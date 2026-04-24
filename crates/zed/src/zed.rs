@@ -1366,25 +1366,37 @@ fn open_about_window(cx: &mut App) {
         message: SharedString,
         commit: Option<SharedString>,
         full_version: SharedString,
+        attribution: SharedString,
+        source_url: SharedString,
+        licenses: SharedString,
     }
 
     impl AboutWindow {
         fn new(cx: &mut Context<Self>) -> Self {
             let release_channel = ReleaseChannel::global(cx);
-            let release_channel_name = release_channel.display_name();
             let full_version: SharedString = AppVersion::global(cx).to_string().into();
             let version = env!("CARGO_PKG_VERSION");
 
-            let debug = if cfg!(debug_assertions) {
-                "(debug)"
-            } else {
-                ""
-            };
-            let message: SharedString = format!("{release_channel_name} {version} {debug}").into();
+            let commit_sha = AppCommitSha::try_global(cx)
+                .and_then(|sha| {
+                    let full = sha.full();
+                    if full.is_empty() {
+                        None
+                    } else {
+                        Some(full)
+                    }
+                })
+                .unwrap_or_else(|| "dev".to_string());
+
+            let message: SharedString = format!("SPK Editor v{version} ({commit_sha})").into();
             let commit = AppCommitSha::try_global(cx)
                 .map(|sha| sha.full())
                 .filter(|commit| !commit.is_empty())
                 .map(SharedString::from);
+
+            let attribution: SharedString = "Fork of Zed by Zed Industries, Inc., modified by Simonov Pavel.".into();
+            let source_url: SharedString = "https://github.com/Sipaha/spk-editor".into();
+            let licenses: SharedString = "Distributed under GPL-3.0-or-later (editor), AGPL-3.0 (collab), Apache-2.0 (libraries).".into();
 
             Self {
                 focus_handle: cx.focus_handle(),
@@ -1394,19 +1406,24 @@ fn open_about_window(cx: &mut App) {
                 message,
                 commit,
                 full_version,
+                attribution,
+                source_url,
+                licenses,
             }
         }
 
         fn copy_details(&self, window: &mut Window, cx: &mut Context<Self>) {
-            let content = match self.commit.as_ref() {
-                Some(commit) => {
-                    format!(
-                        "{}\nCommit: {}\nVersion: {}",
-                        self.message, commit, self.full_version
-                    )
-                }
-                None => format!("{}\nVersion: {}", self.message, self.full_version),
-            };
+            let mut lines = vec![self.message.to_string()];
+            if let Some(commit) = self.commit.as_ref() {
+                lines.push(format!("Commit: {}", commit));
+            }
+            lines.push(format!("Version: {}", self.full_version));
+            lines.push(String::new());
+            lines.push(self.attribution.to_string());
+            lines.push(format!("Source: {}", self.source_url));
+            lines.push(String::new());
+            lines.push(self.licenses.to_string());
+            let content = lines.join("\n");
             cx.write_to_clipboard(ClipboardItem::new_string(content));
             window.remove_window();
         }
@@ -1440,20 +1457,9 @@ fn open_about_window(cx: &mut App) {
                             .items_center()
                             .child(img(self.app_icon.clone()).size_16().flex_none())
                             .child(Headline::new(self.message.clone()))
-                            .when_some(self.commit.clone(), |this, commit| {
-                                this.child(
-                                    Label::new("Commit")
-                                        .color(Color::Muted)
-                                        .size(LabelSize::XSmall),
-                                )
-                                .child(Label::new(commit).size(LabelSize::Small))
-                            })
-                            .child(
-                                Label::new("Version")
-                                    .color(Color::Muted)
-                                    .size(LabelSize::XSmall),
-                            )
-                            .child(Label::new(self.full_version.clone()).size(LabelSize::Small)),
+                            .child(Label::new(self.attribution.clone()).size(LabelSize::Small))
+                            .child(Label::new(self.source_url.clone()).size(LabelSize::Small))
+                            .child(Label::new(self.licenses.clone()).size(LabelSize::Small)),
                     )
                     .child(
                         h_flex()
@@ -1534,7 +1540,7 @@ fn open_about_window(cx: &mut App) {
     cx.open_window(
         WindowOptions {
             titlebar: Some(TitlebarOptions {
-                title: Some("About Zed".into()),
+                title: Some("About SPK Editor".into()),
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(12.), px(12.))),
             }),
