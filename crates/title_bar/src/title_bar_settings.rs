@@ -8,6 +8,8 @@ pub struct TitleBarSettings {
     pub show_user_picture: bool,
     pub show_branch_name: bool,
     pub show_project_items: bool,
+    // Sign-in UI is hidden in spk-editor — Zed accounts are not used.
+    #[allow(dead_code)]
     pub show_sign_in: bool,
     pub show_user_menu: bool,
     pub show_menus: bool,

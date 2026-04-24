@@ -271,11 +271,12 @@ impl Render for TitleBar {
                     | client::Status::Authenticated
                     | client::Status::Connecting
             );
-        let is_signed_out_or_auth_error = user.is_none()
-            && matches!(
-                status,
-                client::Status::SignedOut | client::Status::AuthenticationError
-            );
+        // Sign-in UI is hidden in spk-editor — Zed accounts are not used.
+        // let is_signed_out_or_auth_error = user.is_none()
+        //     && matches!(
+        //         status,
+        //         client::Status::SignedOut | client::Status::AuthenticationError
+        //     );
 
         children.push(
             h_flex()
@@ -291,12 +292,13 @@ impl Render for TitleBar {
                 .children(self.render_call_controls(window, cx))
                 .children(self.render_connection_status(status, cx))
                 .child(self.update_version.clone())
-                .when(
-                    user.is_none()
-                        && is_signed_out_or_auth_error
-                        && TitleBarSettings::get_global(cx).show_sign_in,
-                    |this| this.child(self.render_sign_in_button(cx)),
-                )
+                // Sign-in UI is hidden in spk-editor — Zed accounts are not used.
+                // .when(
+                //     user.is_none()
+                //         && is_signed_out_or_auth_error
+                //         && TitleBarSettings::get_global(cx).show_sign_in,
+                //     |this| this.child(self.render_sign_in_button(cx)),
+                // )
                 .when(is_signing_in, |this| {
                     this.child(
                         Label::new("Signing in…")

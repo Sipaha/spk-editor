@@ -1,5 +1,5 @@
 use crate::multibuffer_hint::MultibufferHint;
-use client::{Client, UserStore, zed_urls};
+use client::{UserStore, zed_urls};
 use db::kvp::KeyValueStore;
 use fs::Fs;
 use gpui::{
@@ -23,7 +23,6 @@ use workspace::{
     AppState, Workspace, WorkspaceId,
     dock::DockPosition,
     item::{Item, ItemEvent},
-    notifications::NotifyResultExt as _,
     open_new, register_serializable_item, with_active_or_new_workspace,
 };
 use zed_actions::OpenOnboarding;
@@ -241,18 +240,8 @@ impl Onboarding {
         go_to_welcome_page(cx);
     }
 
-    fn handle_sign_in(&mut self, _: &SignIn, window: &mut Window, cx: &mut Context<Self>) {
-        let client = Client::global(cx);
-        let workspace = self.workspace.clone();
-
-        window
-            .spawn(cx, async move |mut cx| {
-                client
-                    .sign_in_with_optional_connect(true, &cx)
-                    .await
-                    .notify_workspace_async_err(workspace, &mut cx);
-            })
-            .detach();
+    fn handle_sign_in(&mut self, _: &SignIn, _window: &mut Window, _cx: &mut Context<Self>) {
+        // Sign-in UI is hidden in spk-editor — Zed accounts are not used.
     }
 
     fn handle_open_account(_: &OpenAccount, _: &mut Window, cx: &mut App) {

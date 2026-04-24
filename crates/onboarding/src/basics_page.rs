@@ -1,11 +1,9 @@
 use std::sync::Arc;
-use std::time::Duration;
 
-use client::{Client, TelemetrySettings, UserStore, zed_urls};
-use cloud_api_types::Plan;
+use client::{TelemetrySettings, UserStore};
 use collections::HashMap;
 use fs::Fs;
-use gpui::{Action, Animation, AnimationExt, App, Entity, IntoElement, pulsating_between};
+use gpui::{Action, App, Entity, IntoElement};
 use project::agent_server_store::AllAgentServersSettings;
 use project::project_settings::ProjectSettings;
 use project::{AgentRegistryStore, RegistryAgent};
@@ -582,52 +580,10 @@ fn render_registry_agent_button(
         })
 }
 
-fn render_zed_agent_button(user_store: &Entity<UserStore>, cx: &mut App) -> impl IntoElement {
-    let client = Client::global(cx);
-    let status = *client.status().borrow();
-
-    let plan = user_store.read(cx).plan();
-    let is_free = matches!(plan, Some(Plan::ZedFree) | None);
-    let is_pro = matches!(plan, Some(Plan::ZedPro));
-    let is_trial = matches!(plan, Some(Plan::ZedProTrial));
-
-    let is_signed_out = status.is_signed_out()
-        || matches!(
-            status,
-            client::Status::AuthenticationError | client::Status::ConnectionError
-        );
-    let is_signing_in = status.is_signing_in();
-    let is_signed_in = !is_signed_out;
-
-    let state_element = if is_signed_out {
-        Label::new("Sign In")
-            .size(LabelSize::XSmall)
-            .color(Color::Muted)
-            .into_any_element()
-    } else if is_signing_in {
-        Label::new("Signing In…")
-            .size(LabelSize::XSmall)
-            .color(Color::Muted)
-            .with_animation(
-                "signing-in",
-                Animation::new(Duration::from_secs(2))
-                    .repeat()
-                    .with_easing(pulsating_between(0.4, 0.8)),
-                |label, delta| label.alpha(delta),
-            )
-            .into_any_element()
-    } else if is_signed_in && is_free {
-        Label::new("Start Free Trial")
-            .size(LabelSize::XSmall)
-            .color(Color::Muted)
-            .into_any_element()
-    } else {
-        Icon::new(IconName::Check)
-            .size(IconSize::Small)
-            .color(Color::Success)
-            .into_any_element()
-    };
-
+fn render_zed_agent_button(_user_store: &Entity<UserStore>, _cx: &mut App) -> impl IntoElement {
+    // Sign-in UI is hidden in spk-editor — Zed accounts are not used.
+    // The Zed agent button is rendered in a disabled, no-op state. Full onboarding
+    // cleanup (including removing the button entirely) happens in a later rebrand step.
     AgentSetupButton::new("zed-agent-onboarding")
         .icon(
             Icon::new(IconName::ZedAgent)
@@ -635,22 +591,13 @@ fn render_zed_agent_button(user_store: &Entity<UserStore>, cx: &mut App) -> impl
                 .color(Color::Muted),
         )
         .name("Zed Agent")
-        .state(state_element)
-        .disabled(is_trial || is_pro)
-        .map(|this| {
-            if is_signed_in && is_free {
-                this.on_click(move |_, _window, cx| {
-                    telemetry::event!("Start Trial Clicked", state = "post-sign-in");
-                    cx.open_url(&zed_urls::start_trial_url(cx))
-                })
-            } else {
-                this.on_click(move |_, _, cx| {
-                    let client = Client::global(cx);
-                    cx.spawn(async move |cx| client.sign_in_with_optional_connect(true, cx).await)
-                        .detach_and_log_err(cx);
-                })
-            }
-        })
+        .state(
+            Label::new("Unavailable")
+                .size(LabelSize::XSmall)
+                .color(Color::Muted)
+                .into_any_element(),
+        )
+        .disabled(true)
 }
 
 fn render_ai_section(user_store: &Entity<UserStore>, cx: &mut App) -> impl IntoElement {
