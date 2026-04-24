@@ -44,21 +44,22 @@ trait InstalledApp {
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "zed",
+    name = "spk-editor",
     disable_version_flag = true,
-    before_help = "The Zed CLI binary.
-This CLI is a separate binary that invokes Zed.
+    about = "SPK Editor — fork of Zed by Zed Industries, Inc., modified by Simonov Pavel",
+    before_help = "The SPK Editor CLI binary.
+This CLI is a separate binary that invokes SPK Editor.
 
 Examples:
-    `zed`
-          Simply opens Zed
-    `zed --foreground`
+    `spk-editor`
+          Simply opens SPK Editor
+    `spk-editor --foreground`
           Runs in foreground (shows all logs)
-    `zed path-to-your-project`
-          Open your project in Zed
-    `zed -n path-to-file `
+    `spk-editor path-to-your-project`
+          Open your project in SPK Editor
+    `spk-editor -n path-to-file `
           Open file/folder in a new window",
-    after_help = "To read from stdin, append '-', e.g. 'ps axf | zed -'"
+    after_help = "To read from stdin, append '-', e.g. 'ps axf | spk-editor -'"
 )]
 struct Args {
     /// Wait for all of the given paths to be opened/closed before exiting.
