@@ -3,6 +3,7 @@
 **/cargo-target
 **/target
 **/venv
+.worktrees/
 **/.direnv
 *.wasm
 *.xcodeproj
