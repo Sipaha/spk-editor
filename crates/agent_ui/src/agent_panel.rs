@@ -2964,36 +2964,46 @@ impl AgentPanel {
                                 this
                             }
                         })
-                        .item(
-                            ContextMenuEntry::new("Zed Agent")
-                                .when(is_agent_selected(Agent::NativeAgent), |this| {
-                                    this.action(Box::new(NewExternalAgentThread { agent: None }))
-                                })
-                                .icon(IconName::ZedAgent)
-                                .icon_color(Color::Muted)
-                                .handler({
-                                    let workspace = workspace.clone();
-                                    move |window, cx| {
-                                        if let Some(workspace) = workspace.upgrade() {
-                                            workspace.update(cx, |workspace, cx| {
-                                                if let Some(panel) =
-                                                    workspace.panel::<AgentPanel>(cx)
-                                                {
-                                                    panel.update(cx, |panel, cx| {
-                                                        panel.new_external_agent_thread(
-                                                            &NewExternalAgentThread {
-                                                                agent: Some(Agent::NativeAgent),
-                                                            },
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    });
-                                                }
-                                            });
+                        // spk-editor: hide the native "Zed Agent" entry from the
+                        // new-thread menu. spk-editor relies on external ACP
+                        // agents (Claude Code, Gemini, etc.) and does not expose
+                        // Zed-cloud-backed threads.
+                        .when(false, |this| {
+                            let workspace = workspace.clone();
+                            this.item(
+                                ContextMenuEntry::new("Zed Agent")
+                                    .when(is_agent_selected(Agent::NativeAgent), |this| {
+                                        this.action(Box::new(NewExternalAgentThread {
+                                            agent: None,
+                                        }))
+                                    })
+                                    .icon(IconName::ZedAgent)
+                                    .icon_color(Color::Muted)
+                                    .handler({
+                                        move |window, cx| {
+                                            if let Some(workspace) = workspace.upgrade() {
+                                                workspace.update(cx, |workspace, cx| {
+                                                    if let Some(panel) =
+                                                        workspace.panel::<AgentPanel>(cx)
+                                                    {
+                                                        panel.update(cx, |panel, cx| {
+                                                            panel.new_external_agent_thread(
+                                                                &NewExternalAgentThread {
+                                                                    agent: Some(
+                                                                        Agent::NativeAgent,
+                                                                    ),
+                                                                },
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        });
+                                                    }
+                                                });
+                                            }
                                         }
-                                    }
-                                }),
-                        )
+                                    }),
+                            )
+                        })
                         .map(|mut menu| {
                             let agent_server_store = agent_server_store.read(cx);
                             let registry_store = project::AgentRegistryStore::try_global(cx);
@@ -3346,6 +3356,12 @@ impl AgentPanel {
     }
 
     fn should_render_new_user_onboarding(&mut self, cx: &mut Context<Self>) -> bool {
+        // spk-editor: never render the AI onboarding card. It promotes Zed's
+        // hosted AI plans / sign-in, which spk-editor does not support; ACP
+        // agents (Claude Code, etc.) are configured through their own flows.
+        if true {
+            return false;
+        }
         if self
             .new_user_onboarding_upsell_dismissed
             .load(Ordering::Acquire)
