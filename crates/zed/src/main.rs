@@ -616,9 +616,11 @@ fn main() {
         });
         AppState::set_global(app_state.clone(), cx);
 
-        auto_update::init(client.clone(), cx);
+        // Auto-update disabled in spk-editor: no upstream channel, builds from source.
+        // auto_update::init(client.clone(), cx);
         dap_adapters::init(cx);
-        auto_update_ui::init(cx);
+        // Auto-update UI disabled in spk-editor: no upstream channel, builds from source.
+        // auto_update_ui::init(cx);
         reliability::init(client.clone(), cx);
         extension_host::init(
             extension_host_proxy.clone(),
