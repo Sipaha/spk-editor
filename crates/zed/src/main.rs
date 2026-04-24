@@ -730,7 +730,8 @@ fn main() {
         language_tools::init(cx);
         call::init(app_state.client.clone(), app_state.user_store.clone(), cx);
         notifications::init(app_state.client.clone(), app_state.user_store.clone(), cx);
-        collab_ui::init(&app_state, cx);
+        // Collab is disabled in spk-editor (no Zed Industries collab server access).
+        // collab_ui::init(&app_state, cx);
         git_ui::init(cx);
         git_graph::init(cx);
         feedback::init(cx);
