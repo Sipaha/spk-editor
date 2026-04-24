@@ -858,8 +858,11 @@ mod linux {
 
                 // libexec is the standard, lib/zed is for Arch (and other non-libexec distros),
                 // ./zed is for the target directory in development builds.
-                let possible_locations =
-                    ["../libexec/zed-editor", "../lib/zed/zed-editor", "./zed"];
+                let possible_locations = [
+                    "../libexec/spk-editor-bin",
+                    "../lib/spk-editor/spk-editor-bin",
+                    "./zed",
+                ];
                 possible_locations
                     .iter()
                     .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))
@@ -1024,7 +1027,7 @@ mod flatpak {
 
             if !is_app_location_set {
                 args.push("--zed".into());
-                args.push(flatpak_dir.join("libexec").join("zed-editor").into());
+                args.push(flatpak_dir.join("libexec").join("spk-editor-bin").into());
             }
 
             let error = exec::execvp("/usr/bin/flatpak-spawn", args);
@@ -1038,7 +1041,7 @@ mod flatpak {
             && env::var("FLATPAK_ID").is_ok_and(|id| id.starts_with("dev.zed.Zed"))
             && args.zed.is_none()
         {
-            args.zed = Some("/app/libexec/zed-editor".into());
+            args.zed = Some("/app/libexec/spk-editor-bin".into());
             unsafe { env::set_var("ZED_UPDATE_EXPLANATION", "Please use flatpak to update zed") };
         }
         args
@@ -1193,7 +1196,11 @@ mod windows {
 
                 // ../Zed.exe is the standard, lib/zed is for MSYS2, ./zed.exe is for the target
                 // directory in development builds.
-                let possible_locations = ["../Zed.exe", "../lib/zed/zed-editor.exe", "./zed.exe"];
+                let possible_locations = [
+                    "../Zed.exe",
+                    "../lib/spk-editor/spk-editor-bin.exe",
+                    "./zed.exe",
+                ];
                 possible_locations
                     .iter()
                     .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))

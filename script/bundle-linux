@@ -174,16 +174,16 @@ export APP_ICON="spk-editor"
 export APP_ARGS="%U"
 if [[ "$channel" == "preview" ]]; then
   export APP_NAME="SPK Editor Preview"
-  APP_ID="dev.zed.Zed-Preview"
+  APP_ID="ru.sipaha.spk-editor-preview"
 elif [[ "$channel" == "nightly" ]]; then
   export APP_NAME="SPK Editor Nightly"
-  APP_ID="dev.zed.Zed-Nightly"
+  APP_ID="ru.sipaha.spk-editor-nightly"
 elif [[ "$channel" == "dev" ]]; then
   export APP_NAME="SPK Editor Devel"
-  APP_ID="dev.zed.Zed-Dev"
+  APP_ID="ru.sipaha.spk-editor-dev"
 else
   export APP_NAME="SPK Editor"
-  APP_ID="dev.zed.Zed"
+  APP_ID="ru.sipaha.spk-editor"
 fi
 
 mkdir -p "${zed_dir}/share/applications"
