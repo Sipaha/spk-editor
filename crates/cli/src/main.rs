@@ -1194,10 +1194,10 @@ mod windows {
                 let cli = std::env::current_exe()?;
                 let dir = cli.parent().context("no parent path for cli")?;
 
-                // ../Zed.exe is the standard, lib/zed is for MSYS2, ./zed.exe is for the target
+                // ../spk-editor.exe is the standard, lib/zed is for MSYS2, ./zed.exe is for the target
                 // directory in development builds.
                 let possible_locations = [
-                    "../Zed.exe",
+                    "../spk-editor.exe",
                     "../lib/spk-editor/spk-editor-bin.exe",
                     "./zed.exe",
                 ];
