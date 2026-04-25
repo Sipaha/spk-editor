@@ -2,6 +2,7 @@
 //! title-bar segment, status-bar widget, welcome integration.
 
 mod actions;
+mod add_member_picker;
 mod dock_panel;
 mod modals;
 mod picker;

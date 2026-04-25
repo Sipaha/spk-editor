@@ -4,7 +4,7 @@ use gpui::{
     MouseButton, Pixels, Render, WeakEntity, Window, px,
 };
 use solutions::{CatalogProject, Solution, SolutionId, SolutionStore, SolutionStoreEvent};
-use ui::prelude::*;
+use ui::{Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::{
     AppState, OpenOptions, Workspace,
@@ -60,7 +60,8 @@ impl SolutionsPanel {
         s: &Solution,
         cx: &mut gpui::Context<Self>,
     ) -> impl IntoElement {
-        let sol_id = s.id.clone();
+        let sol_id_open = s.id.clone();
+        let sol_id_add = s.id.clone();
         h_flex()
             .id(SharedString::from(format!("sol-{}", s.id.as_str())))
             .px_2()
@@ -75,12 +76,38 @@ impl SolutionsPanel {
                     .color(Color::Muted)
                     .size(LabelSize::Small),
             )
+            .child(div().flex_1())
+            .child(
+                IconButton::new(
+                    SharedString::from(format!("add-member-{}", s.id.as_str())),
+                    IconName::Plus,
+                )
+                .icon_size(IconSize::Small)
+                .tooltip(Tooltip::text("Add project to solution"))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.open_add_member_picker(sol_id_add.clone(), window, cx);
+                })),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event, window, cx| {
-                    this.open_solution(sol_id.clone(), window, cx);
+                    this.open_solution(sol_id_open.clone(), window, cx);
                 }),
             )
+    }
+
+    fn open_add_member_picker(
+        &self,
+        sol_id: SolutionId,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let Some(workspace) = self._workspace.upgrade() else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            crate::add_member_picker::AddMemberPicker::open(workspace, sol_id, window, cx);
+        });
     }
 
     fn open_solution(
