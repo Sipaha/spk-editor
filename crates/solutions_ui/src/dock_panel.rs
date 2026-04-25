@@ -1,12 +1,13 @@
 use anyhow::Result;
 use gpui::{
-    App, AsyncWindowContext, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Render,
-    WeakEntity, Window, px,
+    App, AppContext as _, AsyncWindowContext, Entity, EventEmitter, FocusHandle, Focusable,
+    MouseButton, Pixels, Render, WeakEntity, Window, px,
 };
-use solutions::{CatalogProject, Solution, SolutionStore, SolutionStoreEvent};
+use solutions::{CatalogProject, Solution, SolutionId, SolutionStore, SolutionStoreEvent};
 use ui::prelude::*;
+use util::ResultExt as _;
 use workspace::{
-    Workspace,
+    AppState, OpenOptions, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
 };
 
@@ -54,11 +55,19 @@ impl SolutionsPanel {
             .child(Label::new(project.name.clone()))
     }
 
-    fn render_solution_row(s: &Solution) -> impl IntoElement {
+    fn render_solution_row(
+        &self,
+        s: &Solution,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl IntoElement {
+        let sol_id = s.id.clone();
         h_flex()
+            .id(SharedString::from(format!("sol-{}", s.id.as_str())))
             .px_2()
             .py_1()
             .gap_2()
+            .cursor_pointer()
+            .hover(|s| s.bg(cx.theme().colors().element_hover))
             .child(Icon::new(IconName::Folder).size(IconSize::Small))
             .child(Label::new(s.name.clone()))
             .child(
@@ -66,6 +75,46 @@ impl SolutionsPanel {
                     .color(Color::Muted)
                     .size(LabelSize::Small),
             )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event, window, cx| {
+                    this.open_solution(sol_id.clone(), window, cx);
+                }),
+            )
+    }
+
+    fn open_solution(
+        &self,
+        sol_id: SolutionId,
+        _window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let store = SolutionStore::global(cx);
+        let paths = match store.read_with(cx, |s, _| s.paths_for_open(&sol_id)) {
+            Ok(paths) => paths,
+            Err(err) => {
+                log::error!("solutions_ui: paths_for_open failed: {err}");
+                return;
+            }
+        };
+        if paths.is_empty() {
+            log::info!("solutions_ui: solution {} has no members", sol_id.as_str());
+            return;
+        }
+        let app_state = AppState::global(cx);
+
+        store
+            .update(cx, |s, cx| s.touch_last_opened(&sol_id, cx))
+            .log_err();
+
+        cx.spawn(async move |_, cx| {
+            let task = cx.update(|cx| {
+                workspace::open_paths(&paths, app_state, OpenOptions::default(), cx)
+            });
+            task.await?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
     }
 }
 
@@ -134,7 +183,12 @@ impl Render for SolutionsPanel {
             .track_focus(&self.focus_handle)
             .size_full()
             .child(Self::render_section_header("Solutions"))
-            .children(solutions.iter().map(Self::render_solution_row))
+            .children(
+                solutions
+                    .iter()
+                    .map(|s| self.render_solution_row(s, cx).into_any_element())
+                    .collect::<Vec<_>>(),
+            )
             .child(div().h(px(8.)))
             .child(Self::render_section_header("Catalog"))
             .children(catalog.iter().map(Self::render_catalog_row))
