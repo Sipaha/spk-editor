@@ -11,7 +11,7 @@ use workspace::{
     dock::{DockPosition, Panel, PanelEvent},
 };
 
-use crate::actions::ToggleSolutionsPanel;
+use crate::actions::{NewSolution, ToggleSolutionsPanel};
 
 pub struct SolutionsPanel {
     focus_handle: FocusHandle,
@@ -189,9 +189,29 @@ impl Render for SolutionsPanel {
                     .map(|s| self.render_solution_row(s, cx).into_any_element())
                     .collect::<Vec<_>>(),
             )
+            .child(
+                div().px_2().py_1().child(
+                    Button::new("new-solution", "+ New Solution")
+                        .on_click(cx.listener(|_, _, window, cx| {
+                            window.dispatch_action(Box::new(NewSolution), cx);
+                        })),
+                ),
+            )
             .child(div().h(px(8.)))
             .child(Self::render_section_header("Catalog"))
             .children(catalog.iter().map(Self::render_catalog_row))
+            .child(
+                div().px_2().py_1().child(
+                    Button::new("add-project", "+ Add Project").on_click(cx.listener(
+                        |_, _, window, cx| {
+                            window.dispatch_action(
+                                Box::new(crate::modals::AddCatalogProject),
+                                cx,
+                            );
+                        },
+                    )),
+                ),
+            )
     }
 }
 

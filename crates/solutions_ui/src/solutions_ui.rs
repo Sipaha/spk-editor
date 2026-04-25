@@ -3,6 +3,7 @@
 
 mod actions;
 mod dock_panel;
+mod modals;
 mod picker;
 
 pub use actions::{
@@ -15,4 +16,5 @@ use gpui::App;
 pub fn init(cx: &mut App) {
     dock_panel::init(cx);
     cx.observe_new(picker::OpenSolutionModal::register).detach();
+    cx.observe_new(modals::register).detach();
 }
