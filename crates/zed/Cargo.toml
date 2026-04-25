@@ -190,6 +190,7 @@ smol.workspace = true
 snippet_provider.workspace = true
 snippets_ui.workspace = true
 solutions.workspace = true
+solutions_ui.workspace = true
 svg_preview.workspace = true
 sysinfo.workspace = true
 tab_switcher.workspace = true

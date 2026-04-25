@@ -16645,6 +16645,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "solutions_ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "editor",
+ "gpui",
+ "log",
+ "menu",
+ "paths",
+ "picker",
+ "project",
+ "serde",
+ "settings",
+ "solutions",
+ "theme",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "spdx"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -22537,6 +22559,7 @@ dependencies = [
  "snippet_provider",
  "snippets_ui",
  "solutions",
+ "solutions_ui",
  "svg_preview",
  "sysinfo 0.37.2",
  "system_specs",

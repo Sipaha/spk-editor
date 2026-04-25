@@ -9,9 +9,10 @@ mod settings;
 mod slug;
 mod store;
 
+pub use cache::default_cache_root;
 pub use model::{CatalogId, CatalogProject, Solution, SolutionId, SolutionMember};
 pub use settings::SolutionsSettings;
-pub use store::SolutionStore;
+pub use store::{SolutionStore, SolutionStoreEvent};
 
 use ::settings::Settings;
 use gpui::App;
