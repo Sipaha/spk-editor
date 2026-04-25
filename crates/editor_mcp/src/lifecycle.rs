@@ -1,10 +1,12 @@
 //! MCP server lifecycle: lock acquisition, server bind, graceful shutdown.
-use anyhow::Result;
+use anyhow::{Context as _, Result};
+use context_server::listener::McpServer;
 use fs2::FileExt;
-use gpui::App;
+use gpui::{App, AppContext as _, Entity, Global};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use util::ResultExt as _;
 
 #[derive(Debug)]
 pub struct SingleInstanceLock {
@@ -66,9 +68,81 @@ impl Drop for SingleInstanceLock {
     }
 }
 
-pub fn start_server(_cx: &mut App) -> Result<()> {
-    // Stub — implemented in Task 1.4.
+pub fn lock_path() -> PathBuf {
+    paths::config_dir().join("mcp.lock")
+}
+
+pub fn socket_path() -> PathBuf {
+    paths::config_dir().join("mcp.sock")
+}
+
+struct ActiveServer {
+    _lock: SingleInstanceLock,
+    server: Entity<McpServer>,
+}
+
+impl Global for ActiveServer {}
+
+pub fn start_server(cx: &mut App) -> Result<()> {
+    let lock = match SingleInstanceLock::acquire(&lock_path()) {
+        Ok(lock) => lock,
+        Err(err) => {
+            log::warn!("editor_mcp: not starting server — {err}");
+            return Ok(());
+        }
+    };
+
+    let sock = socket_path();
+    if sock.exists() {
+        std::fs::remove_file(&sock).log_err();
+    }
+
+    crate::registry::mark_started(cx);
+    let drained = crate::registry::drain(cx);
+
+    let async_cx = cx.to_async();
+    let server_task = McpServer::new(&async_cx);
+
+    cx.spawn(async move |cx| {
+        let mut server = server_task.await.context("creating MCP server")?;
+
+        // McpServer binds its own socket inside a tempdir. Symlink the
+        // well-known path to it so clients can find us deterministically.
+        let actual_socket = server.socket_path().to_path_buf();
+        if actual_socket != sock {
+            std::fs::remove_file(&sock).log_err();
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&actual_socket, &sock).with_context(|| {
+                    format!(
+                        "linking {} to {}",
+                        actual_socket.display(),
+                        sock.display()
+                    )
+                })?;
+            }
+        }
+
+        for registration in drained {
+            registration(&mut server);
+        }
+
+        cx.update(|cx| {
+            let server_entity = cx.new(|_| server);
+            cx.set_global(ActiveServer {
+                _lock: lock,
+                server: server_entity,
+            });
+        });
+        anyhow::Ok(())
+    })
+    .detach_and_log_err(cx);
+
     Ok(())
+}
+
+pub fn server(cx: &App) -> Option<Entity<McpServer>> {
+    cx.try_global::<ActiveServer>().map(|a| a.server.clone())
 }
 
 #[cfg(test)]
