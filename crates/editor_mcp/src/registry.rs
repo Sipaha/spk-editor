@@ -59,6 +59,9 @@ pub(crate) fn register_builtin_tools(cx: &mut App) {
     register_tool(cx, |server| {
         server.add_tool(crate::tools::windows::ListWindowsTool);
     });
+    register_tool(cx, |server| {
+        server.add_tool(crate::tools::windows::FocusWindowTool);
+    });
 }
 
 #[cfg(test)]

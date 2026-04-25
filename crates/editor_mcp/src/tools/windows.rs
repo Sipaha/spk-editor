@@ -177,3 +177,75 @@ fn compute_title(root_paths: &[String]) -> String {
         names.join(", ")
     }
 }
+
+/// Focus the editor window with the given window_id (raises it to front).
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct FocusWindowParams {
+    pub window_id: String,
+}
+
+impl<'de> Deserialize<'de> for FocusWindowParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            window_id: String,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(FocusWindowParams {
+            window_id: inner.window_id,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FocusWindowResult {
+    pub focused: bool,
+}
+
+#[derive(Clone)]
+pub struct FocusWindowTool;
+
+impl McpServerTool for FocusWindowTool {
+    type Input = FocusWindowParams;
+    type Output = FocusWindowResult;
+    const NAME: &'static str = "windows.focus";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        let focused = cx.update(|cx| -> anyhow::Result<bool> {
+            let handle = find_window_by_id(&input.window_id, cx)?;
+            // `AnyWindowHandle::update` requires the window to still exist; if
+            // it has been closed concurrently we surface that to the caller.
+            handle
+                .update(cx, |_view, window, _cx| window.activate_window())
+                .map_err(|err| anyhow::anyhow!("activate_window failed: {err}"))?;
+            Ok(true)
+        })?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("focused: {focused}"),
+            }],
+            structured_content: FocusWindowResult { focused },
+        })
+    }
+}
+
+fn find_window_by_id(
+    window_id: &str,
+    cx: &mut App,
+) -> anyhow::Result<gpui::AnyWindowHandle> {
+    // Mirror the iteration order used by `windows.list`: prefer Z-ordered
+    // stack, fall back to the unstable slot-map iteration so both tools
+    // observe the same set of handles.
+    let candidates = cx.window_stack().unwrap_or_else(|| cx.windows());
+    for handle in candidates {
+        if crate::window_ids::format(handle.window_id()) == window_id {
+            return Ok(handle);
+        }
+    }
+    anyhow::bail!("window_not_found: {window_id}");
+}
