@@ -31,6 +31,7 @@ pub async fn ensure_cache(
     Ok(path)
 }
 
+#[allow(dead_code)]
 pub async fn refresh_cache(
     cache_root: &Path,
     remote_url: &str,
@@ -44,6 +45,7 @@ pub async fn refresh_cache(
     Ok(path)
 }
 
+#[allow(dead_code)]
 pub fn default_cache_root() -> PathBuf {
     paths::temp_dir().join("catalog")
 }
@@ -51,57 +53,8 @@ pub fn default_cache_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
+    use crate::git::test_support;
     use tempfile::tempdir;
-
-    fn make_seed_bare(dir: &Path) -> PathBuf {
-        let bare = dir.join("seed.git");
-        let s = Command::new("git")
-            .args(["init", "--bare"])
-            .arg(&bare)
-            .status()
-            .expect("init bare");
-        assert!(s.success());
-        let work = dir.join("seed-work");
-        std::fs::create_dir(&work).expect("mkdir work");
-        let s = Command::new("git").current_dir(&work).arg("init").status().expect("git init");
-        assert!(s.success());
-        std::fs::write(work.join("README"), "x").expect("write seed file");
-        let s = Command::new("git")
-            .current_dir(&work)
-            .args(["add", "."])
-            .status()
-            .expect("git add");
-        assert!(s.success());
-        let s = Command::new("git")
-            .current_dir(&work)
-            .args([
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@t",
-                "commit",
-                "-m",
-                "init",
-            ])
-            .status()
-            .expect("git commit");
-        assert!(s.success());
-        let s = Command::new("git")
-            .current_dir(&work)
-            .args(["remote", "add", "origin"])
-            .arg(&bare)
-            .status()
-            .expect("remote add");
-        assert!(s.success());
-        let s = Command::new("git")
-            .current_dir(&work)
-            .args(["push", "origin", "HEAD:master"])
-            .status()
-            .expect("push");
-        assert!(s.success());
-        bare
-    }
 
     #[test]
     fn repo_key_is_stable_across_runs() {
@@ -121,7 +74,7 @@ mod tests {
     #[test]
     fn ensure_cache_clones_when_missing() {
         let dir = tempdir().expect("tempdir");
-        let bare = make_seed_bare(dir.path());
+        let bare = smol::block_on(test_support::make_bare_with_one_commit(dir.path()));
         let cache_root = dir.path().join("cache");
         let url = bare.to_str().expect("path to str").to_string();
 

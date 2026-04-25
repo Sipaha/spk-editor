@@ -209,15 +209,15 @@ impl SolutionStore {
             }
         };
         if sol.members.iter().any(|m| m.catalog_id == catalog_id) {
-            let sol_name = sol.name.clone();
-            let cat_name = cat.name.clone();
+            let sol_name = sol.name;
+            let cat_name = cat.name;
             return cx.background_spawn(async move {
                 bail!("solution {sol_name} already contains {cat_name}")
             });
         }
         let target = sol.root.join(&catalog_id.0);
-        let remote_url = cat.remote_url.clone();
-        let default_branch = cat.default_branch.clone();
+        let remote_url = cat.remote_url;
+        let default_branch = cat.default_branch;
         let lock = Arc::clone(&self.fs_lock);
 
         cx.spawn(async move |weak: gpui::WeakEntity<Self>, cx: &mut AsyncApp| {
@@ -338,54 +338,9 @@ impl Global for GlobalSolutionStore {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::test_support;
     use gpui::TestAppContext;
-    use std::process::Command;
-    use std::path::Path;
     use tempfile::tempdir;
-
-    fn make_bare_with_one_commit(dir: &Path) -> PathBuf {
-        let bare = dir.join("seed.git");
-        let s = Command::new("git")
-            .args(["init", "--bare"])
-            .arg(&bare)
-            .status()
-            .expect("init bare");
-        assert!(s.success());
-        let work = dir.join("seed-work");
-        std::fs::create_dir(&work).expect("mkdir work");
-        let s = Command::new("git").current_dir(&work).arg("init").status().expect("init");
-        assert!(s.success());
-        std::fs::write(work.join("README"), "x").expect("write seed");
-        let s = Command::new("git")
-            .current_dir(&work)
-            .args(["add", "."])
-            .status()
-            .expect("add");
-        assert!(s.success());
-        let s = Command::new("git")
-            .current_dir(&work)
-            .args([
-                "-c", "user.name=t", "-c", "user.email=t@t",
-                "commit", "-m", "init",
-            ])
-            .status()
-            .expect("commit");
-        assert!(s.success());
-        let s = Command::new("git")
-            .current_dir(&work)
-            .args(["remote", "add", "origin"])
-            .arg(&bare)
-            .status()
-            .expect("remote add");
-        assert!(s.success());
-        let s = Command::new("git")
-            .current_dir(&work)
-            .args(["push", "origin", "HEAD:master"])
-            .status()
-            .expect("push");
-        assert!(s.success());
-        bare
-    }
 
     #[gpui::test]
     async fn add_catalog_project_persists(cx: &mut TestAppContext) {
@@ -452,7 +407,7 @@ mod tests {
     async fn add_member_clones_and_records(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         let dir = tempdir().expect("tempdir");
-        let bare = make_bare_with_one_commit(dir.path());
+        let bare = test_support::make_bare_with_one_commit(dir.path()).await;
         let cache_root = dir.path().join("cache");
         let cfg_path = dir.path().join("solutions.json");
         let solutions_root = dir.path().join("solutions");

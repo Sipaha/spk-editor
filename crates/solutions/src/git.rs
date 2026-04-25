@@ -58,6 +58,7 @@ pub async fn checkout(repo: &Path, branch: &str) -> Result<()> {
     run_git(repo, &["checkout", branch], |_| {}).await
 }
 
+#[allow(dead_code)]
 pub async fn fetch_all(repo: &Path, on_progress: impl FnMut(GitProgress)) -> Result<()> {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(repo).arg("fetch").arg("--all").arg("--prune").arg("--progress");
@@ -116,71 +117,61 @@ fn parse_progress(line: &str) -> Option<GitProgress> {
     })
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    use std::path::{Path, PathBuf};
+
+    pub async fn run(args: &[&str], cwd: Option<&Path>) {
+        let mut cmd = smol::process::Command::new("git");
+        if let Some(d) = cwd {
+            cmd.current_dir(d);
+        }
+        let status = cmd.args(args).status().await.expect("spawn git");
+        assert!(status.success(), "git {:?} failed", args);
+    }
+
+    pub async fn init_seed(work: &Path) {
+        run(&["init"], Some(work)).await;
+        std::fs::write(work.join("README"), "x").expect("write seed file");
+        run(&["add", "."], Some(work)).await;
+        run(
+            &[
+                "-c", "user.name=t", "-c", "user.email=t@t",
+                "commit", "-m", "init",
+            ],
+            Some(work),
+        )
+        .await;
+    }
+
+    pub async fn make_bare_with_one_commit(dir: &Path) -> PathBuf {
+        let bare = dir.join("seed.git");
+        let bare_str = bare.to_str().expect("path str");
+        run(&["init", "--bare", bare_str], None).await;
+        let work = dir.join("seed-work");
+        std::fs::create_dir(&work).expect("mkdir work");
+        init_seed(&work).await;
+        run(
+            &["remote", "add", "origin", bare_str],
+            Some(&work),
+        )
+        .await;
+        run(&["push", "origin", "HEAD:master"], Some(&work)).await;
+        bare
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command as StdCommand;
     use tempfile::tempdir;
-
-    fn init_seed(work: &Path) {
-        let s = StdCommand::new("git").current_dir(work).arg("init").status().expect("git init");
-        assert!(s.success());
-        std::fs::write(work.join("README"), "x").expect("write seed file");
-        let s = StdCommand::new("git")
-            .current_dir(work)
-            .args(["add", "."])
-            .status()
-            .expect("git add");
-        assert!(s.success());
-        let s = StdCommand::new("git")
-            .current_dir(work)
-            .args([
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@t",
-                "commit",
-                "-m",
-                "init",
-            ])
-            .status()
-            .expect("git commit");
-        assert!(s.success());
-    }
-
-    fn make_bare_with_one_commit(dir: &Path) -> std::path::PathBuf {
-        let bare = dir.join("seed.git");
-        let s = StdCommand::new("git")
-            .args(["init", "--bare"])
-            .arg(&bare)
-            .status()
-            .expect("init bare");
-        assert!(s.success());
-        let work = dir.join("seed-work");
-        std::fs::create_dir(&work).expect("mkdir work");
-        init_seed(&work);
-        let s = StdCommand::new("git")
-            .current_dir(&work)
-            .args(["remote", "add", "origin"])
-            .arg(&bare)
-            .status()
-            .expect("remote add");
-        assert!(s.success());
-        let push = StdCommand::new("git")
-            .current_dir(&work)
-            .args(["push", "origin", "HEAD:master"])
-            .status()
-            .expect("push");
-        assert!(push.success());
-        bare
-    }
 
     #[test]
     fn run_git_status_succeeds() {
         let dir = tempdir().expect("tempdir");
         let workdir = dir.path().join("work");
         std::fs::create_dir(&workdir).expect("mkdir work");
-        init_seed(&workdir);
+        smol::block_on(test_support::init_seed(&workdir));
 
         let result = smol::block_on(run_git(&workdir, &["status", "--porcelain"], |_| {}));
         assert!(result.is_ok(), "got {:?}", result.err());
@@ -198,7 +189,7 @@ mod tests {
     #[test]
     fn clone_local_creates_target() {
         let dir = tempdir().expect("tempdir");
-        let bare = make_bare_with_one_commit(dir.path());
+        let bare = smol::block_on(test_support::make_bare_with_one_commit(dir.path()));
         let target = dir.path().join("clone");
 
         let result = smol::block_on(clone_local(&bare, &target, |_| {}));
