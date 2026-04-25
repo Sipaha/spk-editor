@@ -78,6 +78,12 @@ pub fn register(cx: &mut App) {
     editor_mcp::register_tool(cx, |server| {
         server.add_tool(ListFilesTool);
     });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(ReadBufferTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(ApplyEditTool);
+    });
 }
 
 // =====================================================================
@@ -2549,6 +2555,317 @@ pub fn validate_path_in_solution(
 }
 
 // =====================================================================
+// project.read_buffer
+// =====================================================================
+
+/// Read the content of a file via the editor's Buffer system. If the
+/// file is already open in any workspace of the Solution, returns the
+/// live (potentially-dirty) content. Otherwise opens it as a Buffer
+/// without creating a tab; calling again is idempotent.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct ReadBufferParams {
+    pub solution_id: String,
+    /// Absolute path of the file to read. Must lie under one of the
+    /// Solution's worktrees.
+    pub path: String,
+}
+
+impl<'de> Deserialize<'de> for ReadBufferParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            solution_id: String,
+            path: String,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            solution_id: inner.solution_id,
+            path: inner.path,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ReadBufferResult {
+    pub content: String,
+    pub line_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    pub dirty: bool,
+}
+
+#[derive(Clone)]
+pub struct ReadBufferTool;
+
+impl McpServerTool for ReadBufferTool {
+    type Input = ReadBufferParams;
+    type Output = ReadBufferResult;
+    const NAME: &'static str = "project.read_buffer";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.solution_id.is_empty(),
+            "invalid_params: solution_id is required"
+        );
+        anyhow::ensure!(
+            !input.path.is_empty(),
+            "invalid_params: path is required"
+        );
+
+        cx.update(|cx| validate_path_in_solution(&input.solution_id, &input.path, cx))
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+        let project = cx
+            .update(|cx| project_for_solution(&input.solution_id, cx))
+            .ok_or_else(|| anyhow::anyhow!("solution_not_open: {}", input.solution_id))?;
+
+        let project_path = cx.update(|cx| resolve_project_path(&project, &input.path, cx))?;
+
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(project_path, cx))
+            .await?;
+
+        let result = cx.update(|cx| {
+            let buffer_ref = buffer.read(cx);
+            ReadBufferResult {
+                content: buffer_ref.text(),
+                line_count: buffer_ref.max_point().row + 1,
+                language: buffer_ref
+                    .language()
+                    .map(|language| language.name().as_ref().to_string()),
+                dirty: buffer_ref.is_dirty(),
+            }
+        });
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("read {} ({} lines)", input.path, result.line_count),
+            }],
+            structured_content: result,
+        })
+    }
+}
+
+// =====================================================================
+// project.apply_edit
+// =====================================================================
+
+/// Apply atomic edits to a file via a Buffer transaction. All edits in
+/// the request are coalesced into a single edit call so the change is
+/// applied as one undo/redo unit. The buffer is opened (without
+/// creating a tab) if it is not already open. The edits become visible
+/// to the user immediately and join the user's undo stack; saving is
+/// not performed automatically.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct ApplyEditParams {
+    pub solution_id: String,
+    /// Absolute path of the file to edit. Must lie under one of the
+    /// Solution's worktrees.
+    pub path: String,
+    /// One or more edits to apply atomically.
+    pub edits: Vec<EditSpec>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct EditSpec {
+    pub range: EditRange,
+    pub new_text: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct EditRange {
+    pub start: EditPoint,
+    pub end: EditPoint,
+}
+
+/// Zero-based `(line, col)` location. `col` is a UTF-8 byte offset
+/// within the line, matching `language::Point`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct EditPoint {
+    pub line: u32,
+    pub col: u32,
+}
+
+impl<'de> Deserialize<'de> for ApplyEditParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            solution_id: String,
+            path: String,
+            #[serde(default)]
+            edits: Vec<EditSpec>,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            solution_id: inner.solution_id,
+            path: inner.path,
+            edits: inner.edits,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct AfterEditMeta {
+    pub line_count: u32,
+    pub dirty: bool,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ApplyEditResult {
+    pub applied: bool,
+    pub after: AfterEditMeta,
+}
+
+#[derive(Clone)]
+pub struct ApplyEditTool;
+
+impl McpServerTool for ApplyEditTool {
+    type Input = ApplyEditParams;
+    type Output = ApplyEditResult;
+    const NAME: &'static str = "project.apply_edit";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.solution_id.is_empty(),
+            "invalid_params: solution_id is required"
+        );
+        anyhow::ensure!(
+            !input.path.is_empty(),
+            "invalid_params: path is required"
+        );
+        anyhow::ensure!(
+            !input.edits.is_empty(),
+            "invalid_params: at least one edit is required"
+        );
+
+        cx.update(|cx| validate_path_in_solution(&input.solution_id, &input.path, cx))
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+        let project = cx
+            .update(|cx| project_for_solution(&input.solution_id, cx))
+            .ok_or_else(|| anyhow::anyhow!("solution_not_open: {}", input.solution_id))?;
+
+        let project_path = cx.update(|cx| resolve_project_path(&project, &input.path, cx))?;
+
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(project_path, cx))
+            .await?;
+
+        let edit_count = input.edits.len();
+        let after = buffer.update(cx, |buffer, cx| {
+            let edits: Vec<(std::ops::Range<language::Point>, String)> = input
+                .edits
+                .iter()
+                .map(|edit| {
+                    let start = language::Point::new(edit.range.start.line, edit.range.start.col);
+                    let end = language::Point::new(edit.range.end.line, edit.range.end.col);
+                    (start..end, edit.new_text.clone())
+                })
+                .collect();
+            buffer.edit(edits, None, cx);
+            AfterEditMeta {
+                line_count: buffer.max_point().row + 1,
+                dirty: buffer.is_dirty(),
+            }
+        });
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("applied {} edit(s) to {}", edit_count, input.path),
+            }],
+            structured_content: ApplyEditResult {
+                applied: true,
+                after,
+            },
+        })
+    }
+}
+
+// Locate the `Project` whose worktrees back the named Solution. We walk
+// every open `MultiWorkspace` window and return the first project whose
+// visible worktrees include the Solution's root (or a member directory
+// underneath it).
+fn project_for_solution(
+    solution_id: &str,
+    cx: &mut App,
+) -> Option<gpui::Entity<project::Project>> {
+    let store = SolutionStore::try_global(cx)?;
+    let root = store.read_with(cx, |s, _| {
+        s.solutions()
+            .iter()
+            .find(|sol| sol.id.as_str() == solution_id)
+            .map(|sol| sol.root.clone())
+    })?;
+
+    for handle in cx.windows() {
+        let Some(window_handle) = handle.downcast::<workspace::MultiWorkspace>() else {
+            continue;
+        };
+        let result = window_handle
+            .update(cx, |multi, _window, cx| {
+                for workspace_entity in multi.workspaces() {
+                    let workspace = workspace_entity.read(cx);
+                    let project = workspace.project();
+                    let matches = project
+                        .read(cx)
+                        .visible_worktrees(cx)
+                        .any(|tree| tree.read(cx).abs_path().starts_with(&root));
+                    if matches {
+                        return Some(project.clone());
+                    }
+                }
+                None
+            })
+            .ok()
+            .flatten();
+        if let Some(project) = result {
+            return Some(project);
+        }
+    }
+    None
+}
+
+// Map an absolute path to a `ProjectPath` within one of the project's
+// visible worktrees. Returns `path_not_in_worktree` if no worktree
+// contains it.
+fn resolve_project_path(
+    project: &gpui::Entity<project::Project>,
+    abs_path: &str,
+    cx: &App,
+) -> anyhow::Result<project::ProjectPath> {
+    let abs = std::path::PathBuf::from(abs_path);
+    let project_ref = project.read(cx);
+    for tree_entity in project_ref.visible_worktrees(cx) {
+        let tree = tree_entity.read(cx);
+        let root = tree.abs_path();
+        if abs.starts_with(root.as_ref()) {
+            let rel = abs
+                .strip_prefix(root.as_ref())
+                .map_err(|err| anyhow::anyhow!("strip_prefix: {err}"))?;
+            let rel_path = util::rel_path::RelPath::new(rel, tree.path_style())
+                .map_err(|err| anyhow::anyhow!("rel_path: {err}"))?
+                .into_owned()
+                .into();
+            return Ok(project::ProjectPath {
+                worktree_id: tree.id(),
+                path: rel_path,
+            });
+        }
+    }
+    anyhow::bail!("path_not_in_worktree: {abs_path}")
+}
+
+// =====================================================================
 // Tests
 // =====================================================================
 
@@ -3105,5 +3422,50 @@ mod tests {
             result,
             Err(PathValidationError::PathOutsideSolution)
         ));
+    }
+
+    #[test]
+    fn read_buffer_params_round_trip() {
+        let p: ReadBufferParams = serde_json::from_value(serde_json::json!({
+            "solution_id": "demo",
+            "path": "/abs/foo.rs"
+        }))
+        .expect("parse");
+        assert_eq!(p.solution_id, "demo");
+        assert_eq!(p.path, "/abs/foo.rs");
+    }
+
+    #[test]
+    fn read_buffer_params_accepts_null() {
+        let p: ReadBufferParams =
+            serde_json::from_value(serde_json::Value::Null).expect("null");
+        assert!(p.solution_id.is_empty());
+        assert!(p.path.is_empty());
+    }
+
+    #[test]
+    fn apply_edit_params_round_trip() {
+        let p: ApplyEditParams = serde_json::from_value(serde_json::json!({
+            "solution_id": "demo",
+            "path": "/abs/foo.rs",
+            "edits": [{
+                "range": {"start": {"line": 0, "col": 0}, "end": {"line": 0, "col": 5}},
+                "new_text": "hello"
+            }]
+        }))
+        .expect("parse");
+        assert_eq!(p.edits.len(), 1);
+        assert_eq!(p.edits[0].new_text, "hello");
+        assert_eq!(p.edits[0].range.start.line, 0);
+        assert_eq!(p.edits[0].range.end.col, 5);
+    }
+
+    #[test]
+    fn apply_edit_params_accepts_null() {
+        let p: ApplyEditParams =
+            serde_json::from_value(serde_json::Value::Null).expect("null");
+        assert!(p.solution_id.is_empty());
+        assert!(p.path.is_empty());
+        assert!(p.edits.is_empty());
     }
 }
