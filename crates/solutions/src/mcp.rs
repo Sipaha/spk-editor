@@ -84,6 +84,24 @@ pub fn register(cx: &mut App) {
     editor_mcp::register_tool(cx, |server| {
         server.add_tool(ApplyEditTool);
     });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(SaveBufferTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(OpenFileTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(CloseBufferTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(CreateFileTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(DeleteFileTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(RenameFileTool);
+    });
 }
 
 // =====================================================================
@@ -2866,6 +2884,653 @@ fn resolve_project_path(
 }
 
 // =====================================================================
+// project.save_buffer
+// =====================================================================
+
+/// Save the on-disk file for a path via the editor's Buffer system. If
+/// the buffer is not currently open it is opened (without creating a
+/// tab) so the save round-trip applies any pending project formatting
+/// hooks; calling on a clean buffer is a no-op.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct SaveBufferParams {
+    pub solution_id: String,
+    /// Absolute path of the file to save. Must lie under one of the
+    /// Solution's worktrees.
+    pub path: String,
+}
+
+impl<'de> Deserialize<'de> for SaveBufferParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            solution_id: String,
+            path: String,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            solution_id: inner.solution_id,
+            path: inner.path,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SaveBufferResult {
+    pub saved: bool,
+    pub path: String,
+}
+
+#[derive(Clone)]
+pub struct SaveBufferTool;
+
+impl McpServerTool for SaveBufferTool {
+    type Input = SaveBufferParams;
+    type Output = SaveBufferResult;
+    const NAME: &'static str = "project.save_buffer";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.solution_id.is_empty(),
+            "invalid_params: solution_id is required"
+        );
+        anyhow::ensure!(
+            !input.path.is_empty(),
+            "invalid_params: path is required"
+        );
+
+        cx.update(|cx| validate_path_in_solution(&input.solution_id, &input.path, cx))
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+        let project = cx
+            .update(|cx| project_for_solution(&input.solution_id, cx))
+            .ok_or_else(|| anyhow::anyhow!("solution_not_open: {}", input.solution_id))?;
+
+        let project_path = cx.update(|cx| resolve_project_path(&project, &input.path, cx))?;
+
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(project_path, cx))
+            .await?;
+
+        project
+            .update(cx, |project, cx| project.save_buffer(buffer, cx))
+            .await?;
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("saved {}", input.path),
+            }],
+            structured_content: SaveBufferResult {
+                saved: true,
+                path: input.path,
+            },
+        })
+    }
+}
+
+// =====================================================================
+// project.open_file
+// =====================================================================
+
+/// Open a file as a tab in the Solution's workspace. Unlike
+/// `project.read_buffer`, this surfaces the file in the UI by routing
+/// through `Workspace::open_path`, which builds an `Editor` item and
+/// adds it to the active pane.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct OpenFileParams {
+    pub solution_id: String,
+    /// Absolute path of the file to open. Must lie under one of the
+    /// Solution's worktrees.
+    pub path: String,
+    /// Whether to focus the new tab. Defaults to `true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus: Option<bool>,
+}
+
+impl<'de> Deserialize<'de> for OpenFileParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            solution_id: String,
+            path: String,
+            focus: Option<bool>,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            solution_id: inner.solution_id,
+            path: inner.path,
+            focus: inner.focus,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct OpenFileResult {
+    pub opened: bool,
+    pub focused: bool,
+}
+
+#[derive(Clone)]
+pub struct OpenFileTool;
+
+impl McpServerTool for OpenFileTool {
+    type Input = OpenFileParams;
+    type Output = OpenFileResult;
+    const NAME: &'static str = "project.open_file";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.solution_id.is_empty(),
+            "invalid_params: solution_id is required"
+        );
+        anyhow::ensure!(
+            !input.path.is_empty(),
+            "invalid_params: path is required"
+        );
+
+        cx.update(|cx| validate_path_in_solution(&input.solution_id, &input.path, cx))
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+        let focus = input.focus.unwrap_or(true);
+        let window_handle = cx
+            .update(|cx| find_window_for_solution(&input.solution_id, cx))
+            .ok_or_else(|| anyhow::anyhow!("solution_not_open: {}", input.solution_id))?;
+        let typed_window = window_handle
+            .downcast::<workspace::MultiWorkspace>()
+            .ok_or_else(|| anyhow::anyhow!("window_not_multi_workspace"))?;
+
+        let project = cx
+            .update(|cx| project_for_solution(&input.solution_id, cx))
+            .ok_or_else(|| anyhow::anyhow!("solution_not_open: {}", input.solution_id))?;
+
+        let project_path = cx.update(|cx| resolve_project_path(&project, &input.path, cx))?;
+
+        let task = typed_window
+            .update(cx, |multi, window, cx| {
+                let workspace_entity = multi.workspace().clone();
+                workspace_entity.update(cx, |workspace, cx| {
+                    workspace.open_path(project_path, None, focus, window, cx)
+                })
+            })
+            .map_err(|err| anyhow::anyhow!("open_path failed: {err}"))?;
+
+        task.await?;
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("opened {} (focused={})", input.path, focus),
+            }],
+            structured_content: OpenFileResult {
+                opened: true,
+                focused: focus,
+            },
+        })
+    }
+}
+
+// =====================================================================
+// project.close_buffer
+// =====================================================================
+
+/// Close any tab(s) in the Solution's workspace whose project_path
+/// matches the given absolute path. With `save: true`, dirty buffers
+/// are saved first via the editor's normal save path; otherwise close
+/// uses `SaveIntent::Skip` to avoid prompting the user.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct CloseBufferParams {
+    pub solution_id: String,
+    /// Absolute path of the file whose tab should be closed. Must lie
+    /// under one of the Solution's worktrees.
+    pub path: String,
+    /// Whether to save dirty buffers before closing. Defaults to `false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub save: Option<bool>,
+}
+
+impl<'de> Deserialize<'de> for CloseBufferParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            solution_id: String,
+            path: String,
+            save: Option<bool>,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            solution_id: inner.solution_id,
+            path: inner.path,
+            save: inner.save,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CloseBufferResult {
+    pub closed: bool,
+    pub saved: bool,
+}
+
+#[derive(Clone)]
+pub struct CloseBufferTool;
+
+impl McpServerTool for CloseBufferTool {
+    type Input = CloseBufferParams;
+    type Output = CloseBufferResult;
+    const NAME: &'static str = "project.close_buffer";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.solution_id.is_empty(),
+            "invalid_params: solution_id is required"
+        );
+        anyhow::ensure!(
+            !input.path.is_empty(),
+            "invalid_params: path is required"
+        );
+
+        cx.update(|cx| validate_path_in_solution(&input.solution_id, &input.path, cx))
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+        let save = input.save.unwrap_or(false);
+
+        let window_handle = cx
+            .update(|cx| find_window_for_solution(&input.solution_id, cx))
+            .ok_or_else(|| anyhow::anyhow!("solution_not_open: {}", input.solution_id))?;
+        let typed_window = window_handle
+            .downcast::<workspace::MultiWorkspace>()
+            .ok_or_else(|| anyhow::anyhow!("window_not_multi_workspace"))?;
+
+        let project = cx
+            .update(|cx| project_for_solution(&input.solution_id, cx))
+            .ok_or_else(|| anyhow::anyhow!("solution_not_open: {}", input.solution_id))?;
+
+        let project_path = cx.update(|cx| resolve_project_path(&project, &input.path, cx))?;
+
+        // Collect all tab item ids matching the project_path across every
+        // pane of every workspace in the window. We close them all so a
+        // file split into multiple panes is fully evicted.
+        struct CloseTarget {
+            pane: gpui::Entity<workspace::Pane>,
+            item_id: gpui::EntityId,
+            dirty: bool,
+        }
+
+        let targets = typed_window
+            .update(cx, |multi, _window, cx| {
+                let mut collected = Vec::new();
+                for workspace_entity in multi.workspaces() {
+                    let workspace = workspace_entity.read(cx);
+                    for pane_entity in workspace.panes() {
+                        let pane = pane_entity.read(cx);
+                        for item in pane.items() {
+                            if item.project_path(cx).as_ref() == Some(&project_path) {
+                                collected.push(CloseTarget {
+                                    pane: pane_entity.clone(),
+                                    item_id: item.item_id(),
+                                    dirty: item.is_dirty(cx),
+                                });
+                            }
+                        }
+                    }
+                }
+                collected
+            })
+            .map_err(|err| anyhow::anyhow!("collect close targets failed: {err}"))?;
+
+        if targets.is_empty() {
+            return Ok(ToolResponse {
+                content: vec![ToolResponseContent::Text {
+                    text: format!("no open tab for {}", input.path),
+                }],
+                structured_content: CloseBufferResult {
+                    closed: false,
+                    saved: false,
+                },
+            });
+        }
+
+        let any_dirty = targets.iter().any(|t| t.dirty);
+        let mut saved_flag = false;
+        if save && any_dirty {
+            let buffer = project
+                .update(cx, |project, cx| project.open_buffer(project_path.clone(), cx))
+                .await?;
+            project
+                .update(cx, |project, cx| project.save_buffer(buffer, cx))
+                .await?;
+            saved_flag = true;
+        }
+
+        let save_intent = if save {
+            workspace::pane::SaveIntent::Save
+        } else {
+            workspace::pane::SaveIntent::Skip
+        };
+
+        let close_tasks: Vec<gpui::Task<anyhow::Result<()>>> = typed_window
+            .update(cx, |_multi, window, cx| {
+                targets
+                    .iter()
+                    .map(|target| {
+                        target.pane.update(cx, |pane, cx| {
+                            pane.close_item_by_id(target.item_id, save_intent, window, cx)
+                        })
+                    })
+                    .collect()
+            })
+            .map_err(|err| anyhow::anyhow!("schedule close failed: {err}"))?;
+
+        for task in close_tasks {
+            task.await?;
+        }
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("closed {}", input.path),
+            }],
+            structured_content: CloseBufferResult {
+                closed: true,
+                saved: saved_flag,
+            },
+        })
+    }
+}
+
+// =====================================================================
+// project.create_file
+// =====================================================================
+
+/// Create a new file under one of the Solution's worktrees. Optional
+/// `content` is written via the project's filesystem layer; absent
+/// content yields an empty file. Parent directories are created as
+/// needed. Errors if the path already exists.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct CreateFileParams {
+    pub solution_id: String,
+    /// Absolute path of the file to create. Must lie under one of the
+    /// Solution's worktrees.
+    pub path: String,
+    /// Optional initial file content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for CreateFileParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            solution_id: String,
+            path: String,
+            content: Option<String>,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            solution_id: inner.solution_id,
+            path: inner.path,
+            content: inner.content,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CreateFileResult {
+    pub created: bool,
+}
+
+#[derive(Clone)]
+pub struct CreateFileTool;
+
+impl McpServerTool for CreateFileTool {
+    type Input = CreateFileParams;
+    type Output = CreateFileResult;
+    const NAME: &'static str = "project.create_file";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.solution_id.is_empty(),
+            "invalid_params: solution_id is required"
+        );
+        anyhow::ensure!(
+            !input.path.is_empty(),
+            "invalid_params: path is required"
+        );
+
+        cx.update(|cx| validate_path_in_solution(&input.solution_id, &input.path, cx))
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+        let abs_path = std::path::PathBuf::from(&input.path);
+        if abs_path.exists() {
+            anyhow::bail!("file_exists: {}", input.path);
+        }
+
+        let project = cx
+            .update(|cx| project_for_solution(&input.solution_id, cx))
+            .ok_or_else(|| anyhow::anyhow!("solution_not_open: {}", input.solution_id))?;
+
+        let fs: std::sync::Arc<dyn fs::Fs> =
+            cx.update(|cx| project.read(cx).fs().clone());
+        let bytes = input.content.unwrap_or_default().into_bytes();
+        fs.write(&abs_path, &bytes).await?;
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("created {}", input.path),
+            }],
+            structured_content: CreateFileResult { created: true },
+        })
+    }
+}
+
+// =====================================================================
+// project.delete_file
+// =====================================================================
+
+/// Delete a file via the project's worktree (move-to-trash semantics
+/// disabled — the file is permanently removed from disk). Errors if
+/// the path is not currently tracked by a worktree.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct DeleteFileParams {
+    pub solution_id: String,
+    /// Absolute path of the file to delete. Must lie under one of the
+    /// Solution's worktrees.
+    pub path: String,
+}
+
+impl<'de> Deserialize<'de> for DeleteFileParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            solution_id: String,
+            path: String,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            solution_id: inner.solution_id,
+            path: inner.path,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DeleteFileResult {
+    pub deleted: bool,
+}
+
+#[derive(Clone)]
+pub struct DeleteFileTool;
+
+impl McpServerTool for DeleteFileTool {
+    type Input = DeleteFileParams;
+    type Output = DeleteFileResult;
+    const NAME: &'static str = "project.delete_file";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.solution_id.is_empty(),
+            "invalid_params: solution_id is required"
+        );
+        anyhow::ensure!(
+            !input.path.is_empty(),
+            "invalid_params: path is required"
+        );
+
+        cx.update(|cx| validate_path_in_solution(&input.solution_id, &input.path, cx))
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+        let project = cx
+            .update(|cx| project_for_solution(&input.solution_id, cx))
+            .ok_or_else(|| anyhow::anyhow!("solution_not_open: {}", input.solution_id))?;
+
+        let project_path = cx.update(|cx| resolve_project_path(&project, &input.path, cx))?;
+
+        let task = cx.update(|cx| {
+            project.update(cx, |project, cx| {
+                let entry = project
+                    .entry_for_path(&project_path, cx)
+                    .ok_or_else(|| anyhow::anyhow!("path_not_in_worktree: {}", input.path))?;
+                let entry_id = entry.id;
+                project
+                    .delete_entry(entry_id, false, cx)
+                    .ok_or_else(|| anyhow::anyhow!("delete_entry returned no task"))
+            })
+        })?;
+
+        task.await?;
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("deleted {}", input.path),
+            }],
+            structured_content: DeleteFileResult { deleted: true },
+        })
+    }
+}
+
+// =====================================================================
+// project.rename_file
+// =====================================================================
+
+/// Rename or move a file within a single worktree. Both `from` and `to`
+/// must resolve to the same Solution; cross-worktree moves are
+/// rejected. The rename routes through `Project::rename_entry`, which
+/// also notifies the LSP layer.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct RenameFileParams {
+    pub solution_id: String,
+    /// Absolute source path. Must lie under one of the Solution's
+    /// worktrees.
+    pub from: String,
+    /// Absolute destination path. Must lie under the same worktree as
+    /// `from`.
+    pub to: String,
+}
+
+impl<'de> Deserialize<'de> for RenameFileParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            solution_id: String,
+            from: String,
+            to: String,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            solution_id: inner.solution_id,
+            from: inner.from,
+            to: inner.to,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct RenameFileResult {
+    pub renamed: bool,
+}
+
+#[derive(Clone)]
+pub struct RenameFileTool;
+
+impl McpServerTool for RenameFileTool {
+    type Input = RenameFileParams;
+    type Output = RenameFileResult;
+    const NAME: &'static str = "project.rename_file";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.solution_id.is_empty(),
+            "invalid_params: solution_id is required"
+        );
+        anyhow::ensure!(!input.from.is_empty(), "invalid_params: from is required");
+        anyhow::ensure!(!input.to.is_empty(), "invalid_params: to is required");
+
+        cx.update(|cx| validate_path_in_solution(&input.solution_id, &input.from, cx))
+            .map_err(|err| anyhow::anyhow!("from: {err}"))?;
+        cx.update(|cx| validate_path_in_solution(&input.solution_id, &input.to, cx))
+            .map_err(|err| anyhow::anyhow!("to: {err}"))?;
+
+        let project = cx
+            .update(|cx| project_for_solution(&input.solution_id, cx))
+            .ok_or_else(|| anyhow::anyhow!("solution_not_open: {}", input.solution_id))?;
+
+        let from_project_path = cx.update(|cx| resolve_project_path(&project, &input.from, cx))?;
+        let to_project_path = cx.update(|cx| resolve_project_path(&project, &input.to, cx))?;
+
+        anyhow::ensure!(
+            from_project_path.worktree_id == to_project_path.worktree_id,
+            "cross_worktree_rename_unsupported"
+        );
+
+        let task = cx.update(|cx| {
+            project.update(cx, |project, cx| {
+                let entry = project
+                    .entry_for_path(&from_project_path, cx)
+                    .ok_or_else(|| anyhow::anyhow!("path_not_in_worktree: {}", input.from))?;
+                let entry_id = entry.id;
+                anyhow::Ok(project.rename_entry(entry_id, to_project_path.clone(), cx))
+            })
+        })?;
+
+        task.await?;
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("renamed {} -> {}", input.from, input.to),
+            }],
+            structured_content: RenameFileResult { renamed: true },
+        })
+    }
+}
+
+// =====================================================================
 // Tests
 // =====================================================================
 
@@ -3467,5 +4132,131 @@ mod tests {
         assert!(p.solution_id.is_empty());
         assert!(p.path.is_empty());
         assert!(p.edits.is_empty());
+    }
+
+    #[test]
+    fn save_buffer_params_round_trip() {
+        let p: SaveBufferParams = serde_json::from_value(serde_json::json!({
+            "solution_id": "demo",
+            "path": "/abs/foo.rs"
+        }))
+        .expect("parse");
+        assert_eq!(p.solution_id, "demo");
+        assert_eq!(p.path, "/abs/foo.rs");
+    }
+
+    #[test]
+    fn save_buffer_params_accepts_null() {
+        let p: SaveBufferParams =
+            serde_json::from_value(serde_json::Value::Null).expect("null");
+        assert!(p.solution_id.is_empty());
+        assert!(p.path.is_empty());
+    }
+
+    #[test]
+    fn open_file_params_round_trip() {
+        let p: OpenFileParams = serde_json::from_value(serde_json::json!({
+            "solution_id": "demo",
+            "path": "/abs/foo.rs",
+            "focus": false
+        }))
+        .expect("parse");
+        assert_eq!(p.solution_id, "demo");
+        assert_eq!(p.path, "/abs/foo.rs");
+        assert_eq!(p.focus, Some(false));
+    }
+
+    #[test]
+    fn open_file_params_accepts_null() {
+        let p: OpenFileParams =
+            serde_json::from_value(serde_json::Value::Null).expect("null");
+        assert!(p.solution_id.is_empty());
+        assert!(p.path.is_empty());
+        assert!(p.focus.is_none());
+    }
+
+    #[test]
+    fn close_buffer_params_round_trip() {
+        let p: CloseBufferParams = serde_json::from_value(serde_json::json!({
+            "solution_id": "demo",
+            "path": "/abs/foo.rs",
+            "save": true
+        }))
+        .expect("parse");
+        assert_eq!(p.solution_id, "demo");
+        assert_eq!(p.path, "/abs/foo.rs");
+        assert_eq!(p.save, Some(true));
+    }
+
+    #[test]
+    fn close_buffer_params_accepts_null() {
+        let p: CloseBufferParams =
+            serde_json::from_value(serde_json::Value::Null).expect("null");
+        assert!(p.solution_id.is_empty());
+        assert!(p.path.is_empty());
+        assert!(p.save.is_none());
+    }
+
+    #[test]
+    fn create_file_params_round_trip() {
+        let p: CreateFileParams = serde_json::from_value(serde_json::json!({
+            "solution_id": "demo",
+            "path": "/abs/foo.rs",
+            "content": "hello"
+        }))
+        .expect("parse");
+        assert_eq!(p.solution_id, "demo");
+        assert_eq!(p.path, "/abs/foo.rs");
+        assert_eq!(p.content.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn create_file_params_accepts_null() {
+        let p: CreateFileParams =
+            serde_json::from_value(serde_json::Value::Null).expect("null");
+        assert!(p.solution_id.is_empty());
+        assert!(p.path.is_empty());
+        assert!(p.content.is_none());
+    }
+
+    #[test]
+    fn delete_file_params_round_trip() {
+        let p: DeleteFileParams = serde_json::from_value(serde_json::json!({
+            "solution_id": "demo",
+            "path": "/abs/foo.rs"
+        }))
+        .expect("parse");
+        assert_eq!(p.solution_id, "demo");
+        assert_eq!(p.path, "/abs/foo.rs");
+    }
+
+    #[test]
+    fn delete_file_params_accepts_null() {
+        let p: DeleteFileParams =
+            serde_json::from_value(serde_json::Value::Null).expect("null");
+        assert!(p.solution_id.is_empty());
+        assert!(p.path.is_empty());
+    }
+
+    #[test]
+    fn rename_file_params_round_trip() {
+        let p: RenameFileParams = serde_json::from_value(serde_json::json!({
+            "solution_id": "demo",
+            "from": "/abs/old.rs",
+            "to": "/abs/new.rs"
+        }))
+        .expect("parse");
+        assert_eq!(p.solution_id, "demo");
+        assert_eq!(p.from, "/abs/old.rs");
+        assert_eq!(p.to, "/abs/new.rs");
+    }
+
+    #[test]
+    fn rename_file_params_accepts_null() {
+        let p: RenameFileParams =
+            serde_json::from_value(serde_json::Value::Null).expect("null");
+        assert!(p.solution_id.is_empty());
+        assert!(p.from.is_empty());
+        assert!(p.to.is_empty());
     }
 }
