@@ -2244,6 +2244,75 @@ fn collect_diagnostics(
 }
 
 // =====================================================================
+// Path-validation helper (cross-cutting security primitive)
+// =====================================================================
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub enum PathValidationError {
+    SolutionNotFound,
+    PathOutsideSolution,
+    InvalidPath,
+}
+
+impl std::fmt::Display for PathValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SolutionNotFound => write!(f, "solution_not_found"),
+            Self::PathOutsideSolution => write!(f, "path_outside_solution"),
+            Self::InvalidPath => write!(f, "invalid_path"),
+        }
+    }
+}
+
+impl std::error::Error for PathValidationError {}
+
+/// Verify that `path` lies under at least one worktree root of the
+/// named Solution. Returns the canonicalized absolute path.
+///
+/// Used by every Phase 6 `project.*` tool to prevent agents from
+/// escaping into arbitrary filesystem via `apply_edit("/etc/passwd", ...)`.
+#[allow(dead_code)]
+pub fn validate_path_in_solution(
+    solution_id: &str,
+    path: &str,
+    cx: &App,
+) -> Result<std::path::PathBuf, PathValidationError> {
+    let absolute = std::path::PathBuf::from(path);
+    if !absolute.is_absolute() {
+        // Relative paths require a cwd that we don't have here. Reject.
+        return Err(PathValidationError::InvalidPath);
+    }
+
+    // Best-effort canonicalization. If the path doesn't exist yet (e.g.
+    // create_file), we accept the absolute non-canonical form provided
+    // its prefix is under a Solution member.
+    let canonical = absolute.canonicalize().unwrap_or_else(|_| absolute.clone());
+
+    let store = SolutionStore::try_global(cx).ok_or(PathValidationError::SolutionNotFound)?;
+    let valid = store.read_with(cx, |s, _| {
+        s.solutions()
+            .iter()
+            .find(|sol| sol.id.as_str() == solution_id)
+            .map(|sol| {
+                sol.members.iter().any(|m| {
+                    let canon_member = m
+                        .local_path
+                        .canonicalize()
+                        .unwrap_or_else(|_| m.local_path.clone());
+                    canonical.starts_with(&canon_member)
+                }) || canonical.starts_with(&sol.root)
+            })
+    });
+
+    match valid {
+        Some(true) => Ok(canonical),
+        Some(false) => Err(PathValidationError::PathOutsideSolution),
+        None => Err(PathValidationError::SolutionNotFound),
+    }
+}
+
+// =====================================================================
 // Tests
 // =====================================================================
 
@@ -2739,5 +2808,40 @@ mod tests {
             serde_json::from_value(serde_json::Value::Null).expect("null");
         assert!(p.solution_id.is_empty());
         assert!(p.buffer_path.is_none());
+    }
+
+    #[gpui::test]
+    async fn validate_path_rejects_relative(cx: &mut TestAppContext) {
+        let dir = tempdir().expect("tempdir");
+        let store = cx.update(|cx| SolutionStore::for_test(dir.path().join("c.json"), cx));
+        cx.update(|cx| crate::store::install_global_for_test(store, cx));
+        let result = cx.update(|cx| validate_path_in_solution("any", "relative/path.rs", cx));
+        assert!(matches!(result, Err(PathValidationError::InvalidPath)));
+    }
+
+    #[gpui::test]
+    async fn validate_path_rejects_unknown_solution(cx: &mut TestAppContext) {
+        let dir = tempdir().expect("tempdir");
+        let store = cx.update(|cx| SolutionStore::for_test(dir.path().join("c.json"), cx));
+        cx.update(|cx| crate::store::install_global_for_test(store, cx));
+        let result = cx.update(|cx| validate_path_in_solution("nonexistent", "/tmp/foo", cx));
+        assert!(matches!(result, Err(PathValidationError::SolutionNotFound)));
+    }
+
+    #[gpui::test]
+    async fn validate_path_rejects_outside_solution(cx: &mut TestAppContext) {
+        let dir = tempdir().expect("tempdir");
+        let store = cx.update(|cx| SolutionStore::for_test(dir.path().join("c.json"), cx));
+        cx.update(|cx| crate::store::install_global_for_test(store.clone(), cx));
+        let _sol_id = store
+            .update(cx, |s, cx| {
+                s.create_solution("Sol", dir.path().to_path_buf(), cx)
+            })
+            .expect("create");
+        let result = cx.update(|cx| validate_path_in_solution("sol", "/etc/passwd", cx));
+        assert!(matches!(
+            result,
+            Err(PathValidationError::PathOutsideSolution)
+        ));
     }
 }
