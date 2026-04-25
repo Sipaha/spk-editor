@@ -20,3 +20,15 @@ async fn capabilities_returns_protocol_version(cx: &mut TestAppContext) {
     assert!(caps.supported_event_kinds.iter().any(|k| k == "buffer_saved"));
     assert!(caps.supported_event_kinds.iter().any(|k| k == "cli_args_received"));
 }
+
+#[test]
+fn capabilities_params_deserializes_from_null() {
+    let _: editor_mcp::tools_for_test::CapabilitiesParams =
+        serde_json::from_value(serde_json::Value::Null).expect("null accepted");
+}
+
+#[test]
+fn capabilities_params_deserializes_from_empty_object() {
+    let _: editor_mcp::tools_for_test::CapabilitiesParams =
+        serde_json::from_value(serde_json::json!({})).expect("empty object accepted");
+}

@@ -3,12 +3,24 @@ use context_server::listener::{McpServerTool, ToolResponse};
 use context_server::types::ToolResponseContent;
 use gpui::AsyncApp;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Editor MCP capability probe — returns protocol version, server version,
 /// supported event kinds, and any experimental flags currently enabled.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, JsonSchema)]
 pub struct CapabilitiesParams {}
+
+// Custom deserializer accepts JSON null, missing, or `{}` — all valid forms
+// for a tool whose input schema declares no required fields. Without this,
+// `serde_json::from_value(Value::Null)` rejects the unit-style struct, so
+// MCP clients that omit `arguments` (the dispatcher routes that to `Null`)
+// would fail before reaching `run`.
+impl<'de> Deserialize<'de> for CapabilitiesParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let _ = serde::de::IgnoredAny::deserialize(de)?;
+        Ok(CapabilitiesParams {})
+    }
+}
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct Capabilities {
