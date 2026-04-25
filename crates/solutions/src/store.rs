@@ -1,13 +1,14 @@
-use crate::model::{CatalogId, CatalogProject, Solution, SolutionId};
-#[cfg(test)]
-use crate::model::SolutionMember;
+use crate::cache;
+use crate::git;
+use crate::model::{CatalogId, CatalogProject, Solution, SolutionId, SolutionMember};
 use crate::persistence::{CURRENT_VERSION, SolutionsConfig, load_or_default, save_atomic};
 use crate::slug::unique_slug;
 use anyhow::{Context as _, Result, bail};
 use chrono::Utc;
-use gpui::{App, AppContext as _, Entity, EventEmitter, Global};
+use gpui::{App, AppContext as _, AsyncApp, Entity, EventEmitter, Global, Task};
 use std::path::PathBuf;
 use std::sync::Arc;
+use util::ResultExt as _;
 
 pub struct SolutionStore {
     config_path: PathBuf,
@@ -186,6 +187,122 @@ impl SolutionStore {
         Ok(())
     }
 
+    pub fn add_member(
+        &mut self,
+        solution_id: SolutionId,
+        catalog_id: CatalogId,
+        cache_root: PathBuf,
+        cx: &mut gpui::Context<Self>,
+    ) -> Task<Result<()>> {
+        let sol = match self.config.solutions.iter().find(|s| s.id == solution_id) {
+            Some(s) => s.clone(),
+            None => {
+                let id = solution_id.0.clone();
+                return cx.background_spawn(async move { bail!("solution not found: {id}") });
+            }
+        };
+        let cat = match self.config.catalog.iter().find(|c| c.id == catalog_id) {
+            Some(c) => c.clone(),
+            None => {
+                let id = catalog_id.0.clone();
+                return cx.background_spawn(async move { bail!("catalog project not found: {id}") });
+            }
+        };
+        if sol.members.iter().any(|m| m.catalog_id == catalog_id) {
+            let sol_name = sol.name.clone();
+            let cat_name = cat.name.clone();
+            return cx.background_spawn(async move {
+                bail!("solution {sol_name} already contains {cat_name}")
+            });
+        }
+        let target = sol.root.join(&catalog_id.0);
+        let remote_url = cat.remote_url.clone();
+        let default_branch = cat.default_branch.clone();
+        let lock = Arc::clone(&self.fs_lock);
+
+        cx.spawn(async move |weak: gpui::WeakEntity<Self>, cx: &mut AsyncApp| {
+            let _guard = lock.lock().await;
+            let cache_path = cache::ensure_cache(&cache_root, &remote_url, |_| {}).await?;
+            git::clone_local(&cache_path, &target, |_| {}).await?;
+            git::set_remote_url(&target, "origin", &remote_url).await?;
+            if let Some(branch) = default_branch.as_deref() {
+                git::checkout(&target, branch).await.ok();
+            }
+            weak.update(cx, |store, cx| {
+                if let Some(sol) = store
+                    .config
+                    .solutions
+                    .iter_mut()
+                    .find(|s| s.id == solution_id)
+                {
+                    sol.members.push(SolutionMember {
+                        catalog_id: catalog_id.clone(),
+                        local_path: target.clone(),
+                    });
+                    store.persist().log_err();
+                    cx.emit(SolutionStoreEvent::Changed);
+                    cx.notify();
+                }
+                Ok::<(), anyhow::Error>(())
+            })??;
+            Ok(())
+        })
+    }
+
+    pub fn remove_member(
+        &mut self,
+        solution_id: &SolutionId,
+        catalog_id: &CatalogId,
+        cx: &mut gpui::Context<Self>,
+    ) -> Result<()> {
+        let sol = self.find_solution_mut(solution_id)?;
+        let before = sol.members.len();
+        sol.members.retain(|m| m.catalog_id != *catalog_id);
+        if sol.members.len() == before {
+            bail!("member not in solution");
+        }
+        self.persist()?;
+        cx.emit(SolutionStoreEvent::Changed);
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn reorder_members(
+        &mut self,
+        solution_id: &SolutionId,
+        new_order: Vec<CatalogId>,
+        cx: &mut gpui::Context<Self>,
+    ) -> Result<()> {
+        let sol = self.find_solution_mut(solution_id)?;
+        let mut by_id: collections::HashMap<CatalogId, SolutionMember> = sol
+            .members
+            .drain(..)
+            .map(|m| (m.catalog_id.clone(), m))
+            .collect();
+        for id in &new_order {
+            if let Some(m) = by_id.remove(id) {
+                sol.members.push(m);
+            }
+        }
+        for (_, m) in by_id {
+            sol.members.push(m);
+        }
+        self.persist()?;
+        cx.emit(SolutionStoreEvent::Changed);
+        cx.notify();
+        Ok(())
+    }
+
+    pub fn paths_for_open(&self, id: &SolutionId) -> Result<Vec<PathBuf>> {
+        let sol = self
+            .config
+            .solutions
+            .iter()
+            .find(|s| s.id == *id)
+            .with_context(|| format!("solution not found: {}", id.0))?;
+        Ok(sol.members.iter().map(|m| m.local_path.clone()).collect())
+    }
+
     fn find_solution_mut(&mut self, id: &SolutionId) -> Result<&mut Solution> {
         self.config
             .solutions
@@ -222,7 +339,53 @@ impl Global for GlobalSolutionStore {}
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+    use std::process::Command;
+    use std::path::Path;
     use tempfile::tempdir;
+
+    fn make_bare_with_one_commit(dir: &Path) -> PathBuf {
+        let bare = dir.join("seed.git");
+        let s = Command::new("git")
+            .args(["init", "--bare"])
+            .arg(&bare)
+            .status()
+            .expect("init bare");
+        assert!(s.success());
+        let work = dir.join("seed-work");
+        std::fs::create_dir(&work).expect("mkdir work");
+        let s = Command::new("git").current_dir(&work).arg("init").status().expect("init");
+        assert!(s.success());
+        std::fs::write(work.join("README"), "x").expect("write seed");
+        let s = Command::new("git")
+            .current_dir(&work)
+            .args(["add", "."])
+            .status()
+            .expect("add");
+        assert!(s.success());
+        let s = Command::new("git")
+            .current_dir(&work)
+            .args([
+                "-c", "user.name=t", "-c", "user.email=t@t",
+                "commit", "-m", "init",
+            ])
+            .status()
+            .expect("commit");
+        assert!(s.success());
+        let s = Command::new("git")
+            .current_dir(&work)
+            .args(["remote", "add", "origin"])
+            .arg(&bare)
+            .status()
+            .expect("remote add");
+        assert!(s.success());
+        let s = Command::new("git")
+            .current_dir(&work)
+            .args(["push", "origin", "HEAD:master"])
+            .status()
+            .expect("push");
+        assert!(s.success());
+        bare
+    }
 
     #[gpui::test]
     async fn add_catalog_project_persists(cx: &mut TestAppContext) {
@@ -283,5 +446,72 @@ mod tests {
 
         let result = store.update(cx, |s, cx| s.remove_catalog_project(&cat_id, cx));
         assert!(result.is_err(), "expected refusal");
+    }
+
+    #[gpui::test]
+    async fn add_member_clones_and_records(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let dir = tempdir().expect("tempdir");
+        let bare = make_bare_with_one_commit(dir.path());
+        let cache_root = dir.path().join("cache");
+        let cfg_path = dir.path().join("solutions.json");
+        let solutions_root = dir.path().join("solutions");
+        std::fs::create_dir_all(&solutions_root).expect("mkdir solutions");
+
+        let store = cx.update(|cx| SolutionStore::for_test(cfg_path, cx));
+        let cat_id = store
+            .update(cx, |s, cx| {
+                s.add_catalog_project(
+                    "Bare",
+                    bare.to_str().expect("path str"),
+                    Some("master".into()),
+                    cx,
+                )
+            })
+            .expect("add catalog");
+        let sol_id = store
+            .update(cx, |s, cx| s.create_solution("S", solutions_root, cx))
+            .expect("create solution");
+
+        let task = store.update(cx, |s, cx| {
+            s.add_member(sol_id.clone(), cat_id.clone(), cache_root, cx)
+        });
+        task.await.expect("add_member");
+
+        let target = store.read_with(cx, |s, _| {
+            s.solutions()
+                .iter()
+                .find(|x| x.id == sol_id)
+                .expect("solution exists")
+                .members[0]
+                .local_path
+                .clone()
+        });
+        assert!(target.join(".git").exists());
+    }
+
+    #[gpui::test]
+    async fn paths_for_open_returns_member_paths_in_order(cx: &mut TestAppContext) {
+        let dir = tempdir().expect("tempdir");
+        let store =
+            cx.update(|cx| SolutionStore::for_test(dir.path().join("c.json"), cx));
+        let sol_id = store
+            .update(cx, |s, cx| s.create_solution("S", dir.path().to_path_buf(), cx))
+            .expect("create solution");
+        let cat_a = store
+            .update(cx, |s, cx| s.add_catalog_project("A", "git@x:a", None, cx))
+            .expect("add A");
+        let cat_b = store
+            .update(cx, |s, cx| s.add_catalog_project("B", "git@x:b", None, cx))
+            .expect("add B");
+        store.update(cx, |s, _| {
+            s.test_force_add_member(&sol_id, &cat_a);
+            s.test_force_add_member(&sol_id, &cat_b);
+        });
+        let paths =
+            store.read_with(cx, |s, _| s.paths_for_open(&sol_id).expect("paths"));
+        assert_eq!(paths.len(), 2);
+        assert!(paths[0].ends_with("a"));
+        assert!(paths[1].ends_with("b"));
     }
 }
