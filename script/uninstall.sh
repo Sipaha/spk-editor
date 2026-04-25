@@ -101,7 +101,7 @@ linux() {
         prompt_remove_preferences
     fi
 
-    rm -rf $HOME/.spk-editor_server
+    rm -rf $HOME/.zed_server
 }
 
 macos() {
@@ -152,7 +152,7 @@ macos() {
         prompt_remove_preferences
     fi
 
-    rm -rf $HOME/.spk-editor_server
+    rm -rf $HOME/.zed_server
 }
 
 main "$@"
