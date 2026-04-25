@@ -72,6 +72,9 @@ pub fn register(cx: &mut App) {
     editor_mcp::register_tool(cx, |server| {
         server.add_tool(DumpVisualStructureTool);
     });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(GetDiagnosticsTool);
+    });
 }
 
 // =====================================================================
@@ -2087,6 +2090,160 @@ fn build_modal_node(_workspace: &workspace::Workspace, _cx: &App) -> Option<Visu
 }
 
 // =====================================================================
+// diagnostics.get
+// =====================================================================
+
+/// Get LSP diagnostic summary counts for files in a Solution. Returns
+/// per-path `error_count` / `warning_count` aggregated across all language
+/// servers reporting on that file. Optional `buffer_path` filters results
+/// to a single project-relative path. Individual diagnostic items
+/// (line / column / message / source) are not exposed in v1; that level
+/// of detail requires per-buffer LSP queries and is deferred to Phase 7.
+///
+/// `info_count` / `hint_count` are intentionally absent from the schema:
+/// the underlying `project::DiagnosticSummary` only tracks errors and
+/// warnings today. Adding info/hint reporting requires upstream changes
+/// and will land alongside the detailed-diagnostic surface.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct GetDiagnosticsParams {
+    pub solution_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub buffer_path: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for GetDiagnosticsParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            solution_id: String,
+            buffer_path: Option<String>,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            solution_id: inner.solution_id,
+            buffer_path: inner.buffer_path,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DiagnosticPathSummary {
+    pub path: String,
+    pub error_count: usize,
+    pub warning_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct GetDiagnosticsResult {
+    pub diagnostics: Vec<DiagnosticPathSummary>,
+}
+
+#[derive(Clone)]
+pub struct GetDiagnosticsTool;
+
+impl McpServerTool for GetDiagnosticsTool {
+    type Input = GetDiagnosticsParams;
+    type Output = GetDiagnosticsResult;
+    const NAME: &'static str = "diagnostics.get";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.solution_id.is_empty(),
+            "invalid_params: solution_id is required"
+        );
+        let diagnostics = cx.update(|cx| collect_diagnostics(&input, cx));
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("{} file(s) with diagnostics", diagnostics.len()),
+            }],
+            structured_content: GetDiagnosticsResult { diagnostics },
+        })
+    }
+}
+
+fn collect_diagnostics(
+    input: &GetDiagnosticsParams,
+    cx: &mut App,
+) -> Vec<DiagnosticPathSummary> {
+    let Some(store) = SolutionStore::try_global(cx) else {
+        return Vec::new();
+    };
+    let Some(root) = store.read_with(cx, |s, _| {
+        s.solutions()
+            .iter()
+            .find(|sol| sol.id.as_str() == input.solution_id)
+            .map(|sol| sol.root.clone())
+    }) else {
+        return Vec::new();
+    };
+
+    for handle in cx.windows() {
+        let Some(window_handle) = handle.downcast::<workspace::MultiWorkspace>() else {
+            continue;
+        };
+        let collected = window_handle
+            .update(cx, |multi, _window, cx| {
+                let workspace = multi.workspace().read(cx);
+                let project = workspace.project().read(cx);
+                let matches_solution = project
+                    .visible_worktrees(cx)
+                    .any(|tree| tree.read(cx).abs_path().starts_with(&root))
+                    || multi.workspaces().any(|ws| {
+                        ws.read(cx)
+                            .project()
+                            .read(cx)
+                            .visible_worktrees(cx)
+                            .any(|tree| tree.read(cx).abs_path().starts_with(&root))
+                    });
+                if !matches_solution {
+                    return None;
+                }
+
+                // A path may have multiple language servers reporting on it
+                // (e.g. rust-analyzer + clippy). Aggregate counts across all
+                // servers for a single per-path summary, matching the rollup
+                // shown in the editor's diagnostics panel.
+                let mut by_path: std::collections::BTreeMap<String, DiagnosticPathSummary> =
+                    std::collections::BTreeMap::new();
+
+                for (project_path, _server_id, summary) in
+                    project.diagnostic_summaries(false, cx)
+                {
+                    let path_str = project_path.path.as_unix_str().to_string();
+                    if let Some(filter) = input.buffer_path.as_deref() {
+                        if path_str != filter {
+                            continue;
+                        }
+                    }
+                    let entry = by_path.entry(path_str.clone()).or_insert(
+                        DiagnosticPathSummary {
+                            path: path_str,
+                            error_count: 0,
+                            warning_count: 0,
+                        },
+                    );
+                    entry.error_count += summary.error_count;
+                    entry.warning_count += summary.warning_count;
+                }
+
+                Some(by_path.into_values().collect::<Vec<_>>())
+            })
+            .ok()
+            .flatten();
+
+        if let Some(diagnostics) = collected {
+            return diagnostics;
+        }
+    }
+    Vec::new()
+}
+
+// =====================================================================
 // Tests
 // =====================================================================
 
@@ -2563,5 +2720,24 @@ mod tests {
         let p: DumpVisualStructureParams =
             serde_json::from_value(serde_json::Value::Null).expect("null");
         assert!(p.solution_id.is_empty());
+    }
+
+    #[test]
+    fn diagnostics_params_round_trip() {
+        let p: GetDiagnosticsParams = serde_json::from_value(serde_json::json!({
+            "solution_id": "demo",
+            "buffer_path": "src/foo.rs"
+        }))
+        .expect("parse");
+        assert_eq!(p.solution_id, "demo");
+        assert_eq!(p.buffer_path.as_deref(), Some("src/foo.rs"));
+    }
+
+    #[test]
+    fn diagnostics_params_accepts_null() {
+        let p: GetDiagnosticsParams =
+            serde_json::from_value(serde_json::Value::Null).expect("null");
+        assert!(p.solution_id.is_empty());
+        assert!(p.buffer_path.is_none());
     }
 }
