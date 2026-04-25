@@ -156,18 +156,10 @@ fn find_window_id_for_solution(solution_root: &std::path::Path, cx: &App) -> Opt
             .ok()
             .unwrap_or(false);
         if matches {
-            return Some(format_window_id(handle.window_id()));
+            return Some(editor_mcp::format_window_id(handle.window_id()));
         }
     }
     None
-}
-
-// Inline window-id formatting helper. Mirrors what `editor_mcp::window_ids::format`
-// produces (`window:<u64>`); duplicated here because `solutions` cannot reach
-// `editor_mcp`'s private modules. Both must agree on format — if
-// `editor_mcp::window_ids` ever changes its format, this needs to track.
-fn format_window_id(id: gpui::WindowId) -> String {
-    format!("window:{}", id.as_u64())
 }
 
 // =====================================================================
@@ -321,7 +313,7 @@ fn build_window_detail(solution_root: &std::path::Path, cx: &mut App) -> Option<
                 }
 
                 Some(WindowDetail {
-                    window_id: format_window_id(handle.window_id()),
+                    window_id: editor_mcp::format_window_id(handle.window_id()),
                     focused: active_window_id == Some(handle.window_id()),
                     active_buffer,
                     worktree_paths,
@@ -618,7 +610,7 @@ impl McpServerTool for OpenSolutionTool {
             workspace::open_paths(&paths, app_state, options, cx)
         });
         let open_result = task.await?;
-        let window_id = format_window_id(open_result.window.window_id());
+        let window_id = editor_mcp::format_window_id(open_result.window.window_id());
 
         // Persist failure here is non-fatal: the open already happened and the
         // user should see a window even if we lose the recency update.

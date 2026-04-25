@@ -16,6 +16,7 @@ mod window_ids;
 pub use handoff::{HandoffOutcome, try_handoff_to_existing_instance};
 pub use lifecycle::start_server;
 pub use registry::{init, register_tool};
+pub use window_ids::format as format_window_id;
 
 #[cfg(test)]
 pub use lifecycle::start_server_for_test;
@@ -23,12 +24,4 @@ pub use lifecycle::start_server_for_test;
 #[doc(hidden)]
 pub mod tools_for_test {
     pub use crate::tools::capabilities::{CapabilitiesParams, CapabilitiesTool};
-    pub use crate::tools::handle_cli_args::{
-        HandleCliArgsParams, HandleCliArgsResult, HandleCliArgsTool,
-    };
-    pub use crate::tools::windows::{
-        CloseWindowParams, CloseWindowResult, CloseWindowTool, DispatchActionParams,
-        DispatchActionResult, DispatchActionTool, FocusWindowParams, FocusWindowResult,
-        FocusWindowTool, ListWindowsParams, ListWindowsResult, ListWindowsTool, WindowInfo,
-    };
 }

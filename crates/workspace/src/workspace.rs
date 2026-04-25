@@ -3,6 +3,7 @@ pub mod dock;
 pub mod history_manager;
 pub mod invalid_item_view;
 pub mod item;
+mod mcp;
 mod modal_layer;
 mod multi_workspace;
 #[cfg(test)]
@@ -767,6 +768,7 @@ pub fn init(app_state: Arc<AppState>, cx: &mut App) {
     theme_preview::init(cx);
     toast_layer::init(cx);
     history_manager::init(app_state.fs.clone(), cx);
+    mcp::register(cx);
 
     cx.on_action(|_: &CloseWindow, cx| Workspace::close_global(cx))
         .on_action(|_: &Reload, cx| reload(cx))

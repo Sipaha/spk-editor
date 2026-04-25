@@ -12,11 +12,18 @@ use std::path::PathBuf;
 
 /// Forward CLI args from a second editor process to the existing instance.
 /// The existing instance opens any provided paths and focuses the relevant window.
+//
+// `new_window` and `focus` are accepted (and round-trip through the schema) so
+// Phase 7 can wire them to focus / new-window behaviour without a schema
+// change. Until then, the run path ignores them — `#[allow(dead_code)]` on the
+// fields keeps clippy quiet.
 #[derive(Debug, Clone, Default, JsonSchema)]
 pub struct HandleCliArgsParams {
     pub paths: Vec<String>,
     pub cwd: Option<String>,
+    #[allow(dead_code)]
     pub new_window: Option<bool>,
+    #[allow(dead_code)]
     pub focus: Option<bool>,
 }
 
@@ -84,17 +91,12 @@ impl McpServerTool for HandleCliArgsTool {
         }
 
         let task = cx.update(|cx| {
-            let app_state = workspace::AppState::global(cx);
-            workspace::open_paths(
-                &resolved,
-                app_state,
-                workspace::OpenOptions::default(),
-                cx,
-            )
+            let app_state = crate::AppState::global(cx);
+            crate::open_paths(&resolved, app_state, crate::OpenOptions::default(), cx)
         });
         match task.await {
             Ok(open_result) => {
-                let window_id = crate::window_ids::format(open_result.window.window_id());
+                let window_id = editor_mcp::format_window_id(open_result.window.window_id());
                 Ok(success(opened_paths, Some(window_id)))
             }
             Err(err) => Ok(refused(format!("open_paths failed: {err}"))),
@@ -186,5 +188,27 @@ mod tests {
         let (resolved, display) = resolve_paths(&[], None).expect("ok");
         assert!(resolved.is_empty());
         assert!(display.is_empty());
+    }
+
+    #[test]
+    fn params_deserialize_from_null() {
+        let _: HandleCliArgsParams =
+            serde_json::from_value(serde_json::Value::Null).expect("null accepted");
+    }
+
+    #[test]
+    fn params_deserialize_from_empty_object() {
+        let _: HandleCliArgsParams =
+            serde_json::from_value(serde_json::json!({})).expect("empty object accepted");
+    }
+
+    #[test]
+    fn params_deserialize_from_paths_only() {
+        let p: HandleCliArgsParams = serde_json::from_value(serde_json::json!({
+            "paths": ["/tmp/foo", "/tmp/bar"]
+        }))
+        .expect("parse");
+        assert_eq!(p.paths.len(), 2);
+        assert_eq!(p.paths[0], "/tmp/foo");
     }
 }

@@ -66,7 +66,7 @@ fn collect_windows(cx: &mut App) -> Vec<WindowInfo> {
     let handles = cx.window_stack().unwrap_or_else(|| cx.windows());
     let mut out = Vec::new();
     for handle in handles {
-        let Some(window_handle) = handle.downcast::<workspace::MultiWorkspace>() else {
+        let Some(window_handle) = handle.downcast::<crate::MultiWorkspace>() else {
             continue;
         };
         let window_id = handle.window_id();
@@ -83,9 +83,9 @@ fn collect_windows(cx: &mut App) -> Vec<WindowInfo> {
 fn build_window_info(
     window_id: gpui::WindowId,
     active_window_id: Option<gpui::WindowId>,
-    multi: &mut workspace::MultiWorkspace,
+    multi: &mut crate::MultiWorkspace,
     window: &mut gpui::Window,
-    cx: &mut gpui::Context<workspace::MultiWorkspace>,
+    cx: &mut gpui::Context<crate::MultiWorkspace>,
 ) -> WindowInfo {
     // Solution windows retain multiple workspaces; reading only the active
     // one would miss worktrees of non-active members. Walk every retained
@@ -128,7 +128,7 @@ fn build_window_info(
     let title = compute_title(&root_paths);
 
     WindowInfo {
-        window_id: crate::window_ids::format(window_id),
+        window_id: editor_mcp::format_window_id(window_id),
         kind,
         root_paths,
         focused: active_window_id == Some(window_id),
@@ -358,18 +358,69 @@ impl McpServerTool for DispatchActionTool {
     }
 }
 
-fn find_window_by_id(
-    window_id: &str,
-    cx: &mut App,
-) -> anyhow::Result<gpui::AnyWindowHandle> {
+fn find_window_by_id(window_id: &str, cx: &mut App) -> anyhow::Result<gpui::AnyWindowHandle> {
     // Mirror the iteration order used by `windows.list`: prefer Z-ordered
     // stack, fall back to the unstable slot-map iteration so both tools
     // observe the same set of handles.
     let candidates = cx.window_stack().unwrap_or_else(|| cx.windows());
     for handle in candidates {
-        if crate::window_ids::format(handle.window_id()) == window_id {
+        if editor_mcp::format_window_id(handle.window_id()) == window_id {
             return Ok(handle);
         }
     }
     anyhow::bail!("window_not_found: {window_id}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_params_deserialize_from_null() {
+        let _: ListWindowsParams =
+            serde_json::from_value(serde_json::Value::Null).expect("null accepted");
+    }
+
+    #[test]
+    fn list_params_deserialize_from_empty_object() {
+        let _: ListWindowsParams =
+            serde_json::from_value(serde_json::json!({})).expect("empty object accepted");
+    }
+
+    #[test]
+    fn focus_params_round_trip() {
+        let p: FocusWindowParams = serde_json::from_value(serde_json::json!({
+            "window_id": "window:42"
+        }))
+        .expect("parse");
+        assert_eq!(p.window_id, "window:42");
+    }
+
+    #[test]
+    fn focus_params_accepts_null() {
+        let p: FocusWindowParams =
+            serde_json::from_value(serde_json::Value::Null).expect("null accepted");
+        assert!(p.window_id.is_empty());
+    }
+
+    #[test]
+    fn close_params_round_trip() {
+        let p: CloseWindowParams = serde_json::from_value(serde_json::json!({
+            "window_id": "window:7"
+        }))
+        .expect("parse");
+        assert_eq!(p.window_id, "window:7");
+    }
+
+    #[test]
+    fn dispatch_action_params_with_args() {
+        let p: DispatchActionParams = serde_json::from_value(serde_json::json!({
+            "window_id": "window:5",
+            "action_name": "workspace::ToggleLeftDock",
+            "args": null
+        }))
+        .expect("parse");
+        assert_eq!(p.window_id, "window:5");
+        assert_eq!(p.action_name, "workspace::ToggleLeftDock");
+    }
 }

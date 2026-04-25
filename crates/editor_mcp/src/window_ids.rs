@@ -5,6 +5,6 @@
 
 use gpui::WindowId;
 
-pub(crate) fn format(window_id: WindowId) -> String {
+pub fn format(window_id: WindowId) -> String {
     format!("window:{}", window_id.as_u64())
 }

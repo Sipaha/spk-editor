@@ -56,21 +56,6 @@ pub(crate) fn register_builtin_tools(cx: &mut App) {
     register_tool(cx, |server| {
         server.add_tool(crate::tools::capabilities::CapabilitiesTool);
     });
-    register_tool(cx, |server| {
-        server.add_tool(crate::tools::handle_cli_args::HandleCliArgsTool);
-    });
-    register_tool(cx, |server| {
-        server.add_tool(crate::tools::windows::ListWindowsTool);
-    });
-    register_tool(cx, |server| {
-        server.add_tool(crate::tools::windows::FocusWindowTool);
-    });
-    register_tool(cx, |server| {
-        server.add_tool(crate::tools::windows::CloseWindowTool);
-    });
-    register_tool(cx, |server| {
-        server.add_tool(crate::tools::windows::DispatchActionTool);
-    });
 }
 
 #[cfg(test)]
