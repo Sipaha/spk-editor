@@ -644,6 +644,8 @@
       "alt-9": ["workspace::ActivatePane", 8],
       "ctrl-alt-b": "workspace::ToggleRightDock",
       "ctrl-b": "workspace::ToggleLeftDock",
+      "ctrl-alt-o": "solutions::OpenSolution",
+      "ctrl-alt-shift-s": "solutions::ToggleSolutionsPanel",
       "ctrl-j": "workspace::ToggleBottomDock",
       "ctrl-alt-j": "multi_workspace::ToggleWorkspaceSidebar",
       "ctrl-alt-;": "multi_workspace::FocusWorkspaceSidebar",

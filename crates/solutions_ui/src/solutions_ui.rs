@@ -3,6 +3,7 @@
 
 mod actions;
 mod dock_panel;
+mod picker;
 
 pub use actions::{
     NewSolution, OpenSolution, RefreshCacheForCurrent, ToggleSolutionsPanel,
@@ -13,4 +14,5 @@ use gpui::App;
 
 pub fn init(cx: &mut App) {
     dock_panel::init(cx);
+    cx.observe_new(picker::OpenSolutionModal::register).detach();
 }

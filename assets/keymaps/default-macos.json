@@ -707,6 +707,8 @@
       "cmd-9": ["workspace::ActivatePane", 8],
       "cmd-b": "workspace::ToggleLeftDock",
       "cmd-alt-b": "workspace::ToggleRightDock",
+      "cmd-alt-o": "solutions::OpenSolution",
+      "cmd-alt-shift-s": "solutions::ToggleSolutionsPanel",
       "cmd-r": "workspace::ToggleRightDock",
       "cmd-j": "workspace::ToggleBottomDock",
       "cmd-alt-j": "multi_workspace::ToggleWorkspaceSidebar",
