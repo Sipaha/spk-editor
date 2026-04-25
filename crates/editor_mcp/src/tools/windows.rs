@@ -234,6 +234,63 @@ impl McpServerTool for FocusWindowTool {
     }
 }
 
+/// Close the editor window with the given window_id.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct CloseWindowParams {
+    pub window_id: String,
+}
+
+impl<'de> Deserialize<'de> for CloseWindowParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            window_id: String,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(CloseWindowParams {
+            window_id: inner.window_id,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CloseWindowResult {
+    pub closed: bool,
+}
+
+#[derive(Clone)]
+pub struct CloseWindowTool;
+
+impl McpServerTool for CloseWindowTool {
+    type Input = CloseWindowParams;
+    type Output = CloseWindowResult;
+    const NAME: &'static str = "windows.close";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        let closed = cx.update(|cx| -> anyhow::Result<bool> {
+            let handle = find_window_by_id(&input.window_id, cx)?;
+            // `Window::remove_window` flips the `removed` flag; the window is
+            // actually torn down on the next platform tick. Failure here means
+            // the handle is stale (window already gone).
+            handle
+                .update(cx, |_view, window, _cx| window.remove_window())
+                .map_err(|err| anyhow::anyhow!("remove_window failed: {err}"))?;
+            Ok(true)
+        })?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("closed: {closed}"),
+            }],
+            structured_content: CloseWindowResult { closed },
+        })
+    }
+}
+
 fn find_window_by_id(
     window_id: &str,
     cx: &mut App,
