@@ -31,16 +31,15 @@ render() {
 }
 
 # PNG variants (Linux desktop, macOS retina source)
-mkdir -p "$ROOT/assets/icons/app"
 for variant in '' '-dev' '-preview' '-nightly'; do
-    render 512  "$ROOT/assets/icons/app/app-icon${variant}.png"
-    render 1024 "$ROOT/assets/icons/app/app-icon${variant}@2x.png"
+    render 512  "$ROOT/crates/zed/resources/app-icon${variant}.png"
+    render 1024 "$ROOT/crates/zed/resources/app-icon${variant}@2x.png"
 done
 
 # macOS .icns (Document.icns is the per-document file; same placeholder)
 if command -v png2icns >/dev/null 2>&1; then
     render 1024 "$TMP/document.png"
-    png2icns "$ROOT/assets/icons/app/Document.icns" "$TMP/document.png"
+    png2icns "$ROOT/crates/zed/resources/Document.icns" "$TMP/document.png"
 fi
 
 # Windows .ico — pack 16, 32, 48, 64, 128, 256
