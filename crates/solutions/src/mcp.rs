@@ -69,6 +69,9 @@ pub fn register(cx: &mut App) {
     editor_mcp::register_tool(cx, |server| {
         server.add_tool(ScreenshotTool);
     });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(DumpVisualStructureTool);
+    });
 }
 
 // =====================================================================
@@ -1882,6 +1885,208 @@ fn render_window_to_image(
 }
 
 // =====================================================================
+// workspace.dump_visual_structure
+// =====================================================================
+
+/// Dump a logical tree of the editor window for a Solution. Returns a
+/// hierarchical view of `Workspace` -> `TitleBar` / `Dock(side)` /
+/// `PaneArea` / `Pane` / `Tab` / `StatusBar` nodes with visibility and
+/// focus state.
+///
+/// This is a logical structure (suitable for assertions like "is the
+/// SolutionsPanel open"), NOT the full GPUI element tree.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct DumpVisualStructureParams {
+    pub solution_id: String,
+}
+
+impl<'de> Deserialize<'de> for DumpVisualStructureParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            solution_id: String,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            solution_id: inner.solution_id,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct VisualNode {
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub visible: bool,
+    pub focused: bool,
+    pub children: Vec<VisualNode>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DumpVisualStructureResult {
+    pub tree: VisualNode,
+}
+
+#[derive(Clone)]
+pub struct DumpVisualStructureTool;
+
+impl McpServerTool for DumpVisualStructureTool {
+    type Input = DumpVisualStructureParams;
+    type Output = DumpVisualStructureResult;
+    const NAME: &'static str = "workspace.dump_visual_structure";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.solution_id.is_empty(),
+            "invalid_params: solution_id is required"
+        );
+        let tree = cx
+            .update(|cx| build_visual_tree(&input.solution_id, cx))
+            .ok_or_else(|| anyhow::anyhow!("solution_not_open: {}", input.solution_id))?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("structure for {}", input.solution_id),
+            }],
+            structured_content: DumpVisualStructureResult { tree },
+        })
+    }
+}
+
+fn build_visual_tree(solution_id: &str, cx: &mut App) -> Option<VisualNode> {
+    let handle = find_window_for_solution(solution_id, cx)?;
+    let window_handle = handle.downcast::<workspace::MultiWorkspace>()?;
+    window_handle
+        .read_with(cx, |multi, cx| build_workspace_node(multi, cx))
+        .ok()
+}
+
+fn build_workspace_node(multi: &workspace::MultiWorkspace, cx: &App) -> VisualNode {
+    let workspace = multi.workspace().read(cx);
+    let mut children = vec![
+        VisualNode {
+            kind: "TitleBar".to_string(),
+            label: None,
+            visible: true,
+            focused: false,
+            children: Vec::new(),
+        },
+        build_dock_node("left", workspace.left_dock(), cx),
+        build_pane_area_node(workspace, cx),
+        build_dock_node("right", workspace.right_dock(), cx),
+        build_dock_node("bottom", workspace.bottom_dock(), cx),
+        VisualNode {
+            kind: "StatusBar".to_string(),
+            label: None,
+            visible: workspace.status_bar_visible(cx),
+            focused: false,
+            children: Vec::new(),
+        },
+    ];
+
+    if let Some(modal) = build_modal_node(workspace, cx) {
+        children.push(modal);
+    }
+
+    VisualNode {
+        kind: "Workspace".to_string(),
+        label: None,
+        visible: true,
+        focused: false,
+        children,
+    }
+}
+
+fn build_dock_node(
+    side: &str,
+    dock: &gpui::Entity<workspace::dock::Dock>,
+    cx: &App,
+) -> VisualNode {
+    let dock = dock.read(cx);
+    let is_open = dock.is_open();
+    let active_panel_label = dock
+        .active_panel()
+        .map(|panel| panel.persistent_name().to_string());
+
+    let panel_node = active_panel_label.map(|name| VisualNode {
+        kind: "Panel".to_string(),
+        label: Some(name),
+        visible: is_open,
+        focused: false,
+        children: Vec::new(),
+    });
+
+    VisualNode {
+        kind: format!("Dock({side})"),
+        label: None,
+        visible: is_open,
+        focused: false,
+        children: panel_node.into_iter().collect(),
+    }
+}
+
+fn build_pane_area_node(workspace: &workspace::Workspace, cx: &App) -> VisualNode {
+    let active_pane_id = workspace.active_pane().entity_id();
+    let pane_children: Vec<VisualNode> = workspace
+        .panes()
+        .iter()
+        .map(|pane_entity| {
+            let pane_is_active = pane_entity.entity_id() == active_pane_id;
+            let pane = pane_entity.read(cx);
+            let active_item_id = pane.active_item().map(|item| item.item_id());
+            let tabs: Vec<VisualNode> = pane
+                .items()
+                .map(|item| {
+                    let label = item
+                        .project_path(cx)
+                        .map(|p| p.path.as_unix_str().to_string())
+                        .unwrap_or_else(|| {
+                            item.tab_content_text(0, cx).to_string()
+                        });
+                    let is_active = active_item_id
+                        .map(|id| id == item.item_id())
+                        .unwrap_or(false);
+                    VisualNode {
+                        kind: format!("Tab({label})"),
+                        label: Some(label),
+                        visible: true,
+                        focused: is_active,
+                        children: Vec::new(),
+                    }
+                })
+                .collect();
+
+            VisualNode {
+                kind: "Pane".to_string(),
+                label: None,
+                visible: true,
+                focused: pane_is_active,
+                children: tabs,
+            }
+        })
+        .collect();
+
+    VisualNode {
+        kind: "PaneArea".to_string(),
+        label: None,
+        visible: true,
+        focused: false,
+        children: pane_children,
+    }
+}
+
+// Modal layer access requires API discovery; skip for v1.
+// Phase 7 / follow-up can enrich.
+fn build_modal_node(_workspace: &workspace::Workspace, _cx: &App) -> Option<VisualNode> {
+    None
+}
+
+// =====================================================================
 // Tests
 // =====================================================================
 
@@ -2342,5 +2547,21 @@ mod tests {
         assert!(p.format.is_none());
         assert!(p.quality.is_none());
         assert!(p.max_dimension.is_none());
+    }
+
+    #[test]
+    fn dump_visual_params_round_trip() {
+        let p: DumpVisualStructureParams = serde_json::from_value(serde_json::json!({
+            "solution_id": "demo"
+        }))
+        .expect("parse");
+        assert_eq!(p.solution_id, "demo");
+    }
+
+    #[test]
+    fn dump_visual_params_accepts_null() {
+        let p: DumpVisualStructureParams =
+            serde_json::from_value(serde_json::Value::Null).expect("null");
+        assert!(p.solution_id.is_empty());
     }
 }
