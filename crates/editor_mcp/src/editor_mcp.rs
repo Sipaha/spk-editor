@@ -26,4 +26,7 @@ pub mod tools_for_test {
     pub use crate::tools::handle_cli_args::{
         HandleCliArgsParams, HandleCliArgsResult, HandleCliArgsTool,
     };
+    pub use crate::tools::windows::{
+        ListWindowsParams, ListWindowsResult, ListWindowsTool, WindowInfo,
+    };
 }
