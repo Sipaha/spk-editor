@@ -56,6 +56,21 @@ pub(crate) fn register_builtin_tools(cx: &mut App) {
     register_tool(cx, |server| {
         server.add_tool(crate::tools::capabilities::CapabilitiesTool);
     });
+    register_tool(cx, |server| {
+        server.add_tool(crate::tools::operations::GetOperationTool);
+    });
+    register_tool(cx, |server| {
+        server.add_tool(crate::tools::operations::CancelOperationTool);
+    });
+    register_tool(cx, |server| {
+        server.add_tool(crate::tools::subscribe::SubscribeTool);
+    });
+    register_tool(cx, |server| {
+        server.add_tool(crate::tools::subscribe::UnsubscribeTool);
+    });
+    register_tool(cx, |server| {
+        server.add_tool(crate::tools::subscribe::ListSubscriptionsTool);
+    });
 }
 
 #[cfg(test)]

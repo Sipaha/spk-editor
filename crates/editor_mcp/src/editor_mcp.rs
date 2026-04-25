@@ -36,4 +36,11 @@ pub use lifecycle::start_server_for_test;
 #[doc(hidden)]
 pub mod tools_for_test {
     pub use crate::tools::capabilities::{CapabilitiesParams, CapabilitiesTool};
+    pub use crate::tools::operations::{
+        CancelOperationParams, CancelOperationTool, GetOperationParams, GetOperationTool,
+    };
+    pub use crate::tools::subscribe::{
+        ListSubscriptionsParams, ListSubscriptionsTool, SubscribeParams, SubscribeTool,
+        UnsubscribeParams, UnsubscribeTool,
+    };
 }
