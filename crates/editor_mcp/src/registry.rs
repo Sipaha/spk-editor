@@ -25,6 +25,9 @@ pub fn register_tool<F>(cx: &mut App, registration: F)
 where
     F: FnOnce(&mut McpServer) + 'static,
 {
+    // Auto-init the Registry on first use so domain crates don't have to
+    // worry about init order relative to editor_mcp::init.
+    init(cx);
     let registry = cx.global::<Registry>();
     if *registry.started.borrow() {
         debug_assert!(false, "register_tool called after start_server");
@@ -109,6 +112,16 @@ mod tests {
             init(cx);
             mark_started(cx);
             register_tool(cx, |_| {});
+        });
+    }
+
+    #[gpui::test]
+    async fn register_tool_works_without_explicit_init(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            // Note: NO call to editor_mcp::init() before register_tool.
+            // Should not panic — register_tool auto-inits the Registry.
+            register_tool(cx, |_| {});
+            assert!(cx.try_global::<Registry>().is_some());
         });
     }
 }

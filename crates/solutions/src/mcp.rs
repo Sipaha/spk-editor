@@ -105,12 +105,13 @@ fn find_window_id_for_solution(solution_root: &std::path::Path, cx: &App) -> Opt
         };
         let matches = window
             .read_with(cx, |multi, cx| {
-                let workspace = multi.workspace().read(cx);
-                workspace
-                    .project()
-                    .read(cx)
-                    .visible_worktrees(cx)
-                    .any(|tree| tree.read(cx).abs_path().starts_with(solution_root))
+                multi.workspaces().any(|ws| {
+                    ws.read(cx)
+                        .project()
+                        .read(cx)
+                        .visible_worktrees(cx)
+                        .any(|tree| tree.read(cx).abs_path().starts_with(solution_root))
+                })
             })
             .ok()
             .unwrap_or(false);
@@ -253,22 +254,32 @@ fn build_window_detail(solution_root: &std::path::Path, cx: &mut App) -> Option<
         };
         let detail = window
             .update(cx, |multi, _window, cx| {
-                let workspace = multi.workspace().read(cx);
-                let project = workspace.project().read(cx);
-                let worktree_paths: Vec<String> = project
-                    .visible_worktrees(cx)
-                    .map(|t| t.read(cx).abs_path().to_string_lossy().into_owned())
-                    .collect();
-                if !worktree_paths
-                    .iter()
-                    .any(|p| std::path::Path::new(p).starts_with(solution_root))
-                {
+                let mut worktree_paths: Vec<String> = Vec::new();
+                let mut active_buffer: Option<String> = None;
+                let mut matches = false;
+
+                for ws in multi.workspaces() {
+                    let workspace = ws.read(cx);
+                    let project = workspace.project().read(cx);
+                    for tree in project.visible_worktrees(cx) {
+                        let p = tree.read(cx).abs_path().to_string_lossy().into_owned();
+                        if std::path::Path::new(&p).starts_with(solution_root) {
+                            matches = true;
+                        }
+                        worktree_paths.push(p);
+                    }
+                    if active_buffer.is_none() {
+                        active_buffer = workspace
+                            .active_item(cx)
+                            .and_then(|item| item.project_path(cx))
+                            .map(|pp| pp.path.as_unix_str().to_string());
+                    }
+                }
+
+                if !matches {
                     return None;
                 }
-                let active_buffer = workspace
-                    .active_item(cx)
-                    .and_then(|item| item.project_path(cx))
-                    .map(|pp| pp.path.as_unix_str().to_string());
+
                 Some(WindowDetail {
                     window_id: format_window_id(handle.window_id()),
                     focused: active_window_id == Some(handle.window_id()),
