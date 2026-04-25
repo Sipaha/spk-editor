@@ -1,5 +1,4 @@
 use crate::multibuffer_hint::MultibufferHint;
-use client::{UserStore, zed_urls};
 use db::kvp::KeyValueStore;
 use fs::Fs;
 use gpui::{
@@ -206,7 +205,6 @@ pub fn show_onboarding_view(app_state: Arc<AppState>, cx: &mut App) -> Task<anyh
 struct Onboarding {
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
-    user_store: Entity<UserStore>,
     scroll_handle: ScrollHandle,
     _settings_subscription: Subscription,
 }
@@ -228,7 +226,6 @@ impl Onboarding {
                 workspace: workspace.weak_handle(),
                 focus_handle: cx.focus_handle(),
                 scroll_handle: ScrollHandle::new(),
-                user_store: workspace.user_store().clone(),
                 _settings_subscription: cx
                     .observe_global::<SettingsStore>(move |_, cx| cx.notify()),
             }
@@ -244,12 +241,8 @@ impl Onboarding {
         // Sign-in UI is hidden in spk-editor — Zed accounts are not used.
     }
 
-    fn handle_open_account(_: &OpenAccount, _: &mut Window, cx: &mut App) {
-        cx.open_url(&zed_urls::account_url(cx))
-    }
-
     fn render_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        crate::basics_page::render_basics_page(&self.user_store, cx).into_any_element()
+        crate::basics_page::render_basics_page(cx).into_any_element()
     }
 }
 
@@ -268,7 +261,6 @@ impl Render for Onboarding {
             .bg(cx.theme().colors().editor_background)
             .on_action(Self::on_finish)
             .on_action(cx.listener(Self::handle_sign_in))
-            .on_action(Self::handle_open_account)
             .on_action(cx.listener(|_, _: &menu::SelectNext, window, cx| {
                 window.focus_next(cx);
                 cx.notify();
@@ -303,7 +295,7 @@ impl Render for Onboarding {
                                             .child(
                                                 v_flex()
                                                     .child(
-                                                        Headline::new("Welcome to Zed")
+                                                        Headline::new("Welcome to SPK Editor")
                                                             .size(HeadlineSize::Small),
                                                     )
                                                     .child(
@@ -372,7 +364,6 @@ impl Item for Onboarding {
     ) -> Task<Option<Entity<Self>>> {
         Task::ready(Some(cx.new(|cx| Onboarding {
             workspace: self.workspace.clone(),
-            user_store: self.user_store.clone(),
             scroll_handle: ScrollHandle::new(),
             focus_handle: cx.focus_handle(),
             _settings_subscription: cx.observe_global::<SettingsStore>(move |_, cx| cx.notify()),
