@@ -147,7 +147,7 @@ impl<T> Default for InventoryFor<T> {
 pub enum TaskSourceKind {
     /// bash-like commands spawned by users, not associated with any path
     UserInput,
-    /// Tasks from the worktree's .zed/task.json
+    /// Tasks from the worktree's .spke/task.json
     Worktree {
         id: WorktreeId,
         directory_in_worktree: Arc<RelPath>,

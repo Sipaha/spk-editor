@@ -2571,7 +2571,7 @@ mod tests {
         let (stream_tx, mut stream_rx) = ToolCallEventStream::test();
         let _auth = cx.update(|cx| {
             tool.authorize(
-                &PathBuf::from(".zed/settings.json"),
+                &PathBuf::from(".spke/settings.json"),
                 "test 1",
                 &stream_tx,
                 cx,
@@ -2605,7 +2605,7 @@ mod tests {
         let (stream_tx, mut stream_rx) = ToolCallEventStream::test();
         let _auth = cx.update(|cx| {
             tool.authorize(
-                &PathBuf::from("root/.zed/tasks.json"),
+                &PathBuf::from("root/.spke/tasks.json"),
                 "test 4",
                 &stream_tx,
                 cx,
@@ -2625,11 +2625,11 @@ mod tests {
             agent_settings::AgentSettings::override_global(settings, cx);
         });
 
-        // 5.1: .zed/settings.json is a sensitive path — still prompts
+        // 5.1: .spke/settings.json is a sensitive path — still prompts
         let (stream_tx, mut stream_rx) = ToolCallEventStream::test();
         let _auth = cx.update(|cx| {
             tool.authorize(
-                &PathBuf::from(".zed/settings.json"),
+                &PathBuf::from(".spke/settings.json"),
                 "test 5.1",
                 &stream_tx,
                 cx,
@@ -2950,7 +2950,7 @@ mod tests {
         fs.insert_tree(
             "/workspace/shared",
             json!({
-                ".zed": {
+                ".spke": {
                     "settings.json": "{}"
                 }
             }),
@@ -2971,7 +2971,7 @@ mod tests {
             ("frontend/src/main.js", false, "File in first worktree"),
             ("backend/src/main.rs", false, "File in second worktree"),
             (
-                "shared/.zed/settings.json",
+                "shared/.spke/settings.json",
                 true,
                 ".zed file in third worktree",
             ),
@@ -3009,11 +3009,11 @@ mod tests {
         fs.insert_tree(
             "/project",
             json!({
-                ".zed": {
+                ".spke": {
                     "settings.json": "{}"
                 },
                 "src": {
-                    ".zed": {
+                    ".spke": {
                         "local.json": "{}"
                     }
                 }
@@ -3071,7 +3071,7 @@ mod tests {
             "/project",
             json!({
                 "existing.txt": "content",
-                ".zed": {
+                ".spke": {
                     "settings.json": "{}"
                 }
             }),
@@ -3087,7 +3087,7 @@ mod tests {
             let (stream_tx, mut stream_rx) = ToolCallEventStream::test();
             let _auth = cx.update(|cx| {
                 tool.authorize(
-                    &PathBuf::from("project/.zed/settings.json"),
+                    &PathBuf::from("project/.spke/settings.json"),
                     "Edit settings",
                     &stream_tx,
                     cx,
