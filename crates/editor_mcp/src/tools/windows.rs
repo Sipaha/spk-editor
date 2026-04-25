@@ -292,8 +292,14 @@ impl McpServerTool for CloseWindowTool {
 }
 
 /// Dispatch a registered action to the window with the given window_id.
-/// Action name is the fully-qualified path like "workspace::ToggleLeftDock".
-/// Optional args are deserialized into the action's payload type.
+///
+/// Action name is the fully-qualified path like `workspace::ToggleLeftDock`.
+/// Optional `args` are deserialized into the action's payload type.
+///
+/// Note: returns `dispatched: true` once the action was successfully built
+/// and queued onto the window's dispatcher. The dispatch itself runs on a
+/// later tick; this tool does NOT report whether a handler eventually
+/// fired or refused the action.
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct DispatchActionParams {
     pub window_id: String,
@@ -321,6 +327,8 @@ impl<'de> Deserialize<'de> for DispatchActionParams {
     }
 }
 
+/// Result of `windows.dispatch_action`. `dispatched` indicates the action
+/// was built and queued, NOT that a handler subsequently fired.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DispatchActionResult {
     pub dispatched: bool,
@@ -346,7 +354,9 @@ impl McpServerTool for DispatchActionTool {
             // before we touch the window. Once built, dispatch is infallible
             // — the window itself routes the action through its keybinding /
             // focus tree.
-            let action = build_action_from_json(&input.action_name, input.args.as_ref(), cx)?;
+            let action = cx
+                .build_action(&input.action_name, input.args.clone())
+                .map_err(|err| anyhow::anyhow!("build_action({}): {err}", input.action_name))?;
             handle
                 .update(cx, |_view, window, cx| {
                     window.dispatch_action(action, cx);
@@ -361,16 +371,6 @@ impl McpServerTool for DispatchActionTool {
             structured_content: DispatchActionResult { dispatched },
         })
     }
-}
-
-fn build_action_from_json(
-    name: &str,
-    args: Option<&serde_json::Value>,
-    cx: &App,
-) -> anyhow::Result<Box<dyn gpui::Action>> {
-    let value = args.cloned().unwrap_or(serde_json::Value::Null);
-    cx.build_action(name, Some(value))
-        .map_err(|err| anyhow::anyhow!("build_action({name}): {err}"))
 }
 
 fn find_window_by_id(

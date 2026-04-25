@@ -102,6 +102,7 @@ mod tests {
     }
 
     #[gpui::test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "register_tool called after start_server")]
     async fn register_after_start_panics_in_debug(cx: &mut TestAppContext) {
         cx.update(|cx| {
