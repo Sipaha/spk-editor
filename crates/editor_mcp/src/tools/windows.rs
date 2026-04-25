@@ -28,7 +28,7 @@ pub struct WindowInfo {
     pub solution_id: Option<String>,
     pub root_paths: Vec<String>,
     pub focused: bool,
-    pub bounds: [u32; 4],
+    pub bounds: [i32; 4],
     pub title: String,
 }
 
@@ -62,8 +62,12 @@ impl McpServerTool for ListWindowsTool {
 
 fn collect_windows(cx: &mut App) -> Vec<WindowInfo> {
     let active_window_id = cx.active_window().map(|h| h.window_id());
+    // Prefer Z-ordered window stack for stable, meaningful ordering. SlotMap
+    // iteration via `cx.windows()` is unstable across calls, which the
+    // fallback compensates for with a deterministic sort by window id.
+    let handles = cx.window_stack().unwrap_or_else(|| cx.windows());
     let mut out = Vec::new();
-    for handle in cx.windows() {
+    for handle in handles {
         let Some(window_handle) = handle.downcast::<workspace::MultiWorkspace>() else {
             continue;
         };
@@ -85,21 +89,31 @@ fn build_window_info(
     window: &mut gpui::Window,
     cx: &mut gpui::Context<workspace::MultiWorkspace>,
 ) -> WindowInfo {
-    let workspace = multi.workspace().read(cx);
-    let project = workspace.project().read(cx);
-
-    let root_paths: Vec<String> = project
-        .visible_worktrees(cx)
-        .map(|tree| tree.read(cx).abs_path().to_string_lossy().into_owned())
-        .collect();
+    // Solution windows retain multiple workspaces; reading only the active
+    // one would miss worktrees of non-active members. Walk every retained
+    // workspace and dedupe paths so the response reflects the full window.
+    let mut root_paths: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for workspace_entity in multi.workspaces() {
+        let workspace = workspace_entity.read(cx);
+        let project = workspace.project().read(cx);
+        for tree in project.visible_worktrees(cx) {
+            let path = tree.read(cx).abs_path().to_string_lossy().into_owned();
+            if seen.insert(path.clone()) {
+                root_paths.push(path);
+            }
+        }
+    }
 
     let solution_id = solutions::SolutionStore::try_global(cx).and_then(|store| {
         store.read_with(cx, |store, _| {
             store.solutions().iter().find_map(|sol| {
-                if root_paths
-                    .iter()
-                    .any(|p| std::path::Path::new(p).starts_with(&sol.root))
-                {
+                let matches = root_paths.iter().any(|p| {
+                    let path = std::path::Path::new(p);
+                    path.starts_with(&sol.root)
+                        || sol.members.iter().any(|m| path.starts_with(&m.local_path))
+                });
+                if matches {
                     Some(sol.id.as_str().to_string())
                 } else {
                     None
@@ -118,11 +132,14 @@ fn build_window_info(
     .to_string();
 
     let bounds = window.bounds();
+    // Window origin can be negative on multi-monitor / off-screen setups, so
+    // use signed integers and route through `f32` (the only `From<Pixels>`
+    // impl that preserves sign).
     let bounds_arr = [
-        u32::from(bounds.origin.x),
-        u32::from(bounds.origin.y),
-        u32::from(bounds.size.width),
-        u32::from(bounds.size.height),
+        f32::from(bounds.origin.x) as i32,
+        f32::from(bounds.origin.y) as i32,
+        f32::from(bounds.size.width) as i32,
+        f32::from(bounds.size.height) as i32,
     ];
 
     let title = compute_title(&root_paths);
