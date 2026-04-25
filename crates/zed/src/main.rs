@@ -321,6 +321,49 @@ fn main() {
             .unwrap_or("unknown"),
     );
 
+    // Single-instance handoff: if another spk-editor is already running and
+    // its MCP server is reachable, hand off our CLI paths to it and exit.
+    // Otherwise we continue and become the canonical instance (later we'll
+    // bind the MCP server in `editor_mcp::start_server`).
+    let handoff_paths: Vec<PathBuf> = args
+        .paths_or_urls
+        .iter()
+        .filter_map(|arg| {
+            if arg.starts_with("file://")
+                || arg.starts_with("zed://")
+                || arg.starts_with("zed-cli://")
+                || arg.starts_with("ssh://")
+                || arg.starts_with("spk-editor://")
+            {
+                None
+            } else {
+                Some(PathBuf::from(arg))
+            }
+        })
+        .collect();
+    match editor_mcp::try_handoff_to_existing_instance(handoff_paths) {
+        Ok(editor_mcp::HandoffOutcome::HandedOff { focused_window_id }) => {
+            log::info!(
+                "spk-editor: handed off to existing instance (window: {:?})",
+                focused_window_id
+            );
+            return;
+        }
+        Ok(editor_mcp::HandoffOutcome::LockBusyButUnreachable { lockholder_pid }) => {
+            eprintln!(
+                "Another spk-editor instance is starting (lock held by PID {:?}); please wait or terminate it.",
+                lockholder_pid
+            );
+            process::exit(1);
+        }
+        Ok(editor_mcp::HandoffOutcome::BecameCanonical) => {
+            // Continue normal startup; we'll bind the MCP server later.
+        }
+        Err(err) => {
+            log::warn!("spk-editor: handoff probe failed: {err}; continuing as canonical");
+        }
+    }
+
     #[cfg(windows)]
     check_for_conpty_dll();
 
@@ -639,6 +682,7 @@ fn main() {
         );
         command_palette::init(cx);
         solutions::init(cx);
+        editor_mcp::init(cx);
         solutions_ui::init(cx);
         let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
             enterprise_uri: language::language_settings::all_language_settings(None, cx)
@@ -917,6 +961,8 @@ fn main() {
             }
         })
         .detach();
+
+        editor_mcp::start_server(cx).log_err();
     });
 }
 
