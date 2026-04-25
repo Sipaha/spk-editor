@@ -16621,6 +16621,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "solutions"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "collections",
+ "fs",
+ "gpui",
+ "log",
+ "paths",
+ "pretty_assertions",
+ "schemars 1.0.4",
+ "serde",
+ "serde_json",
+ "settings",
+ "sha2",
+ "shellexpand",
+ "smol",
+ "tempfile",
+ "thiserror 2.0.17",
+ "util",
+]
+
+[[package]]
 name = "spdx"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
