@@ -18,16 +18,16 @@ static CUSTOM_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// The resolved data directory, combining custom override or platform defaults.
 /// This is set once and cached for subsequent calls.
-/// On macOS, this is `~/Library/Application Support/SPK Editor`.
+/// On macOS, this is `~/Library/Application Support/SpkEditor`.
 /// On Linux/FreeBSD, this is `$XDG_DATA_HOME/spk-editor`.
-/// On Windows, this is `%LOCALAPPDATA%\SPK Editor`.
+/// On Windows, this is `%LOCALAPPDATA%\SpkEditor`.
 static CURRENT_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// The resolved config directory, combining custom override or platform defaults.
 /// This is set once and cached for subsequent calls.
 /// On macOS, this is `~/.config/spk-editor`.
 /// On Linux/FreeBSD, this is `$XDG_CONFIG_HOME/spk-editor`.
-/// On Windows, this is `%APPDATA%\SPK Editor`.
+/// On Windows, this is `%APPDATA%\SpkEditor`.
 static CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Returns the relative path to the zed_server directory on the ssh host.
@@ -91,7 +91,7 @@ pub fn config_dir() -> &'static PathBuf {
         } else if cfg!(target_os = "windows") {
             dirs::config_dir()
                 .expect("failed to determine RoamingAppData directory")
-                .join("SPK Editor")
+                .join("SpkEditor")
         } else if cfg!(any(target_os = "linux", target_os = "freebsd")) {
             if let Ok(flatpak_xdg_config) = std::env::var("FLATPAK_XDG_CONFIG_HOME") {
                 flatpak_xdg_config.into()
@@ -111,7 +111,7 @@ pub fn data_dir() -> &'static PathBuf {
         if let Some(custom_dir) = CUSTOM_DATA_DIR.get() {
             custom_dir.clone()
         } else if cfg!(target_os = "macos") {
-            home_dir().join("Library/Application Support/SPK Editor")
+            home_dir().join("Library/Application Support/SpkEditor")
         } else if cfg!(any(target_os = "linux", target_os = "freebsd")) {
             if let Ok(flatpak_xdg_data) = std::env::var("FLATPAK_XDG_DATA_HOME") {
                 flatpak_xdg_data.into()
@@ -122,7 +122,7 @@ pub fn data_dir() -> &'static PathBuf {
         } else if cfg!(target_os = "windows") {
             dirs::data_local_dir()
                 .expect("failed to determine LocalAppData directory")
-                .join("SPK Editor")
+                .join("SpkEditor")
         } else {
             config_dir().clone() // Fallback
         }
@@ -133,7 +133,7 @@ pub fn state_dir() -> &'static PathBuf {
     static STATE_DIR: OnceLock<PathBuf> = OnceLock::new();
     STATE_DIR.get_or_init(|| {
         if cfg!(target_os = "macos") {
-            return home_dir().join(".local").join("state").join("SPK Editor");
+            return home_dir().join(".local").join("state").join("SpkEditor");
         }
 
         if cfg!(any(target_os = "linux", target_os = "freebsd")) {
@@ -147,7 +147,7 @@ pub fn state_dir() -> &'static PathBuf {
             // Windows
             return dirs::data_local_dir()
                 .expect("failed to determine LocalAppData directory")
-                .join("SPK Editor");
+                .join("SpkEditor");
         }
     })
 }
@@ -159,13 +159,13 @@ pub fn temp_dir() -> &'static PathBuf {
         if cfg!(target_os = "macos") {
             return dirs::cache_dir()
                 .expect("failed to determine cachesDirectory directory")
-                .join("SPK Editor");
+                .join("SpkEditor");
         }
 
         if cfg!(target_os = "windows") {
             return dirs::cache_dir()
                 .expect("failed to determine LocalAppData directory")
-                .join("SPK Editor");
+                .join("SpkEditor");
         }
 
         if cfg!(any(target_os = "linux", target_os = "freebsd")) {
@@ -192,7 +192,7 @@ pub fn logs_dir() -> &'static PathBuf {
     static LOGS_DIR: OnceLock<PathBuf> = OnceLock::new();
     LOGS_DIR.get_or_init(|| {
         if cfg!(target_os = "macos") {
-            home_dir().join("Library/Logs/SPK Editor")
+            home_dir().join("Library/Logs/SpkEditor")
         } else {
             data_dir().join("logs")
         }
@@ -205,16 +205,16 @@ pub fn remote_server_state_dir() -> &'static PathBuf {
     REMOTE_SERVER_STATE.get_or_init(|| data_dir().join("server_state"))
 }
 
-/// Returns the path to the `SPK Editor.log` file.
+/// Returns the path to the `SpkEditor.log` file.
 pub fn log_file() -> &'static PathBuf {
     static LOG_FILE: OnceLock<PathBuf> = OnceLock::new();
-    LOG_FILE.get_or_init(|| logs_dir().join("SPK Editor.log"))
+    LOG_FILE.get_or_init(|| logs_dir().join("SpkEditor.log"))
 }
 
-/// Returns the path to the `SPK Editor.log.old` file.
+/// Returns the path to the `SpkEditor.log.old` file.
 pub fn old_log_file() -> &'static PathBuf {
     static OLD_LOG_FILE: OnceLock<PathBuf> = OnceLock::new();
-    OLD_LOG_FILE.get_or_init(|| logs_dir().join("SPK Editor.log.old"))
+    OLD_LOG_FILE.get_or_init(|| logs_dir().join("SpkEditor.log.old"))
 }
 
 /// Returns the path to the database directory.
@@ -581,7 +581,7 @@ mod rebrand_tests {
     fn config_dir_contains_spk_editor() {
         let p = config_dir();
         assert!(
-            p.to_string_lossy().contains("spk-editor") || p.to_string_lossy().contains("SPK Editor"),
+            p.to_string_lossy().contains("spk-editor") || p.to_string_lossy().contains("SpkEditor"),
             "config_dir should mention spk-editor; got {p:?}"
         );
         assert!(
@@ -594,7 +594,7 @@ mod rebrand_tests {
     fn data_dir_contains_spk_editor() {
         let p = data_dir();
         assert!(
-            p.to_string_lossy().contains("spk-editor") || p.to_string_lossy().contains("SPK Editor"),
+            p.to_string_lossy().contains("spk-editor") || p.to_string_lossy().contains("SpkEditor"),
             "data_dir should mention spk-editor; got {p:?}"
         );
         assert!(

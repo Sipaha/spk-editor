@@ -6,8 +6,8 @@ set -eu
 check_remaining_installations() {
     platform="$(uname -s)"
     if [ "$platform" = "Darwin" ]; then
-        # Check for any spk-editor variants in /Applications
-        remaining=$(ls -d /Applications/SPK*.app 2>/dev/null | wc -l)
+        # Check for any SpkEditor variants in /Applications
+        remaining=$(ls -d /Applications/SpkEditor*.app 2>/dev/null | wc -l)
         [ "$remaining" -eq 0 ]
     else
         # Check for any spk-editor variants in ~/.local
@@ -105,22 +105,22 @@ linux() {
 }
 
 macos() {
-    app="SPK Editor.app"
+    app="SpkEditor.app"
     db_suffix="stable"
     app_id="ru.sipaha.spk-editor"
     case "$channel" in
       nightly)
-        app="SPK Editor Nightly.app"
+        app="SpkEditorNightly.app"
         db_suffix="nightly"
         app_id="ru.sipaha.spk-editor-nightly"
         ;;
       preview)
-        app="SPK Editor Preview.app"
+        app="SpkEditorPreview.app"
         db_suffix="preview"
         app_id="ru.sipaha.spk-editor-preview"
         ;;
       dev)
-        app="SPK Editor Dev.app"
+        app="SpkEditorDev.app"
         db_suffix="dev"
         app_id="ru.sipaha.spk-editor-dev"
         ;;
@@ -135,7 +135,7 @@ macos() {
     rm -f "$HOME/.local/bin/spk-editor"
 
     # Remove the database directory for this channel
-    rm -rf "$HOME/Library/Application Support/SPK Editor/db/0-$db_suffix"
+    rm -rf "$HOME/Library/Application Support/SpkEditor/db/0-$db_suffix"
 
     # Remove app-specific files and directories
     rm -rf "$HOME/Library/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.ApplicationRecentDocuments/$app_id.sfl"*
@@ -144,10 +144,10 @@ macos() {
     rm -rf "$HOME/Library/Preferences/$app_id.plist"
     rm -rf "$HOME/Library/Saved Application State/$app_id.savedState"
 
-    # Remove the entire SPK Editor directory if no installations remain
+    # Remove the entire SpkEditor directory if no installations remain
     if check_remaining_installations; then
-        rm -rf "$HOME/Library/Application Support/SPK Editor"
-        rm -rf "$HOME/Library/Logs/SPK Editor"
+        rm -rf "$HOME/Library/Application Support/SpkEditor"
+        rm -rf "$HOME/Library/Logs/SpkEditor"
 
         prompt_remove_preferences
     fi

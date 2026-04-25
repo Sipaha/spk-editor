@@ -6,7 +6,7 @@ version = "0.235.0"
 publish.workspace = true
 license = "GPL-3.0-or-later"
 authors = ["Zed Team <hi@zed.dev>"]
-default-run = "zed"
+default-run = "spk-editor"
 
 [lints]
 workspace = true
@@ -54,7 +54,7 @@ visual-tests = [
 ]
 
 [[bin]]
-name = "zed"
+name = "spk-editor"
 path = "src/main.rs"
 
 [[bin]]
@@ -275,7 +275,7 @@ repl = { workspace = true, features = ["test-support"] }
 [package.metadata.bundle-dev]
 icon = ["resources/app-icon-dev@2x.png", "resources/app-icon-dev.png"]
 identifier = "ru.sipaha.spk-editor-dev"
-name = "SPK Editor Dev"
+name = "SpkEditorDev"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["spk-editor"]
@@ -283,7 +283,7 @@ osx_url_schemes = ["spk-editor"]
 [package.metadata.bundle-nightly]
 icon = ["resources/app-icon-nightly@2x.png", "resources/app-icon-nightly.png"]
 identifier = "ru.sipaha.spk-editor-nightly"
-name = "SPK Editor Nightly"
+name = "SpkEditorNightly"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["spk-editor"]
@@ -291,7 +291,7 @@ osx_url_schemes = ["spk-editor"]
 [package.metadata.bundle-preview]
 icon = ["resources/app-icon-preview@2x.png", "resources/app-icon-preview.png"]
 identifier = "ru.sipaha.spk-editor-preview"
-name = "SPK Editor Preview"
+name = "SpkEditorPreview"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["spk-editor"]
@@ -299,7 +299,7 @@ osx_url_schemes = ["spk-editor"]
 [package.metadata.bundle-stable]
 icon = ["resources/app-icon@2x.png", "resources/app-icon.png"]
 identifier = "ru.sipaha.spk-editor"
-name = "SPK Editor"
+name = "SpkEditor"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
 osx_url_schemes = ["spk-editor"]

@@ -20,13 +20,13 @@ Same toolchain requirements as upstream Zed (recent stable Rust, OS-specific dep
 cargo build --release
 ```
 
-The binary lands at `target/release/zed` (the cargo crate name is unchanged for upstream-merge friendliness — copy or symlink it to `spk-editor` after building).
+The binary lands at `target/release/spk-editor` (the cargo crate name is `zed` for upstream-merge friendliness, but the bin name is overridden to `spk-editor`).
 
 Bundling helpers per platform:
 
 ```sh
 script/bundle-linux         # produces a tarball
-script/bundle-mac           # produces SPK Editor.app
+script/bundle-mac           # produces SpkEditor.app (display name "SPK Editor")
 script/bundle-windows.ps1   # produces the Inno Setup installer
 ```
 
@@ -35,7 +35,7 @@ script/bundle-windows.ps1   # produces the Inno Setup installer
 SPK Editor binaries are **not signed or notarized**. To run on each OS:
 
 - **Linux**: no extra step.
-- **macOS**: Gatekeeper will refuse to launch. Right-click the app → Open, or run `xattr -dr com.apple.quarantine /Applications/SPK\ Editor.app`.
+- **macOS**: Gatekeeper will refuse to launch. Right-click the app → Open, or run `xattr -dr com.apple.quarantine /Applications/SpkEditor.app`.
 - **Windows**: SmartScreen will warn. Click "More info" → "Run anyway".
 
 If you want signing, set up your own certificates and wire them through `script/bundle-mac` / `script/bundle-windows.ps1` (see `SPK_EDITOR_SIGN` env var).

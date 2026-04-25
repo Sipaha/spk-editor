@@ -7,7 +7,7 @@ SPK Editor is a personal fork of [Zed](https://github.com/zed-industries/zed) ma
 - **Internal identifiers stay verbatim from upstream.** Cargo crate `zed`, `pub mod zed`, `enum ReleaseChannel { Stable, Preview, Nightly, Dev }`, type names, module paths, action namespaces — never rename. Renaming them creates merge conflicts on every upstream sync. Only user-visible identity is rebranded.
 - **Stay diff-minimal vs upstream.** Periodic `git merge upstream/main` is a recurring cost; "nice refactor" PRs that touch upstream-owned files are net negative. When fixing a bug, prefer upstreaming it first and merging back. Cleanup-only commits to upstream code are usually wrong.
 - **Disable, don't delete.** Disabled subsystems (collab, auto_update, telemetry, Zeta, native cloud LLM, Sentry uploads) keep their crates in the workspace and their code in tree — only init / dispatch / UI registration sites are commented out (`if false { … }` is fine), so upstream changes to those crates merge cleanly.
-- **Locked rebrand identifiers** (spec §3, change requires user approval): display name `SPK Editor`; CLI binary `spk-editor`; macOS bundle ids `ru.sipaha.spk-editor[-{preview,nightly,dev,debug}]`; URL scheme `spk-editor://`; config dir `~/.config/spk-editor/` (Linux), `~/Library/Application Support/SPK Editor/` (macOS), `%APPDATA%\SPK Editor\` (Windows); GitHub `Sipaha/spk-editor`; attribution string `Fork of Zed by Zed Industries, Inc., modified by Simonov Pavel`.
+- **Locked rebrand identifiers** (spec §3, change requires user approval): display name `SPK Editor` (Dock/About/title bar); CLI binary `spk-editor`; macOS bundle ids `ru.sipaha.spk-editor[-{preview,nightly,dev,debug}]`; URL scheme `spk-editor://`; config dir `~/.config/spk-editor/` (Linux), `~/Library/Application Support/SpkEditor/` (macOS — no space in path, display name keeps space), `%APPDATA%\SpkEditor\` (Windows — no space in path); GitHub `Sipaha/spk-editor`; attribution string `Fork of Zed by Zed Industries, Inc., modified by Simonov Pavel`.
 - **License compliance**: never modify `LICENSE-{GPL,AGPL,APACHE}` or remove `Copyright Zed Industries, Inc.` lines. Fork contents under same SPDX as upstream (`GPL-3.0-or-later` editor, `AGPL-3.0` collab, `Apache-2.0` libraries). Inherited Zed legal docs live in `legal/upstream-zed/` and don't apply to this fork's binaries (no service infrastructure).
 
 ## What's disabled (do NOT try to "fix" these without explicit instruction)
@@ -31,8 +31,8 @@ SPK Editor is a personal fork of [Zed](https://github.com/zed-industries/zed) ma
 
 ## Build + test conventions
 
-- Bundling produces `bin/spk-editor` + `libexec/spk-editor-bin` (Linux), `SPK Editor.app/Contents/MacOS/spk-editor` (macOS), `SpkEditorSetup-*.exe` (Windows).
-- Cargo target binary is still `target/release/zed` (crate name unchanged) — bundle scripts rename at copy step.
+- Bundling produces `bin/spk-editor` + `libexec/spk-editor-bin` (Linux), `SpkEditor.app/Contents/MacOS/spk-editor` (macOS — display name stays `SPK Editor` via plutil override in `script/bundle-mac`), `SpkEditorSetup-*.exe` (Windows).
+- Cargo target binary is `target/release/spk-editor` (crate name `zed` is unchanged for upstream-merge friendliness; only the `[[bin]] name` is overridden).
 - Codesign / notarize gated behind `SPK_EDITOR_SIGN` env var; default produces unsigned bundles.
 - Specs and plans for the rebrand work live in `docs/superpowers/{specs,plans}/`.
 
