@@ -78,6 +78,7 @@ pub fn socket_path() -> PathBuf {
 
 struct ActiveServer {
     _lock: SingleInstanceLock,
+    #[allow(dead_code)]
     server: Entity<McpServer>,
 }
 
@@ -144,6 +145,7 @@ pub fn start_server(cx: &mut App) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn server(cx: &App) -> Option<Entity<McpServer>> {
     cx.try_global::<ActiveServer>().map(|a| a.server.clone())
 }
