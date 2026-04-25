@@ -9,6 +9,7 @@ use context_server::types::ToolResponseContent;
 use gpui::{App, AsyncApp};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
+use util::ResultExt as _;
 
 pub fn register(cx: &mut App) {
     editor_mcp::register_tool(cx, |server| {
@@ -16,6 +17,21 @@ pub fn register(cx: &mut App) {
     });
     editor_mcp::register_tool(cx, |server| {
         server.add_tool(GetSolutionTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(CreateSolutionTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(RenameSolutionTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(DeleteSolutionTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(OpenSolutionTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(CloseSolutionTool);
     });
 }
 
@@ -297,6 +313,400 @@ fn build_window_detail(solution_root: &std::path::Path, cx: &mut App) -> Option<
 }
 
 // =====================================================================
+// solutions.create
+// =====================================================================
+
+/// Create a new empty Solution. Generates a slug from `name`, creates the
+/// on-disk root directory under `SolutionsSettings::root`, persists the new
+/// entry. Returns the assigned id.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct CreateSolutionParams {
+    pub name: String,
+}
+
+impl<'de> Deserialize<'de> for CreateSolutionParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            name: String,
+        }
+        Ok(Self {
+            name: Option::<Inner>::deserialize(de)?
+                .unwrap_or_default()
+                .name,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CreateSolutionResult {
+    pub solution_id: String,
+}
+
+#[derive(Clone)]
+pub struct CreateSolutionTool;
+
+impl McpServerTool for CreateSolutionTool {
+    type Input = CreateSolutionParams;
+    type Output = CreateSolutionResult;
+    const NAME: &'static str = "solutions.create";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.name.trim().is_empty(),
+            "invalid_params: name is required"
+        );
+        let id = cx.update(|cx| -> Result<String> {
+            use ::settings::Settings as _;
+            let store = SolutionStore::global(cx);
+            let root_base = crate::SolutionsSettings::get_global(cx).root.clone();
+            let id = store.update(cx, |s, cx| s.create_solution(&input.name, root_base, cx))?;
+            Ok(id.as_str().to_string())
+        })?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("created: {id}"),
+            }],
+            structured_content: CreateSolutionResult { solution_id: id },
+        })
+    }
+}
+
+// =====================================================================
+// solutions.rename
+// =====================================================================
+
+/// Rename an existing Solution. Mutates `name` only; `id` and on-disk paths
+/// are unchanged.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct RenameSolutionParams {
+    pub solution_id: String,
+    pub new_name: String,
+}
+
+impl<'de> Deserialize<'de> for RenameSolutionParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            solution_id: String,
+            new_name: String,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            solution_id: inner.solution_id,
+            new_name: inner.new_name,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct RenameSolutionResult {
+    pub solution_id: String,
+}
+
+#[derive(Clone)]
+pub struct RenameSolutionTool;
+
+impl McpServerTool for RenameSolutionTool {
+    type Input = RenameSolutionParams;
+    type Output = RenameSolutionResult;
+    const NAME: &'static str = "solutions.rename";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.solution_id.is_empty(),
+            "invalid_params: solution_id is required"
+        );
+        anyhow::ensure!(
+            !input.new_name.trim().is_empty(),
+            "invalid_params: new_name is required"
+        );
+        let solution_id = input.solution_id.clone();
+        cx.update(|cx| -> Result<()> {
+            let store = SolutionStore::global(cx);
+            let id = crate::SolutionId(input.solution_id);
+            store.update(cx, |s, cx| s.rename_solution(&id, &input.new_name, cx))?;
+            Ok(())
+        })?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("renamed: {solution_id}"),
+            }],
+            structured_content: RenameSolutionResult { solution_id },
+        })
+    }
+}
+
+// =====================================================================
+// solutions.delete
+// =====================================================================
+
+/// Delete a Solution from config. Does NOT touch on-disk directories
+/// (Solutions are config-only entities; v1 deliberately leaves orphan
+/// directories for the user to clean up).
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct DeleteSolutionParams {
+    pub solution_id: String,
+}
+
+impl<'de> Deserialize<'de> for DeleteSolutionParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            solution_id: String,
+        }
+        Ok(Self {
+            solution_id: Option::<Inner>::deserialize(de)?
+                .unwrap_or_default()
+                .solution_id,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DeleteSolutionResult {
+    pub deleted: bool,
+}
+
+#[derive(Clone)]
+pub struct DeleteSolutionTool;
+
+impl McpServerTool for DeleteSolutionTool {
+    type Input = DeleteSolutionParams;
+    type Output = DeleteSolutionResult;
+    const NAME: &'static str = "solutions.delete";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.solution_id.is_empty(),
+            "invalid_params: solution_id is required"
+        );
+        cx.update(|cx| -> Result<()> {
+            let store = SolutionStore::global(cx);
+            let id = crate::SolutionId(input.solution_id);
+            store.update(cx, |s, cx| s.delete_solution(&id, cx))?;
+            Ok(())
+        })?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: "deleted".to_string(),
+            }],
+            structured_content: DeleteSolutionResult { deleted: true },
+        })
+    }
+}
+
+// =====================================================================
+// solutions.open
+// =====================================================================
+
+/// Open a Solution: collects member paths, calls `workspace::open_paths`,
+/// updates `last_opened_at`, returns the resulting window info. The `focus`
+/// param is currently echoed back (Phase 7 will plumb it through to
+/// `OpenOptions`).
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct OpenSolutionParams {
+    pub solution_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus: Option<bool>,
+}
+
+impl<'de> Deserialize<'de> for OpenSolutionParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            solution_id: String,
+            focus: Option<bool>,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            solution_id: inner.solution_id,
+            focus: inner.focus,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct OpenSolutionResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_id: Option<String>,
+    pub focused: bool,
+    pub opened_paths: Vec<String>,
+}
+
+#[derive(Clone)]
+pub struct OpenSolutionTool;
+
+impl McpServerTool for OpenSolutionTool {
+    type Input = OpenSolutionParams;
+    type Output = OpenSolutionResult;
+    const NAME: &'static str = "solutions.open";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.solution_id.is_empty(),
+            "invalid_params: solution_id is required"
+        );
+        let sol_id = crate::SolutionId(input.solution_id.clone());
+
+        let paths = cx.update(|cx| -> Result<Vec<std::path::PathBuf>> {
+            let store = SolutionStore::global(cx);
+            store.read_with(cx, |s, _| s.paths_for_open(&sol_id))
+        })?;
+
+        anyhow::ensure!(
+            !paths.is_empty(),
+            "solution {} has no members",
+            input.solution_id
+        );
+
+        // Touch last_opened_at before opening (best-effort; opening proceeds even if this fails).
+        cx.update(|cx| {
+            let store = SolutionStore::global(cx);
+            store
+                .update(cx, |s, cx| s.touch_last_opened(&sol_id, cx))
+                .log_err();
+        });
+
+        let task = cx.update(|cx| {
+            let app_state = workspace::AppState::global(cx);
+            workspace::open_paths(&paths, app_state, workspace::OpenOptions::default(), cx)
+        });
+        let open_result = task.await?;
+        let window_id = format_window_id(open_result.window.window_id());
+        let focused = input.focus.unwrap_or(true);
+
+        let opened_paths: Vec<String> = paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("opened: {}", input.solution_id),
+            }],
+            structured_content: OpenSolutionResult {
+                window_id: Some(window_id),
+                focused,
+                opened_paths,
+            },
+        })
+    }
+}
+
+// =====================================================================
+// solutions.close
+// =====================================================================
+
+/// Close the editor window currently displaying the given Solution, if any.
+/// Returns `closed: false` if no window matches (not an error).
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct CloseSolutionParams {
+    pub solution_id: String,
+}
+
+impl<'de> Deserialize<'de> for CloseSolutionParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            solution_id: String,
+        }
+        Ok(Self {
+            solution_id: Option::<Inner>::deserialize(de)?
+                .unwrap_or_default()
+                .solution_id,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CloseSolutionResult {
+    pub closed: bool,
+}
+
+#[derive(Clone)]
+pub struct CloseSolutionTool;
+
+impl McpServerTool for CloseSolutionTool {
+    type Input = CloseSolutionParams;
+    type Output = CloseSolutionResult;
+    const NAME: &'static str = "solutions.close";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.solution_id.is_empty(),
+            "invalid_params: solution_id is required"
+        );
+        let closed = cx.update(|cx| -> Result<bool> {
+            let store = SolutionStore::global(cx);
+            let root = store
+                .read_with(cx, |s, _| {
+                    s.solutions()
+                        .iter()
+                        .find(|sol| sol.id.as_str() == input.solution_id)
+                        .map(|sol| sol.root.clone())
+                })
+                .with_context(|| format!("solution_not_found: {}", input.solution_id))?;
+            for handle in cx.windows() {
+                let Some(window) = handle.downcast::<workspace::MultiWorkspace>() else {
+                    continue;
+                };
+                let matched = window
+                    .read_with(cx, |multi, cx| {
+                        multi.workspaces().any(|ws| {
+                            ws.read(cx)
+                                .project()
+                                .read(cx)
+                                .visible_worktrees(cx)
+                                .any(|tree| tree.read(cx).abs_path().starts_with(&root))
+                        })
+                    })
+                    .ok()
+                    .unwrap_or(false);
+                if matched {
+                    window
+                        .update(cx, |_view, window, _cx| window.remove_window())
+                        .log_err();
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("closed: {closed}"),
+            }],
+            structured_content: CloseSolutionResult { closed },
+        })
+    }
+}
+
+// =====================================================================
 // Tests
 // =====================================================================
 
@@ -371,5 +781,59 @@ mod tests {
         let p: GetSolutionParams =
             serde_json::from_value(serde_json::Value::Null).expect("null");
         assert!(p.solution_id.is_empty());
+    }
+
+    #[test]
+    fn create_params_round_trip() {
+        let p: CreateSolutionParams =
+            serde_json::from_value(serde_json::json!({"name": "Demo"})).expect("parse");
+        assert_eq!(p.name, "Demo");
+    }
+
+    #[test]
+    fn create_params_accepts_null() {
+        let p: CreateSolutionParams =
+            serde_json::from_value(serde_json::Value::Null).expect("null");
+        assert!(p.name.is_empty());
+    }
+
+    #[test]
+    fn rename_params_round_trip() {
+        let p: RenameSolutionParams = serde_json::from_value(serde_json::json!({
+            "solution_id": "demo",
+            "new_name": "Renamed"
+        }))
+        .expect("parse");
+        assert_eq!(p.solution_id, "demo");
+        assert_eq!(p.new_name, "Renamed");
+    }
+
+    #[test]
+    fn delete_params_round_trip() {
+        let p: DeleteSolutionParams = serde_json::from_value(serde_json::json!({
+            "solution_id": "demo"
+        }))
+        .expect("parse");
+        assert_eq!(p.solution_id, "demo");
+    }
+
+    #[test]
+    fn open_params_with_focus() {
+        let p: OpenSolutionParams = serde_json::from_value(serde_json::json!({
+            "solution_id": "demo",
+            "focus": false
+        }))
+        .expect("parse");
+        assert_eq!(p.solution_id, "demo");
+        assert_eq!(p.focus, Some(false));
+    }
+
+    #[test]
+    fn close_params_round_trip() {
+        let p: CloseSolutionParams = serde_json::from_value(serde_json::json!({
+            "solution_id": "demo"
+        }))
+        .expect("parse");
+        assert_eq!(p.solution_id, "demo");
     }
 }
