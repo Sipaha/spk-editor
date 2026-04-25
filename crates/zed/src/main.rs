@@ -732,6 +732,9 @@ fn main() {
         notifications::init(app_state.client.clone(), app_state.user_store.clone(), cx);
         // Collab is disabled in spk-editor (no Zed Industries collab server access).
         // collab_ui::init(&app_state, cx);
+        // title_bar::init was nested inside collab_ui::init upstream; call it directly
+        // since it has nothing to do with collab and is required for window decorations.
+        title_bar::init(cx);
         git_ui::init(cx);
         git_graph::init(cx);
         feedback::init(cx);
