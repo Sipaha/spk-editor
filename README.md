@@ -1,46 +1,82 @@
-# Zed
+# SPK Editor
 
-[![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
-[![CI](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml/badge.svg)](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml)
+SPK Editor is a personal fork of [Zed](https://zed.dev) by Zed Industries, Inc., modified by **Simonov Pavel** ([@Sipaha](https://github.com/Sipaha)).
 
-Welcome to Zed, a high-performance, multiplayer code editor from the creators of [Atom](https://github.com/atom/atom) and [Tree-sitter](https://github.com/tree-sitter/tree-sitter).
+This fork is built around tight integration with [Claude Code](https://claude.ai/code) as an external agent (via the Agent Client Protocol). It does **not** operate any of the Zed Industries cloud services that the upstream editor uses by default:
 
----
+- No telemetry is sent.
+- No auto-update channel — the binary is built from source.
+- No Zed account / sign-in.
+- No collab / channels / chat / voice.
+- No Sentry crash uploads (panics are still logged locally).
+- No native Zed cloud LLM provider — AI features go through the external `claude` subprocess.
+- The Zed extension registry on `zed.dev` **is** still used for browsing and installing extensions.
 
-### Installation
+## Building from source
 
-On macOS, Linux, and Windows you can [download Zed directly](https://zed.dev/download) or install Zed via your local package manager ([macOS](https://zed.dev/docs/installation#macos)/[Linux](https://zed.dev/docs/linux#installing-via-a-package-manager)/[Windows](https://zed.dev/docs/windows#package-managers)).
+Same toolchain requirements as upstream Zed (recent stable Rust, OS-specific dependencies — see upstream's README for the current list). After cloning:
 
-Other platforms are not yet available:
+```sh
+cargo build --release
+```
 
-- Web ([tracking issue](https://github.com/zed-industries/zed/issues/5396))
+The binary lands at `target/release/zed` (the cargo crate name is unchanged for upstream-merge friendliness — copy or symlink it to `spk-editor` after building).
 
-### Developing Zed
+Bundling helpers per platform:
 
-- [Building Zed for macOS](./docs/src/development/macos.md)
-- [Building Zed for Linux](./docs/src/development/linux.md)
-- [Building Zed for Windows](./docs/src/development/windows.md)
+```sh
+script/bundle-linux         # produces a tarball
+script/bundle-mac           # produces SPK Editor.app
+script/bundle-windows.ps1   # produces the Inno Setup installer
+```
 
-### Contributing
+## Running unsigned binaries
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for ways you can contribute to Zed.
+SPK Editor binaries are **not signed or notarized**. To run on each OS:
 
-Also... we're hiring! Check out our [jobs](https://zed.dev/jobs) page for open roles.
+- **Linux**: no extra step.
+- **macOS**: Gatekeeper will refuse to launch. Right-click the app → Open, or run `xattr -dr com.apple.quarantine /Applications/SPK\ Editor.app`.
+- **Windows**: SmartScreen will warn. Click "More info" → "Run anyway".
 
-### Licensing
+If you want signing, set up your own certificates and wire them through `script/bundle-mac` / `script/bundle-windows.ps1` (see `SPK_EDITOR_SIGN` env var).
 
-License information for third party dependencies must be correctly provided for CI to pass.
+## Icon
 
-We use [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) to automatically comply with open source licenses. If CI is failing, check the following:
+The shipped icon is currently the upstream Zed icon. To replace with placeholder spk-editor artwork, run (requires ImageMagick):
 
-- Is it showing a `no license specified` error for a crate you've created? If so, add `publish = false` under `[package]` in your crate's Cargo.toml.
-- Is the error `failed to satisfy license requirements` for a dependency? If so, first determine what license the project has and whether this system is sufficient to comply with this license's requirements. If you're unsure, ask a lawyer. Once you've verified that this system is acceptable add the license's SPDX identifier to the `accepted` array in `script/licenses/zed-licenses.toml`.
-- Is `cargo-about` unable to find the license for a dependency? If so, add a clarification field at the end of `script/licenses/zed-licenses.toml`, as specified in the [cargo-about book](https://embarkstudios.github.io/cargo-about/cli/generate/config.html#crate-configuration).
+```sh
+script/generate-placeholder-icons.sh
+```
 
-## Sponsorship
+A proper icon design can replace the placeholder afterwards.
 
-Zed is developed by **Zed Industries, Inc.**, a for-profit company.
+## Issues
 
-If you’d like to financially support the project, you can do so via GitHub Sponsors.
-Sponsorships go directly to Zed Industries and are used as general company revenue.
-There are no perks or entitlements associated with sponsorship.
+Bug reports, feature requests, and questions: <https://github.com/Sipaha/spk-editor/issues>.
+
+For upstream Zed bugs (anything not specific to this fork), please file directly at <https://github.com/zed-industries/zed>.
+
+## License
+
+SPK Editor inherits Zed's licensing unchanged:
+
+- The editor (`crates/zed`) is licensed under **GPL-3.0-or-later**.
+- The collab server (`crates/collab*`) is licensed under **AGPL-3.0** (kept in the tree but not built / run by default in spk-editor).
+- The shared libraries (`gpui`, etc.) are licensed under **Apache-2.0**.
+
+See `LICENSE-GPL`, `LICENSE-AGPL`, `LICENSE-APACHE`. All `Copyright Zed Industries, Inc.` notices are preserved per GPL §5(a). The legal documents inherited from upstream Zed are in `legal/upstream-zed/`; they describe Zed Industries' hosted services and **do not apply to spk-editor builds** (which operate no service infrastructure).
+
+License-compliance for third-party dependencies is enforced by `cargo-about` (see `script/licenses/`). To re-check locally:
+
+```sh
+cargo install cargo-about
+cargo about generate -c script/licenses/zed-licenses.toml templates/about.hbs > /dev/null
+```
+
+## Upstream
+
+This fork is periodically merged from <https://github.com/zed-industries/zed>. Internal identifiers (cargo crate `zed`, modules, types) are kept unchanged from upstream to minimize merge friction; only user-visible identity (binary name, app bundle id, URL scheme, config directories, About dialog) is rebranded.
+
+## Acknowledgements
+
+All credit for the editor itself goes to **Zed Industries, Inc.** and the upstream Zed contributors. SPK Editor is a thin reskin + service-detachment layer on top of their work.
