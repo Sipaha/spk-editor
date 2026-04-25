@@ -172,6 +172,10 @@ pub struct SettingsContent {
 
     pub project_panel: Option<ProjectPanelSettingsContent>,
 
+    /// Configuration for the Solutions feature (catalog of remote git projects
+    /// + named groups that open as a single editor window).
+    pub solutions: Option<SolutionsSettingsContent>,
+
     /// Configuration for the Message Editor
     pub message_editor: Option<MessageEditorSettings>,
 
@@ -1058,6 +1062,18 @@ pub enum LineIndicatorFormat {
     Short,
     #[default]
     Long,
+}
+
+/// Configuration for the Solutions feature.
+#[with_fallible_options]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, Default, PartialEq)]
+pub struct SolutionsSettingsContent {
+    /// Default root directory for new Solutions. Tilde (`~`) is expanded to
+    /// the user's home directory. Existing Solutions store absolute paths
+    /// and are unaffected by changes to this setting.
+    ///
+    /// Default: "~/spk-editor/solutions"
+    pub root: Option<String>,
 }
 
 /// The settings for the image viewer.

@@ -11,6 +11,7 @@ pub use model::{CatalogId, CatalogProject, Solution, SolutionId, SolutionMember}
 pub use settings::SolutionsSettings;
 pub use store::SolutionStore;
 
+use ::settings::Settings;
 use gpui::App;
 
 pub fn init(cx: &mut App) {
