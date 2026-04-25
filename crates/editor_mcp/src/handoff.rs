@@ -36,6 +36,8 @@ struct HandleCliArgsResult {
     opened_paths: Vec<String>,
     #[serde(default)]
     focused_window_id: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
 }
 
 /// Probe the lock file. Returns:
@@ -123,7 +125,8 @@ pub fn try_handoff_to_existing_instance(paths: Vec<PathBuf>) -> Result<HandoffOu
                         .ok_or_else(|| anyhow!("missing result.structuredContent"))?;
                     let outcome: HandleCliArgsResult = serde_json::from_value(structured)?;
                     if !outcome.handled {
-                        return Err(anyhow!("existing instance refused handoff"));
+                        let detail = outcome.error.as_deref().unwrap_or("(no detail)");
+                        return Err(anyhow!("existing instance refused handoff: {detail}"));
                     }
                     return Ok(HandoffOutcome::HandedOff {
                         focused_window_id: outcome.focused_window_id,

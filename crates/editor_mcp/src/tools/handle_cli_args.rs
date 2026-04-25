@@ -53,6 +53,8 @@ pub struct HandleCliArgsResult {
     pub opened_paths: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub focused_window_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -68,60 +70,121 @@ impl McpServerTool for HandleCliArgsTool {
         input: Self::Input,
         cx: &mut AsyncApp,
     ) -> anyhow::Result<ToolResponse<Self::Output>> {
-        let resolved: Vec<PathBuf> = input
-            .paths
-            .iter()
-            .map(|p| {
-                let pb = PathBuf::from(p);
-                if pb.is_absolute() {
-                    pb
-                } else if let Some(cwd) = input.cwd.as_ref() {
-                    PathBuf::from(cwd).join(p)
-                } else {
-                    pb
-                }
-            })
-            .collect();
-
-        let opened_paths: Vec<String> = resolved
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect();
-
-        let mut focused_window_id: Option<String> = None;
-
-        if !resolved.is_empty() {
-            let task = cx.update(|cx| {
-                let app_state = workspace::AppState::global(cx);
-                workspace::open_paths(
-                    &resolved,
-                    app_state,
-                    workspace::OpenOptions::default(),
-                    cx,
-                )
-            });
-            match task.await {
-                Ok(open_result) => {
-                    focused_window_id = Some(format!("{:?}", open_result.window.window_id()));
-                }
-                Err(err) => {
-                    log::error!("editor_mcp: handle_cli_args open_paths failed: {err}");
-                }
+        let (resolved, opened_paths) = match resolve_paths(&input.paths, input.cwd.as_deref()) {
+            Ok(value) => value,
+            Err(err) => {
+                return Ok(refused(format!("path resolution failed: {err}")));
             }
+        };
+
+        if resolved.is_empty() {
+            // Empty paths is a "just focus" request; Phase 7 will wire focus action.
+            // For now, treat as handled but no-op.
+            return Ok(success(opened_paths, None));
+        }
+
+        let task = cx.update(|cx| {
+            let app_state = workspace::AppState::global(cx);
+            workspace::open_paths(
+                &resolved,
+                app_state,
+                workspace::OpenOptions::default(),
+                cx,
+            )
+        });
+        match task.await {
+            Ok(open_result) => {
+                let window_id = crate::window_ids::format(open_result.window.window_id());
+                Ok(success(opened_paths, Some(window_id)))
+            }
+            Err(err) => Ok(refused(format!("open_paths failed: {err}"))),
         }
 
         // TODO Phase 7: emit `cli_args_received` notification with payload
         // { paths, source_pid, opened_window_id }.
+    }
+}
 
-        Ok(ToolResponse {
-            content: vec![ToolResponseContent::Text {
-                text: format!("opened {} path(s)", opened_paths.len()),
-            }],
-            structured_content: HandleCliArgsResult {
-                handled: true,
-                opened_paths,
-                focused_window_id,
-            },
-        })
+fn resolve_paths(
+    paths: &[String],
+    cwd: Option<&str>,
+) -> anyhow::Result<(Vec<PathBuf>, Vec<String>)> {
+    let mut resolved = Vec::with_capacity(paths.len());
+    let mut display = Vec::with_capacity(paths.len());
+    for path in paths {
+        let pb = PathBuf::from(path);
+        let abs = if pb.is_absolute() {
+            pb
+        } else if let Some(cwd) = cwd {
+            PathBuf::from(cwd).join(path)
+        } else {
+            anyhow::bail!("relative path {path:?} requires cwd, but none was provided");
+        };
+        display.push(abs.to_string_lossy().into_owned());
+        resolved.push(abs);
+    }
+    Ok((resolved, display))
+}
+
+fn success(
+    opened_paths: Vec<String>,
+    focused_window_id: Option<String>,
+) -> ToolResponse<HandleCliArgsResult> {
+    ToolResponse {
+        content: vec![ToolResponseContent::Text {
+            text: format!("opened {} path(s)", opened_paths.len()),
+        }],
+        structured_content: HandleCliArgsResult {
+            handled: true,
+            opened_paths,
+            focused_window_id,
+            error: None,
+        },
+    }
+}
+
+fn refused(error: String) -> ToolResponse<HandleCliArgsResult> {
+    ToolResponse {
+        content: vec![ToolResponseContent::Text {
+            text: format!("refused: {error}"),
+        }],
+        structured_content: HandleCliArgsResult {
+            handled: false,
+            opened_paths: Vec::new(),
+            focused_window_id: None,
+            error: Some(error),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_paths_absolute_passes_through() {
+        let (resolved, display) = resolve_paths(&["/tmp/foo".into()], None).expect("ok");
+        assert_eq!(resolved.len(), 1);
+        assert!(resolved[0].is_absolute());
+        assert_eq!(display, vec!["/tmp/foo".to_string()]);
+    }
+
+    #[test]
+    fn resolve_paths_relative_with_cwd() {
+        let (resolved, _) = resolve_paths(&["sub/file.rs".into()], Some("/work")).expect("ok");
+        assert_eq!(resolved[0], PathBuf::from("/work/sub/file.rs"));
+    }
+
+    #[test]
+    fn resolve_paths_relative_without_cwd_errors() {
+        let result = resolve_paths(&["sub/file.rs".into()], None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_paths_empty_input() {
+        let (resolved, display) = resolve_paths(&[], None).expect("ok");
+        assert!(resolved.is_empty());
+        assert!(display.is_empty());
     }
 }

@@ -11,6 +11,7 @@ mod notifications;
 mod registry;
 mod subscriptions;
 mod tools;
+mod window_ids;
 
 pub use handoff::{HandoffOutcome, try_handoff_to_existing_instance};
 pub use lifecycle::start_server;
