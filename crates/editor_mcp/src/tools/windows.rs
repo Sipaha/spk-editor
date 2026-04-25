@@ -291,6 +291,88 @@ impl McpServerTool for CloseWindowTool {
     }
 }
 
+/// Dispatch a registered action to the window with the given window_id.
+/// Action name is the fully-qualified path like "workspace::ToggleLeftDock".
+/// Optional args are deserialized into the action's payload type.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct DispatchActionParams {
+    pub window_id: String,
+    pub action_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<serde_json::Value>,
+}
+
+impl<'de> Deserialize<'de> for DispatchActionParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            window_id: String,
+            action_name: String,
+            #[serde(default)]
+            args: Option<serde_json::Value>,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(DispatchActionParams {
+            window_id: inner.window_id,
+            action_name: inner.action_name,
+            args: inner.args,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DispatchActionResult {
+    pub dispatched: bool,
+}
+
+#[derive(Clone)]
+pub struct DispatchActionTool;
+
+impl McpServerTool for DispatchActionTool {
+    type Input = DispatchActionParams;
+    type Output = DispatchActionResult;
+    const NAME: &'static str = "windows.dispatch_action";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        let action_name = input.action_name.clone();
+        let dispatched = cx.update(|cx| -> anyhow::Result<bool> {
+            let handle = find_window_by_id(&input.window_id, cx)?;
+            // Build the action up-front so a deserialization error surfaces
+            // before we touch the window. Once built, dispatch is infallible
+            // — the window itself routes the action through its keybinding /
+            // focus tree.
+            let action = build_action_from_json(&input.action_name, input.args.as_ref(), cx)?;
+            handle
+                .update(cx, |_view, window, cx| {
+                    window.dispatch_action(action, cx);
+                })
+                .map_err(|err| anyhow::anyhow!("dispatch_action failed: {err}"))?;
+            Ok(true)
+        })?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("dispatched: {action_name} ({dispatched})"),
+            }],
+            structured_content: DispatchActionResult { dispatched },
+        })
+    }
+}
+
+fn build_action_from_json(
+    name: &str,
+    args: Option<&serde_json::Value>,
+    cx: &App,
+) -> anyhow::Result<Box<dyn gpui::Action>> {
+    let value = args.cloned().unwrap_or(serde_json::Value::Null);
+    cx.build_action(name, Some(value))
+        .map_err(|err| anyhow::anyhow!("build_action({name}): {err}"))
+}
+
 fn find_window_by_id(
     window_id: &str,
     cx: &mut App,

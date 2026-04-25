@@ -65,6 +65,9 @@ pub(crate) fn register_builtin_tools(cx: &mut App) {
     register_tool(cx, |server| {
         server.add_tool(crate::tools::windows::CloseWindowTool);
     });
+    register_tool(cx, |server| {
+        server.add_tool(crate::tools::windows::DispatchActionTool);
+    });
 }
 
 #[cfg(test)]

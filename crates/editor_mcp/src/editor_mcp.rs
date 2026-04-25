@@ -27,8 +27,8 @@ pub mod tools_for_test {
         HandleCliArgsParams, HandleCliArgsResult, HandleCliArgsTool,
     };
     pub use crate::tools::windows::{
-        CloseWindowParams, CloseWindowResult, CloseWindowTool, FocusWindowParams,
-        FocusWindowResult, FocusWindowTool, ListWindowsParams, ListWindowsResult,
-        ListWindowsTool, WindowInfo,
+        CloseWindowParams, CloseWindowResult, CloseWindowTool, DispatchActionParams,
+        DispatchActionResult, DispatchActionTool, FocusWindowParams, FocusWindowResult,
+        FocusWindowTool, ListWindowsParams, ListWindowsResult, ListWindowsTool, WindowInfo,
     };
 }
