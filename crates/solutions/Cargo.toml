@@ -20,6 +20,7 @@ collections.workspace = true
 context_server.workspace = true
 editor_mcp.workspace = true
 fs.workspace = true
+globset.workspace = true
 gpui.workspace = true
 image.workspace = true
 log.workspace = true

@@ -16652,6 +16652,7 @@ dependencies = [
  "context_server",
  "editor_mcp",
  "fs",
+ "globset",
  "gpui",
  "image",
  "log",
