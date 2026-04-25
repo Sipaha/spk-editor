@@ -14,12 +14,14 @@ doctest = false
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 chrono.workspace = true
 collections.workspace = true
 context_server.workspace = true
 editor_mcp.workspace = true
 fs.workspace = true
 gpui.workspace = true
+image.workspace = true
 log.workspace = true
 paths.workspace = true
 schemars.workspace = true

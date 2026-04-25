@@ -16646,12 +16646,14 @@ name = "solutions"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "collections",
  "context_server",
  "editor_mcp",
  "fs",
  "gpui",
+ "image",
  "log",
  "paths",
  "pretty_assertions",

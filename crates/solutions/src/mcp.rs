@@ -66,6 +66,9 @@ pub fn register(cx: &mut App) {
     editor_mcp::register_tool(cx, |server| {
         server.add_tool(DispatchActionTool);
     });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(ScreenshotTool);
+    });
 }
 
 // =====================================================================
@@ -1711,6 +1714,174 @@ fn find_window_for_solution(
 }
 
 // =====================================================================
+// workspace.screenshot
+// =====================================================================
+
+/// Capture a screenshot of the editor window for a Solution. Returns the
+/// image as base64-encoded data, with default JPEG quality 80 for token
+/// efficiency. Use `format: "png"` for pixel-perfect captures.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct ScreenshotParams {
+    pub solution_id: String,
+    /// Image format: "jpeg" (default), "png", or "webp".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    /// Quality 1..=100 for jpeg/webp (ignored for png). Default: 80.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality: Option<u8>,
+    /// Optional max dimension; if either width or height exceeds this,
+    /// the image is downscaled while preserving aspect ratio.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_dimension: Option<u32>,
+}
+
+impl<'de> Deserialize<'de> for ScreenshotParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            solution_id: String,
+            format: Option<String>,
+            quality: Option<u8>,
+            max_dimension: Option<u32>,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            solution_id: inner.solution_id,
+            format: inner.format,
+            quality: inner.quality,
+            max_dimension: inner.max_dimension,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ScreenshotResult {
+    pub width: u32,
+    pub height: u32,
+    pub media_type: String,
+    /// Base64-encoded image bytes.
+    pub base64_data: String,
+}
+
+#[derive(Clone)]
+pub struct ScreenshotTool;
+
+impl McpServerTool for ScreenshotTool {
+    type Input = ScreenshotParams;
+    type Output = ScreenshotResult;
+    const NAME: &'static str = "workspace.screenshot";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.solution_id.is_empty(),
+            "invalid_params: solution_id is required"
+        );
+        let format = input.format.as_deref().unwrap_or("jpeg").to_ascii_lowercase();
+        let quality = input.quality.unwrap_or(80).clamp(1, 100);
+
+        let rgba = cx.update(|cx| -> anyhow::Result<image::RgbaImage> {
+            let handle = find_window_for_solution(&input.solution_id, cx)
+                .ok_or_else(|| anyhow::anyhow!("solution_not_open: {}", input.solution_id))?;
+            render_window_to_image(handle, cx)
+        })?;
+
+        let (orig_w, orig_h) = rgba.dimensions();
+        let resized = if let Some(max_dim) = input.max_dimension {
+            let max_side = orig_w.max(orig_h);
+            if max_side > max_dim {
+                let scale = max_dim as f32 / max_side as f32;
+                let new_w = ((orig_w as f32 * scale).round() as u32).max(1);
+                let new_h = ((orig_h as f32 * scale).round() as u32).max(1);
+                image::imageops::resize(
+                    &rgba,
+                    new_w,
+                    new_h,
+                    image::imageops::FilterType::Lanczos3,
+                )
+            } else {
+                rgba
+            }
+        } else {
+            rgba
+        };
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut cursor = std::io::Cursor::new(&mut buf);
+        let media_type: &'static str = match format.as_str() {
+            "png" => {
+                resized
+                    .write_to(&mut cursor, image::ImageFormat::Png)
+                    .with_context(|| "encode png")?;
+                "image/png"
+            }
+            "webp" => {
+                resized
+                    .write_to(&mut cursor, image::ImageFormat::WebP)
+                    .with_context(|| "encode webp")?;
+                "image/webp"
+            }
+            "jpeg" | "jpg" => {
+                let dyn_image = image::DynamicImage::ImageRgba8(resized.clone());
+                let rgb = dyn_image.to_rgb8();
+                let mut encoder =
+                    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, quality);
+                encoder
+                    .encode_image(&rgb)
+                    .with_context(|| "encode jpeg")?;
+                "image/jpeg"
+            }
+            other => anyhow::bail!("unsupported_format: {other}"),
+        };
+
+        use base64::Engine as _;
+        let base64_data = base64::engine::general_purpose::STANDARD.encode(&buf);
+        let width = resized.width();
+        let height = resized.height();
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Image {
+                data: base64_data.clone(),
+                mime_type: media_type.to_string(),
+            }],
+            structured_content: ScreenshotResult {
+                width,
+                height,
+                media_type: media_type.to_string(),
+                base64_data,
+            },
+        })
+    }
+}
+
+// `Window::render_to_image` is gated behind gpui's `test-support` feature, so
+// the production build cannot capture pixels. We surface a clear error in that
+// configuration; the tool still parses params and validates state.
+#[cfg(any(test, feature = "test-support"))]
+fn render_window_to_image(
+    handle: gpui::AnyWindowHandle,
+    cx: &mut App,
+) -> anyhow::Result<image::RgbaImage> {
+    handle
+        .update(cx, |_view, window, _cx| window.render_to_image())
+        .map_err(|err| anyhow::anyhow!("render_to_image failed: {err}"))?
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn render_window_to_image(
+    _handle: gpui::AnyWindowHandle,
+    _cx: &mut App,
+) -> anyhow::Result<image::RgbaImage> {
+    anyhow::bail!(
+        "screenshot_unsupported: gpui::Window::render_to_image is only available in test/test-support builds of this fork"
+    )
+}
+
+// =====================================================================
 // Tests
 // =====================================================================
 
@@ -2146,5 +2317,30 @@ mod tests {
             serde_json::from_value(serde_json::Value::Null).expect("null");
         assert!(p.solution_id.is_empty());
         assert!(p.action_name.is_empty());
+    }
+
+    #[test]
+    fn screenshot_params_round_trip() {
+        let p: ScreenshotParams = serde_json::from_value(serde_json::json!({
+            "solution_id": "demo",
+            "format": "jpeg",
+            "quality": 75,
+            "max_dimension": 1280
+        }))
+        .expect("parse");
+        assert_eq!(p.solution_id, "demo");
+        assert_eq!(p.format.as_deref(), Some("jpeg"));
+        assert_eq!(p.quality, Some(75));
+        assert_eq!(p.max_dimension, Some(1280));
+    }
+
+    #[test]
+    fn screenshot_params_accepts_null() {
+        let p: ScreenshotParams =
+            serde_json::from_value(serde_json::Value::Null).expect("null");
+        assert!(p.solution_id.is_empty());
+        assert!(p.format.is_none());
+        assert!(p.quality.is_none());
+        assert!(p.max_dimension.is_none());
     }
 }
