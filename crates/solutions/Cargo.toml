@@ -31,6 +31,7 @@ shellexpand.workspace = true
 smol.workspace = true
 thiserror.workspace = true
 util.workspace = true
+workspace.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

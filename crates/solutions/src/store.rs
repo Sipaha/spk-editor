@@ -340,6 +340,11 @@ struct GlobalSolutionStore(Entity<SolutionStore>);
 impl Global for GlobalSolutionStore {}
 
 #[cfg(test)]
+pub(crate) fn install_global_for_test(entity: Entity<SolutionStore>, cx: &mut App) {
+    cx.set_global(GlobalSolutionStore(entity));
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::git::test_support;
