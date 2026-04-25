@@ -5536,6 +5536,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "editor_mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "collections",
+ "context_server",
+ "fs2",
+ "gpui",
+ "log",
+ "paths",
+ "pretty_assertions",
+ "schemars 1.0.4",
+ "serde",
+ "serde_json",
+ "smol",
+ "tempfile",
+ "util",
+]
+
+[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -21995,6 +22016,7 @@ dependencies = [
  "session",
  "settings",
  "smallvec",
+ "solutions",
  "sqlez",
  "strum 0.27.2",
  "task",
