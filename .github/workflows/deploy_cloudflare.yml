@@ -1,14 +1,12 @@
 name: Deploy Docs
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
   deploy-docs:
     name: Deploy Docs
-    if: github.repository_owner == 'zed-industries'
+    if: false # spk-editor: not applicable
     runs-on: namespace-profile-16x32-ubuntu-2204
 
     steps:

@@ -21,6 +21,7 @@ on:
         type: string
 jobs:
   run_unit_evals:
+    if: false # spk-editor: not applicable
     runs-on: namespace-profile-16x32-ubuntu-2204
     steps:
     - name: steps::checkout_repo

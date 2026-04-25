@@ -1,15 +1,14 @@
 name: Slack Notify First Responders
 
 on:
-  issues:
-    types: [labeled]
+  workflow_dispatch:
 
 env:
   FIRST_RESPONDER_LABELS: '["priority:P0", "priority:P1"]'
 
 jobs:
   notify-slack:
-    if: github.repository_owner == 'zed-industries' && github.event.issue.state == 'open'
+    if: false # spk-editor: not applicable
     runs-on: namespace-profile-2x4-ubuntu-2404
 
     steps:

@@ -3,11 +3,7 @@ name: Randomized Tests
 concurrency: randomized-tests
 
 on:
-  push:
-    branches:
-      - randomized-tests-runner
-  # schedule:
-  #    - cron: '0 * * * *'
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -18,7 +14,7 @@ env:
 jobs:
   tests:
     name: Run randomized tests
-    if: github.repository_owner == 'zed-industries'
+    if: false # spk-editor: not applicable
     runs-on:
       - namespace-profile-16x32-ubuntu-2204
     steps:

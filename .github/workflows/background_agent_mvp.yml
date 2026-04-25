@@ -33,6 +33,7 @@ env:
 
 jobs:
   run-mvp:
+    if: false # spk-editor: not applicable
     runs-on: ubuntu-latest
     timeout-minutes: 180
 

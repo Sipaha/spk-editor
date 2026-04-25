@@ -10,6 +10,7 @@ on:
   workflow_dispatch: {}
 jobs:
   cron_unit_evals:
+    if: false # spk-editor: not applicable
     runs-on: namespace-profile-16x32-ubuntu-2204
     strategy:
       matrix:

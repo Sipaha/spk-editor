@@ -22,9 +22,7 @@
 name: Assign Reviewers
 
 on:
-  # zizmor: ignore[dangerous-triggers] reviewed — no PR code checkout, only coordinator repo at ref: main
-  pull_request_target:
-    types: [opened, ready_for_review]
+  workflow_dispatch:
 
 # GITHUB_TOKEN is not used — all operations use the GitHub App token.
 # Declare minimal permissions so the default token has no write access.
@@ -45,8 +43,7 @@ concurrency:
 # by the GitHub Teams API.
 jobs:
   assign-reviewers:
-    if: >-
-      github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
+    if: false # spk-editor: not applicable
     runs-on: ubuntu-latest
     steps:
       - name: Generate app token
