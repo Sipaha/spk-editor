@@ -23,9 +23,7 @@ impl<'de> Deserialize<'de> for ListWindowsParams {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct WindowInfo {
     pub window_id: String,
-    pub kind: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub solution_id: Option<String>,
+    pub kind: String, // "folder" | "welcome"
     pub root_paths: Vec<String>,
     pub focused: bool,
     pub bounds: [i32; 4],
@@ -105,26 +103,11 @@ fn build_window_info(
         }
     }
 
-    let solution_id = solutions::SolutionStore::try_global(cx).and_then(|store| {
-        store.read_with(cx, |store, _| {
-            store.solutions().iter().find_map(|sol| {
-                let matches = root_paths.iter().any(|p| {
-                    let path = std::path::Path::new(p);
-                    path.starts_with(&sol.root)
-                        || sol.members.iter().any(|m| path.starts_with(&m.local_path))
-                });
-                if matches {
-                    Some(sol.id.as_str().to_string())
-                } else {
-                    None
-                }
-            })
-        })
-    });
-
-    let kind = if solution_id.is_some() {
-        "solution"
-    } else if root_paths.is_empty() {
+    // Solution-id cross-reference moved to `solutions::mcp` to avoid a
+    // cycle between `editor_mcp` and the `solutions` crate. Clients that
+    // need solution membership should call `solutions.list` and join on
+    // `root_paths`.
+    let kind = if root_paths.is_empty() {
         "welcome"
     } else {
         "folder"
@@ -147,7 +130,6 @@ fn build_window_info(
     WindowInfo {
         window_id: crate::window_ids::format(window_id),
         kind,
-        solution_id,
         root_paths,
         focused: active_window_id == Some(window_id),
         bounds: bounds_arr,

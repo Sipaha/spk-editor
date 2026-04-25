@@ -5552,7 +5552,6 @@ dependencies = [
  "serde",
  "serde_json",
  "smol",
- "solutions",
  "tempfile",
  "util",
  "workspace",
