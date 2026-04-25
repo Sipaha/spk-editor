@@ -102,6 +102,15 @@ pub fn register(cx: &mut App) {
     editor_mcp::register_tool(cx, |server| {
         server.add_tool(RenameFileTool);
     });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(FindInBuffersTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(GotoDefinitionTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(FindReferencesTool);
+    });
 }
 
 // =====================================================================
@@ -3531,6 +3540,572 @@ impl McpServerTool for RenameFileTool {
 }
 
 // =====================================================================
+// project.find_in_buffers
+// =====================================================================
+
+/// Search across files of a Solution. Defaults to a case-insensitive
+/// substring match; opt into `regex` for a regex match (in either case
+/// `case_sensitive: true` makes the match case-sensitive). The `scope`
+/// parameter is reserved for future "open buffers only" behaviour and is
+/// currently ignored — all worktree files are searched. Pagination via
+/// an opaque cursor (`worktree_root|path` of the last file scanned).
+///
+/// Implementation v1 reads files via `std::fs` (skipping files larger
+/// than 1 MiB or non-UTF8). A future iteration will switch to
+/// `Project::search` so gitignore is respected and open-buffer state is
+/// reflected.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct FindInBuffersParams {
+    pub solution_id: String,
+    /// Substring or regex pattern.
+    pub query: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub case_sensitive: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub regex: Option<bool>,
+    /// `"all_files"` (default) or `"open"`. v1: ignored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Optional glob pattern matched against the worktree-relative path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_glob: Option<String>,
+    /// Opaque cursor returned from the previous response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Maximum number of matches in this page. Default 100, max 1000.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max: Option<usize>,
+}
+
+impl<'de> Deserialize<'de> for FindInBuffersParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            solution_id: String,
+            query: String,
+            case_sensitive: Option<bool>,
+            regex: Option<bool>,
+            scope: Option<String>,
+            file_glob: Option<String>,
+            cursor: Option<String>,
+            max: Option<usize>,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            solution_id: inner.solution_id,
+            query: inner.query,
+            case_sensitive: inner.case_sensitive,
+            regex: inner.regex,
+            scope: inner.scope,
+            file_glob: inner.file_glob,
+            cursor: inner.cursor,
+            max: inner.max,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SearchMatch {
+    /// Path relative to `worktree_root`, in unix form.
+    pub path: String,
+    /// Absolute worktree root containing the file.
+    pub worktree_root: String,
+    /// Zero-based line index.
+    pub line: u32,
+    /// Zero-based UTF-8 byte column where the match starts.
+    pub col: u32,
+    /// Full text of the line containing the match (untruncated).
+    pub line_text: String,
+    /// `[start, end)` UTF-8 byte offsets within `line_text`.
+    pub match_range: [u32; 2],
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FindInBuffersResult {
+    pub matches: Vec<SearchMatch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct FindInBuffersTool;
+
+impl McpServerTool for FindInBuffersTool {
+    type Input = FindInBuffersParams;
+    type Output = FindInBuffersResult;
+    const NAME: &'static str = "project.find_in_buffers";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.solution_id.is_empty(),
+            "invalid_params: solution_id is required"
+        );
+        anyhow::ensure!(
+            !input.query.is_empty(),
+            "invalid_params: query is required"
+        );
+        let max = input.max.unwrap_or(100).clamp(1, 1000);
+        let case_sensitive = input.case_sensitive.unwrap_or(false);
+        let use_regex = input.regex.unwrap_or(false);
+
+        let regex = if use_regex {
+            let mut builder = regex::RegexBuilder::new(&input.query);
+            builder.case_insensitive(!case_sensitive);
+            Some(
+                builder
+                    .build()
+                    .map_err(|err| anyhow::anyhow!("invalid_regex: {err}"))?,
+            )
+        } else {
+            None
+        };
+
+        let glob = input
+            .file_glob
+            .as_deref()
+            .map(globset::Glob::new)
+            .transpose()
+            .map_err(|err| anyhow::anyhow!("invalid_glob: {err}"))?
+            .map(|g| g.compile_matcher());
+
+        let start_after = input.cursor.clone().unwrap_or_default();
+
+        let (matches, next_cursor): (Vec<SearchMatch>, Option<String>) = cx.update(|cx| {
+            collect_matches(
+                &input.solution_id,
+                input.query.as_str(),
+                regex.as_ref(),
+                glob.as_ref(),
+                case_sensitive,
+                &start_after,
+                max,
+                cx,
+            )
+        });
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("{} match(es)", matches.len()),
+            }],
+            structured_content: FindInBuffersResult {
+                matches,
+                next_cursor,
+            },
+        })
+    }
+}
+
+fn collect_matches(
+    solution_id: &str,
+    query: &str,
+    regex: Option<&regex::Regex>,
+    glob: Option<&globset::GlobMatcher>,
+    case_sensitive: bool,
+    start_after: &str,
+    max: usize,
+    cx: &mut App,
+) -> (Vec<SearchMatch>, Option<String>) {
+    let Some(store) = SolutionStore::try_global(cx) else {
+        return (Vec::new(), None);
+    };
+    let Some(root) = store.read_with(cx, |s, _| {
+        s.solutions()
+            .iter()
+            .find(|sol| sol.id.as_str() == solution_id)
+            .map(|sol| sol.root.clone())
+    }) else {
+        return (Vec::new(), None);
+    };
+
+    // Walk the open MultiWorkspace's worktrees if the Solution has a
+    // window; otherwise fall back to no-results (matches `list_files`
+    // semantics — open the Solution first).
+    for handle in cx.windows() {
+        let Some(window_handle) = handle.downcast::<workspace::MultiWorkspace>() else {
+            continue;
+        };
+        let collected = window_handle
+            .update(cx, |multi, _window, cx| {
+                let any_matches = multi.workspaces().any(|ws| {
+                    ws.read(cx)
+                        .project()
+                        .read(cx)
+                        .visible_worktrees(cx)
+                        .any(|tree| tree.read(cx).abs_path().starts_with(&root))
+                });
+                if !any_matches {
+                    return None;
+                }
+
+                let mut matches: Vec<SearchMatch> = Vec::new();
+                let mut next_cursor: Option<String> = None;
+                let lowercase_query = if !case_sensitive && regex.is_none() {
+                    Some(query.to_lowercase())
+                } else {
+                    None
+                };
+
+                'outer: for workspace_entity in multi.workspaces() {
+                    let workspace = workspace_entity.read(cx);
+                    let project = workspace.project().read(cx);
+                    for tree_entity in project.visible_worktrees(cx) {
+                        let tree = tree_entity.read(cx);
+                        let abs_root = tree.abs_path();
+                        if !abs_root.starts_with(&root) {
+                            continue;
+                        }
+                        let worktree_root = abs_root.to_string_lossy().into_owned();
+                        for entry in tree.entries(false, 0) {
+                            if !entry.is_file() {
+                                continue;
+                            }
+                            let rel_path = entry.path.as_unix_str().to_string();
+                            let file_cursor = format!("{}|{}", worktree_root, rel_path);
+                            if !start_after.is_empty()
+                                && file_cursor.as_str() <= start_after
+                            {
+                                continue;
+                            }
+                            if let Some(matcher) = glob {
+                                if !matcher.is_match(&rel_path) {
+                                    continue;
+                                }
+                            }
+                            let abs_path =
+                                std::path::Path::new(&worktree_root).join(rel_path.as_str());
+                            let Ok(metadata) = std::fs::metadata(&abs_path) else {
+                                continue;
+                            };
+                            if !metadata.is_file() || metadata.len() > 1_000_000 {
+                                continue;
+                            }
+                            let Ok(content) = std::fs::read_to_string(&abs_path) else {
+                                continue;
+                            };
+
+                            for (line_idx, line) in content.lines().enumerate() {
+                                let line_matches: Vec<(usize, usize)> = if let Some(re) = regex
+                                {
+                                    re.find_iter(line).map(|m| (m.start(), m.end())).collect()
+                                } else if case_sensitive {
+                                    line.match_indices(query)
+                                        .map(|(start, _)| (start, start + query.len()))
+                                        .collect()
+                                } else {
+                                    let lc_query = lowercase_query
+                                        .as_deref()
+                                        .unwrap_or(query);
+                                    let lc_line = line.to_lowercase();
+                                    // Map back from lowercase indices: when
+                                    // ASCII the offsets coincide; for non-
+                                    // ASCII text Rust's `to_lowercase` may
+                                    // change byte length, so we conservatively
+                                    // skip matches that don't align.
+                                    lc_line
+                                        .match_indices(lc_query)
+                                        .filter_map(|(start, _)| {
+                                            let end = start + lc_query.len();
+                                            if line.is_char_boundary(start)
+                                                && line.is_char_boundary(end)
+                                            {
+                                                Some((start, end))
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect()
+                                };
+                                for (start, end) in line_matches {
+                                    if matches.len() >= max {
+                                        next_cursor = Some(file_cursor);
+                                        break 'outer;
+                                    }
+                                    matches.push(SearchMatch {
+                                        path: rel_path.clone(),
+                                        worktree_root: worktree_root.clone(),
+                                        line: line_idx as u32,
+                                        col: start as u32,
+                                        line_text: line.to_string(),
+                                        match_range: [start as u32, end as u32],
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                Some((matches, next_cursor))
+            })
+            .ok()
+            .flatten();
+        if let Some(result) = collected {
+            return result;
+        }
+    }
+    (Vec::new(), None)
+}
+
+// =====================================================================
+// project.goto_definition
+// =====================================================================
+
+/// Resolve LSP "goto definition" for a position in a file. Opens the
+/// buffer (without surfacing a tab) so the language server is engaged,
+/// then awaits the LSP query. Returns an empty list when no language
+/// server provides definitions for the file (not an error).
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct GotoDefinitionParams {
+    pub solution_id: String,
+    /// Absolute path of the file. Must lie under one of the Solution's
+    /// worktrees.
+    pub path: String,
+    /// Zero-based line index.
+    pub line: u32,
+    /// Zero-based UTF-8 byte column.
+    pub col: u32,
+}
+
+impl<'de> Deserialize<'de> for GotoDefinitionParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            solution_id: String,
+            path: String,
+            line: u32,
+            col: u32,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            solution_id: inner.solution_id,
+            path: inner.path,
+            line: inner.line,
+            col: inner.col,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct LocationRef {
+    /// Absolute path of the target file (the buffer's `abs_path`). Empty
+    /// when the target buffer has no on-disk file (e.g. a scratch
+    /// buffer).
+    pub path: String,
+    pub start: EditPoint,
+    pub end: EditPoint,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct GotoDefinitionResult {
+    pub definitions: Vec<LocationRef>,
+}
+
+#[derive(Clone)]
+pub struct GotoDefinitionTool;
+
+impl McpServerTool for GotoDefinitionTool {
+    type Input = GotoDefinitionParams;
+    type Output = GotoDefinitionResult;
+    const NAME: &'static str = "project.goto_definition";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.solution_id.is_empty(),
+            "invalid_params: solution_id is required"
+        );
+        anyhow::ensure!(
+            !input.path.is_empty(),
+            "invalid_params: path is required"
+        );
+
+        cx.update(|cx| validate_path_in_solution(&input.solution_id, &input.path, cx))
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+        let project = cx
+            .update(|cx| project_for_solution(&input.solution_id, cx))
+            .ok_or_else(|| anyhow::anyhow!("solution_not_open: {}", input.solution_id))?;
+
+        let project_path = cx.update(|cx| resolve_project_path(&project, &input.path, cx))?;
+
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(project_path, cx))
+            .await?;
+
+        let position = language::Point::new(input.line, input.col);
+        let task = project.update(cx, |project, cx| {
+            project.definitions(&buffer, position, cx)
+        });
+
+        let definitions = match task.await {
+            Ok(Some(links)) => cx.update(|cx| location_links_to_refs(&links, cx)),
+            Ok(None) | Err(_) => Vec::new(),
+        };
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("{} definition(s)", definitions.len()),
+            }],
+            structured_content: GotoDefinitionResult { definitions },
+        })
+    }
+}
+
+fn location_links_to_refs(links: &[project::LocationLink], cx: &App) -> Vec<LocationRef> {
+    links
+        .iter()
+        .map(|link| location_to_ref(&link.target, cx))
+        .collect()
+}
+
+fn locations_to_refs(locations: &[language::Location], cx: &App) -> Vec<LocationRef> {
+    locations
+        .iter()
+        .map(|location| location_to_ref(location, cx))
+        .collect()
+}
+
+fn location_to_ref(location: &language::Location, cx: &App) -> LocationRef {
+    use language::ToPoint as _;
+
+    let buffer = location.buffer.read(cx);
+    let path = project::File::from_dyn(buffer.file())
+        .map(|file| {
+            <project::File as language::LocalFile>::abs_path(file, cx)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .unwrap_or_default();
+    let snapshot = buffer.snapshot();
+    let start_point = location.range.start.to_point(&snapshot);
+    let end_point = location.range.end.to_point(&snapshot);
+    LocationRef {
+        path,
+        start: EditPoint {
+            line: start_point.row,
+            col: start_point.column,
+        },
+        end: EditPoint {
+            line: end_point.row,
+            col: end_point.column,
+        },
+    }
+}
+
+// =====================================================================
+// project.find_references
+// =====================================================================
+
+/// Resolve LSP "find references" for a position in a file. Opens the
+/// buffer (without surfacing a tab) so the language server is engaged.
+/// `include_declaration` is forwarded to the language server's
+/// preference where applicable; v1 simply returns whatever set the
+/// server reports. Returns an empty list when no language server
+/// provides references for the file (not an error).
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct FindReferencesParams {
+    pub solution_id: String,
+    /// Absolute path of the file. Must lie under one of the Solution's
+    /// worktrees.
+    pub path: String,
+    pub line: u32,
+    pub col: u32,
+    /// Reserved for forwarding to LSP `includeDeclaration`. Currently
+    /// the editor's `Project::references` does not expose this knob, so
+    /// the parameter is accepted but ignored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_declaration: Option<bool>,
+}
+
+impl<'de> Deserialize<'de> for FindReferencesParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            solution_id: String,
+            path: String,
+            line: u32,
+            col: u32,
+            include_declaration: Option<bool>,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            solution_id: inner.solution_id,
+            path: inner.path,
+            line: inner.line,
+            col: inner.col,
+            include_declaration: inner.include_declaration,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FindReferencesResult {
+    pub references: Vec<LocationRef>,
+}
+
+#[derive(Clone)]
+pub struct FindReferencesTool;
+
+impl McpServerTool for FindReferencesTool {
+    type Input = FindReferencesParams;
+    type Output = FindReferencesResult;
+    const NAME: &'static str = "project.find_references";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.solution_id.is_empty(),
+            "invalid_params: solution_id is required"
+        );
+        anyhow::ensure!(
+            !input.path.is_empty(),
+            "invalid_params: path is required"
+        );
+
+        cx.update(|cx| validate_path_in_solution(&input.solution_id, &input.path, cx))
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+        let project = cx
+            .update(|cx| project_for_solution(&input.solution_id, cx))
+            .ok_or_else(|| anyhow::anyhow!("solution_not_open: {}", input.solution_id))?;
+
+        let project_path = cx.update(|cx| resolve_project_path(&project, &input.path, cx))?;
+
+        let buffer = project
+            .update(cx, |project, cx| project.open_buffer(project_path, cx))
+            .await?;
+
+        let position = language::Point::new(input.line, input.col);
+        let task = project.update(cx, |project, cx| {
+            project.references(&buffer, position, cx)
+        });
+
+        let references = match task.await {
+            Ok(Some(locations)) => cx.update(|cx| locations_to_refs(&locations, cx)),
+            Ok(None) | Err(_) => Vec::new(),
+        };
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("{} reference(s)", references.len()),
+            }],
+            structured_content: FindReferencesResult { references },
+        })
+    }
+}
+
+// =====================================================================
 // Tests
 // =====================================================================
 
@@ -4258,5 +4833,95 @@ mod tests {
         assert!(p.solution_id.is_empty());
         assert!(p.from.is_empty());
         assert!(p.to.is_empty());
+    }
+
+    #[test]
+    fn find_in_buffers_params_round_trip() {
+        let p: FindInBuffersParams = serde_json::from_value(serde_json::json!({
+            "solution_id": "demo",
+            "query": "TODO",
+            "case_sensitive": true,
+            "regex": false,
+            "scope": "all_files",
+            "file_glob": "**/*.rs",
+            "cursor": "/tmp|src/foo.rs",
+            "max": 50
+        }))
+        .expect("parse");
+        assert_eq!(p.solution_id, "demo");
+        assert_eq!(p.query, "TODO");
+        assert_eq!(p.case_sensitive, Some(true));
+        assert_eq!(p.regex, Some(false));
+        assert_eq!(p.scope.as_deref(), Some("all_files"));
+        assert_eq!(p.file_glob.as_deref(), Some("**/*.rs"));
+        assert_eq!(p.cursor.as_deref(), Some("/tmp|src/foo.rs"));
+        assert_eq!(p.max, Some(50));
+    }
+
+    #[test]
+    fn find_in_buffers_params_accepts_null() {
+        let p: FindInBuffersParams =
+            serde_json::from_value(serde_json::Value::Null).expect("null");
+        assert!(p.solution_id.is_empty());
+        assert!(p.query.is_empty());
+        assert!(p.case_sensitive.is_none());
+        assert!(p.regex.is_none());
+        assert!(p.scope.is_none());
+        assert!(p.file_glob.is_none());
+        assert!(p.cursor.is_none());
+        assert!(p.max.is_none());
+    }
+
+    #[test]
+    fn goto_definition_params_round_trip() {
+        let p: GotoDefinitionParams = serde_json::from_value(serde_json::json!({
+            "solution_id": "demo",
+            "path": "/abs/foo.rs",
+            "line": 12,
+            "col": 4
+        }))
+        .expect("parse");
+        assert_eq!(p.solution_id, "demo");
+        assert_eq!(p.path, "/abs/foo.rs");
+        assert_eq!(p.line, 12);
+        assert_eq!(p.col, 4);
+    }
+
+    #[test]
+    fn goto_definition_params_accepts_null() {
+        let p: GotoDefinitionParams =
+            serde_json::from_value(serde_json::Value::Null).expect("null");
+        assert!(p.solution_id.is_empty());
+        assert!(p.path.is_empty());
+        assert_eq!(p.line, 0);
+        assert_eq!(p.col, 0);
+    }
+
+    #[test]
+    fn find_references_params_round_trip() {
+        let p: FindReferencesParams = serde_json::from_value(serde_json::json!({
+            "solution_id": "demo",
+            "path": "/abs/foo.rs",
+            "line": 7,
+            "col": 9,
+            "include_declaration": true
+        }))
+        .expect("parse");
+        assert_eq!(p.solution_id, "demo");
+        assert_eq!(p.path, "/abs/foo.rs");
+        assert_eq!(p.line, 7);
+        assert_eq!(p.col, 9);
+        assert_eq!(p.include_declaration, Some(true));
+    }
+
+    #[test]
+    fn find_references_params_accepts_null() {
+        let p: FindReferencesParams =
+            serde_json::from_value(serde_json::Value::Null).expect("null");
+        assert!(p.solution_id.is_empty());
+        assert!(p.path.is_empty());
+        assert_eq!(p.line, 0);
+        assert_eq!(p.col, 0);
+        assert!(p.include_declaration.is_none());
     }
 }
