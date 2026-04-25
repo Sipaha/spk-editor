@@ -3,6 +3,7 @@
 
 mod cache;
 mod git;
+mod mcp;
 mod model;
 mod persistence;
 mod settings;
@@ -20,4 +21,5 @@ use gpui::App;
 pub fn init(cx: &mut App) {
     SolutionsSettings::register(cx);
     SolutionStore::init_global(cx);
+    mcp::register(cx);
 }
