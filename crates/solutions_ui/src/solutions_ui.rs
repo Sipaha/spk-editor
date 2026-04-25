@@ -6,6 +6,9 @@ mod add_member_picker;
 mod dock_panel;
 mod modals;
 mod picker;
+mod status_bar;
+
+pub use status_bar::SolutionsStatusItem;
 
 pub use actions::{
     NewSolution, OpenSolution, RefreshCacheForCurrent, ToggleSolutionsPanel,
