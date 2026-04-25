@@ -17,6 +17,7 @@ impl Global for Registry {}
 pub fn init(cx: &mut App) {
     if cx.try_global::<Registry>().is_none() {
         cx.set_global(Registry::default());
+        register_builtin_tools(cx);
     }
 }
 
@@ -48,6 +49,12 @@ pub(crate) fn pending_count(cx: &App) -> usize {
     cx.global::<Registry>().pending.borrow().len()
 }
 
+pub(crate) fn register_builtin_tools(cx: &mut App) {
+    register_tool(cx, |server| {
+        server.add_tool(crate::tools::capabilities::CapabilitiesTool);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -57,11 +64,12 @@ mod tests {
     async fn registry_collects_registrations(cx: &mut TestAppContext) {
         cx.update(|cx| {
             init(cx);
+            let baseline = pending_count(cx);
             register_tool(cx, |_server| {
                 // captures, doesn't need to actually do anything
             });
             register_tool(cx, |_server| {});
-            assert_eq!(pending_count(cx), 2);
+            assert_eq!(pending_count(cx), baseline + 2);
         });
     }
 
@@ -69,10 +77,11 @@ mod tests {
     async fn drain_removes_pending(cx: &mut TestAppContext) {
         cx.update(|cx| {
             init(cx);
+            let baseline = pending_count(cx);
             register_tool(cx, |_| {});
             register_tool(cx, |_| {});
             let drained = drain(cx);
-            assert_eq!(drained.len(), 2);
+            assert_eq!(drained.len(), baseline + 2);
             assert_eq!(pending_count(cx), 0);
         });
     }

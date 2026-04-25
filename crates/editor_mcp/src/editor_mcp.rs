@@ -18,3 +18,8 @@ pub use registry::{init, register_tool};
 
 #[cfg(test)]
 pub use lifecycle::start_server_for_test;
+
+#[doc(hidden)]
+pub mod tools_for_test {
+    pub use crate::tools::capabilities::{CapabilitiesParams, CapabilitiesTool};
+}
