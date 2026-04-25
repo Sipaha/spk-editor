@@ -329,12 +329,7 @@ fn main() {
         .paths_or_urls
         .iter()
         .filter_map(|arg| {
-            if arg.starts_with("file://")
-                || arg.starts_with("zed://")
-                || arg.starts_with("zed-cli://")
-                || arg.starts_with("ssh://")
-                || arg.starts_with("spk-editor://")
-            {
+            if is_url_scheme(arg) {
                 None
             } else {
                 Some(PathBuf::from(arg))
@@ -1810,16 +1805,23 @@ impl ToString for IdType {
     }
 }
 
+/// Returns true if `arg` looks like a URL (any scheme this editor knows
+/// how to route via the URL handler). Path arguments must NOT match.
+/// Both single-instance handoff and CLI URL parsing rely on this, so a
+/// new scheme only needs to be added here.
+fn is_url_scheme(arg: &str) -> bool {
+    arg.starts_with("file://")
+        || arg.starts_with("zed://")
+        || arg.starts_with("zed-cli://")
+        || arg.starts_with("ssh://")
+        || arg.starts_with("spk-editor://")
+}
+
 fn parse_url_arg(arg: &str, cx: &App) -> String {
     match std::fs::canonicalize(Path::new(&arg)) {
         Ok(path) => format!("file://{}", path.display()),
         Err(_) => {
-            if arg.starts_with("file://")
-                || arg.starts_with("zed://")
-                || arg.starts_with("zed-cli://")
-                || arg.starts_with("ssh://")
-                || parse_zed_link(arg, cx).is_some()
-            {
+            if is_url_scheme(arg) || parse_zed_link(arg, cx).is_some() {
                 arg.into()
             } else {
                 format!("file://{arg}")
