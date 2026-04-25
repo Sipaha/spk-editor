@@ -42,13 +42,13 @@ If you want signing, set up your own certificates and wire them through `script/
 
 ## Icon
 
-The shipped icon is currently the upstream Zed icon. To replace with placeholder spk-editor artwork, run (requires ImageMagick):
+The shipped icon is a placeholder ('S' on a blue background). To regenerate after editing the geometry / colors in `script/generate-placeholder-icons.sh`, run (requires ImageMagick):
 
 ```sh
 script/generate-placeholder-icons.sh
 ```
 
-A proper icon design can replace the placeholder afterwards.
+Replace with proper artwork by overwriting the files at `crates/zed/resources/app-icon*.png`, `crates/zed/resources/Document.icns`, and `crates/zed/resources/windows/app-icon*.ico`.
 
 ## Issues
 
