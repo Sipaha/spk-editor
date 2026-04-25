@@ -1,14 +1,89 @@
 //! Tool registry: holds boxed registration callbacks until `start_server`
 //! drains them and applies to the live `McpServer`.
-use gpui::App;
+use context_server::listener::McpServer;
+use gpui::{App, Global};
+use std::cell::RefCell;
 
-pub fn init(_cx: &mut App) {
-    // Stub — implemented in Task 1.3.
+type Registration = Box<dyn FnOnce(&mut McpServer) + 'static>;
+
+#[derive(Default)]
+pub(crate) struct Registry {
+    pending: RefCell<Vec<Registration>>,
+    started: RefCell<bool>,
 }
 
-pub fn register_tool<F>(_cx: &mut App, _registration: F)
+impl Global for Registry {}
+
+pub fn init(cx: &mut App) {
+    if cx.try_global::<Registry>().is_none() {
+        cx.set_global(Registry::default());
+    }
+}
+
+pub fn register_tool<F>(cx: &mut App, registration: F)
 where
-    F: FnOnce(&mut context_server::listener::McpServer) + 'static,
+    F: FnOnce(&mut McpServer) + 'static,
 {
-    // Stub — implemented in Task 1.3.
+    let registry = cx.global::<Registry>();
+    if *registry.started.borrow() {
+        debug_assert!(false, "register_tool called after start_server");
+        log::error!("editor_mcp: register_tool called after start_server — tool not registered");
+        return;
+    }
+    registry.pending.borrow_mut().push(Box::new(registration));
+}
+
+pub(crate) fn drain(cx: &mut App) -> Vec<Registration> {
+    let registry = cx.global::<Registry>();
+    std::mem::take(&mut *registry.pending.borrow_mut())
+}
+
+pub(crate) fn mark_started(cx: &mut App) {
+    let registry = cx.global::<Registry>();
+    *registry.started.borrow_mut() = true;
+}
+
+#[cfg(test)]
+pub(crate) fn pending_count(cx: &App) -> usize {
+    cx.global::<Registry>().pending.borrow().len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    async fn registry_collects_registrations(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            init(cx);
+            register_tool(cx, |_server| {
+                // captures, doesn't need to actually do anything
+            });
+            register_tool(cx, |_server| {});
+            assert_eq!(pending_count(cx), 2);
+        });
+    }
+
+    #[gpui::test]
+    async fn drain_removes_pending(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            init(cx);
+            register_tool(cx, |_| {});
+            register_tool(cx, |_| {});
+            let drained = drain(cx);
+            assert_eq!(drained.len(), 2);
+            assert_eq!(pending_count(cx), 0);
+        });
+    }
+
+    #[gpui::test]
+    #[should_panic(expected = "register_tool called after start_server")]
+    async fn register_after_start_panics_in_debug(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            init(cx);
+            mark_started(cx);
+            register_tool(cx, |_| {});
+        });
+    }
 }
