@@ -1,6 +1,7 @@
 //! Solutions: catalog of remote git projects + named groups (Solutions) that
 //! open as a single editor window with all members mounted as worktrees.
 
+mod git;
 mod model;
 mod persistence;
 mod settings;
