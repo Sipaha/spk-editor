@@ -22,4 +22,7 @@ pub use lifecycle::start_server_for_test;
 #[doc(hidden)]
 pub mod tools_for_test {
     pub use crate::tools::capabilities::{CapabilitiesParams, CapabilitiesTool};
+    pub use crate::tools::handle_cli_args::{
+        HandleCliArgsParams, HandleCliArgsResult, HandleCliArgsTool,
+    };
 }

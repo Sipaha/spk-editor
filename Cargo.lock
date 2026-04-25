@@ -5554,6 +5554,7 @@ dependencies = [
  "smol",
  "tempfile",
  "util",
+ "workspace",
 ]
 
 [[package]]
