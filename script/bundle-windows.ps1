@@ -259,6 +259,7 @@ function BuildInstaller {
             $appIconName = "app-icon"
             $appName = "SPK Editor"
             $appDisplayName = "SPK Editor"
+            $installDirName = "SpkEditor"
             $appSetupName = "SpkEditorSetup-$Architecture"
             # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs (built from release_channel::app_identifier()).
             $appMutex = "SPK-Editor-Instance-Mutex"
@@ -273,6 +274,7 @@ function BuildInstaller {
             $appIconName = "app-icon-preview"
             $appName = "SPK Editor Preview"
             $appDisplayName = "SPK Editor Preview"
+            $installDirName = "SpkEditorPreview"
             $appSetupName = "SpkEditorSetup-preview-$Architecture"
             $appMutex = "SPK-Editor-Preview-Instance-Mutex"
             $appExeName = "spk-editor"
@@ -286,6 +288,7 @@ function BuildInstaller {
             $appIconName = "app-icon-nightly"
             $appName = "SPK Editor Nightly"
             $appDisplayName = "SPK Editor Nightly"
+            $installDirName = "SpkEditorNightly"
             $appSetupName = "SpkEditorSetup-nightly-$Architecture"
             $appMutex = "SPK-Editor-Nightly-Instance-Mutex"
             $appExeName = "spk-editor"
@@ -299,6 +302,7 @@ function BuildInstaller {
             $appIconName = "app-icon-dev"
             $appName = "SPK Editor Dev"
             $appDisplayName = "SPK Editor Dev"
+            $installDirName = "SpkEditorDev"
             $appSetupName = "SpkEditorSetup-dev-$Architecture"
             $appMutex = "SPK-Editor-Dev-Instance-Mutex"
             $appExeName = "spk-editor"
@@ -325,6 +329,7 @@ function BuildInstaller {
         "AppSetupName"   = $appSetupName
         "AppName"        = $appName
         "AppDisplayName" = $appDisplayName
+        "InstallDirName" = $installDirName
         "RegValueName"   = $regValueName
         "AppMutex"       = $appMutex
         "AppExeName"     = $appExeName
