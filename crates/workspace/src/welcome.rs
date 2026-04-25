@@ -30,6 +30,13 @@ pub struct OpenRecentProject {
     pub index: usize,
 }
 
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, JsonSchema, Action)]
+#[action(namespace = welcome)]
+#[serde(transparent)]
+pub struct OpenRecentSolution {
+    pub index: usize,
+}
+
 actions!(
     zed,
     [
@@ -250,6 +257,7 @@ pub struct WelcomePage {
             DateTime<Utc>,
         )>,
     >,
+    recent_solutions: Vec<(solutions::SolutionId, String, usize)>,
 }
 
 impl WelcomePage {
@@ -285,11 +293,36 @@ impl WelcomePage {
             .detach();
         }
 
+        let recent_solutions = solutions::SolutionStore::try_global(cx)
+            .map(|store| {
+                let mut sols = store.read_with(cx, |s, _| {
+                    s.solutions()
+                        .iter()
+                        .filter(|sol| sol.last_opened_at.is_some())
+                        .map(|sol| {
+                            (
+                                sol.id.clone(),
+                                sol.name.clone(),
+                                sol.members.len(),
+                                sol.last_opened_at,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                });
+                sols.sort_by(|a, b| b.3.cmp(&a.3));
+                sols.into_iter()
+                    .take(5)
+                    .map(|(id, name, members, _)| (id, name, members))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
         WelcomePage {
             workspace,
             focus_handle,
             fallback_to_recent_projects,
             recent_workspaces: None,
+            recent_solutions,
         }
     }
 
@@ -301,6 +334,42 @@ impl WelcomePage {
     fn select_previous(&mut self, _: &SelectPrevious, window: &mut Window, cx: &mut Context<Self>) {
         window.focus_prev(cx);
         cx.notify();
+    }
+
+    fn open_recent_solution(
+        &mut self,
+        action: &OpenRecentSolution,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((sol_id, _, _)) = self.recent_solutions.get(action.index).cloned() else {
+            return;
+        };
+        let Some(store) = solutions::SolutionStore::try_global(cx) else {
+            return;
+        };
+        let paths = match store.read_with(cx, |s, _| s.paths_for_open(&sol_id)) {
+            Ok(paths) => paths,
+            Err(err) => {
+                log::error!("welcome: paths_for_open failed: {err}");
+                return;
+            }
+        };
+        if paths.is_empty() {
+            return;
+        }
+        let app_state = crate::AppState::global(cx);
+        store
+            .update(cx, |s, cx| s.touch_last_opened(&sol_id, cx))
+            .log_err();
+        cx.spawn(async move |_, cx| {
+            let task = cx.update(|cx| {
+                crate::open_paths(&paths, app_state, crate::OpenOptions::default(), cx)
+            });
+            task.await?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
     }
 
     fn open_recent_project(
@@ -392,6 +461,33 @@ impl WelcomePage {
             .children(recent_projects)
     }
 
+    fn render_recent_solution_section(&self, base_tab_index: usize) -> Option<impl IntoElement> {
+        if self.recent_solutions.is_empty() {
+            return None;
+        }
+        let buttons: Vec<_> = self
+            .recent_solutions
+            .iter()
+            .enumerate()
+            .map(|(idx, (_id, name, member_count))| {
+                let label = format!("{name}  ({member_count} projects)");
+                SectionButton::new(
+                    label,
+                    IconName::Folder,
+                    &OpenRecentSolution { index: idx },
+                    base_tab_index + idx,
+                    self.focus_handle.clone(),
+                )
+            })
+            .collect();
+        Some(
+            v_flex()
+                .w_full()
+                .child(SectionHeader::new("Recent Solutions"))
+                .children(buttons),
+        )
+    }
+
     fn render_recent_project(
         &self,
         project_index: usize,
@@ -461,6 +557,7 @@ impl Render for WelcomePage {
             .on_action(cx.listener(Self::select_previous))
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::open_recent_project))
+            .on_action(cx.listener(Self::open_recent_solution))
             .size_full()
             .bg(cx.theme().colors().editor_background)
             .justify_center()
@@ -490,6 +587,13 @@ impl Render for WelcomePage {
                             ),
                     )
                     .child(first_section.render(Default::default(), &self.focus_handle))
+                    .when_some(
+                        self.render_recent_solution_section(next_tab_index),
+                        |this, section| {
+                            next_tab_index += self.recent_solutions.len();
+                            this.child(section)
+                        },
+                    )
                     .child(second_section)
                     .when(ai_enabled && !showing_recent_projects, |this| {
                         let agent_tab_index = next_tab_index;

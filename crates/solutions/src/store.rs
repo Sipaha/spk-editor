@@ -48,6 +48,10 @@ impl SolutionStore {
         cx.global::<GlobalSolutionStore>().0.clone()
     }
 
+    pub fn try_global(cx: &App) -> Option<Entity<SolutionStore>> {
+        cx.try_global::<GlobalSolutionStore>().map(|g| g.0.clone())
+    }
+
     #[cfg(test)]
     pub fn for_test(config_path: PathBuf, cx: &mut App) -> Entity<SolutionStore> {
         cx.new(|_| SolutionStore {
