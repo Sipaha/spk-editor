@@ -1,3 +1,41 @@
+# Project: SPK Editor
+
+SPK Editor is a personal fork of [Zed](https://github.com/zed-industries/zed) maintained by Simonov Pavel ([@Sipaha](https://github.com/Sipaha)). Repo: <https://github.com/Sipaha/spk-editor>.
+
+## Fork philosophy — read this before suggesting changes
+
+- **Internal identifiers stay verbatim from upstream.** Cargo crate `zed`, `pub mod zed`, `enum ReleaseChannel { Stable, Preview, Nightly, Dev }`, type names, module paths, action namespaces — never rename. Renaming them creates merge conflicts on every upstream sync. Only user-visible identity is rebranded.
+- **Stay diff-minimal vs upstream.** Periodic `git merge upstream/main` is a recurring cost; "nice refactor" PRs that touch upstream-owned files are net negative. When fixing a bug, prefer upstreaming it first and merging back. Cleanup-only commits to upstream code are usually wrong.
+- **Disable, don't delete.** Disabled subsystems (collab, auto_update, telemetry, Zeta, native cloud LLM, Sentry uploads) keep their crates in the workspace and their code in tree — only init / dispatch / UI registration sites are commented out (`if false { … }` is fine), so upstream changes to those crates merge cleanly.
+- **Locked rebrand identifiers** (spec §3, change requires user approval): display name `SPK Editor`; CLI binary `spk-editor`; macOS bundle ids `ru.sipaha.spk-editor[-{preview,nightly,dev,debug}]`; URL scheme `spk-editor://`; config dir `~/.config/spk-editor/` (Linux), `~/Library/Application Support/SPK Editor/` (macOS), `%APPDATA%\SPK Editor\` (Windows); GitHub `Sipaha/spk-editor`; attribution string `Fork of Zed by Zed Industries, Inc., modified by Simonov Pavel`.
+- **License compliance**: never modify `LICENSE-{GPL,AGPL,APACHE}` or remove `Copyright Zed Industries, Inc.` lines. Fork contents under same SPDX as upstream (`GPL-3.0-or-later` editor, `AGPL-3.0` collab, `Apache-2.0` libraries). Inherited Zed legal docs live in `legal/upstream-zed/` and don't apply to this fork's binaries (no service infrastructure).
+
+## What's disabled (do NOT try to "fix" these without explicit instruction)
+
+| Subsystem | Where disabled |
+|---|---|
+| `auto_update` | init skipped in `crates/zed/src/main.rs`; "Check for Updates" menu hidden in `app_menus.rs` |
+| `telemetry` | `send_event` + `flush_events_inner` early-return; defaults `metrics:false`/`diagnostics:false` |
+| `collab` / `collab_ui` | `collab_ui::init` skipped; CollabPanel not loaded; "Collab Panel" menu hidden |
+| Sign-in | title-bar `render_sign_in_button` not invoked; onboarding `SignIn` action no-op'd |
+| Native cloud LLM | `CloudLanguageModelProvider::new` wrapped in `if false`; "Zed Agent" entry hidden in agent panel |
+| `zeta` (edit prediction) | `EditPredictionProvider::Zed` arm returns `None`; default `provider:"none"` |
+| Sentry uploads | `upload_panic`/`upload_minidump`/`upload_build_timings` all early-return; local panic logs preserved |
+| CI workflows | 41 workflows hard-disabled (`if: false`); `run_tests.yml` is `workflow_dispatch:` only |
+
+## What's kept
+
+- **Extension registry on `zed.dev`** — extensions panel still browses / installs from upstream registry.
+- **External agents via ACP** (Claude Code subprocess, Gemini CLI, etc.) — `agent_servers` + `acp*` + ACP entries in `agent_ui` are the primary AI integration. AI in this fork = `claude` subprocess, NOT API tokens.
+- **BYOK providers** (Copilot, Anthropic via API key, Ollama, etc.) — defined but not promoted in UI.
+
+## Build + test conventions
+
+- Bundling produces `bin/spk-editor` + `libexec/spk-editor-bin` (Linux), `SPK Editor.app/Contents/MacOS/spk-editor` (macOS), `SpkEditorSetup-*.exe` (Windows).
+- Cargo target binary is still `target/release/zed` (crate name unchanged) — bundle scripts rename at copy step.
+- Codesign / notarize gated behind `SPK_EDITOR_SIGN` env var; default produces unsigned bundles.
+- Specs and plans for the rebrand work live in `docs/superpowers/{specs,plans}/`.
+
 # Rust coding guidelines
 
 * Prioritize code correctness and clarity. Speed and efficiency are secondary priorities unless otherwise specified.
