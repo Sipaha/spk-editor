@@ -106,6 +106,13 @@ pub fn start_server(cx: &mut App) -> Result<()> {
     cx.spawn(async move |cx| {
         let mut server = server_task.await.context("creating MCP server")?;
 
+        // Apply tool registrations BEFORE publishing the well-known socket
+        // symlink. Otherwise a client connecting between symlink creation and
+        // registration application would see an empty `tools/list`.
+        for registration in drained {
+            registration(&mut server);
+        }
+
         // McpServer binds its own socket inside a tempdir. Symlink the
         // well-known path to it so clients can find us deterministically.
         let actual_socket = server.socket_path().to_path_buf();
@@ -121,10 +128,6 @@ pub fn start_server(cx: &mut App) -> Result<()> {
                     )
                 })?;
             }
-        }
-
-        for registration in drained {
-            registration(&mut server);
         }
 
         cx.update(|cx| {
