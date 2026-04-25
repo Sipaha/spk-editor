@@ -98,6 +98,31 @@ impl SolutionStore {
         Ok(id)
     }
 
+    pub fn edit_catalog_project(
+        &mut self,
+        id: &CatalogId,
+        new_name: Option<String>,
+        new_default_branch: Option<String>,
+        cx: &mut gpui::Context<Self>,
+    ) -> Result<()> {
+        let proj = self
+            .config
+            .catalog
+            .iter_mut()
+            .find(|p| p.id == *id)
+            .with_context(|| format!("catalog_not_found: {}", id.0))?;
+        if let Some(name) = new_name {
+            proj.name = name;
+        }
+        if let Some(branch) = new_default_branch {
+            proj.default_branch = Some(branch);
+        }
+        self.persist()?;
+        cx.emit(SolutionStoreEvent::Changed);
+        cx.notify();
+        Ok(())
+    }
+
     pub fn remove_catalog_project(
         &mut self,
         id: &CatalogId,

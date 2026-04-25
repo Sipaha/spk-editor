@@ -31,7 +31,6 @@ pub async fn ensure_cache(
     Ok(path)
 }
 
-#[allow(dead_code)]
 pub async fn refresh_cache(
     cache_root: &Path,
     remote_url: &str,
@@ -45,7 +44,6 @@ pub async fn refresh_cache(
     Ok(path)
 }
 
-#[allow(dead_code)]
 pub fn default_cache_root() -> PathBuf {
     paths::temp_dir().join("catalog")
 }
