@@ -516,9 +516,10 @@ impl McpServerTool for DeleteSolutionTool {
 // =====================================================================
 
 /// Open a Solution: collects member paths, calls `workspace::open_paths`,
-/// updates `last_opened_at`, returns the resulting window info. The `focus`
-/// param is currently echoed back (Phase 7 will plumb it through to
-/// `OpenOptions`).
+/// updates `last_opened_at` (only after a successful open), returns the
+/// resulting window info. `focus` is plumbed into `OpenOptions.focus`:
+/// `Some(true)` requests focus, `Some(false)` requests no focus, and
+/// `None` leaves the workspace's default behaviour intact.
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct OpenSolutionParams {
     pub solution_id: String,
@@ -542,6 +543,10 @@ impl<'de> Deserialize<'de> for OpenSolutionParams {
     }
 }
 
+/// Result of `solutions.open`. `focused` reflects the FOCUS REQUEST sent to
+/// the workspace (`input.focus.unwrap_or(true)`); the OS may not honor it on
+/// all platforms, and we cannot synchronously observe the resulting OS
+/// focus state, so the value is the request, not the post-condition.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct OpenSolutionResult {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -580,7 +585,19 @@ impl McpServerTool for OpenSolutionTool {
             input.solution_id
         );
 
-        // Touch last_opened_at before opening (best-effort; opening proceeds even if this fails).
+        // Open first; only stamp last_opened_at after the open actually
+        // succeeds, so a failed open does not lie about recency.
+        let task = cx.update(|cx| {
+            let app_state = workspace::AppState::global(cx);
+            let mut options = workspace::OpenOptions::default();
+            options.focus = input.focus;
+            workspace::open_paths(&paths, app_state, options, cx)
+        });
+        let open_result = task.await?;
+        let window_id = format_window_id(open_result.window.window_id());
+
+        // Persist failure here is non-fatal: the open already happened and the
+        // user should see a window even if we lose the recency update.
         cx.update(|cx| {
             let store = SolutionStore::global(cx);
             store
@@ -588,12 +605,6 @@ impl McpServerTool for OpenSolutionTool {
                 .log_err();
         });
 
-        let task = cx.update(|cx| {
-            let app_state = workspace::AppState::global(cx);
-            workspace::open_paths(&paths, app_state, workspace::OpenOptions::default(), cx)
-        });
-        let open_result = task.await?;
-        let window_id = format_window_id(open_result.window.window_id());
         let focused = input.focus.unwrap_or(true);
 
         let opened_paths: Vec<String> = paths
@@ -620,6 +631,9 @@ impl McpServerTool for OpenSolutionTool {
 
 /// Close the editor window currently displaying the given Solution, if any.
 /// Returns `closed: false` if no window matches (not an error).
+///
+/// **Warning**: forces close — does NOT prompt the user to save unsaved
+/// buffers. Callers should ensure modifications are saved beforehand.
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct CloseSolutionParams {
     pub solution_id: String,
@@ -835,5 +849,81 @@ mod tests {
         }))
         .expect("parse");
         assert_eq!(p.solution_id, "demo");
+    }
+
+    // NOTE: live-runner test for `solutions.create` requires a `SettingsStore`
+    // (the tool reads `root` from `SolutionsSettings::get_global`). Setting
+    // that up here is gnarly; the create path is exercised end-to-end in the
+    // Phase 8 integration tests where a real editor `App` is available.
+    // `rename` and `delete` go through the store directly and need no
+    // settings, so we cover them here.
+
+    #[gpui::test]
+    async fn rename_solution_updates_store(cx: &mut TestAppContext) {
+        let dir = tempdir().expect("tempdir");
+        let store = cx.update(|cx| SolutionStore::for_test(dir.path().join("c.json"), cx));
+        cx.update(|cx| crate::store::install_global_for_test(store.clone(), cx));
+
+        let sol_id = store
+            .update(cx, |s, cx| {
+                s.create_solution("Original", dir.path().to_path_buf(), cx)
+            })
+            .expect("create");
+
+        let response = cx
+            .update(|cx| {
+                let tool = RenameSolutionTool;
+                let id = sol_id.as_str().to_string();
+                cx.spawn(async move |cx| {
+                    tool.run(
+                        RenameSolutionParams {
+                            solution_id: id,
+                            new_name: "New Name".into(),
+                        },
+                        cx,
+                    )
+                    .await
+                })
+            })
+            .await
+            .expect("run task");
+
+        assert_eq!(response.structured_content.solution_id, sol_id.as_str());
+
+        let new_name = store.read_with(cx, |s, _| {
+            s.solutions()
+                .iter()
+                .find(|sol| sol.id == sol_id)
+                .map(|sol| sol.name.clone())
+        });
+        assert_eq!(new_name, Some("New Name".to_string()));
+    }
+
+    #[gpui::test]
+    async fn delete_solution_removes_from_store(cx: &mut TestAppContext) {
+        let dir = tempdir().expect("tempdir");
+        let store = cx.update(|cx| SolutionStore::for_test(dir.path().join("c.json"), cx));
+        cx.update(|cx| crate::store::install_global_for_test(store.clone(), cx));
+
+        let sol_id = store
+            .update(cx, |s, cx| {
+                s.create_solution("Demo", dir.path().to_path_buf(), cx)
+            })
+            .expect("create");
+
+        let response = cx
+            .update(|cx| {
+                let tool = DeleteSolutionTool;
+                let id = sol_id.as_str().to_string();
+                cx.spawn(async move |cx| {
+                    tool.run(DeleteSolutionParams { solution_id: id }, cx).await
+                })
+            })
+            .await
+            .expect("run task");
+
+        assert!(response.structured_content.deleted);
+        let count = store.read_with(cx, |s, _| s.solutions().len());
+        assert_eq!(count, 0);
     }
 }

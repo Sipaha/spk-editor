@@ -217,6 +217,9 @@ impl McpServerTool for FocusWindowTool {
 }
 
 /// Close the editor window with the given window_id.
+///
+/// **Warning**: forces close — does NOT prompt the user to save unsaved
+/// buffers. Callers should ensure modifications are saved beforehand.
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct CloseWindowParams {
     pub window_id: String,
