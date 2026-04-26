@@ -16645,6 +16645,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "solution_agent"
+version = "0.1.0"
+dependencies = [
+ "acp_thread",
+ "agent-client-protocol",
+ "agent_servers",
+ "anyhow",
+ "chrono",
+ "editor_mcp",
+ "gpui",
+ "indoc",
+ "language_models",
+ "log",
+ "notifications",
+ "parking_lot",
+ "paths",
+ "project",
+ "schemars 1.0.4",
+ "serde",
+ "serde_json",
+ "solutions",
+ "sqlez",
+ "tempfile",
+ "ui",
+ "util",
+ "uuid",
+ "workspace",
+]
+
+[[package]]
 name = "solutions"
 version = "0.1.0"
 dependencies = [

@@ -185,6 +185,7 @@ members = [
     "crates/snippet",
     "crates/snippet_provider",
     "crates/snippets_ui",
+    "crates/solution_agent",
     "crates/solutions",
     "crates/solutions_ui",
     "crates/sqlez",
@@ -444,6 +445,7 @@ shell_command_parser = { path = "crates/shell_command_parser" }
 snippet = { path = "crates/snippet" }
 snippet_provider = { path = "crates/snippet_provider" }
 snippets_ui = { path = "crates/snippets_ui" }
+solution_agent = { path = "crates/solution_agent" }
 solutions = { path = "crates/solutions" }
 solutions_ui = { path = "crates/solutions_ui" }
 sqlez = { path = "crates/sqlez" }
