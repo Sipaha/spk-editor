@@ -16,6 +16,7 @@ mod window_ids;
 
 pub use handoff::{HandoffOutcome, try_handoff_to_existing_instance};
 pub use lifecycle::start_server;
+pub use notifications::emit as emit_notification;
 pub use registry::{init, register_tool};
 pub use window_ids::format as format_window_id;
 
