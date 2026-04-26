@@ -4,8 +4,12 @@
 //! See `docs/superpowers/specs/2026-04-26-solution-scoped-ai-sessions-design.md`
 //! for the design rationale.
 
+pub mod model;
+
+pub use model::{
+    AgentServerId, SessionState, SolutionSession, SolutionSessionId, SolutionSessionMetadata,
+};
+
 use gpui::App;
 
-pub fn init(_cx: &mut App) {
-    // Phases 1+ register store, MCP, UI, actions here.
-}
+pub fn init(_cx: &mut App) {}
