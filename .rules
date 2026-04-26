@@ -36,6 +36,35 @@ SPK Editor is a personal fork of [Zed](https://github.com/zed-industries/zed) ma
 - Codesign / notarize gated behind `SPK_EDITOR_SIGN` env var; default produces unsigned bundles.
 - Specs and plans for the rebrand work live in `docs/superpowers/{specs,plans}/`.
 
+## Autonomous testing via embedded MCP
+
+A running `spk-editor` instance exposes an MCP server over a Unix socket so an agent can drive a real editor for end-to-end testing without a human in the loop. Use this whenever a change touches workspace/project/buffer/LSP behavior and you want to verify it against a live UI rather than only unit tests.
+
+**Socket:** `~/.config/spk-editor/mcp.sock` (Linux). Single-instance — one editor process at a time holds the socket; a second `spk-editor` invocation hands off CLI args via the existing socket and exits. Lock file is `~/.config/spk-editor/mcp.lock`.
+
+**Tool catalog** (43 tools, JSON-RPC 2.0 over the socket — namespaces: `editor.*`, `windows.*`, `solutions.*`, `catalog.*`, `workspace.*`, `project.*`, `diagnostics.*`):
+- **Probe / control:** `editor.capabilities`, `editor.handle_cli_args`, `editor.{subscribe,unsubscribe,list_subscriptions}`, `editor.{get_operation,cancel_operation}`
+- **Solutions / catalog (the multi-project workspace abstraction):** `solutions.{list,get,create,rename,delete,open,close,add_member,remove_member,reorder_members}`, `catalog.{list,add_project,remove_project,edit_project,refresh_cache}`
+- **Windows:** `windows.{list,focus,close,dispatch_action}`
+- **Workspace state:** `workspace.{list_buffers,get_effective_settings,dispatch_action,screenshot,dump_visual_structure}`
+- **Project / buffer ops:** `project.{list_files,read_buffer,apply_edit,save_buffer,open_file,close_buffer,create_file,delete_file,rename_file,find_in_buffers,goto_definition,find_references}`
+- **Diagnostics:** `diagnostics.get` (per-file summaries + per-diagnostic items with severity / message / source / code)
+
+**Self-test recipe:**
+1. Build + launch: `cargo run --release --bin spk-editor` (or use a prebuilt bundle). Confirm the socket exists.
+2. Connect via `socat - UNIX-CONNECT:$HOME/.config/spk-editor/mcp.sock` for ad-hoc probes, or write a small Rust/Python client. JSON-RPC frames are newline-delimited.
+3. Always start with `editor.capabilities` to confirm protocol version and supported event kinds.
+4. For long-running ops (`solutions.add_member`, `catalog.refresh_cache`) use the returned `operation_id` with `editor.get_operation` to poll, or subscribe via `editor.subscribe { kinds: ["operation_completed", "operation_progress"] }` for push notifications.
+5. For visual / state assertions, prefer `workspace.dump_visual_structure` (cheap structured tree) over `workspace.screenshot` (only works in test/test-support builds — see "Known gap" below).
+
+**Event subscriptions** broadcast as JSON-RPC `editor/notification` frames. Wired kinds: `operation_progress`, `operation_completed`, `solution_changed`, `buffer_opened`, `buffer_closed`, `buffer_saved`, `buffer_dirty_changed`, `diagnostic_updated`, `lsp_started`, `lsp_stopped`, `window_focused`. Deferred: `selection_changed` (Editor-level, not Buffer), `cli_args_received`, `server_shutting_down`.
+
+**Integration tests** in `crates/editor_mcp/tests/*_e2e_test.rs` spin up the real socket using `paths::config_dir()`. Because they share the well-known socket path with a real running editor, **never run them while a real `spk-editor` instance is up** — the test will collide with the live lock. Run e2e tests serially when the editor is closed.
+
+**Known gap:** `workspace.screenshot` returns a 1×1 placeholder in production builds — `gpui::Window::render_to_image` is gated behind `cfg(test|test-support)` upstream. For real visual verification today, use `workspace.dump_visual_structure` plus targeted `cargo test`. Production screenshot needs upstream GPUI work; do not attempt to backfill it as a fork-local change.
+
+**Architecture:** `editor_mcp` crate owns lifecycle (`SingleInstanceLock`, server bind, broadcast). Tools are registered from each domain crate's `init` (`solutions::init`, `workspace::init`) via `editor_mcp::register_tool`. Event-source coordinator is in `solutions::event_sources` (kept out of `editor_mcp` to avoid a `editor_mcp → solutions/workspace/project` dep cycle that earlier phases had to resolve).
+
 # Rust coding guidelines
 
 * Prioritize code correctness and clarity. Speed and efficiency are secondary priorities unless otherwise specified.
