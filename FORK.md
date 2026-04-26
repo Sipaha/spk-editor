@@ -84,6 +84,12 @@ Why: respects the user's Claude subscription policy. The subprocess inherits `~/
 
 How to apply: never inject Anthropic credentials into a subprocess env. If a user wants BYOK, they configure that through Zed's normal language model providers — those are kept but not promoted in UI.
 
+### 9. File drops on a session view insert plain `@path` text, not `MentionSet` entries
+
+Why: upstream `agent_ui::MessageEditor` integrates with a heavy `MentionSet` machinery (mention rendering, image upload, project-path resolution, capability negotiation). Pulling that into `solution_agent` would couple us to `agent_ui` internals. v1 keeps the compose box a vanilla `editor::Editor` and the drop handler emits text like `@member-name/src/lib.rs`. The agent reads the path on its own via the `Read` tool — no editor-side resolution needed.
+
+How to apply: if image-paste, rich mentions, or capability-aware path expansion become user requirements, integrate `agent_ui::message_editor::insert_mention_for_project_path` and bring `MentionSet` along — don't half-build a parallel mention layer in `solution_agent`. Plain text paste (`Ctrl+V` for clipboard text) works via `editor::Editor`'s native action; no patch needed.
+
 ## Where specs and plans live
 
 `docs/superpowers/{specs,plans}/` is in `.gitignore` — these are personal working notes, not committed. Each major fork feature has a design spec + step-by-step implementation plan there. They're append-only history; the canonical state of the code lives in code + this file + `.rules`.
