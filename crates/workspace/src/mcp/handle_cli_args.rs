@@ -85,9 +85,22 @@ impl McpServerTool for HandleCliArgsTool {
         };
 
         if resolved.is_empty() {
-            // Empty paths is a "just focus" request; Phase 7 will wire focus action.
-            // For now, treat as handled but no-op.
-            return Ok(success(opened_paths, None));
+            // Empty paths means a duplicate launch with no args — bring an
+            // existing window to the foreground so the user gets feedback that
+            // the editor is already running, instead of having the new
+            // process exit silently while the original window stays buried
+            // under whatever else is on screen.
+            let activated: Option<String> = cx.update(|cx| {
+                cx.activate(false);
+                let handle = cx.windows().into_iter().next()?;
+                handle
+                    .update(cx, |_, window, _| {
+                        window.activate_window();
+                        editor_mcp::format_window_id(handle.window_id())
+                    })
+                    .ok()
+            });
+            return Ok(success(opened_paths, activated));
         }
 
         let task = cx.update(|cx| {
