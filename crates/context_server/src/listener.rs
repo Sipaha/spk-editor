@@ -35,6 +35,9 @@ pub struct McpServer {
     socket_path: PathBuf,
     tools: Rc<RefCell<HashMap<&'static str, RegisteredTool>>>,
     handlers: Rc<RefCell<HashMap<&'static str, RequestHandler>>>,
+    connections: Rc<RefCell<HashMap<u64, UnboundedSender<String>>>>,
+    #[allow(dead_code)]
+    next_connection_id: Rc<RefCell<u64>>,
     _server_task: Task<()>,
 }
 
@@ -65,12 +68,23 @@ impl McpServer {
             let (temp_dir, socket_path, listener) = task.await?;
             let tools = Rc::new(RefCell::new(HashMap::default()));
             let handlers = Rc::new(RefCell::new(HashMap::default()));
+            let connections = Rc::new(RefCell::new(HashMap::default()));
+            let next_connection_id = Rc::new(RefCell::new(0u64));
             let server_task = cx.spawn({
                 let tools = tools.clone();
                 let handlers = handlers.clone();
+                let connections = connections.clone();
+                let next_connection_id = next_connection_id.clone();
                 async move |cx| {
                     while let Ok((stream, _)) = listener.accept().await {
-                        Self::serve_connection(stream, tools.clone(), handlers.clone(), cx);
+                        Self::serve_connection(
+                            stream,
+                            tools.clone(),
+                            handlers.clone(),
+                            connections.clone(),
+                            next_connection_id.clone(),
+                            cx,
+                        );
                     }
                     drop(temp_dir)
                 }
@@ -80,6 +94,8 @@ impl McpServer {
                 _server_task: server_task,
                 tools,
                 handlers,
+                connections,
+                next_connection_id,
             })
         })
     }
@@ -200,11 +216,21 @@ impl McpServer {
         stream: UnixStream,
         tools: Rc<RefCell<HashMap<&'static str, RegisteredTool>>>,
         handlers: Rc<RefCell<HashMap<&'static str, RequestHandler>>>,
+        connections: Rc<RefCell<HashMap<u64, UnboundedSender<String>>>>,
+        next_connection_id: Rc<RefCell<u64>>,
         cx: &mut AsyncApp,
     ) {
         let (read, write) = stream.split();
         let (incoming_tx, mut incoming_rx) = unbounded();
         let (outgoing_tx, outgoing_rx) = unbounded();
+
+        let connection_id = {
+            let mut next = next_connection_id.borrow_mut();
+            let id = *next;
+            *next += 1;
+            connections.borrow_mut().insert(id, outgoing_tx.clone());
+            id
+        };
 
         cx.background_spawn(Self::handle_io(outgoing_rx, incoming_tx, write, read))
             .detach();
@@ -237,8 +263,33 @@ impl McpServer {
                     );
                 }
             }
+            connections.borrow_mut().remove(&connection_id);
         })
         .detach();
+    }
+
+    /// Broadcast a JSON-RPC notification (no `id` field) to all connected
+    /// clients. Notification shape:
+    /// `{"jsonrpc": "2.0", "method": method, "params": params}`.
+    /// Failed sends (closed connections) are silently dropped — broadcast is
+    /// best-effort and the connection's read side will deregister it shortly.
+    pub fn broadcast_notification(&self, method: &str, params: serde_json::Value) {
+        let payload = json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        });
+        let serialized = match serde_json::to_string(&payload) {
+            Ok(s) => s,
+            Err(err) => {
+                log::error!("context_server: failed to serialize notification: {err}");
+                return;
+            }
+        };
+        let connections = self.connections.borrow();
+        for sender in connections.values() {
+            sender.unbounded_send(serialized.clone()).ok();
+        }
     }
 
     fn handle_list_tools(

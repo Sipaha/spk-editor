@@ -4,8 +4,9 @@
 //! a large repo) return an `operation_id` immediately and continue work
 //! in `cx.spawn`. Clients poll via `editor.get_operation(id)`.
 //!
-//! Real-time server-push notifications are deferred to a future upstream
-//! patch on `context_server::McpServer`; for now polling is the only path.
+//! State changes (progress, completion) are also broadcast via
+//! `editor/notification` MCP notifications so clients can react in real time
+//! without polling.
 
 use chrono::{DateTime, Utc};
 use collections::HashMap;
@@ -86,8 +87,25 @@ pub fn record_progress(id: &str, stage: String, percent: Option<u8>, cx: &App) {
     let Some(tracker) = cx.try_global::<OperationTracker>() else {
         return;
     };
-    if let Some(op) = tracker.operations.borrow_mut().get_mut(id) {
-        op.progress = OperationProgress { stage, percent };
+    let updated = if let Some(op) = tracker.operations.borrow_mut().get_mut(id) {
+        op.progress = OperationProgress {
+            stage: stage.clone(),
+            percent,
+        };
+        true
+    } else {
+        false
+    };
+    if updated {
+        crate::notifications::emit(
+            cx,
+            "operation_progress",
+            serde_json::json!({
+                "operation_id": id,
+                "stage": stage,
+                "percent": percent,
+            }),
+        );
     }
 }
 
@@ -95,10 +113,23 @@ pub fn complete_ok(id: &str, result: serde_json::Value, cx: &App) {
     let Some(tracker) = cx.try_global::<OperationTracker>() else {
         return;
     };
-    if let Some(op) = tracker.operations.borrow_mut().get_mut(id) {
+    let updated = if let Some(op) = tracker.operations.borrow_mut().get_mut(id) {
         op.status = OperationStatus::Completed;
-        op.result = Some(result);
+        op.result = Some(result.clone());
         op.completed_at = Some(Utc::now());
+        true
+    } else {
+        false
+    };
+    if updated {
+        crate::notifications::emit(
+            cx,
+            "operation_completed",
+            serde_json::json!({
+                "operation_id": id,
+                "result": { "ok": true, "data": result },
+            }),
+        );
     }
     gc(cx);
 }
@@ -107,10 +138,23 @@ pub fn complete_err(id: &str, error: String, cx: &App) {
     let Some(tracker) = cx.try_global::<OperationTracker>() else {
         return;
     };
-    if let Some(op) = tracker.operations.borrow_mut().get_mut(id) {
+    let updated = if let Some(op) = tracker.operations.borrow_mut().get_mut(id) {
         op.status = OperationStatus::Failed;
-        op.error = Some(error);
+        op.error = Some(error.clone());
         op.completed_at = Some(Utc::now());
+        true
+    } else {
+        false
+    };
+    if updated {
+        crate::notifications::emit(
+            cx,
+            "operation_completed",
+            serde_json::json!({
+                "operation_id": id,
+                "result": { "ok": false, "error": error },
+            }),
+        );
     }
     gc(cx);
 }
@@ -119,9 +163,22 @@ pub fn complete_cancelled(id: &str, cx: &App) {
     let Some(tracker) = cx.try_global::<OperationTracker>() else {
         return;
     };
-    if let Some(op) = tracker.operations.borrow_mut().get_mut(id) {
+    let updated = if let Some(op) = tracker.operations.borrow_mut().get_mut(id) {
         op.status = OperationStatus::Cancelled;
         op.completed_at = Some(Utc::now());
+        true
+    } else {
+        false
+    };
+    if updated {
+        crate::notifications::emit(
+            cx,
+            "operation_completed",
+            serde_json::json!({
+                "operation_id": id,
+                "result": { "ok": false, "error": "cancelled" },
+            }),
+        );
     }
     gc(cx);
 }
