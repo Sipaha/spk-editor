@@ -8,10 +8,13 @@
 #   script/run-mcp                # uses $DISPLAY if set, otherwise Xvfb
 #   script/run-mcp --headless     # always use Xvfb, even if $DISPLAY is set
 #   script/run-mcp --display      # never use Xvfb (fails if no $DISPLAY)
+#   script/run-mcp --debug        # use the dev (debug) build — much faster to
+#                                 # rebuild during iteration; runtime is slower
+#   script/run-mcp --release      # use target/release/spk-editor (default)
 #   script/run-mcp -- <args>      # pass extra args to spk-editor
 #
 # Behavior:
-# - Builds target/release/spk-editor if missing.
+# - Builds the chosen binary (release by default, dev with --debug) if missing.
 # - Waits for the MCP socket to appear (timeout 30s) and prints its path
 #   so callers can pipe into a follow-up command.
 # - Forwards SIGINT/SIGTERM to the editor process, then cleans up Xvfb.
@@ -25,6 +28,7 @@ set -euo pipefail
 mode=""
 forward_args=()
 runtime_dir=""
+profile="release"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -34,6 +38,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --display)
             mode="display"
+            shift
+            ;;
+        --debug)
+            profile="dev"
+            shift
+            ;;
+        --release)
+            profile="release"
             shift
             ;;
         --runtime-dir)
@@ -53,11 +65,17 @@ while [[ $# -gt 0 ]]; do
 done
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-binary="$repo_root/target/release/spk-editor"
+if [[ "$profile" == "dev" ]]; then
+    binary="$repo_root/target/debug/spk-editor"
+    cargo_flags=(--bin spk-editor)
+else
+    binary="$repo_root/target/release/spk-editor"
+    cargo_flags=(--release --bin spk-editor)
+fi
 
 if [[ ! -x "$binary" ]]; then
-    echo "[run-mcp] building $binary ..."
-    (cd "$repo_root" && cargo build --release --bin spk-editor)
+    echo "[run-mcp] building $binary (profile: $profile) ..."
+    (cd "$repo_root" && cargo build "${cargo_flags[@]}")
 fi
 
 # Decide whether to wrap with Xvfb. If $DISPLAY is unset and mode wasn't
