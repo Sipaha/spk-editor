@@ -16,6 +16,7 @@ use util::ResultExt;
 use crate::adapter::AdapterRegistry;
 use crate::db::SolutionAgentDb;
 use crate::model::{AgentServerId, SessionState, SolutionSession, SolutionSessionId};
+use crate::notifier;
 use crate::pool::{PooledConnection, SHUTDOWN_DEBOUNCE, SpawnState, SubprocessPool};
 
 pub struct SolutionAgentStore {
@@ -30,6 +31,14 @@ pub struct SolutionAgentStore {
     /// table that production wiring will populate at app init and tests
     /// populate manually. Held in an `Rc` because `dyn AgentServer` is `!Sync`.
     server_registry: HashMap<AgentServerId, Rc<dyn agent_servers::AgentServer>>,
+    /// Set by the navigator (Phase 6) so `mutate_state` can ask "is this
+    /// session currently focused in the UI?" before deciding whether to
+    /// fire an OS notification. Stored as `Fn(&App) -> bool` rather than
+    /// `Fn(&Context<Self>) -> bool` because `Context` is parameterised on
+    /// `Self`, which makes the trait object generic and unstorable. `&App`
+    /// is the strict supertype the resolver actually needs.
+    pub focus_resolver:
+        Option<Arc<dyn Fn(SolutionSessionId, &gpui::App) -> bool + Send + Sync>>,
     _solution_subscription: Option<Subscription>,
 }
 
@@ -40,6 +49,7 @@ pub enum SolutionAgentStoreEvent {
     SessionStateChanged(SolutionSessionId),
     SessionTitleChanged(SolutionSessionId),
     SessionMessageAppended(SolutionSessionId),
+    SessionNotified(SolutionSessionId, notifier::NotifyKind),
 }
 
 impl EventEmitter<SolutionAgentStoreEvent> for SolutionAgentStore {}
@@ -99,6 +109,7 @@ impl SolutionAgentStore {
             persistence: None,
             adapters,
             server_registry: HashMap::new(),
+            focus_resolver: None,
             _solution_subscription: solution_subscription,
         }
     }
@@ -543,47 +554,57 @@ impl SolutionAgentStore {
         };
         match event {
             acp_thread::AcpThreadEvent::NewEntry => {
-                session_entity.update(cx, |s, _| {
-                    s.last_activity_at = Utc::now();
-                    if matches!(s.state, SessionState::Idle | SessionState::AwaitingInput) {
-                        s.state = SessionState::Running {
-                            started_at: std::time::Instant::now(),
-                            notified: false,
-                        };
-                    }
-                });
+                self.mutate_state(
+                    session_id,
+                    |state| {
+                        if matches!(state, SessionState::Idle | SessionState::AwaitingInput) {
+                            *state = SessionState::Running {
+                                started_at: std::time::Instant::now(),
+                                notified: false,
+                            };
+                        }
+                    },
+                    cx,
+                );
+                if let Some(s) = self.sessions.get(&session_id).cloned() {
+                    s.update(cx, |s, _| s.last_activity_at = Utc::now());
+                }
                 cx.emit(SolutionAgentStoreEvent::SessionMessageAppended(session_id));
             }
             acp_thread::AcpThreadEvent::Stopped(_) => {
-                session_entity.update(cx, |s, _| {
-                    s.state = SessionState::Idle;
-                    s.last_activity_at = Utc::now();
-                });
-                cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+                self.mutate_state(session_id, |state| *state = SessionState::Idle, cx);
+                if let Some(s) = self.sessions.get(&session_id).cloned() {
+                    s.update(cx, |s, _| s.last_activity_at = Utc::now());
+                }
             }
             acp_thread::AcpThreadEvent::Error
             | acp_thread::AcpThreadEvent::LoadError(_) => {
-                session_entity.update(cx, |s, _| {
-                    s.state = SessionState::Errored(SharedString::from("agent error"));
-                });
-                cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+                self.mutate_state(
+                    session_id,
+                    |state| *state = SessionState::Errored(SharedString::from("agent error")),
+                    cx,
+                );
             }
             acp_thread::AcpThreadEvent::ToolAuthorizationRequested(_) => {
-                session_entity.update(cx, |s, _| {
-                    s.state = SessionState::AwaitingInput;
-                });
-                cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+                self.mutate_state(
+                    session_id,
+                    |state| *state = SessionState::AwaitingInput,
+                    cx,
+                );
             }
             acp_thread::AcpThreadEvent::ToolAuthorizationReceived(_) => {
-                session_entity.update(cx, |s, _| {
-                    if matches!(s.state, SessionState::AwaitingInput) {
-                        s.state = SessionState::Running {
-                            started_at: std::time::Instant::now(),
-                            notified: false,
-                        };
-                    }
-                });
-                cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+                self.mutate_state(
+                    session_id,
+                    |state| {
+                        if matches!(state, SessionState::AwaitingInput) {
+                            *state = SessionState::Running {
+                                started_at: std::time::Instant::now(),
+                                notified: false,
+                            };
+                        }
+                    },
+                    cx,
+                );
             }
             acp_thread::AcpThreadEvent::TitleUpdated => {
                 let new_title = session_entity
@@ -598,6 +619,71 @@ impl SolutionAgentStore {
             _ => {}
         }
         cx.notify();
+    }
+
+    /// Wraps a `SessionState` mutation so notifier hooks fire uniformly:
+    ///   1. Snapshot previous state.
+    ///   2. Apply `f` to mutate state.
+    ///   3. Emit `SessionStateChanged` only when the discriminant changed.
+    ///   4. Ask the notifier whether the transition warrants a desktop
+    ///      notification, dispatch it, emit `SessionNotified`, and mark
+    ///      the session's `Running { notified: true }` to suppress dupes.
+    ///
+    /// Side-channel updates (e.g. `last_activity_at`) stay outside `f` so
+    /// they don't accidentally affect the notification decision.
+    fn mutate_state<F: FnOnce(&mut SessionState)>(
+        &mut self,
+        session_id: SolutionSessionId,
+        f: F,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.sessions.get(&session_id).cloned() else {
+            return;
+        };
+        let previous = session.read(cx).state.clone();
+        session.update(cx, |s, _| f(&mut s.state));
+        let next = session.read(cx).state.clone();
+        if std::mem::discriminant(&previous) != std::mem::discriminant(&next) {
+            cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+        }
+        let now = std::time::Instant::now();
+        let is_focused = self
+            .focus_resolver
+            .as_ref()
+            .map(|f| f(session_id, cx))
+            .unwrap_or(false);
+        if let Some(decision) =
+            notifier::decide_notification(session_id, &previous, &next, now, is_focused)
+        {
+            let (title, body) = {
+                let s = session.read(cx);
+                let title = format!("SPK Editor — {} ({})", s.agent_id, s.title);
+                let body = match decision.kind {
+                    notifier::NotifyKind::Completed => {
+                        format!("Done after {} min", decision.elapsed.as_secs() / 60)
+                    }
+                    notifier::NotifyKind::AwaitingInput => format!(
+                        "Awaiting your input after {} min",
+                        decision.elapsed.as_secs() / 60
+                    ),
+                    notifier::NotifyKind::Errored => match &next {
+                        SessionState::Errored(msg) => format!("Failed: {msg}"),
+                        _ => "Failed".to_string(),
+                    },
+                };
+                (title, body)
+            };
+            notifier::dispatch(&decision, &title, &body, cx);
+            cx.emit(SolutionAgentStoreEvent::SessionNotified(
+                session_id,
+                decision.kind,
+            ));
+            session.update(cx, |s, _| {
+                if let SessionState::Running { notified, .. } = &mut s.state {
+                    *notified = true;
+                }
+            });
+        }
     }
 
     pub fn pool_release_session(

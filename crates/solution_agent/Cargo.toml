@@ -34,12 +34,16 @@ project.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+smol.workspace = true
 solutions.workspace = true
 sqlez.workspace = true
 ui.workspace = true
 util.workspace = true
 uuid = { workspace = true, features = ["serde", "v4"] }
 workspace.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+ashpd.workspace = true
 
 [dev-dependencies]
 acp_thread = { workspace = true, features = ["test-support"] }
