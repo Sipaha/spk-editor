@@ -11,12 +11,14 @@ use ui::{Icon, IconName, Label};
 use workspace::{Workspace, item::Item};
 
 use crate::model::{SolutionSession, SolutionSessionId};
+use crate::store::SolutionAgentStore;
 
 pub struct SolutionSessionView {
     session_id: SolutionSessionId,
     session: Entity<SolutionSession>,
     focus_handle: FocusHandle,
     workspace: WeakEntity<Workspace>,
+    compose_editor: Entity<editor::Editor>,
 }
 
 impl SolutionSessionView {
@@ -24,15 +26,42 @@ impl SolutionSessionView {
         session_id: SolutionSessionId,
         session: Entity<SolutionSession>,
         workspace: WeakEntity<Workspace>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&session, |_, _, cx| cx.notify()).detach();
+        let compose_editor = cx.new(|cx| {
+            let mut e = editor::Editor::auto_height(1, 8, window, cx);
+            e.set_placeholder_text("Send a message…", window, cx);
+            e
+        });
         Self {
             session_id,
             session,
             focus_handle: cx.focus_handle(),
             workspace,
+            compose_editor,
         }
+    }
+
+    fn submit_compose(
+        &mut self,
+        _: &menu::Confirm,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let content = self.compose_editor.read(cx).text(cx);
+        if content.trim().is_empty() {
+            return;
+        }
+        self.compose_editor
+            .update(cx, |e, cx| e.clear(window, cx));
+        let session_id = self.session_id;
+        SolutionAgentStore::global(cx).update(cx, |store, cx| {
+            store
+                .send_message(session_id, content, cx)
+                .detach_and_log_err(cx);
+        });
     }
 }
 
@@ -51,6 +80,9 @@ impl Render for SolutionSessionView {
         let session = self.session.read(cx);
         let header = format!("{} • {:?}", session.agent_id, session.state);
         div()
+            .key_context("SolutionSessionView")
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::submit_compose))
             .flex()
             .flex_col()
             .size_full()
@@ -87,10 +119,20 @@ impl Render for SolutionSessionView {
             })
             .child(
                 div()
-                    .h_16()
+                    .flex()
+                    .h_24()
+                    .p_2()
+                    .gap_2()
                     .border_t_1()
                     .border_color(cx.theme().colors().border)
-                    .child(Label::new("(compose box — Task 6.4)")),
+                    .child(div().flex_1().child(self.compose_editor.clone()))
+                    .child(
+                        ui::Button::new("solution-session-send", "Send").on_click(cx.listener(
+                            |this, _, window, cx| {
+                                this.submit_compose(&menu::Confirm, window, cx);
+                            },
+                        )),
+                    ),
             )
     }
 }
