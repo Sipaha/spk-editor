@@ -13,6 +13,7 @@ pub mod event_sources;
 pub mod mcp;
 pub mod notifier;
 pub(crate) mod pool;
+pub mod session_view;
 pub mod status_item;
 pub mod store;
 
