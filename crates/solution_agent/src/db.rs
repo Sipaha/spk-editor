@@ -100,6 +100,38 @@ impl SolutionAgentDb {
             select_metadata_for_solution(&connection, &solution_id)
         })
     }
+
+    pub fn save_blob(&self, id: SolutionSessionId, blob: Vec<u8>) -> Task<Result<()>> {
+        let connection = self.connection.clone();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            update_blob(&connection, id, &blob)
+        })
+    }
+
+    pub fn load_blob(&self, id: SolutionSessionId) -> Task<Result<Option<Vec<u8>>>> {
+        let connection = self.connection.clone();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            select_blob(&connection, id)
+        })
+    }
+
+    pub fn delete(&self, id: SolutionSessionId) -> Task<Result<()>> {
+        let connection = self.connection.clone();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            delete_by_id(&connection, id)
+        })
+    }
+
+    pub fn delete_for_solution(&self, solution_id: SolutionId) -> Task<Result<()>> {
+        let connection = self.connection.clone();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            delete_by_solution(&connection, &solution_id)
+        })
+    }
 }
 
 fn insert_or_update_metadata(
@@ -130,6 +162,38 @@ fn insert_or_update_metadata(
         meta.last_activity_at.timestamp_millis(),
     ))?;
 
+    Ok(())
+}
+
+fn update_blob(connection: &Connection, id: SolutionSessionId, blob: &[u8]) -> Result<()> {
+    let mut update = connection.exec_bound::<(Vec<u8>, String)>(indoc! {"
+        UPDATE solution_sessions SET acp_thread_blob = ?1 WHERE id = ?2
+    "})?;
+    update((blob.to_vec(), id.to_string()))?;
+    Ok(())
+}
+
+fn select_blob(connection: &Connection, id: SolutionSessionId) -> Result<Option<Vec<u8>>> {
+    let mut select = connection.select_bound::<String, Option<Vec<u8>>>(indoc! {"
+        SELECT acp_thread_blob FROM solution_sessions WHERE id = ? LIMIT 1
+    "})?;
+    let rows = select(id.to_string())?;
+    Ok(rows.into_iter().next().flatten())
+}
+
+fn delete_by_id(connection: &Connection, id: SolutionSessionId) -> Result<()> {
+    let mut delete = connection.exec_bound::<String>(indoc! {"
+        DELETE FROM solution_sessions WHERE id = ?
+    "})?;
+    delete(id.to_string())?;
+    Ok(())
+}
+
+fn delete_by_solution(connection: &Connection, solution_id: &SolutionId) -> Result<()> {
+    let mut delete = connection.exec_bound::<String>(indoc! {"
+        DELETE FROM solution_sessions WHERE solution_id = ?
+    "})?;
+    delete(solution_id.0.clone())?;
     Ok(())
 }
 
@@ -213,5 +277,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(in_c.len(), 0);
+    }
+
+    #[gpui::test]
+    async fn save_blob_then_load_roundtrips(cx: &mut gpui::TestAppContext) {
+        let executor = cx.executor();
+        let db = SolutionAgentDb::open(executor).unwrap();
+
+        let meta = make_meta(1, "sol-a");
+        db.save_metadata(meta.clone()).await.unwrap();
+        let blob = b"\x01\x02\x03 example payload".to_vec();
+        db.save_blob(meta.id, blob.clone()).await.unwrap();
+
+        let loaded = db.load_blob(meta.id).await.unwrap();
+        assert_eq!(loaded, Some(blob));
+    }
+
+    #[gpui::test]
+    async fn delete_removes_row(cx: &mut gpui::TestAppContext) {
+        let executor = cx.executor();
+        let db = SolutionAgentDb::open(executor).unwrap();
+        let meta = make_meta(1, "sol-a");
+        db.save_metadata(meta.clone()).await.unwrap();
+
+        db.delete(meta.id).await.unwrap();
+
+        let listing = db.list_for_solution(meta.solution_id.clone()).await.unwrap();
+        assert!(listing.is_empty());
+    }
+
+    #[gpui::test]
+    async fn delete_for_solution_cascades(cx: &mut gpui::TestAppContext) {
+        let executor = cx.executor();
+        let db = SolutionAgentDb::open(executor).unwrap();
+        db.save_metadata(make_meta(1, "sol-a")).await.unwrap();
+        db.save_metadata(make_meta(2, "sol-a")).await.unwrap();
+        db.save_metadata(make_meta(3, "sol-b")).await.unwrap();
+
+        db.delete_for_solution(SolutionId("sol-a".into())).await.unwrap();
+
+        assert!(db.list_for_solution(SolutionId("sol-a".into())).await.unwrap().is_empty());
+        assert_eq!(db.list_for_solution(SolutionId("sol-b".into())).await.unwrap().len(), 1);
     }
 }
