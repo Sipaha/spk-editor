@@ -5556,6 +5556,7 @@ dependencies = [
  "solutions",
  "tempfile",
  "util",
+ "workspace",
 ]
 
 [[package]]

@@ -1,7 +1,11 @@
-//! `windows.*` MCP tools — list/focus/close/dispatch_action operations on open editor windows.
+//! `windows.*` MCP tools — list/focus/close/dispatch_action plus programmatic
+//! input (keystrokes, text, mouse click) for autonomous UI testing.
 use context_server::listener::{McpServerTool, ToolResponse};
 use context_server::types::ToolResponseContent;
-use gpui::{App, AsyncApp};
+use gpui::{
+    App, AsyncApp, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, PlatformInput,
+    Pixels, Point, px,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -358,6 +362,303 @@ impl McpServerTool for DispatchActionTool {
     }
 }
 
+// =====================================================================
+// windows.send_keystroke
+// =====================================================================
+
+/// Dispatch a single keystroke to the focused element of a window.
+/// Useful for triggering keybindings or single-character input. The
+/// `keystroke` string follows GPUI's parser: e.g. `"ctrl-shift-p"`,
+/// `"escape"`, `"enter"`, `"a"`, `"alt-tab"`.
+///
+/// Returns `handled: true` if the keystroke matched a binding or was
+/// consumed by the focused input; `false` means it propagated past
+/// every handler (i.e. nothing acted on it).
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct SendKeystrokeParams {
+    pub window_id: String,
+    pub keystroke: String,
+}
+
+impl<'de> Deserialize<'de> for SendKeystrokeParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            window_id: String,
+            keystroke: String,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            window_id: inner.window_id,
+            keystroke: inner.keystroke,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SendKeystrokeResult {
+    pub handled: bool,
+}
+
+#[derive(Clone)]
+pub struct SendKeystrokeTool;
+
+impl McpServerTool for SendKeystrokeTool {
+    type Input = SendKeystrokeParams;
+    type Output = SendKeystrokeResult;
+    const NAME: &'static str = "windows.send_keystroke";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.keystroke.is_empty(),
+            "invalid_params: keystroke is required"
+        );
+        let keystroke = Keystroke::parse(&input.keystroke)
+            .map_err(|err| anyhow::anyhow!("parse_keystroke({}): {err}", input.keystroke))?;
+        let handled = cx.update(|cx| -> anyhow::Result<bool> {
+            let handle = find_window_by_id(&input.window_id, cx)?;
+            handle
+                .update(cx, |_view, window, cx| {
+                    window.dispatch_keystroke(keystroke.clone(), cx)
+                })
+                .map_err(|err| anyhow::anyhow!("dispatch_keystroke failed: {err}"))
+        })?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("keystroke {} handled: {handled}", input.keystroke),
+            }],
+            structured_content: SendKeystrokeResult { handled },
+        })
+    }
+}
+
+// =====================================================================
+// windows.send_text
+// =====================================================================
+
+/// Dispatch a string of text as individual character keystrokes. Each
+/// character becomes one `dispatch_keystroke` call so the focused input
+/// receives them as if typed. Newlines are translated to `enter`.
+///
+/// For multi-key shortcuts (e.g. `ctrl-c`) use `windows.send_keystroke`
+/// instead — this tool is for plain text entry into search fields,
+/// editors, etc.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct SendTextParams {
+    pub window_id: String,
+    pub text: String,
+}
+
+impl<'de> Deserialize<'de> for SendTextParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            window_id: String,
+            text: String,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            window_id: inner.window_id,
+            text: inner.text,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SendTextResult {
+    pub characters_sent: usize,
+}
+
+#[derive(Clone)]
+pub struct SendTextTool;
+
+impl McpServerTool for SendTextTool {
+    type Input = SendTextParams;
+    type Output = SendTextResult;
+    const NAME: &'static str = "windows.send_text";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        let mut sent = 0usize;
+        cx.update(|cx| -> anyhow::Result<()> {
+            let handle = find_window_by_id(&input.window_id, cx)?;
+            handle
+                .update(cx, |_view, window, cx| {
+                    for ch in input.text.chars() {
+                        let key_str = match ch {
+                            '\n' => "enter".to_string(),
+                            '\t' => "tab".to_string(),
+                            ' ' => "space".to_string(),
+                            other => other.to_string(),
+                        };
+                        if let Ok(keystroke) = Keystroke::parse(&key_str) {
+                            window.dispatch_keystroke(keystroke, cx);
+                            sent += 1;
+                        }
+                    }
+                })
+                .map_err(|err| anyhow::anyhow!("send_text dispatch failed: {err}"))?;
+            Ok(())
+        })?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("sent {sent} characters"),
+            }],
+            structured_content: SendTextResult {
+                characters_sent: sent,
+            },
+        })
+    }
+}
+
+// =====================================================================
+// windows.click_at
+// =====================================================================
+
+/// Dispatch a synthetic left-mouse click at window-relative coordinates
+/// (DIP / logical pixels — same units as `windows.list` `bounds`).
+/// Sends MouseDown immediately followed by MouseUp at the same point,
+/// matching GPUI's `simulate_click` semantics.
+///
+/// Coordinates are LOGICAL window pixels with `(0, 0)` at the top-left
+/// of the window's content area; modifiers default to none.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct ClickAtParams {
+    pub window_id: String,
+    pub x: f32,
+    pub y: f32,
+    /// Modifiers held during the click. Recognized: `"ctrl"`, `"alt"`,
+    /// `"shift"`, `"cmd"` / `"platform"`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifiers: Vec<String>,
+    /// `"left"` (default), `"right"`, `"middle"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub button: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ClickAtParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            window_id: String,
+            x: f32,
+            y: f32,
+            #[serde(default)]
+            modifiers: Vec<String>,
+            #[serde(default)]
+            button: Option<String>,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            window_id: inner.window_id,
+            x: inner.x,
+            y: inner.y,
+            modifiers: inner.modifiers,
+            button: inner.button,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ClickAtResult {
+    pub clicked: bool,
+}
+
+#[derive(Clone)]
+pub struct ClickAtTool;
+
+impl McpServerTool for ClickAtTool {
+    type Input = ClickAtParams;
+    type Output = ClickAtResult;
+    const NAME: &'static str = "windows.click_at";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        let modifiers = parse_modifiers(&input.modifiers)?;
+        let button = parse_button(input.button.as_deref())?;
+        let position = Point::new(px(input.x), px(input.y));
+        let clicked = cx.update(|cx| -> anyhow::Result<bool> {
+            let handle = find_window_by_id(&input.window_id, cx)?;
+            handle
+                .update(cx, |_view, window, cx| {
+                    dispatch_mouse_click(window, cx, position, button, modifiers);
+                })
+                .map_err(|err| anyhow::anyhow!("click_at dispatch failed: {err}"))?;
+            Ok(true)
+        })?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("click at ({}, {})", input.x, input.y),
+            }],
+            structured_content: ClickAtResult { clicked },
+        })
+    }
+}
+
+fn parse_modifiers(names: &[String]) -> anyhow::Result<Modifiers> {
+    let mut modifiers = Modifiers::default();
+    for name in names {
+        match name.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => modifiers.control = true,
+            "alt" | "option" => modifiers.alt = true,
+            "shift" => modifiers.shift = true,
+            "cmd" | "platform" | "meta" | "super" => modifiers.platform = true,
+            other => anyhow::bail!("unknown modifier: {other}"),
+        }
+    }
+    Ok(modifiers)
+}
+
+fn parse_button(name: Option<&str>) -> anyhow::Result<MouseButton> {
+    Ok(match name.unwrap_or("left") {
+        "left" => MouseButton::Left,
+        "right" => MouseButton::Right,
+        "middle" => MouseButton::Middle,
+        other => anyhow::bail!("unknown button: {other}"),
+    })
+}
+
+fn dispatch_mouse_click(
+    window: &mut gpui::Window,
+    cx: &mut App,
+    position: Point<Pixels>,
+    button: MouseButton,
+    modifiers: Modifiers,
+) {
+    window.dispatch_event(
+        PlatformInput::MouseDown(MouseDownEvent {
+            position,
+            modifiers,
+            button,
+            click_count: 1,
+            first_mouse: false,
+        }),
+        cx,
+    );
+    window.dispatch_event(
+        PlatformInput::MouseUp(MouseUpEvent {
+            position,
+            modifiers,
+            button,
+            click_count: 1,
+        }),
+        cx,
+    );
+}
+
 fn find_window_by_id(window_id: &str, cx: &mut App) -> anyhow::Result<gpui::AnyWindowHandle> {
     // Mirror the iteration order used by `windows.list`: prefer Z-ordered
     // stack, fall back to the unstable slot-map iteration so both tools
@@ -422,5 +723,78 @@ mod tests {
         .expect("parse");
         assert_eq!(p.window_id, "window:5");
         assert_eq!(p.action_name, "workspace::ToggleLeftDock");
+    }
+
+    #[test]
+    fn send_keystroke_params_round_trip() {
+        let p: SendKeystrokeParams = serde_json::from_value(serde_json::json!({
+            "window_id": "window:1",
+            "keystroke": "ctrl-shift-p"
+        }))
+        .expect("parse");
+        assert_eq!(p.keystroke, "ctrl-shift-p");
+    }
+
+    #[test]
+    fn send_text_params_round_trip() {
+        let p: SendTextParams = serde_json::from_value(serde_json::json!({
+            "window_id": "window:1",
+            "text": "hello"
+        }))
+        .expect("parse");
+        assert_eq!(p.text, "hello");
+    }
+
+    #[test]
+    fn click_at_params_default_button_and_modifiers() {
+        let p: ClickAtParams = serde_json::from_value(serde_json::json!({
+            "window_id": "window:1",
+            "x": 100.0,
+            "y": 50.0
+        }))
+        .expect("parse");
+        assert_eq!(p.x, 100.0);
+        assert_eq!(p.y, 50.0);
+        assert!(p.modifiers.is_empty());
+        assert!(p.button.is_none());
+    }
+
+    #[test]
+    fn click_at_params_with_modifiers_and_button() {
+        let p: ClickAtParams = serde_json::from_value(serde_json::json!({
+            "window_id": "window:1",
+            "x": 1.0, "y": 2.0,
+            "modifiers": ["ctrl", "shift"],
+            "button": "right"
+        }))
+        .expect("parse");
+        assert_eq!(p.modifiers, vec!["ctrl".to_string(), "shift".to_string()]);
+        assert_eq!(p.button.as_deref(), Some("right"));
+    }
+
+    #[test]
+    fn parse_modifiers_handles_known_aliases() {
+        let m = parse_modifiers(&[
+            "Ctrl".to_string(),
+            "alt".to_string(),
+            "shift".to_string(),
+            "cmd".to_string(),
+        ])
+        .expect("parse");
+        assert!(m.control && m.alt && m.shift && m.platform);
+    }
+
+    #[test]
+    fn parse_modifiers_rejects_unknown() {
+        let err = parse_modifiers(&["spongebob".to_string()]).unwrap_err();
+        assert!(err.to_string().contains("spongebob"));
+    }
+
+    #[test]
+    fn parse_button_defaults_to_left() {
+        assert_eq!(parse_button(None).unwrap(), MouseButton::Left);
+        assert_eq!(parse_button(Some("right")).unwrap(), MouseButton::Right);
+        assert_eq!(parse_button(Some("middle")).unwrap(), MouseButton::Middle);
+        assert!(parse_button(Some("scroll-down")).is_err());
     }
 }

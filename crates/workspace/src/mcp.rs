@@ -28,4 +28,13 @@ pub fn register(cx: &mut App) {
     editor_mcp::register_tool(cx, |server| {
         server.add_tool(windows::DispatchActionTool);
     });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(windows::SendKeystrokeTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(windows::SendTextTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(windows::ClickAtTool);
+    });
 }

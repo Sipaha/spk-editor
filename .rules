@@ -42,20 +42,21 @@ A running `spk-editor` instance exposes an MCP server over a Unix socket so an a
 
 **Socket:** `~/.config/spk-editor/mcp.sock` (Linux). Single-instance — one editor process at a time holds the socket; a second `spk-editor` invocation hands off CLI args via the existing socket and exits. Lock file is `~/.config/spk-editor/mcp.lock`.
 
-**Tool catalog** (43 tools, JSON-RPC 2.0 over the socket — namespaces: `editor.*`, `windows.*`, `solutions.*`, `catalog.*`, `workspace.*`, `project.*`, `diagnostics.*`):
+**Tool catalog** (47 tools, JSON-RPC 2.0 over the socket — namespaces: `editor.*`, `windows.*`, `solutions.*`, `catalog.*`, `workspace.*`, `project.*`, `diagnostics.*`):
 - **Probe / control:** `editor.capabilities`, `editor.handle_cli_args`, `editor.{subscribe,unsubscribe,list_subscriptions}`, `editor.{get_operation,cancel_operation}`
-- **Solutions / catalog (the multi-project workspace abstraction):** `solutions.{list,get,create,rename,delete,open,close,add_member,remove_member,reorder_members}`, `catalog.{list,add_project,remove_project,edit_project,refresh_cache}`
-- **Windows:** `windows.{list,focus,close,dispatch_action}`
+- **Solutions / catalog (the multi-project workspace abstraction):** `solutions.{list,get,create,rename,delete,open,close,find_for_path,add_member,remove_member,reorder_members}`, `catalog.{list,add_project,remove_project,edit_project,refresh_cache}`
+- **Windows:** `windows.{list,focus,close,dispatch_action,send_keystroke,send_text,click_at}`
 - **Workspace state:** `workspace.{list_buffers,get_effective_settings,dispatch_action,screenshot,dump_visual_structure}`
 - **Project / buffer ops:** `project.{list_files,read_buffer,apply_edit,save_buffer,open_file,close_buffer,create_file,delete_file,rename_file,find_in_buffers,goto_definition,find_references}`
 - **Diagnostics:** `diagnostics.get` (per-file summaries + per-diagnostic items with severity / message / source / code)
 
 **Self-test recipe:**
-1. Build + launch: `cargo run --release --bin spk-editor` (or use a prebuilt bundle). Confirm the socket exists.
+1. Build + launch via `script/run-mcp` (recommended: builds the release binary if missing, wraps in `xvfb-run` automatically when `$DISPLAY` is unset, prints the socket path when ready). For an attached display use `script/run-mcp --display`; force headless with `--headless`. Plain `cargo run --release --bin spk-editor` also works if you already have a display.
 2. Connect via `socat - UNIX-CONNECT:$HOME/.config/spk-editor/mcp.sock` for ad-hoc probes, or write a small Rust/Python client. JSON-RPC frames are newline-delimited.
 3. Always start with `editor.capabilities` to confirm protocol version and supported event kinds.
 4. For long-running ops (`solutions.add_member`, `catalog.refresh_cache`) use the returned `operation_id` with `editor.get_operation` to poll, or subscribe via `editor.subscribe { kinds: ["operation_completed", "operation_progress"] }` for push notifications.
-5. For visual / state assertions, prefer `workspace.dump_visual_structure` (cheap structured tree) over `workspace.screenshot` (only works in test/test-support builds — see "Known gap" below).
+5. For visual / state assertions, prefer `workspace.dump_visual_structure` (cheap structured tree) plus pure-data probes like `solutions.find_for_path` over `workspace.screenshot` (only works in test/test-support builds — see "Known gap" below).
+6. **Programmatic UI driving:** trigger keybindings via `windows.send_keystroke` (e.g. `{"window_id":..., "keystroke":"ctrl-shift-p"}`), type plain text via `windows.send_text`, click at coordinates via `windows.click_at` (logical pixels, top-left origin). Most clickable UI in this fork dispatches a named action — prefer `windows.dispatch_action` when one exists since it doesn't depend on rendered geometry. **Notification frames** (`editor/notification`) interleave with responses on the same socket; clients must filter by JSON-RPC `id` and skip frames without one (or with non-matching id) — see `crates/editor_mcp/tests/solutions_add_member_e2e_test.rs::call_tool` for a 10-line implementation.
 
 **Event subscriptions** broadcast as JSON-RPC `editor/notification` frames. Wired kinds: `operation_progress`, `operation_completed`, `solution_changed`, `buffer_opened`, `buffer_closed`, `buffer_saved`, `buffer_dirty_changed`, `diagnostic_updated`, `lsp_started`, `lsp_stopped`, `window_focused`. Deferred: `selection_changed` (Editor-level, not Buffer), `cli_args_received`, `server_shutting_down`.
 

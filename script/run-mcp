@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# Launch spk-editor with the MCP socket exposed and (optionally) a virtual
+# display so an autonomous agent can drive the editor without an attached
+# screen. The MCP socket lives at $XDG_CONFIG_HOME/spk-editor/mcp.sock by
+# default; pass --runtime-dir <path> to override.
+#
+# Usage:
+#   script/run-mcp                # uses $DISPLAY if set, otherwise Xvfb
+#   script/run-mcp --headless     # always use Xvfb, even if $DISPLAY is set
+#   script/run-mcp --display      # never use Xvfb (fails if no $DISPLAY)
+#   script/run-mcp -- <args>      # pass extra args to spk-editor
+#
+# Behavior:
+# - Builds target/release/spk-editor if missing.
+# - Waits for the MCP socket to appear (timeout 30s) and prints its path
+#   so callers can pipe into a follow-up command.
+# - Forwards SIGINT/SIGTERM to the editor process, then cleans up Xvfb.
+#
+# The script is idempotent against stale lock files: if mcp.lock exists
+# but its PID is dead, the editor reclaims it. If a real instance holds
+# the lock, this script's editor exits via the handoff path.
+
+set -euo pipefail
+
+mode=""
+forward_args=()
+runtime_dir=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --headless)
+            mode="headless"
+            shift
+            ;;
+        --display)
+            mode="display"
+            shift
+            ;;
+        --runtime-dir)
+            runtime_dir="$2"
+            shift 2
+            ;;
+        --)
+            shift
+            forward_args=("$@")
+            break
+            ;;
+        *)
+            echo "unknown flag: $1" >&2
+            exit 2
+            ;;
+    esac
+done
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+binary="$repo_root/target/release/spk-editor"
+
+if [[ ! -x "$binary" ]]; then
+    echo "[run-mcp] building $binary ..."
+    (cd "$repo_root" && cargo build --release --bin spk-editor)
+fi
+
+# Decide whether to wrap with Xvfb. If $DISPLAY is unset and mode wasn't
+# forced to "display", use Xvfb. If Xvfb is missing on a headless box we
+# fail loudly so the user installs it instead of getting a cryptic GPUI
+# panic later.
+use_xvfb=0
+if [[ "$mode" == "headless" ]]; then
+    use_xvfb=1
+elif [[ "$mode" == "display" ]]; then
+    use_xvfb=0
+elif [[ -z "${DISPLAY:-}" ]]; then
+    use_xvfb=1
+fi
+
+if (( use_xvfb )) && ! command -v xvfb-run >/dev/null 2>&1; then
+    echo "[run-mcp] xvfb-run is not installed." >&2
+    echo "[run-mcp] On Debian/Ubuntu: sudo apt-get install xvfb" >&2
+    echo "[run-mcp] On Fedora:       sudo dnf install xorg-x11-server-Xvfb" >&2
+    exit 1
+fi
+
+socket_dir="${runtime_dir:-${XDG_CONFIG_HOME:-$HOME/.config}/spk-editor}"
+socket_path="$socket_dir/mcp.sock"
+mkdir -p "$socket_dir"
+
+# Remove a stale socket so the wait loop below sees a fresh one.
+[[ -L "$socket_path" || -S "$socket_path" ]] && rm -f "$socket_path"
+
+cleanup() {
+    if [[ -n "${editor_pid:-}" ]] && kill -0 "$editor_pid" 2>/dev/null; then
+        kill -TERM "$editor_pid" 2>/dev/null || true
+        wait "$editor_pid" 2>/dev/null || true
+    fi
+}
+trap cleanup INT TERM EXIT
+
+if (( use_xvfb )); then
+    echo "[run-mcp] launching under xvfb-run"
+    xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
+        "$binary" "${forward_args[@]}" &
+else
+    echo "[run-mcp] launching with display=$DISPLAY"
+    "$binary" "${forward_args[@]}" &
+fi
+editor_pid=$!
+
+# Wait up to 30s for the socket to appear.
+for _ in $(seq 1 60); do
+    if [[ -S "$socket_path" || -L "$socket_path" ]]; then
+        break
+    fi
+    if ! kill -0 "$editor_pid" 2>/dev/null; then
+        echo "[run-mcp] editor exited before socket appeared" >&2
+        exit 1
+    fi
+    sleep 0.5
+done
+
+if [[ ! -S "$socket_path" && ! -L "$socket_path" ]]; then
+    echo "[run-mcp] timeout waiting for $socket_path" >&2
+    exit 1
+fi
+
+echo "[run-mcp] mcp socket ready: $socket_path (editor pid: $editor_pid)"
+echo "[run-mcp] press Ctrl+C to stop"
+
+wait "$editor_pid"
