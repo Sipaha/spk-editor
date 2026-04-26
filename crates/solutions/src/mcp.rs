@@ -1099,9 +1099,9 @@ impl McpServerTool for EditCatalogProjectTool {
 // =====================================================================
 
 /// Refresh the on-disk cache for a catalog entry by running `git fetch`
-/// (or cloning if the cache is absent). Returns an `operation_id`. Phase 7
-/// will wire this into a real operation tracker; today the work runs inline
-/// and the id is a deterministic placeholder derived from `catalog_id`.
+/// (or cloning if the cache is absent). Returns an `operation_id`
+/// immediately; the work is spawned in the background and progress can be
+/// polled via `editor.get_operation`.
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct RefreshCacheParams {
     pub catalog_id: String,
@@ -1155,17 +1155,45 @@ impl McpServerTool for RefreshCacheTool {
             url.with_context(|| format!("catalog_not_found: {}", input.catalog_id))
         })?;
 
-        // Phase 7 placeholder: the real OperationTracker will replace this
-        // with an async-tracked id; for now the fetch runs inline.
-        let operation_id = format!("op-refresh-{}", input.catalog_id);
+        let operation_id = cx.update(|cx| editor_mcp::op_start("catalog.refresh_cache", cx));
+
+        let op_id_for_task = operation_id.clone();
+        let catalog_id_for_log = input.catalog_id.clone();
         let cache_root = crate::default_cache_root();
-        crate::cache::refresh_cache(&cache_root, &remote_url, |_| {})
-            .await
-            .with_context(|| format!("refresh_cache failed for {}", input.catalog_id))?;
+
+        cx.spawn(async move |cx| {
+            cx.update(|cx| {
+                editor_mcp::op_record_progress(
+                    &op_id_for_task,
+                    "fetching".to_string(),
+                    Some(0),
+                    cx,
+                );
+            });
+
+            // Note: the progress callback runs synchronously inside the future
+            // and has no App handle, so intermediate progress updates can't
+            // call op_record_progress here. We only record the initial state.
+            let result = crate::cache::refresh_cache(&cache_root, &remote_url, |_| {}).await;
+
+            cx.update(|cx| match result {
+                Ok(_) => {
+                    editor_mcp::op_complete_ok(
+                        &op_id_for_task,
+                        serde_json::json!({ "catalog_id": catalog_id_for_log }),
+                        cx,
+                    );
+                }
+                Err(err) => {
+                    editor_mcp::op_complete_err(&op_id_for_task, err.to_string(), cx);
+                }
+            });
+        })
+        .detach();
 
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text {
-                text: format!("refreshed: {}", input.catalog_id),
+                text: format!("queued refresh_cache: {}", input.catalog_id),
             }],
             structured_content: RefreshCacheResult { operation_id },
         })
@@ -1178,9 +1206,8 @@ impl McpServerTool for RefreshCacheTool {
 
 /// Add a catalog project as a member of a Solution. Clones the project into
 /// the Solution's root (using cached source if available) and registers it.
-/// Returns `operation_id`. Phase 7 will wire a real operation tracker; today
-/// the work runs inline and the id is a deterministic placeholder derived
-/// from `solution_id`/`catalog_id`.
+/// Returns `operation_id` immediately; the clone is spawned in the
+/// background and progress can be polled via `editor.get_operation`.
 ///
 /// **Slow**: cloning can take seconds-to-minutes for large repos.
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
@@ -1236,22 +1263,49 @@ impl McpServerTool for AddMemberTool {
         let cat_id = crate::CatalogId(input.catalog_id.clone());
         let cache_root = crate::default_cache_root();
 
-        // Phase 7 placeholder: the real OperationTracker will replace this
-        // with an async-tracked id; for now the clone runs inline.
-        let operation_id = format!(
-            "op-add-member-{}-{}",
-            input.solution_id, input.catalog_id
-        );
+        let operation_id = cx.update(|cx| editor_mcp::op_start("solutions.add_member", cx));
 
-        let task = cx.update(|cx| {
-            let store = SolutionStore::global(cx);
-            store.update(cx, |s, cx| s.add_member(sol_id, cat_id, cache_root, cx))
-        });
-        task.await?;
+        let op_id_for_task = operation_id.clone();
+        let solution_id_for_log = input.solution_id.clone();
+        let catalog_id_for_log = input.catalog_id.clone();
+
+        cx.spawn(async move |cx| {
+            cx.update(|cx| {
+                editor_mcp::op_record_progress(
+                    &op_id_for_task,
+                    "starting".to_string(),
+                    Some(0),
+                    cx,
+                );
+            });
+
+            let task = cx.update(|cx| {
+                let store = SolutionStore::global(cx);
+                store.update(cx, |s, cx| s.add_member(sol_id, cat_id, cache_root, cx))
+            });
+            let result = task.await;
+
+            cx.update(|cx| match result {
+                Ok(()) => {
+                    editor_mcp::op_complete_ok(
+                        &op_id_for_task,
+                        serde_json::json!({
+                            "solution_id": solution_id_for_log,
+                            "catalog_id": catalog_id_for_log,
+                        }),
+                        cx,
+                    );
+                }
+                Err(err) => {
+                    editor_mcp::op_complete_err(&op_id_for_task, err.to_string(), cx);
+                }
+            });
+        })
+        .detach();
 
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text {
-                text: format!("added member: {}/{}", input.solution_id, input.catalog_id),
+                text: format!("queued add_member: {}/{}", input.solution_id, input.catalog_id),
             }],
             structured_content: AddMemberResult { operation_id },
         })
