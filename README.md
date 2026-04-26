@@ -12,6 +12,14 @@ This fork is built around tight integration with [Claude Code](https://claude.ai
 - No native Zed cloud LLM provider — AI features go through the external `claude` subprocess.
 - The Zed extension registry on `zed.dev` **is** still used for browsing and installing extensions.
 
+## What this fork adds beyond rebrand
+
+- **Solutions** — multi-project workspace abstraction. Group N remote git projects into a single editor window with all members mounted as worktrees. Daily work on tightly-related repos (e.g. a parent + microservices) without juggling windows. Catalog of remote URLs is shareable across machines via `~/.config/spk-editor/solutions.json`.
+- **Solution-scoped AI sessions** — N parallel Claude Code-style chat sessions per Solution, each a first-class pane item that can sit next to the code being changed (split view). Long tasks keep running after you close the window — the editor pings you with an OS notification when a turn completes (5 min threshold). Auth uses your `claude` subscription via `~/.claude/`; no API keys.
+- **Embedded MCP server** — running `spk-editor` exposes a Unix-socket JSON-RPC API at `~/.config/spk-editor/mcp.sock` (58 tools across `editor.*`, `windows.*`, `solutions.*`, `catalog.*`, `solution_agent.*`, `workspace.*`, `project.*`, `diagnostics.*`). Lets external agents drive the editor for end-to-end automation without a human in the loop.
+
+For the full list of fork-local crates and architectural decisions, see [`FORK.md`](./FORK.md).
+
 ## Building from source
 
 Same toolchain requirements as upstream Zed (recent stable Rust, OS-specific dependencies — see upstream's README for the current list). After cloning:
