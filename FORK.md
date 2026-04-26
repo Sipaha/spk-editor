@@ -90,7 +90,13 @@ Why: upstream `agent_ui::MessageEditor` integrates with a heavy `MentionSet` mac
 
 How to apply: if rich mentions or capability-aware path expansion become user requirements, integrate `agent_ui::message_editor::insert_mention_for_project_path` and bring `MentionSet` along — don't half-build a parallel mention layer in `solution_agent`. Plain text paste (`Ctrl+V` for clipboard text) works via `editor::Editor`'s native action; no patch needed.
 
-### 10. Image paste: clipboard `gpui::Image` → base64 → `acp::ContentBlock::Image`
+### 10. Welcome page is the launcher; `restore_on_startup = "none"` by default
+
+Why: the editor is built around Solutions. Restoring "the last workspace" pins the user to whatever they happened to close last (often a one-off `/tmp` or a single member subfolder), hiding the rest of their solutions. The fork's startup story is "open the editor → see all your solutions → pick one (or create one)". Welcome is always shown; the Solutions section in `solutions_ui::welcome` lists every solution (opened-recent first, never-opened in store order) and always shows a `Create new solution` button.
+
+How to apply: the default lives in `assets/settings/default.json` (`"restore_on_startup": "none"`). Users can override it in their own settings if they want upstream behavior. The Welcome section renderer in `crates/solutions_ui/src/welcome.rs::render_section` is the single place that defines what the launcher shows — keep it as the only fork-local Welcome section unless there's a strong reason for more.
+
+### 11. Image paste: clipboard `gpui::Image` → base64 → `acp::ContentBlock::Image`
 
 Why: Claude (and other ACP agents that declare the `image` prompt capability) accepts image content blocks alongside text. We want native paste UX without dragging in `MentionSet`. The compose box registers a `capture_action(Paste)` handler that runs **before** the editor's default text-paste, inspects the clipboard, and:
 - if the first entry is text → returns without consuming (action falls through to the editor's text paste)
