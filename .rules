@@ -67,6 +67,8 @@ A running `spk-editor` instance exposes an MCP server over a Unix socket so an a
 
 **Known gap:** `workspace.screenshot` returns a 1×1 placeholder in production builds — `gpui::Window::render_to_image` is gated behind `cfg(test|test-support)` upstream. For real visual verification today, use `workspace.dump_visual_structure` plus targeted `cargo test`. Production screenshot needs upstream GPUI work; do not attempt to backfill it as a fork-local change.
 
+**System-level screenshots ARE possible** despite the MCP tool gap. On Linux `import -window root /tmp/screen.png` (ImageMagick) or `grim /tmp/screen.png` (Wayland) grab whatever's on the display, and the agent can `Read /tmp/screen.png` to see actual pixels. Use this for real visual verification when `dump_visual_structure` would lie — e.g. anything inside a pane item (the dumper does not recurse into rendered item content, so `Pane { children: [] }` is ambiguous between "truly empty" and "has WelcomePage / Editor / etc.").
+
 **Architecture:** `editor_mcp` crate owns lifecycle (`SingleInstanceLock`, server bind, broadcast). Tools are registered from each domain crate's `init` (`solutions::init`, `workspace::init`) via `editor_mcp::register_tool`. Event-source coordinator is in `solutions::event_sources` (kept out of `editor_mcp` to avoid a `editor_mcp → solutions/workspace/project` dep cycle that earlier phases had to resolve).
 
 # Rust coding guidelines
