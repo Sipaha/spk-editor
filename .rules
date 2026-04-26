@@ -28,6 +28,8 @@ SPK Editor is a personal fork of [Zed](https://github.com/zed-industries/zed) ma
 - **Extension registry on `zed.dev`** — extensions panel still browses / installs from upstream registry.
 - **External agents via ACP** (Claude Code subprocess, Gemini CLI, etc.) — `agent_servers` + `acp*` + ACP entries in `agent_ui` are the primary AI integration. AI in this fork = `claude` subprocess, NOT API tokens.
 - **BYOK providers** (Copilot, Anthropic via API key, Ollama, etc.) — defined but not promoted in UI.
+- **Multi-project Solutions** (`solutions` + `solutions_ui`) — group N catalog projects into one window. See `FORK.md`.
+- **Solution-scoped AI sessions** (`solution_agent`) — N parallel Claude Code sessions per Solution, multiplexed onto a shared subprocess per `(solution, agent)` pair. Auth via subscription, not API key. See `FORK.md`.
 
 ## Build + test conventions
 
@@ -42,9 +44,10 @@ A running `spk-editor` instance exposes an MCP server over a Unix socket so an a
 
 **Socket:** `~/.config/spk-editor/mcp.sock` (Linux). Single-instance — one editor process at a time holds the socket; a second `spk-editor` invocation hands off CLI args via the existing socket and exits. Lock file is `~/.config/spk-editor/mcp.lock`.
 
-**Tool catalog** (50 tools, JSON-RPC 2.0 over the socket — namespaces: `editor.*`, `windows.*`, `solutions.*`, `catalog.*`, `workspace.*`, `project.*`, `diagnostics.*`):
+**Tool catalog** (58 tools, JSON-RPC 2.0 over the socket — namespaces: `editor.*`, `windows.*`, `solutions.*`, `catalog.*`, `solution_agent.*`, `workspace.*`, `project.*`, `diagnostics.*`):
 - **Probe / control:** `editor.capabilities`, `editor.handle_cli_args`, `editor.{subscribe,unsubscribe,list_subscriptions}`, `editor.{get_operation,cancel_operation}`
 - **Solutions / catalog (the multi-project workspace abstraction):** `solutions.{list,get,create,rename,delete,open,close,find_for_path,add_member,remove_member,reorder_members}`, `catalog.{list,add_project,remove_project,edit_project,refresh_cache,clear_cache}`
+- **Solution-scoped AI sessions:** `solution_agent.{list_sessions,get_session,create_session,send_message,cancel_turn,close_session,rename_session,restart_agent}`
 - **Windows:** `windows.{list,focus,close,dispatch_action,send_keystroke,send_text,click_at,dump_visual_structure}`
 - **Workspace state:** `workspace.{list_buffers,get_effective_settings,dispatch_action,screenshot,dump_visual_structure}`
 - **Project / buffer ops:** `project.{list_files,read_buffer,apply_edit,save_buffer,open_file,close_buffer,create_file,delete_file,rename_file,find_in_buffers,goto_definition,find_references}`
@@ -58,7 +61,7 @@ A running `spk-editor` instance exposes an MCP server over a Unix socket so an a
 5. For visual / state assertions, prefer `workspace.dump_visual_structure` (cheap structured tree) plus pure-data probes like `solutions.find_for_path` over `workspace.screenshot` (only works in test/test-support builds — see "Known gap" below).
 6. **Programmatic UI driving:** trigger keybindings via `windows.send_keystroke` (e.g. `{"window_id":..., "keystroke":"ctrl-shift-p"}`), type plain text via `windows.send_text`, click at coordinates via `windows.click_at` (logical pixels, top-left origin). Most clickable UI in this fork dispatches a named action — prefer `windows.dispatch_action` when one exists since it doesn't depend on rendered geometry. **Notification frames** (`editor/notification`) interleave with responses on the same socket; clients must filter by JSON-RPC `id` and skip frames without one (or with non-matching id) — see `crates/editor_mcp/tests/solutions_add_member_e2e_test.rs::call_tool` for a 10-line implementation.
 
-**Event subscriptions** broadcast as JSON-RPC `editor/notification` frames. Wired kinds: `operation_progress`, `operation_completed`, `solution_changed`, `buffer_opened`, `buffer_closed`, `buffer_saved`, `buffer_dirty_changed`, `diagnostic_updated`, `lsp_started`, `lsp_stopped`, `window_focused`. Deferred: `selection_changed` (Editor-level, not Buffer), `cli_args_received`, `server_shutting_down`.
+**Event subscriptions** broadcast as JSON-RPC `editor/notification` frames. Wired kinds: `operation_progress`, `operation_completed`, `solution_changed`, `buffer_opened`, `buffer_closed`, `buffer_saved`, `buffer_dirty_changed`, `diagnostic_updated`, `lsp_started`, `lsp_stopped`, `window_focused`, `agent_session_created`, `agent_session_closed`, `agent_session_state_changed`, `agent_session_title_changed`, `agent_session_message_appended`, `agent_session_notification_sent`. Deferred: `selection_changed` (Editor-level, not Buffer), `cli_args_received`, `server_shutting_down`. Note: AI session events use the `agent_session_*` prefix (not bare `session_*`) — defensive namespacing against future collisions.
 
 **Integration tests** in `crates/editor_mcp/tests/*_e2e_test.rs` are isolated via `editor_mcp::set_runtime_dir_for_test(tempdir)` — each test pins its own `mcp.{lock,sock}` to a tempdir, so they can run safely alongside a live `spk-editor` instance and never touch `~/.config/spk-editor/`. When you write a new e2e test that calls `editor_mcp::start_server`, you MUST call `set_runtime_dir_for_test` first or you will collide with (and corrupt) the user's real lock and socket.
 
