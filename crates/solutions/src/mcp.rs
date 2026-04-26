@@ -3601,13 +3601,16 @@ impl McpServerTool for RenameFileTool {
 /// substring match; opt into `regex` for a regex match (in either case
 /// `case_sensitive: true` makes the match case-sensitive). The `scope`
 /// parameter is reserved for future "open buffers only" behaviour and is
-/// currently ignored — all worktree files are searched. Pagination via
-/// an opaque cursor (`worktree_root|path` of the last file scanned).
+/// currently ignored — all searchable files are searched. Pagination via
+/// an opaque cursor (`worktree_root|path:line` of the last match
+/// returned); the cursor is advisory and not perfectly stable across
+/// calls because the order of results from `Project::search` depends on
+/// scan timing, so callers should treat it as a coarse "resume from
+/// here" hint.
 ///
-/// Implementation v1 reads files via `std::fs` (skipping files larger
-/// than 1 MiB or non-UTF8). A future iteration will switch to
-/// `Project::search` so gitignore is respected and open-buffer state is
-/// reflected.
+/// Backed by `Project::search`, so gitignore is respected and unsaved
+/// open-buffer state is reflected. Files outside the Solution's root
+/// (when the project owns extra worktrees) are filtered out post-hoc.
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct FindInBuffersParams {
     pub solution_id: String,
@@ -3706,201 +3709,198 @@ impl McpServerTool for FindInBuffersTool {
         let max = input.max.unwrap_or(100).clamp(1, 1000);
         let case_sensitive = input.case_sensitive.unwrap_or(false);
         let use_regex = input.regex.unwrap_or(false);
+        let start_after = input.cursor.clone().unwrap_or_default();
 
-        let regex = if use_regex {
-            let mut builder = regex::RegexBuilder::new(&input.query);
-            builder.case_insensitive(!case_sensitive);
-            Some(
-                builder
-                    .build()
-                    .map_err(|err| anyhow::anyhow!("invalid_regex: {err}"))?,
+        let solution_root = cx
+            .update(|cx| {
+                SolutionStore::try_global(cx).and_then(|store| {
+                    store.read_with(cx, |s, _| {
+                        s.solutions()
+                            .iter()
+                            .find(|sol| sol.id.as_str() == input.solution_id)
+                            .map(|sol| sol.root.clone())
+                    })
+                })
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("solution_not_open: {}", input.solution_id)
+            })?;
+
+        let project = cx
+            .update(|cx| project_for_solution(&input.solution_id, cx))
+            .ok_or_else(|| {
+                anyhow::anyhow!("solution_not_open: {}", input.solution_id)
+            })?;
+
+        // Build the SearchQuery. We pass the optional file_glob through
+        // the project search engine's own include matcher so gitignore
+        // and the include/exclude pipeline stay consistent with
+        // upstream's project search.
+        let path_style = cx.update(|cx| project.read(cx).path_style(cx));
+        let include_matcher = match input.file_glob.as_deref() {
+            Some(glob) => util::paths::PathMatcher::new([glob], path_style)
+                .map_err(|err| anyhow::anyhow!("invalid_glob: {err}"))?,
+            None => util::paths::PathMatcher::default(),
+        };
+        let exclude_matcher = util::paths::PathMatcher::default();
+
+        let query = if use_regex {
+            project::search::SearchQuery::regex(
+                &input.query,
+                false,
+                case_sensitive,
+                false,
+                false,
+                include_matcher,
+                exclude_matcher,
+                false,
+                None,
             )
+        } else {
+            project::search::SearchQuery::text(
+                &input.query,
+                false,
+                case_sensitive,
+                false,
+                include_matcher,
+                exclude_matcher,
+                false,
+                None,
+            )
+        };
+        let query = query.map_err(|err| anyhow::anyhow!("invalid_query: {err}"))?;
+
+        let results =
+            cx.update(|cx| project.update(cx, |proj, cx| proj.search(query, cx)));
+        let project::SearchResults {
+            rx,
+            _task_handle,
+        } = results;
+
+        let mut all_matches: Vec<SearchMatch> = Vec::new();
+        let mut hit_limit = false;
+        // Pull matches from the search stream; bail out once we've
+        // accumulated `max` matches so the caller can resume via the
+        // returned cursor.
+        loop {
+            let Ok(result) = rx.recv().await else {
+                break;
+            };
+            match result {
+                project::search::SearchResult::Buffer { buffer, ranges } => {
+                    if ranges.is_empty() {
+                        continue;
+                    }
+                    let collected = cx.update(|cx| {
+                        let buffer_ref = buffer.read(cx);
+                        let snapshot = buffer_ref.snapshot();
+                        let Some(file) = buffer_ref.file() else {
+                            return Vec::new();
+                        };
+                        let Some(local) = file.as_local() else {
+                            return Vec::new();
+                        };
+                        let abs_path = local.abs_path(cx);
+                        // Filter out files that fall outside the
+                        // Solution root, e.g. when the project owns
+                        // extra worktrees added after the Solution was
+                        // opened.
+                        if !abs_path.starts_with(&solution_root) {
+                            return Vec::new();
+                        }
+                        let worktree_id = file.worktree_id(cx);
+                        let Some(worktree) =
+                            project.read(cx).worktree_for_id(worktree_id, cx)
+                        else {
+                            return Vec::new();
+                        };
+                        let worktree_root = worktree
+                            .read(cx)
+                            .abs_path()
+                            .to_string_lossy()
+                            .into_owned();
+                        let rel_path = file.path().as_unix_str().to_string();
+
+                        let mut local_matches = Vec::new();
+                        for range in ranges.iter() {
+                            use language::OffsetRangeExt as _;
+                            let point_range = range.to_point(&snapshot);
+                            let line = point_range.start.row;
+                            // Restrict the match to the start line
+                            // (multi-line matches are rare for typical
+                            // text searches and the response shape is
+                            // single-line).
+                            let line_len = snapshot.line_len(line);
+                            let line_start = language::Point::new(line, 0);
+                            let line_end = language::Point::new(line, line_len);
+                            let line_text: String =
+                                snapshot.text_for_range(line_start..line_end).collect();
+                            let start_col = point_range.start.column;
+                            let end_col = if point_range.end.row == line {
+                                point_range.end.column
+                            } else {
+                                line_len
+                            };
+                            local_matches.push(SearchMatch {
+                                path: rel_path.clone(),
+                                worktree_root: worktree_root.clone(),
+                                line,
+                                col: start_col,
+                                line_text,
+                                match_range: [start_col, end_col],
+                            });
+                        }
+                        local_matches
+                    });
+
+                    // Apply the cursor filter (advisory: skip matches
+                    // whose `worktree_root|rel_path:line` ordering is
+                    // <= start_after).
+                    for m in collected {
+                        if !start_after.is_empty() {
+                            let key =
+                                format!("{}|{}:{}", m.worktree_root, m.path, m.line);
+                            if key.as_str() <= start_after.as_str() {
+                                continue;
+                            }
+                        }
+                        if all_matches.len() >= max {
+                            hit_limit = true;
+                            break;
+                        }
+                        all_matches.push(m);
+                    }
+                    if hit_limit {
+                        break;
+                    }
+                }
+                project::search::SearchResult::LimitReached => {
+                    hit_limit = true;
+                    break;
+                }
+                project::search::SearchResult::WaitingForScan
+                | project::search::SearchResult::Searching => continue,
+            }
+        }
+
+        let next_cursor = if hit_limit {
+            all_matches
+                .last()
+                .map(|m| format!("{}|{}:{}", m.worktree_root, m.path, m.line))
         } else {
             None
         };
 
-        let glob = input
-            .file_glob
-            .as_deref()
-            .map(globset::Glob::new)
-            .transpose()
-            .map_err(|err| anyhow::anyhow!("invalid_glob: {err}"))?
-            .map(|g| g.compile_matcher());
-
-        let start_after = input.cursor.clone().unwrap_or_default();
-
-        let (matches, next_cursor): (Vec<SearchMatch>, Option<String>) = cx.update(|cx| {
-            collect_matches(
-                &input.solution_id,
-                input.query.as_str(),
-                regex.as_ref(),
-                glob.as_ref(),
-                case_sensitive,
-                &start_after,
-                max,
-                cx,
-            )
-        });
-
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text {
-                text: format!("{} match(es)", matches.len()),
+                text: format!("{} match(es)", all_matches.len()),
             }],
             structured_content: FindInBuffersResult {
-                matches,
+                matches: all_matches,
                 next_cursor,
             },
         })
     }
-}
-
-fn collect_matches(
-    solution_id: &str,
-    query: &str,
-    regex: Option<&regex::Regex>,
-    glob: Option<&globset::GlobMatcher>,
-    case_sensitive: bool,
-    start_after: &str,
-    max: usize,
-    cx: &mut App,
-) -> (Vec<SearchMatch>, Option<String>) {
-    let Some(store) = SolutionStore::try_global(cx) else {
-        return (Vec::new(), None);
-    };
-    let Some(root) = store.read_with(cx, |s, _| {
-        s.solutions()
-            .iter()
-            .find(|sol| sol.id.as_str() == solution_id)
-            .map(|sol| sol.root.clone())
-    }) else {
-        return (Vec::new(), None);
-    };
-
-    // Walk the open MultiWorkspace's worktrees if the Solution has a
-    // window; otherwise fall back to no-results (matches `list_files`
-    // semantics — open the Solution first).
-    for handle in cx.windows() {
-        let Some(window_handle) = handle.downcast::<workspace::MultiWorkspace>() else {
-            continue;
-        };
-        let collected = window_handle
-            .update(cx, |multi, _window, cx| {
-                let any_matches = multi.workspaces().any(|ws| {
-                    ws.read(cx)
-                        .project()
-                        .read(cx)
-                        .visible_worktrees(cx)
-                        .any(|tree| tree.read(cx).abs_path().starts_with(&root))
-                });
-                if !any_matches {
-                    return None;
-                }
-
-                let mut matches: Vec<SearchMatch> = Vec::new();
-                let mut next_cursor: Option<String> = None;
-                let lowercase_query = if !case_sensitive && regex.is_none() {
-                    Some(query.to_lowercase())
-                } else {
-                    None
-                };
-
-                'outer: for workspace_entity in multi.workspaces() {
-                    let workspace = workspace_entity.read(cx);
-                    let project = workspace.project().read(cx);
-                    for tree_entity in project.visible_worktrees(cx) {
-                        let tree = tree_entity.read(cx);
-                        let abs_root = tree.abs_path();
-                        if !abs_root.starts_with(&root) {
-                            continue;
-                        }
-                        let worktree_root = abs_root.to_string_lossy().into_owned();
-                        for entry in tree.entries(false, 0) {
-                            if !entry.is_file() {
-                                continue;
-                            }
-                            let rel_path = entry.path.as_unix_str().to_string();
-                            let file_cursor = format!("{}|{}", worktree_root, rel_path);
-                            if !start_after.is_empty()
-                                && file_cursor.as_str() <= start_after
-                            {
-                                continue;
-                            }
-                            if let Some(matcher) = glob {
-                                if !matcher.is_match(&rel_path) {
-                                    continue;
-                                }
-                            }
-                            let abs_path =
-                                std::path::Path::new(&worktree_root).join(rel_path.as_str());
-                            let Ok(metadata) = std::fs::metadata(&abs_path) else {
-                                continue;
-                            };
-                            if !metadata.is_file() || metadata.len() > 1_000_000 {
-                                continue;
-                            }
-                            let Ok(content) = std::fs::read_to_string(&abs_path) else {
-                                continue;
-                            };
-
-                            for (line_idx, line) in content.lines().enumerate() {
-                                let line_matches: Vec<(usize, usize)> = if let Some(re) = regex
-                                {
-                                    re.find_iter(line).map(|m| (m.start(), m.end())).collect()
-                                } else if case_sensitive {
-                                    line.match_indices(query)
-                                        .map(|(start, _)| (start, start + query.len()))
-                                        .collect()
-                                } else {
-                                    let lc_query = lowercase_query
-                                        .as_deref()
-                                        .unwrap_or(query);
-                                    let lc_line = line.to_lowercase();
-                                    // Map back from lowercase indices: when
-                                    // ASCII the offsets coincide; for non-
-                                    // ASCII text Rust's `to_lowercase` may
-                                    // change byte length, so we conservatively
-                                    // skip matches that don't align.
-                                    lc_line
-                                        .match_indices(lc_query)
-                                        .filter_map(|(start, _)| {
-                                            let end = start + lc_query.len();
-                                            if line.is_char_boundary(start)
-                                                && line.is_char_boundary(end)
-                                            {
-                                                Some((start, end))
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                        .collect()
-                                };
-                                for (start, end) in line_matches {
-                                    if matches.len() >= max {
-                                        next_cursor = Some(file_cursor);
-                                        break 'outer;
-                                    }
-                                    matches.push(SearchMatch {
-                                        path: rel_path.clone(),
-                                        worktree_root: worktree_root.clone(),
-                                        line: line_idx as u32,
-                                        col: start as u32,
-                                        line_text: line.to_string(),
-                                        match_range: [start as u32, end as u32],
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-                Some((matches, next_cursor))
-            })
-            .ok()
-            .flatten();
-        if let Some(result) = collected {
-            return result;
-        }
-    }
-    (Vec::new(), None)
 }
 
 // =====================================================================
