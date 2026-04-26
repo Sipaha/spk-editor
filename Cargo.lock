@@ -16695,6 +16695,7 @@ dependencies = [
  "serde",
  "settings",
  "solutions",
+ "tempfile",
  "theme",
  "ui",
  "util",

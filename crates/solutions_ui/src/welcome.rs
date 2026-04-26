@@ -109,9 +109,15 @@ fn open_solution(sol_id: SolutionId, cx: &mut App) {
     .detach();
 }
 
+#[cfg_attr(test, derive(Debug))]
 struct RecentSolution {
     id: SolutionId,
     label: String,
+}
+
+#[cfg(test)]
+fn recent_solutions_for_test(cx: &App) -> Vec<RecentSolution> {
+    recent_solutions(cx)
 }
 
 fn recent_solutions(cx: &App) -> Vec<RecentSolution> {
@@ -130,4 +136,64 @@ fn recent_solutions(cx: &App) -> Vec<RecentSolution> {
     sols.into_iter()
         .map(|(id, name, _)| RecentSolution { id, label: name })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use solutions::SolutionStore;
+    use tempfile::tempdir;
+
+    #[gpui::test]
+    async fn empty_store_yields_no_recent(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let dir = tempdir().expect("tempdir");
+            let store = SolutionStore::for_test(dir.path().join("c.json"), cx);
+            solutions::install_global_for_test(store, cx);
+            assert!(recent_solutions_for_test(cx).is_empty());
+        });
+    }
+
+    #[gpui::test]
+    async fn unopened_solutions_are_excluded(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let dir = tempdir().expect("tempdir");
+            let store = SolutionStore::for_test(dir.path().join("c.json"), cx);
+            store
+                .update(cx, |s, cx| s.create_solution("Alpha", dir.path().to_path_buf(), cx))
+                .expect("create");
+            solutions::install_global_for_test(store, cx);
+            // last_opened_at is None for a freshly-created solution.
+            assert!(recent_solutions_for_test(cx).is_empty());
+        });
+    }
+
+    #[gpui::test]
+    async fn most_recent_first_capped_to_max(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let dir = tempdir().expect("tempdir");
+            let store = SolutionStore::for_test(dir.path().join("c.json"), cx);
+            // Create MAX_RECENT + 2 solutions and stamp them in order.
+            for i in 0..MAX_RECENT + 2 {
+                let sol_id = store
+                    .update(cx, |s, cx| {
+                        s.create_solution(&format!("Sol{i}"), dir.path().join(format!("r{i}")), cx)
+                    })
+                    .expect("create");
+                store
+                    .update(cx, |s, cx| s.touch_last_opened(&sol_id, cx))
+                    .expect("touch");
+            }
+            solutions::install_global_for_test(store, cx);
+
+            let recent = recent_solutions_for_test(cx);
+            assert_eq!(recent.len(), MAX_RECENT);
+            // Highest index was stamped last → comes first.
+            let last_index = MAX_RECENT + 1;
+            assert_eq!(recent[0].label, format!("Sol{last_index}"));
+            // Just-before-last is second.
+            assert_eq!(recent[1].label, format!("Sol{}", last_index - 1));
+        });
+    }
 }

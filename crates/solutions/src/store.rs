@@ -71,6 +71,17 @@ impl SolutionStore {
         &self.config.solutions
     }
 
+    /// First Solution whose `root` is an ancestor of (or equal to) `path`.
+    /// Used by the title bar to determine which Solution segment to render
+    /// for the active worktree, and by tests to assert the same matching
+    /// without going through the rendered UI.
+    pub fn solution_for_path(&self, path: &std::path::Path) -> Option<&Solution> {
+        self.config
+            .solutions
+            .iter()
+            .find(|sol| path.starts_with(&sol.root))
+    }
+
     pub fn fs_lock(&self) -> Arc<smol::lock::Mutex<()>> {
         Arc::clone(&self.fs_lock)
     }
@@ -475,6 +486,60 @@ mod tests {
                 .clone()
         });
         assert!(target.join(".git").exists());
+    }
+
+    #[gpui::test]
+    async fn solution_for_path_matches_root_and_descendants(cx: &mut TestAppContext) {
+        let dir = tempdir().expect("tempdir");
+        let store =
+            cx.update(|cx| SolutionStore::for_test(dir.path().join("c.json"), cx));
+        let root_base = dir.path().join("alpha-root");
+        std::fs::create_dir_all(&root_base).expect("mkdir sol root");
+        let sol_id = store
+            .update(cx, |s, cx| s.create_solution("Alpha", root_base.clone(), cx))
+            .expect("create solution");
+        // create_solution joins the slug onto root_base — fetch the real root.
+        let actual_root = store
+            .read_with(cx, |s, _| {
+                s.solutions()
+                    .iter()
+                    .find(|x| x.id == sol_id)
+                    .map(|x| x.root.clone())
+            })
+            .expect("solution exists");
+
+        store.read_with(cx, |s, _| {
+            // Exact match on the stored root.
+            assert_eq!(
+                s.solution_for_path(&actual_root).map(|x| x.id.clone()),
+                Some(sol_id.clone()),
+            );
+            // Descendant.
+            assert_eq!(
+                s.solution_for_path(&actual_root.join("nested/file.rs"))
+                    .map(|x| x.id.clone()),
+                Some(sol_id.clone()),
+            );
+            // Sibling at the same parent — not under actual_root.
+            let sibling = root_base.join("not-alpha");
+            assert!(s.solution_for_path(&sibling).is_none());
+            // Path above the root → not contained.
+            assert!(s.solution_for_path(&root_base).is_none());
+            // Unrelated path.
+            assert!(
+                s.solution_for_path(std::path::Path::new("/tmp/elsewhere")).is_none(),
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn solution_for_path_returns_none_when_no_solutions(cx: &mut TestAppContext) {
+        let dir = tempdir().expect("tempdir");
+        let store =
+            cx.update(|cx| SolutionStore::for_test(dir.path().join("c.json"), cx));
+        store.read_with(cx, |s, _| {
+            assert!(s.solution_for_path(dir.path()).is_none());
+        });
     }
 
     #[gpui::test]

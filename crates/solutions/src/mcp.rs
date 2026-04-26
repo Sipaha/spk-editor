@@ -34,6 +34,9 @@ pub fn register(cx: &mut App) {
         server.add_tool(CloseSolutionTool);
     });
     editor_mcp::register_tool(cx, |server| {
+        server.add_tool(FindForPathTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
         server.add_tool(ListCatalogTool);
     });
     editor_mcp::register_tool(cx, |server| {
@@ -786,6 +789,86 @@ impl McpServerTool for CloseSolutionTool {
                 text: format!("closed: {closed}"),
             }],
             structured_content: CloseSolutionResult { closed },
+        })
+    }
+}
+
+// =====================================================================
+// solutions.find_for_path
+// =====================================================================
+
+/// Given an absolute filesystem path, return the Solution (if any) whose
+/// root contains it. This is the same matching the title bar uses to
+/// pick its Solution segment for the active worktree, exposed as a
+/// pure-data tool so agents can verify the title-bar logic without
+/// rendering pixels or attaching to a window.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct FindForPathParams {
+    pub abs_path: String,
+}
+
+impl<'de> Deserialize<'de> for FindForPathParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            abs_path: String,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            abs_path: inner.abs_path,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FindForPathMatch {
+    pub solution_id: String,
+    pub solution_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct FindForPathResult {
+    /// `None` if no Solution's root contains `abs_path`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#match: Option<FindForPathMatch>,
+}
+
+#[derive(Clone)]
+pub struct FindForPathTool;
+
+impl McpServerTool for FindForPathTool {
+    type Input = FindForPathParams;
+    type Output = FindForPathResult;
+    const NAME: &'static str = "solutions.find_for_path";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.abs_path.is_empty(),
+            "invalid_params: abs_path is required"
+        );
+        let path = std::path::PathBuf::from(&input.abs_path);
+        let r#match = cx.update(|cx| {
+            SolutionStore::try_global(cx).and_then(|store| {
+                store.read_with(cx, |s, _| {
+                    s.solution_for_path(&path).map(|sol| FindForPathMatch {
+                        solution_id: sol.id.as_str().to_string(),
+                        solution_name: sol.name.clone(),
+                    })
+                })
+            })
+        });
+        let summary = match &r#match {
+            Some(m) => format!("matched: {}", m.solution_name),
+            None => "no match".to_string(),
+        };
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: FindForPathResult { r#match },
         })
     }
 }

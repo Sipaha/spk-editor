@@ -489,13 +489,10 @@ impl TitleBar {
     /// the SolutionStore across element construction.
     fn active_solution(&self, cx: &App) -> Option<(SolutionId, SharedString)> {
         let worktree = self.effective_active_worktree(cx)?;
-        let worktree = worktree.read(cx);
-        let worktree_path = worktree.abs_path();
+        let worktree_path = worktree.read(cx).abs_path();
         let store = SolutionStore::try_global(cx)?;
         store.read_with(cx, |s, _| {
-            s.solutions()
-                .iter()
-                .find(|sol| worktree_path.starts_with(&sol.root))
+            s.solution_for_path(&worktree_path)
                 .map(|sol| (sol.id.clone(), SharedString::from(sol.name.clone())))
         })
     }

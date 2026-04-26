@@ -188,6 +188,46 @@ async fn add_member_clones_from_local_bare_repo(cx: &mut TestAppContext) {
         "seed README missing at {local_path}",
     );
 
+    // --- 4b. solutions.find_for_path matches what the title bar would render ---
+    // The active worktree path of an opened Solution is the member's local_path.
+    // Title-bar logic walks SolutionStore looking for a Solution whose root
+    // contains that path; this tool exposes the same matching for verification.
+    let resp = call_tool(
+        &mut stream,
+        41,
+        "solutions.find_for_path",
+        json!({"abs_path": local_path}),
+    )
+    .await;
+    assert_eq!(
+        resp.pointer("/result/structuredContent/match/solution_id")
+            .and_then(|v| v.as_str()),
+        Some(solution_id.as_str()),
+        "find_for_path should match the solution that contains local_path: {resp}"
+    );
+    assert_eq!(
+        resp.pointer("/result/structuredContent/match/solution_name")
+            .and_then(|v| v.as_str()),
+        Some("Demo"),
+    );
+
+    // Unrelated path → no match.
+    let resp = call_tool(
+        &mut stream,
+        42,
+        "solutions.find_for_path",
+        json!({"abs_path": "/tmp/definitely-not-a-solution-root"}),
+    )
+    .await;
+    assert!(
+        resp.pointer("/result/structuredContent/match").is_none()
+            || resp
+                .pointer("/result/structuredContent/match")
+                .map(|v| v.is_null())
+                .unwrap_or(false),
+        "expected no match for unrelated path, got: {resp}"
+    );
+
     // --- 5. remove_member tears it down cleanly ---
     let resp = call_tool(
         &mut stream,
