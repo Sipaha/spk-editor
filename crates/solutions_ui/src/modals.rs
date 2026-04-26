@@ -9,6 +9,9 @@ use util::ResultExt as _;
 use workspace::{ModalView, Workspace};
 
 use crate::actions::NewSolution;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use solutions::SolutionId;
 
 actions!(
     solutions,
@@ -17,6 +20,17 @@ actions!(
         AddCatalogProject,
     ]
 );
+
+/// Open the AddMember picker for a specific solution by id. Dispatched from
+/// the Welcome page when the user clicks an empty solution — the natural
+/// next step there is "let me add a member to this solution", not "fail
+/// silently because there's no worktree to mount".
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, JsonSchema, gpui::Action)]
+#[action(namespace = solutions)]
+#[serde(transparent)]
+pub struct AddMemberTo {
+    pub solution_id: String,
+}
 
 pub fn register(workspace: &mut Workspace, _: Option<&mut Window>, _: &mut Context<Workspace>) {
     workspace.register_action(|workspace, _: &NewSolution, window, cx| {
@@ -30,6 +44,14 @@ pub fn register(workspace: &mut Workspace, _: Option<&mut Window>, _: &mut Conte
         workspace.toggle_modal(window, cx, |window, cx| {
             AddCatalogProjectModal::new(weak, window, cx)
         });
+    });
+    workspace.register_action(|workspace, action: &AddMemberTo, window, cx| {
+        crate::add_member_picker::AddMemberPicker::open(
+            workspace,
+            SolutionId(action.solution_id.clone()),
+            window,
+            cx,
+        );
     });
 }
 

@@ -24,6 +24,7 @@ use workspace::{
 };
 
 use crate::actions::NewSolution;
+use crate::modals::AddMemberTo;
 
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize, JsonSchema, Action)]
 #[action(namespace = solutions)]
@@ -111,19 +112,25 @@ fn render_create_button() -> impl IntoElement {
 }
 
 fn render_row(index: usize, entry: RecentSolution) -> impl IntoElement {
+    let mut row = ui::h_flex()
+        .gap_2()
+        .child(
+            Icon::new(IconName::Folder)
+                .color(Color::Muted)
+                .size(IconSize::Small),
+        )
+        .child(Label::new(entry.label));
+    if entry.is_empty {
+        row = row.child(
+            Label::new("(empty)")
+                .color(Color::Muted)
+                .size(LabelSize::XSmall),
+        );
+    }
     ButtonLike::new(("recent-solution", index))
         .full_width()
         .size(ui::ButtonSize::Medium)
-        .child(
-            ui::h_flex()
-                .gap_2()
-                .child(
-                    Icon::new(IconName::Folder)
-                        .color(Color::Muted)
-                        .size(IconSize::Small),
-                )
-                .child(Label::new(entry.label)),
-        )
+        .child(row)
         .on_click(move |_, window, cx| {
             window.dispatch_action(Box::new(OpenRecentSolution { index }), cx);
         })
@@ -149,6 +156,24 @@ fn open_solution(sol_id: SolutionId, cx: &mut App) {
         }
     };
     if paths.is_empty() {
+        // Empty solution: clicking it from Welcome should let the user add the
+        // first member, not fail silently. Dispatch into the active window's
+        // workspace where modals.rs has registered AddMemberTo.
+        if let Some(window) = cx.active_window() {
+            let action = AddMemberTo {
+                solution_id: sol_id.0.clone(),
+            };
+            window
+                .update(cx, |_, window, cx| {
+                    window.dispatch_action(Box::new(action), cx);
+                })
+                .log_err();
+        } else {
+            log::warn!(
+                "solutions_ui: solution {} is empty and no active window to open AddMember picker",
+                sol_id.0
+            );
+        }
         return;
     }
     store
@@ -168,6 +193,7 @@ fn open_solution(sol_id: SolutionId, cx: &mut App) {
 struct RecentSolution {
     id: SolutionId,
     label: String,
+    is_empty: bool,
 }
 
 #[cfg(test)]
@@ -183,12 +209,20 @@ fn all_solutions(cx: &App) -> Vec<RecentSolution> {
     let Some(store) = SolutionStore::try_global(cx) else {
         return Vec::new();
     };
-    let mut sols: Vec<(SolutionId, String, Option<DateTime<Utc>>)> = store.read_with(cx, |s, _| {
-        s.solutions()
-            .iter()
-            .map(|sol| (sol.id.clone(), sol.name.clone(), sol.last_opened_at))
-            .collect()
-    });
+    let mut sols: Vec<(SolutionId, String, Option<DateTime<Utc>>, bool)> = store
+        .read_with(cx, |s, _| {
+            s.solutions()
+                .iter()
+                .map(|sol| {
+                    (
+                        sol.id.clone(),
+                        sol.name.clone(),
+                        sol.last_opened_at,
+                        sol.members.is_empty(),
+                    )
+                })
+                .collect()
+        });
     // Opened solutions first, ordered by last_opened_at desc (newest first).
     // Never-opened solutions follow, kept in their store insertion order.
     sols.sort_by(|a, b| match (a.2, b.2) {
@@ -198,7 +232,11 @@ fn all_solutions(cx: &App) -> Vec<RecentSolution> {
         (None, None) => std::cmp::Ordering::Equal,
     });
     sols.into_iter()
-        .map(|(id, name, _)| RecentSolution { id, label: name })
+        .map(|(id, name, _, is_empty)| RecentSolution {
+            id,
+            label: name,
+            is_empty,
+        })
         .collect()
 }
 
