@@ -234,12 +234,25 @@ Release Notes:
 - Fetch crash reports: `script/sentry-fetch <issue-id>`
 - Generate investigation prompt from crash: `script/crash-to-prompt <issue-id>`
 
+# Documenting fork-local work
+
+**Every fork-local addition or architectural decision on top of upstream MUST be recorded in `FORK.md`** at the repo root. That file is the single index for "what's different here" and the *why* behind non-obvious choices. Update it when:
+
+- A new fork-local crate is added (one row in the crates table + a one-line purpose).
+- An upstream file is touched additively (one row in the touched-files table + the owning fork crate).
+- A non-obvious architectural decision is made — record it as a numbered entry under "Key architectural decisions" with **why** (the constraint that ruled out the obvious approach) and **how to apply** (concrete guidance for future sessions).
+- A locked rebrand identifier changes (cross-reference the spec; keep `.rules` § "Locked rebrand identifiers" in sync).
+
+Don't put per-crate module layouts, type catalogs, or status updates in `FORK.md` — those go stale fast. Use `git log` for status, code for layout, and per-crate `.rules` for traps to avoid.
+
 # Rules Hygiene
 
 These `.rules` files are read by every agent session. Keep them high-signal.
 
 ## After any agentic session
 If you discover a non-obvious pattern that would help future sessions, include a **"Suggested .rules additions"** heading in your PR description with the proposed text. Do **not** edit `.rules` inline during normal feature/fix work. Reviewers decide what gets merged.
+
+Mechanical post-feature maintenance is fine without a separate suggestion (e.g. bumping the tool catalog count when a new MCP namespace lands). Architectural rules and "trap to avoid" entries follow the suggestion path.
 
 ## High bar for new rules
 Editing or clarifying existing rules is always welcome. New rules must meet **all three** criteria:
