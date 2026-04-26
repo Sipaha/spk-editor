@@ -3,7 +3,7 @@
 
 mod cache;
 mod event_sources;
-mod git;
+pub mod git;
 pub mod mcp;
 mod model;
 mod persistence;
