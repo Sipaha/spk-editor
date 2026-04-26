@@ -39,6 +39,8 @@ use project::{
 };
 use remote::RemoteConnectionOptions;
 use settings::Settings as _;
+use solutions::{SolutionId, SolutionStore};
+use solutions_ui::OpenSolution;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -232,6 +234,7 @@ impl Render for TitleBar {
                             title_bar
                                 .when(title_bar_settings.show_project_items, |title_bar| {
                                     title_bar
+                                        .children(self.render_solution_segment(cx))
                                         .children(self.render_project_host(cx))
                                         .child(self.render_project_name(project_name, window, cx))
                                 })
@@ -479,6 +482,38 @@ impl TitleBar {
         }
 
         project.visible_worktrees(cx).next()
+    }
+
+    /// Find the Solution whose root contains the active worktree's path.
+    /// Returns `(id, name)` so render code does not have to hold a borrow on
+    /// the SolutionStore across element construction.
+    fn active_solution(&self, cx: &App) -> Option<(SolutionId, SharedString)> {
+        let worktree = self.effective_active_worktree(cx)?;
+        let worktree = worktree.read(cx);
+        let worktree_path = worktree.abs_path();
+        let store = SolutionStore::try_global(cx)?;
+        store.read_with(cx, |s, _| {
+            s.solutions()
+                .iter()
+                .find(|sol| worktree_path.starts_with(&sol.root))
+                .map(|sol| (sol.id.clone(), SharedString::from(sol.name.clone())))
+        })
+    }
+
+    fn render_solution_segment(&self, cx: &App) -> Option<AnyElement> {
+        let (_, name) = self.active_solution(cx)?;
+        let display = util::truncate_and_trailoff(&name, MAX_PROJECT_NAME_LENGTH);
+        Some(
+            Button::new("title_bar_solution", display)
+                .label_size(LabelSize::Small)
+                .color(Color::Muted)
+                .selected_style(ButtonStyle::Tinted(TintColor::Accent))
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(OpenSolution.boxed_clone(), cx);
+                })
+                .tooltip(Tooltip::for_action_title("Open Solution", &OpenSolution))
+                .into_any_element(),
+        )
     }
 
     fn get_repository_for_worktree(
