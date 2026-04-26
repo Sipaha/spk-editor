@@ -11,6 +11,7 @@ use gpui::{
     Task,
 };
 use solutions::{Solution, SolutionId, SolutionStore, SolutionStoreEvent};
+use util::ResultExt;
 
 use crate::adapter::AdapterRegistry;
 use crate::db::SolutionAgentDb;
@@ -45,6 +46,35 @@ impl EventEmitter<SolutionAgentStoreEvent> for SolutionAgentStore {}
 
 struct GlobalSolutionAgentStore(Entity<SolutionAgentStore>);
 impl Global for GlobalSolutionAgentStore {}
+
+/// On-disk snapshot of a session. v1 only captures enough state to label
+/// a session in the navigator on rehydration; the full transcript is left
+/// out until the rehydration path (Phase 4) needs it.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct PersistedSession {
+    title: String,
+    entry_summaries: Vec<String>,
+}
+
+fn serializable_snapshot(session: &SolutionSession, cx: &App) -> Vec<u8> {
+    let entry_summaries = session
+        .acp_thread
+        .as_ref()
+        .map(|thread| {
+            thread
+                .read(cx)
+                .entries()
+                .iter()
+                .map(|entry| entry.to_markdown(cx))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let snapshot = PersistedSession {
+        title: session.title.to_string(),
+        entry_summaries,
+    };
+    serde_json::to_vec(&snapshot).unwrap_or_default()
+}
 
 impl SolutionAgentStore {
     pub fn global(cx: &App) -> Entity<Self> {
@@ -365,6 +395,104 @@ impl SolutionAgentStore {
         Ok(())
     }
 
+    /// Send a user message to `session_id`. Flips `SessionState` to `Running`
+    /// synchronously (before the returned `Task` is awaited) so the UI shows
+    /// activity immediately, then forwards the prompt to the underlying ACP
+    /// connection. On success, schedules a persistence write of the session
+    /// snapshot. On failure, transitions the session to `Errored`.
+    pub fn send_message(
+        &mut self,
+        session_id: SolutionSessionId,
+        content: String,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let Some(session_entity) = self.sessions.get(&session_id).cloned() else {
+            return Task::ready(Err(anyhow!("unknown session {session_id}")));
+        };
+
+        // Flip state immediately, before the spawn, so callers observing the
+        // session right after this call returns see `Running`.
+        session_entity.update(cx, |s, _| {
+            s.state = SessionState::Running {
+                started_at: std::time::Instant::now(),
+                notified: false,
+            };
+            s.last_activity_at = Utc::now();
+        });
+        cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+        cx.notify();
+
+        let Some(acp_thread) = session_entity.read(cx).acp_thread.clone() else {
+            return Task::ready(Err(anyhow!(
+                "session {session_id} has no ACP thread yet"
+            )));
+        };
+
+        let user_message_id = acp_thread::UserMessageId::new();
+        let acp_session_id = acp_thread.read(cx).session_id().clone();
+        let prompt = agent_client_protocol::schema::PromptRequest::new(
+            acp_session_id,
+            vec![agent_client_protocol::schema::ContentBlock::Text(
+                agent_client_protocol::schema::TextContent::new(content),
+            )],
+        );
+
+        let connection = acp_thread.read(cx).connection().clone();
+
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let prompt_task = cx.update(|cx| connection.prompt(user_message_id, prompt, cx));
+            let result = prompt_task.await;
+            match &result {
+                Err(err) => {
+                    let err_message = SharedString::from(err.to_string());
+                    this.update(cx, |store, cx| {
+                        if let Some(s) = store.sessions.get(&session_id).cloned() {
+                            s.update(cx, |s, _| {
+                                s.state = SessionState::Errored(err_message.clone());
+                            });
+                            cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+                            cx.notify();
+                        }
+                    })?;
+                }
+                Ok(_) => {
+                    this.update(cx, |store, cx| {
+                        store.persist_session_blob(session_id, cx);
+                    })?;
+                }
+            }
+            result.map(|_| ())
+        })
+    }
+
+    /// Schedule a debounce-friendly write of the session's serialised snapshot
+    /// to the persistence backend (if configured). The serialisation runs on
+    /// the foreground thread because it must read the `AcpThread` entity; the
+    /// SQLite write itself is dispatched to the background executor by
+    /// `SolutionAgentDb::save_blob`.
+    pub fn persist_session_blob(
+        &self,
+        session_id: SolutionSessionId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.sessions.get(&session_id).cloned() else {
+            return;
+        };
+        let Some(db) = self.persistence.clone() else {
+            return;
+        };
+        cx.spawn(async move |_this, cx: &mut AsyncApp| {
+            let blob: Vec<u8> = cx.update(|cx| {
+                let s = session.read(cx);
+                serializable_snapshot(s, cx)
+            });
+            if !blob.is_empty() {
+                db.save_blob(session_id, blob).await.log_err();
+            }
+        })
+        .detach();
+    }
+
     /// Test-only: pretend a session was added against an existing connection.
     #[cfg(any(feature = "test-support", test))]
     pub fn pool_pretend_session_added(
@@ -611,14 +739,27 @@ mod tests {
 
     /// AgentConnection mock that returns a real `AcpThread` from `new_session`
     /// so `create_session` can complete without going through a real subprocess.
+    ///
+    /// `prompt()` returns an error by default. Tests that want to control turn
+    /// timing can pass a `prompt_gate` receiver; `prompt()` then awaits the
+    /// gate before returning `Ok(EndTurn)`.
     struct MockConnection {
         next_session: std::cell::Cell<u64>,
+        prompt_gate: parking_lot::Mutex<Option<async_channel::Receiver<()>>>,
     }
 
     impl MockConnection {
         fn new() -> Self {
             Self {
                 next_session: std::cell::Cell::new(0),
+                prompt_gate: parking_lot::Mutex::new(None),
+            }
+        }
+
+        fn with_prompt_gate(gate: async_channel::Receiver<()>) -> Self {
+            Self {
+                next_session: std::cell::Cell::new(0),
+                prompt_gate: parking_lot::Mutex::new(Some(gate)),
             }
         }
     }
@@ -672,9 +813,18 @@ mod tests {
             &self,
             _user_message_id: acp_thread::UserMessageId,
             _params: agent_client_protocol::schema::PromptRequest,
-            _cx: &mut App,
+            cx: &mut App,
         ) -> Task<anyhow::Result<agent_client_protocol::schema::PromptResponse>> {
-            Task::ready(Err(anyhow::anyhow!("not used in this test")))
+            let gate = self.prompt_gate.lock().clone();
+            match gate {
+                None => Task::ready(Err(anyhow::anyhow!("not used in this test"))),
+                Some(gate) => cx.spawn(async move |_| {
+                    gate.recv().await.ok();
+                    Ok(agent_client_protocol::schema::PromptResponse::new(
+                        agent_client_protocol::schema::StopReason::EndTurn,
+                    ))
+                }),
+            }
         }
         fn cancel(&self, _session_id: &agent_client_protocol::schema::SessionId, _cx: &mut App) {}
         fn into_any(self: Rc<Self>) -> Rc<dyn std::any::Any> {
@@ -693,6 +843,8 @@ mod tests {
         connect_count: Arc<AtomicUsize>,
         // Optional async gate to hold connect() pending until the test releases it.
         gate: parking_lot::Mutex<Option<async_channel::Receiver<()>>>,
+        // Optional gate forwarded to the spawned `MockConnection::prompt`.
+        prompt_gate: parking_lot::Mutex<Option<async_channel::Receiver<()>>>,
     }
 
     // SAFETY: We only ever touch `gate` from the foreground thread (its
@@ -705,6 +857,7 @@ mod tests {
             Self {
                 connect_count,
                 gate: parking_lot::Mutex::new(None),
+                prompt_gate: parking_lot::Mutex::new(None),
             }
         }
 
@@ -715,6 +868,18 @@ mod tests {
             Self {
                 connect_count,
                 gate: parking_lot::Mutex::new(Some(gate)),
+                prompt_gate: parking_lot::Mutex::new(None),
+            }
+        }
+
+        fn with_prompt_gate(
+            connect_count: Arc<AtomicUsize>,
+            prompt_gate: async_channel::Receiver<()>,
+        ) -> Self {
+            Self {
+                connect_count,
+                gate: parking_lot::Mutex::new(None),
+                prompt_gate: parking_lot::Mutex::new(Some(prompt_gate)),
             }
         }
     }
@@ -734,12 +899,15 @@ mod tests {
         ) -> Task<anyhow::Result<Rc<dyn acp_thread::AgentConnection>>> {
             self.connect_count.fetch_add(1, Ordering::SeqCst);
             let gate = self.gate.lock().clone();
+            let prompt_gate = self.prompt_gate.lock().clone();
             cx.spawn(async move |_| {
                 if let Some(gate) = gate {
                     let _ = gate.recv().await;
                 }
-                let connection: Rc<dyn acp_thread::AgentConnection> =
-                    Rc::new(MockConnection::new());
+                let connection: Rc<dyn acp_thread::AgentConnection> = match prompt_gate {
+                    Some(prompt_gate) => Rc::new(MockConnection::with_prompt_gate(prompt_gate)),
+                    None => Rc::new(MockConnection::new()),
+                };
                 Ok(connection)
             })
         }
@@ -1123,5 +1291,84 @@ mod tests {
                 );
             });
         });
+    }
+
+    #[gpui::test]
+    async fn send_message_starts_running_state_immediately(cx: &mut TestAppContext) {
+        let (solution_id, _tmp, project) = setup_solution_and_project(cx).await;
+        let agent_id = SharedString::from("mock-agent");
+
+        // Use a prompt-gated MockConnection so prompt() stays pending until we
+        // release the gate — this lets us observe the synchronous Running flip
+        // before the underlying ACP turn completes.
+        let (prompt_gate_tx, prompt_gate_rx) = async_channel::bounded::<()>(1);
+        let connect_count = Arc::new(AtomicUsize::new(0));
+        cx.update(|cx| {
+            let registry = Arc::new(AdapterRegistry::new());
+            SolutionAgentStore::init_global(cx, registry);
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, _| {
+                store.register_agent_server(
+                    agent_id.clone(),
+                    Rc::new(MockAgentServer::with_prompt_gate(
+                        connect_count.clone(),
+                        prompt_gate_rx,
+                    )),
+                );
+            });
+        });
+
+        let session_id = cx
+            .update(|cx| {
+                let store = SolutionAgentStore::global(cx);
+                store.update(cx, |store, cx| {
+                    store.create_session(
+                        solution_id.clone(),
+                        agent_id.clone(),
+                        project.clone(),
+                        cx,
+                    )
+                })
+            })
+            .await
+            .expect("create_session");
+
+        // Force `Idle` so we can prove `send_message` flips it to `Running`
+        // synchronously rather than just observing pre-existing `Running`.
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| {
+                let session = store.session(session_id).expect("session exists");
+                session.update(cx, |s, _| s.state = SessionState::Idle);
+            });
+        });
+
+        // Kick off the prompt. We deliberately don't await `task` here — we
+        // want to read the state BEFORE the prompt resolves.
+        let task = cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| {
+                store.send_message(session_id, "hi".into(), cx)
+            })
+        });
+
+        // Synchronous post-condition: state is already Running.
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| {
+                let session = store.session(session_id).expect("session exists");
+                let state = session.read(cx).state.clone();
+                assert!(
+                    matches!(state, SessionState::Running { .. }),
+                    "expected Running synchronously after send_message, got {:?}",
+                    state
+                );
+            });
+        });
+
+        // Now release the prompt gate so the spawned future resolves.
+        prompt_gate_tx.send(()).await.expect("release prompt gate");
+        prompt_gate_tx.close();
+        task.await.expect("send_message task");
     }
 }
