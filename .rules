@@ -54,7 +54,7 @@ A running `spk-editor` instance exposes an MCP server over a Unix socket so an a
 - **Diagnostics:** `diagnostics.get` (per-file summaries + per-diagnostic items with severity / message / source / code)
 
 **Self-test recipe:**
-1. Build + launch via `script/run-mcp` (recommended: builds the release binary if missing, wraps in `xvfb-run` automatically when `$DISPLAY` is unset, prints the socket path when ready). For an attached display use `script/run-mcp --display`; force headless with `--headless`. Plain `cargo run --release --bin spk-editor` also works if you already have a display.
+1. Build + launch via `script/run-mcp` (recommended: builds the binary if missing, wraps in `xvfb-run` automatically when `$DISPLAY` is unset, prints the socket path when ready). For an attached display use `script/run-mcp --display`; force headless with `--headless`. **For dev iteration use `--debug`** — the dev profile builds in 1-2 min (incremental) vs 3-9 min for release; runtime is slower but fine for probing structure / opening Welcome / verifying UI changes. Default stays release for "matches what users see" checks.
 2. Connect via `socat - UNIX-CONNECT:$HOME/.config/spk-editor/mcp.sock` for ad-hoc probes, or write a small Rust/Python client. JSON-RPC frames are newline-delimited.
 3. Always start with `editor.capabilities` to confirm protocol version and supported event kinds.
 4. For long-running ops (`solutions.add_member`, `catalog.refresh_cache`) use the returned `operation_id` with `editor.get_operation` to poll, or subscribe via `editor.subscribe { kinds: ["operation_completed", "operation_progress"] }` for push notifications.
