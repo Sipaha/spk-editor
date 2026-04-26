@@ -86,9 +86,19 @@ How to apply: never inject Anthropic credentials into a subprocess env. If a use
 
 ### 9. File drops on a session view insert plain `@path` text, not `MentionSet` entries
 
-Why: upstream `agent_ui::MessageEditor` integrates with a heavy `MentionSet` machinery (mention rendering, image upload, project-path resolution, capability negotiation). Pulling that into `solution_agent` would couple us to `agent_ui` internals. v1 keeps the compose box a vanilla `editor::Editor` and the drop handler emits text like `@member-name/src/lib.rs`. The agent reads the path on its own via the `Read` tool — no editor-side resolution needed.
+Why: upstream `agent_ui::MessageEditor` integrates with a heavy `MentionSet` machinery (mention rendering, project-path resolution, capability negotiation). Pulling that into `solution_agent` would couple us to `agent_ui` internals. v1 keeps the compose box a vanilla `editor::Editor` and the drop handler emits text like `@member-name/src/lib.rs`. The agent reads the path on its own via the `Read` tool — no editor-side resolution needed.
 
-How to apply: if image-paste, rich mentions, or capability-aware path expansion become user requirements, integrate `agent_ui::message_editor::insert_mention_for_project_path` and bring `MentionSet` along — don't half-build a parallel mention layer in `solution_agent`. Plain text paste (`Ctrl+V` for clipboard text) works via `editor::Editor`'s native action; no patch needed.
+How to apply: if rich mentions or capability-aware path expansion become user requirements, integrate `agent_ui::message_editor::insert_mention_for_project_path` and bring `MentionSet` along — don't half-build a parallel mention layer in `solution_agent`. Plain text paste (`Ctrl+V` for clipboard text) works via `editor::Editor`'s native action; no patch needed.
+
+### 10. Image paste: clipboard `gpui::Image` → base64 → `acp::ContentBlock::Image`
+
+Why: Claude (and other ACP agents that declare the `image` prompt capability) accepts image content blocks alongside text. We want native paste UX without dragging in `MentionSet`. The compose box registers a `capture_action(Paste)` handler that runs **before** the editor's default text-paste, inspects the clipboard, and:
+- if the first entry is text → returns without consuming (action falls through to the editor's text paste)
+- if the first entry is an image → encodes via `base64::engine::general_purpose::STANDARD`, stashes a `PendingImage` on the view, drops a `[image #N]` placeholder into the buffer, and calls `cx.stop_propagation()`
+
+On submit, `pending_images` are converted to `acp::ContentBlock::Image(ImageContent::new(base64, mime))` and combined with the text block via `SolutionAgentStore::send_message_blocks(...)` (the new structured-content API alongside the legacy text-only `send_message`).
+
+How to apply: this is a deliberate parallel implementation of upstream's `paste_images_as_context`, NOT a reuse. The upstream version requires `MentionSet`, image-upload state, capability checks — all coupled to `agent_ui`. Our path stays self-contained inside `solution_agent`. If the agent doesn't support images (capability missing), the call still goes out — the agent rejects with an error that surfaces to the user as a normal `Errored` state. Adding capability negotiation pre-flight is a follow-up.
 
 ## Where specs and plans live
 
