@@ -8,10 +8,12 @@ use agent_settings::AgentSettings;
 use chrono::{DateTime, Utc};
 use git::Clone as GitClone;
 use gpui::{
-    Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
-    ParentElement, Render, Styled, Task, Window, actions,
+    Action, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Global,
+    InteractiveElement, ParentElement, Render, Styled, Task, Window, actions,
 };
 use gpui::{WeakEntity, linear_color_stop, linear_gradient};
+use std::cell::RefCell;
+use std::rc::Rc;
 use menu::{SelectNext, SelectPrevious};
 
 use schemars::JsonSchema;
@@ -236,6 +238,50 @@ impl<const COLS: usize> Section<COLS> {
                     .filter_map(|(index, entry)| entry.render(index_offset + index, focus)),
             )
     }
+}
+
+/// Closure that renders an extra section into the welcome page. Returns
+/// `None` if the section has nothing to show this frame.
+///
+/// Lives behind an `Rc` so the registry can hand out clones that outlive
+/// the borrow on the registry itself (rendering iterates registered
+/// sections one at a time and each call needs `&mut App`).
+pub type WelcomeSectionRenderer = Rc<dyn Fn(&mut App) -> Option<AnyElement>>;
+
+#[derive(Default)]
+struct WelcomeSectionRegistry {
+    sections: RefCell<Vec<WelcomeSectionRenderer>>,
+}
+
+impl Global for WelcomeSectionRegistry {}
+
+/// Register an extra section to render on the welcome page (above the
+/// "Recent Projects" / static second section). Used by sibling crates such
+/// as `solutions_ui` to plug Recent Solutions in without the `workspace`
+/// crate having to take a dependency on `solutions` (which would create a
+/// cycle: `solutions` already depends on `workspace::open_paths`).
+pub fn register_welcome_section(
+    cx: &mut App,
+    renderer: impl Fn(&mut App) -> Option<AnyElement> + 'static,
+) {
+    if cx.try_global::<WelcomeSectionRegistry>().is_none() {
+        cx.set_global(WelcomeSectionRegistry::default());
+    }
+    cx.global::<WelcomeSectionRegistry>()
+        .sections
+        .borrow_mut()
+        .push(Rc::new(renderer));
+}
+
+fn render_registered_sections(cx: &mut App) -> Vec<AnyElement> {
+    let renderers: Vec<WelcomeSectionRenderer> = cx
+        .try_global::<WelcomeSectionRegistry>()
+        .map(|reg| reg.sections.borrow().iter().cloned().collect())
+        .unwrap_or_default();
+    renderers
+        .into_iter()
+        .filter_map(|render| render(cx))
+        .collect()
 }
 
 pub struct WelcomePage {
@@ -490,6 +536,7 @@ impl Render for WelcomePage {
                             ),
                     )
                     .child(first_section.render(Default::default(), &self.focus_handle))
+                    .children(render_registered_sections(cx))
                     .child(second_section)
                     .when(ai_enabled && !showing_recent_projects, |this| {
                         let agent_tab_index = next_tab_index;

@@ -7,6 +7,7 @@ mod dock_panel;
 mod modals;
 mod picker;
 mod status_bar;
+mod welcome;
 
 pub use status_bar::SolutionsStatusItem;
 
@@ -21,4 +22,5 @@ pub fn init(cx: &mut App) {
     dock_panel::init(cx);
     cx.observe_new(picker::OpenSolutionModal::register).detach();
     cx.observe_new(modals::register).detach();
+    welcome::init(cx);
 }
