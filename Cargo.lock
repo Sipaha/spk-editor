@@ -16656,6 +16656,7 @@ dependencies = [
  "ashpd",
  "async-channel 2.5.0",
  "chrono",
+ "context_server",
  "editor_mcp",
  "fs",
  "futures 0.3.32",
