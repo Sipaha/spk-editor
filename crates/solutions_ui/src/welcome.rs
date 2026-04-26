@@ -1,10 +1,14 @@
-//! Welcome page integration: renders a "Recent Solutions" section by
-//! plugging into `workspace::register_welcome_section`.
+//! Welcome page integration: renders a Solutions section (full list + Create
+//! button) by plugging into `workspace::register_welcome_section`.
 //!
 //! Lives here (not in `workspace`) so the dependency graph stays one-way:
 //! `solutions_ui → workspace`, never the reverse. Earlier we tried to read
 //! `SolutionStore` directly from `workspace::welcome` and that introduced
 //! the `workspace ↔ solutions` cycle that had to be reverted.
+//!
+//! Combined with `restore_on_startup: "none"` in `assets/settings/default.json`,
+//! this section is what the user sees on every fresh launch — it's the
+//! Solutions launcher for the whole editor. See FORK.md §11.
 
 use chrono::{DateTime, Utc};
 use gpui::{Action, AnyElement, App, IntoElement};
@@ -19,7 +23,7 @@ use workspace::{
     welcome::{WelcomePage, register_welcome_section},
 };
 
-const MAX_RECENT: usize = 5;
+use crate::actions::NewSolution;
 
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize, JsonSchema, Action)]
 #[action(namespace = solutions)]
@@ -52,10 +56,7 @@ pub fn init(cx: &mut App) {
 }
 
 fn render_section(cx: &mut App) -> Option<AnyElement> {
-    let entries = recent_solutions(cx);
-    if entries.is_empty() {
-        return None;
-    }
+    let entries = all_solutions(cx);
     let mut list = ui::v_flex().w_full().gap_1();
     list = list.child(
         ui::h_flex()
@@ -63,17 +64,50 @@ fn render_section(cx: &mut App) -> Option<AnyElement> {
             .mb_2()
             .gap_2()
             .child(
-                Label::new("RECENT SOLUTIONS")
+                Label::new("SOLUTIONS")
                     .buffer_font(cx)
                     .color(Color::Muted)
                     .size(LabelSize::XSmall),
             )
             .child(Divider::horizontal().color(DividerColor::BorderVariant)),
     );
-    for (index, entry) in entries.into_iter().enumerate() {
-        list = list.child(render_row(index, entry));
+    if entries.is_empty() {
+        list = list.child(
+            ui::v_flex()
+                .px_1()
+                .py_2()
+                .child(
+                    Label::new("No solutions yet.")
+                        .color(Color::Muted)
+                        .size(LabelSize::Small),
+                ),
+        );
+    } else {
+        for (index, entry) in entries.into_iter().enumerate() {
+            list = list.child(render_row(index, entry));
+        }
     }
+    list = list.child(render_create_button());
     Some(list.into_any_element())
+}
+
+fn render_create_button() -> impl IntoElement {
+    ButtonLike::new("create-solution-from-welcome")
+        .full_width()
+        .size(ui::ButtonSize::Medium)
+        .child(
+            ui::h_flex()
+                .gap_2()
+                .child(
+                    Icon::new(IconName::Plus)
+                        .color(Color::Muted)
+                        .size(IconSize::Small),
+                )
+                .child(Label::new("Create new solution")),
+        )
+        .on_click(|_, window, cx| {
+            window.dispatch_action(Box::new(NewSolution), cx);
+        })
 }
 
 fn render_row(index: usize, entry: RecentSolution) -> impl IntoElement {
@@ -96,7 +130,7 @@ fn render_row(index: usize, entry: RecentSolution) -> impl IntoElement {
 }
 
 fn open_recent_solution(action: &OpenRecentSolution, cx: &mut App) {
-    let entries = recent_solutions(cx);
+    let entries = all_solutions(cx);
     let Some(entry) = entries.get(action.index) else {
         return;
     };
@@ -137,23 +171,32 @@ struct RecentSolution {
 }
 
 #[cfg(test)]
-fn recent_solutions_for_test(cx: &App) -> Vec<RecentSolution> {
-    recent_solutions(cx)
+fn all_solutions_for_test(cx: &App) -> Vec<RecentSolution> {
+    all_solutions(cx)
 }
 
-fn recent_solutions(cx: &App) -> Vec<RecentSolution> {
+/// Returns every solution in the store, sorted by `last_opened_at` desc with
+/// never-opened solutions placed last (kept in their natural store order).
+/// No truncation — the Welcome page is the launcher for the whole editor and
+/// the user expects to see all of their solutions, not just five.
+fn all_solutions(cx: &App) -> Vec<RecentSolution> {
     let Some(store) = SolutionStore::try_global(cx) else {
         return Vec::new();
     };
     let mut sols: Vec<(SolutionId, String, Option<DateTime<Utc>>)> = store.read_with(cx, |s, _| {
         s.solutions()
             .iter()
-            .filter(|sol| sol.last_opened_at.is_some())
             .map(|sol| (sol.id.clone(), sol.name.clone(), sol.last_opened_at))
             .collect()
     });
-    sols.sort_by(|a, b| b.2.cmp(&a.2));
-    sols.truncate(MAX_RECENT);
+    // Opened solutions first, ordered by last_opened_at desc (newest first).
+    // Never-opened solutions follow, kept in their store insertion order.
+    sols.sort_by(|a, b| match (a.2, b.2) {
+        (Some(ts_a), Some(ts_b)) => ts_b.cmp(&ts_a),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
     sols.into_iter()
         .map(|(id, name, _)| RecentSolution { id, label: name })
         .collect()
@@ -167,39 +210,50 @@ mod tests {
     use tempfile::tempdir;
 
     #[gpui::test]
-    async fn empty_store_yields_no_recent(cx: &mut TestAppContext) {
+    async fn empty_store_yields_empty_list(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let dir = tempdir().expect("tempdir");
             let store = SolutionStore::for_test(dir.path().join("c.json"), cx);
             solutions::install_global_for_test(store, cx);
-            assert!(recent_solutions_for_test(cx).is_empty());
+            assert!(all_solutions_for_test(cx).is_empty());
         });
     }
 
     #[gpui::test]
-    async fn unopened_solutions_are_excluded(cx: &mut TestAppContext) {
+    async fn unopened_solutions_are_included(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let dir = tempdir().expect("tempdir");
             let store = SolutionStore::for_test(dir.path().join("c.json"), cx);
             store
-                .update(cx, |s, cx| s.create_solution("Alpha", dir.path().to_path_buf(), cx))
+                .update(cx, |s, cx| {
+                    s.create_solution("Alpha", dir.path().to_path_buf(), cx)
+                })
                 .expect("create");
             solutions::install_global_for_test(store, cx);
-            // last_opened_at is None for a freshly-created solution.
-            assert!(recent_solutions_for_test(cx).is_empty());
+            // Welcome shows ALL solutions — never-opened ones included.
+            let entries = all_solutions_for_test(cx);
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].label, "Alpha");
         });
     }
 
     #[gpui::test]
-    async fn most_recent_first_capped_to_max(cx: &mut TestAppContext) {
+    async fn opened_solutions_first_then_unopened_in_store_order(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let dir = tempdir().expect("tempdir");
             let store = SolutionStore::for_test(dir.path().join("c.json"), cx);
-            // Create MAX_RECENT + 2 solutions and stamp them in order.
-            for i in 0..MAX_RECENT + 2 {
+            // Three never-opened, then two opened (so the latter sort first).
+            for i in 0..3 {
+                store
+                    .update(cx, |s, cx| {
+                        s.create_solution(&format!("Unopen{i}"), dir.path().join(format!("u{i}")), cx)
+                    })
+                    .expect("create");
+            }
+            for i in 0..2 {
                 let sol_id = store
                     .update(cx, |s, cx| {
-                        s.create_solution(&format!("Sol{i}"), dir.path().join(format!("r{i}")), cx)
+                        s.create_solution(&format!("Open{i}"), dir.path().join(format!("o{i}")), cx)
                     })
                     .expect("create");
                 store
@@ -208,13 +262,15 @@ mod tests {
             }
             solutions::install_global_for_test(store, cx);
 
-            let recent = recent_solutions_for_test(cx);
-            assert_eq!(recent.len(), MAX_RECENT);
-            // Highest index was stamped last → comes first.
-            let last_index = MAX_RECENT + 1;
-            assert_eq!(recent[0].label, format!("Sol{last_index}"));
-            // Just-before-last is second.
-            assert_eq!(recent[1].label, format!("Sol{}", last_index - 1));
+            let entries = all_solutions_for_test(cx);
+            assert_eq!(entries.len(), 5);
+            // Most recently opened first.
+            assert_eq!(entries[0].label, "Open1");
+            assert_eq!(entries[1].label, "Open0");
+            // Then never-opened in store insertion order.
+            assert_eq!(entries[2].label, "Unopen0");
+            assert_eq!(entries[3].label, "Unopen1");
+            assert_eq!(entries[4].label, "Unopen2");
         });
     }
 }
