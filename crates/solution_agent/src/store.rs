@@ -93,6 +93,11 @@ impl SolutionAgentStore {
         cx.global::<GlobalSolutionAgentStore>().0.clone()
     }
 
+    pub fn try_global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalSolutionAgentStore>()
+            .map(|g| g.0.clone())
+    }
+
     pub fn init_global(cx: &mut App, adapters: Arc<AdapterRegistry>) {
         let entity = cx.new(|cx| Self::new_in_app(adapters, cx));
         cx.set_global(GlobalSolutionAgentStore(entity));

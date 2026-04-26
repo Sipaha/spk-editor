@@ -8,6 +8,7 @@ pub mod model;
 pub mod adapter;
 pub mod claude_adapter;
 pub(crate) mod db;
+pub mod event_sources;
 pub mod mcp;
 pub mod notifier;
 pub(crate) mod pool;
