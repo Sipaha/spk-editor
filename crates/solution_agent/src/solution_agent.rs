@@ -14,6 +14,9 @@ pub mod notifier;
 pub(crate) mod pool;
 pub mod store;
 
+#[cfg(any(feature = "test-support", test))]
+pub mod test_support;
+
 pub use model::{
     AgentServerId, SessionState, SolutionSession, SolutionSessionId, SolutionSessionMetadata,
 };
