@@ -3,7 +3,7 @@ use std::time::Instant;
 use agent_client_protocol::schema as acp;
 use acp_thread::AcpThread;
 use chrono::{DateTime, Utc};
-use gpui::{Entity, SharedString};
+use gpui::{Entity, SharedString, Subscription};
 use serde::{Deserialize, Serialize};
 use solutions::SolutionId;
 use uuid::Uuid;
@@ -64,6 +64,11 @@ pub struct SolutionSession {
     pub created_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
     pub state: SessionState,
+    /// Subscription to the `AcpThread`'s `AcpThreadEvent` stream. Held so
+    /// the callback registered by `SolutionAgentStore::subscribe_to_session`
+    /// stays alive for the lifetime of the session. Underscore-prefixed
+    /// because nothing reads it back; dropping it implicitly unsubscribes.
+    pub _acp_subscription: Option<Subscription>,
 }
 
 /// Lightweight metadata row used for navigator listing without hydrating

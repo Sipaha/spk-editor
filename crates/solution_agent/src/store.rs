@@ -168,11 +168,12 @@ impl SolutionAgentStore {
                     solution_id: solution_id.clone(),
                     agent_id: agent_id.clone(),
                     acp_session_id,
-                    acp_thread: Some(acp_thread),
+                    acp_thread: Some(acp_thread.clone()),
                     title: SharedString::from(format!("Session {}", session_id)),
                     created_at: Utc::now(),
                     last_activity_at: Utc::now(),
                     state: SessionState::Idle,
+                    _acp_subscription: None,
                 };
                 let entity = cx.new(|_| session);
                 store.sessions.insert(session_id, entity);
@@ -181,10 +182,16 @@ impl SolutionAgentStore {
                     .entry(solution_id.clone())
                     .or_default()
                     .push(session_id);
+                let sub = store.subscribe_to_session(session_id, acp_thread, cx);
+                store
+                    .sessions
+                    .get(&session_id)
+                    .ok_or_else(|| anyhow!("session vanished after insert"))?
+                    .update(cx, |s, _| s._acp_subscription = Some(sub));
                 cx.emit(SolutionAgentStoreEvent::SessionCreated(session_id));
                 cx.notify();
-                session_id
-            })?;
+                anyhow::Ok(session_id)
+            })??;
 
             Ok(session_id)
         })
@@ -381,6 +388,90 @@ impl SolutionAgentStore {
         }
     }
 
+    /// Subscribe to a session's `AcpThread` event stream so that ACP-level
+    /// state changes (turn completion, tool authorization, errors, etc.)
+    /// translate into `SessionState` transitions on `SolutionSession`.
+    /// Returns the `Subscription` — caller must store it on the session
+    /// (in `_acp_subscription`) or it will drop and unsubscribe immediately.
+    fn subscribe_to_session(
+        &mut self,
+        session_id: SolutionSessionId,
+        acp_thread: Entity<acp_thread::AcpThread>,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        cx.subscribe(&acp_thread, move |store, _thread, event, cx| {
+            store.handle_acp_event(session_id, event, cx);
+        })
+    }
+
+    fn handle_acp_event(
+        &mut self,
+        session_id: SolutionSessionId,
+        event: &acp_thread::AcpThreadEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session_entity) = self.sessions.get(&session_id).cloned() else {
+            return;
+        };
+        match event {
+            acp_thread::AcpThreadEvent::NewEntry => {
+                session_entity.update(cx, |s, _| {
+                    s.last_activity_at = Utc::now();
+                    if matches!(s.state, SessionState::Idle | SessionState::AwaitingInput) {
+                        s.state = SessionState::Running {
+                            started_at: std::time::Instant::now(),
+                            notified: false,
+                        };
+                    }
+                });
+                cx.emit(SolutionAgentStoreEvent::SessionMessageAppended(session_id));
+            }
+            acp_thread::AcpThreadEvent::Stopped(_) => {
+                session_entity.update(cx, |s, _| {
+                    s.state = SessionState::Idle;
+                    s.last_activity_at = Utc::now();
+                });
+                cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+            }
+            acp_thread::AcpThreadEvent::Error
+            | acp_thread::AcpThreadEvent::LoadError(_) => {
+                session_entity.update(cx, |s, _| {
+                    s.state = SessionState::Errored(SharedString::from("agent error"));
+                });
+                cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+            }
+            acp_thread::AcpThreadEvent::ToolAuthorizationRequested(_) => {
+                session_entity.update(cx, |s, _| {
+                    s.state = SessionState::AwaitingInput;
+                });
+                cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+            }
+            acp_thread::AcpThreadEvent::ToolAuthorizationReceived(_) => {
+                session_entity.update(cx, |s, _| {
+                    if matches!(s.state, SessionState::AwaitingInput) {
+                        s.state = SessionState::Running {
+                            started_at: std::time::Instant::now(),
+                            notified: false,
+                        };
+                    }
+                });
+                cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+            }
+            acp_thread::AcpThreadEvent::TitleUpdated => {
+                let new_title = session_entity
+                    .read(cx)
+                    .acp_thread
+                    .as_ref()
+                    .and_then(|t| t.read(cx).title())
+                    .unwrap_or_default();
+                session_entity.update(cx, |s, _| s.title = new_title);
+                cx.emit(SolutionAgentStoreEvent::SessionTitleChanged(session_id));
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
     pub fn pool_release_session(
         &mut self,
         key: (SolutionId, AgentServerId),
@@ -501,6 +592,7 @@ mod tests {
                     created_at: Utc::now(),
                     last_activity_at: Utc::now(),
                     state: SessionState::Idle,
+                    _acp_subscription: None,
                 });
                 store.sessions.insert(id, entity);
                 store
@@ -881,5 +973,155 @@ mod tests {
             });
         });
         assert_eq!(connect_count.load(Ordering::SeqCst), 1);
+    }
+
+    /// Create a real session (via `create_session`) backed by `MockAgentServer`/
+    /// `MockConnection`, then return both its id and a clone of the underlying
+    /// `Entity<AcpThread>` so tests can emit synthetic `AcpThreadEvent`s.
+    async fn create_session_with_thread(
+        cx: &mut TestAppContext,
+    ) -> (
+        SolutionSessionId,
+        gpui::Entity<acp_thread::AcpThread>,
+        tempfile::TempDir,
+    ) {
+        let (solution_id, tmp, project) = setup_solution_and_project(cx).await;
+        let agent_id = SharedString::from("mock-agent");
+
+        let connect_count = Arc::new(AtomicUsize::new(0));
+        cx.update(|cx| {
+            let registry = Arc::new(AdapterRegistry::new());
+            SolutionAgentStore::init_global(cx, registry);
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, _| {
+                store.register_agent_server(
+                    agent_id.clone(),
+                    Rc::new(MockAgentServer::new(connect_count.clone())),
+                );
+            });
+        });
+
+        let session_id = cx
+            .update(|cx| {
+                let store = SolutionAgentStore::global(cx);
+                store.update(cx, |store, cx| {
+                    store.create_session(
+                        solution_id.clone(),
+                        agent_id.clone(),
+                        project.clone(),
+                        cx,
+                    )
+                })
+            })
+            .await
+            .expect("create_session");
+
+        let acp_thread = cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store
+                .read(cx)
+                .session(session_id)
+                .expect("session exists")
+                .read(cx)
+                .acp_thread
+                .clone()
+                .expect("acp_thread populated")
+        });
+
+        (session_id, acp_thread, tmp)
+    }
+
+    #[gpui::test]
+    async fn turn_complete_event_transitions_running_to_idle(cx: &mut TestAppContext) {
+        let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| {
+                let session = store.session(session_id).expect("session exists");
+                session.update(cx, |s, _| {
+                    s.state = SessionState::Running {
+                        started_at: std::time::Instant::now(),
+                        notified: false,
+                    };
+                });
+            });
+        });
+
+        cx.update(|cx| {
+            acp_thread.update(cx, |_thread, cx| {
+                cx.emit(acp_thread::AcpThreadEvent::Stopped(
+                    agent_client_protocol::schema::StopReason::EndTurn,
+                ));
+            });
+        });
+        cx.executor().run_until_parked();
+
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| {
+                let session = store.session(session_id).expect("session exists");
+                let state = session.read(cx).state.clone();
+                assert!(
+                    matches!(state, SessionState::Idle),
+                    "expected Idle, got {:?}",
+                    state
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn error_event_transitions_to_errored_state(cx: &mut TestAppContext) {
+        let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+
+        cx.update(|cx| {
+            acp_thread.update(cx, |_thread, cx| {
+                cx.emit(acp_thread::AcpThreadEvent::Error);
+            });
+        });
+        cx.executor().run_until_parked();
+
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| {
+                let session = store.session(session_id).expect("session exists");
+                let state = session.read(cx).state.clone();
+                assert!(
+                    matches!(state, SessionState::Errored(_)),
+                    "expected Errored, got {:?}",
+                    state
+                );
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn tool_authorization_request_transitions_to_awaiting_input(
+        cx: &mut TestAppContext,
+    ) {
+        let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+
+        cx.update(|cx| {
+            acp_thread.update(cx, |_thread, cx| {
+                cx.emit(acp_thread::AcpThreadEvent::ToolAuthorizationRequested(
+                    agent_client_protocol::schema::ToolCallId::new("test-tool"),
+                ));
+            });
+        });
+        cx.executor().run_until_parked();
+
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| {
+                let session = store.session(session_id).expect("session exists");
+                let state = session.read(cx).state.clone();
+                assert!(
+                    matches!(state, SessionState::AwaitingInput),
+                    "expected AwaitingInput, got {:?}",
+                    state
+                );
+            });
+        });
     }
 }
