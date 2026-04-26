@@ -22641,6 +22641,7 @@ dependencies = [
  "smol",
  "snippet_provider",
  "snippets_ui",
+ "solution_agent",
  "solutions",
  "solutions_ui",
  "svg_preview",

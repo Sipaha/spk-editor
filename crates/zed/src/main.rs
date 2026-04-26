@@ -678,6 +678,7 @@ fn main() {
         command_palette::init(cx);
         solutions::init(cx);
         editor_mcp::init(cx);
+        solution_agent::init(cx);
         solutions_ui::init(cx);
         let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
             enterprise_uri: language::language_settings::all_language_settings(None, cx)
