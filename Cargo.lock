@@ -16659,6 +16659,7 @@ dependencies = [
  "image",
  "language",
  "log",
+ "lsp",
  "paths",
  "pretty_assertions",
  "project",
