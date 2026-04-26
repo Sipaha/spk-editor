@@ -52,7 +52,6 @@ impl SolutionStore {
         cx.try_global::<GlobalSolutionStore>().map(|g| g.0.clone())
     }
 
-    #[cfg(test)]
     pub fn for_test(config_path: PathBuf, cx: &mut App) -> Entity<SolutionStore> {
         cx.new(|_| SolutionStore {
             config_path,
@@ -364,8 +363,7 @@ struct GlobalSolutionStore(Entity<SolutionStore>);
 
 impl Global for GlobalSolutionStore {}
 
-#[cfg(test)]
-pub(crate) fn install_global_for_test(entity: Entity<SolutionStore>, cx: &mut App) {
+pub fn install_global_for_test(entity: Entity<SolutionStore>, cx: &mut App) {
     cx.set_global(GlobalSolutionStore(entity));
 }
 

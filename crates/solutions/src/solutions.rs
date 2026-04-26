@@ -3,7 +3,7 @@
 
 mod cache;
 mod git;
-mod mcp;
+pub mod mcp;
 mod model;
 mod persistence;
 mod settings;
@@ -13,7 +13,7 @@ mod store;
 pub use cache::default_cache_root;
 pub use model::{CatalogId, CatalogProject, Solution, SolutionId, SolutionMember};
 pub use settings::SolutionsSettings;
-pub use store::{SolutionStore, SolutionStoreEvent};
+pub use store::{SolutionStore, SolutionStoreEvent, install_global_for_test};
 
 use ::settings::Settings;
 use gpui::App;
