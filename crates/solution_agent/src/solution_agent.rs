@@ -5,6 +5,7 @@
 //! for the design rationale.
 
 pub mod model;
+pub mod adapter;
 pub(crate) mod db;
 
 pub use model::{
