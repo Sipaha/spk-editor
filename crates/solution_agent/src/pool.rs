@@ -11,6 +11,22 @@ use solutions::SolutionId;
 
 use crate::model::AgentServerId;
 
+/// Production-side synthetic-Project construction stub. Task 3.3 leaves
+/// production wiring as an explicit error: `create_session` accepts an
+/// `Entity<Project>` from the caller (typically the active workspace), and
+/// the synthetic-project path is reserved for a follow-up that decides
+/// whether sessions get a dedicated worktree or share the workspace project.
+#[cfg(not(any(feature = "test-support", test)))]
+pub fn make_production_project_for_solution(
+    _solution_root: &std::path::Path,
+    _cx: &mut gpui::App,
+) -> anyhow::Result<gpui::Entity<project::Project>> {
+    anyhow::bail!(
+        "solution_agent: synthetic Project construction is not yet wired in production; \
+         pass an existing Entity<Project> to create_session instead"
+    )
+}
+
 pub(crate) const SHUTDOWN_DEBOUNCE: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]

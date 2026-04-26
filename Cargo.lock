@@ -16649,11 +16649,14 @@ name = "solution_agent"
 version = "0.1.0"
 dependencies = [
  "acp_thread",
+ "action_log",
  "agent-client-protocol",
  "agent_servers",
  "anyhow",
+ "async-channel 2.5.0",
  "chrono",
  "editor_mcp",
+ "fs",
  "futures 0.3.32",
  "gpui",
  "indoc",
@@ -16666,12 +16669,14 @@ dependencies = [
  "schemars 1.0.4",
  "serde",
  "serde_json",
+ "settings",
  "solutions",
  "sqlez",
  "tempfile",
  "ui",
  "util",
  "uuid",
+ "watch",
  "workspace",
 ]
 
