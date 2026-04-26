@@ -667,6 +667,12 @@ impl McpServerTool for OpenSolutionTool {
             let app_state = workspace::AppState::global(cx);
             let mut options = workspace::OpenOptions::default();
             options.focus = input.focus;
+            // Solutions always open in a new window so the user keeps their
+            // welcome / current workspace context. Default OpenMode::Activate
+            // would mount the worktree into the requesting window instead,
+            // surprising users who expected a fresh shell — the plan calls
+            // this out as "Click Solution row → new window opens".
+            options.open_mode = workspace::OpenMode::NewWindow;
             workspace::open_paths(&paths, app_state, options, cx)
         });
         let open_result = task.await?;

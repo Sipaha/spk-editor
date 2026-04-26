@@ -10,11 +10,14 @@ use chrono::{DateTime, Utc};
 use gpui::{Action, AnyElement, App, IntoElement};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use solutions::{SolutionId, SolutionStore};
+use solutions::{SolutionId, SolutionStore, SolutionStoreEvent};
 use ui::prelude::*;
 use ui::{ButtonLike, Divider, DividerColor};
 use util::ResultExt as _;
-use workspace::{AppState, OpenOptions, welcome::register_welcome_section};
+use workspace::{
+    AppState, OpenOptions,
+    welcome::{WelcomePage, register_welcome_section},
+};
 
 const MAX_RECENT: usize = 5;
 
@@ -30,6 +33,22 @@ pub struct OpenRecentSolution {
 pub fn init(cx: &mut App) {
     register_welcome_section(cx, render_section);
     cx.on_action(open_recent_solution);
+
+    // WelcomePage doesn't know about SolutionStore on its own, so without
+    // this hook the Recent Solutions section would render once at page
+    // construction and then stay frozen. We subscribe each new WelcomePage
+    // to SolutionStoreEvent::Changed and call `cx.notify` to re-run the
+    // section renderer after `solutions.open` / `delete` / `touch_last_opened`.
+    cx.observe_new::<WelcomePage>(|_page, _window, cx| {
+        let Some(store) = SolutionStore::try_global(cx) else {
+            return;
+        };
+        cx.subscribe(&store, |_page, _store, _event: &SolutionStoreEvent, cx| {
+            cx.notify();
+        })
+        .detach();
+    })
+    .detach();
 }
 
 fn render_section(cx: &mut App) -> Option<AnyElement> {
@@ -102,7 +121,9 @@ fn open_solution(sol_id: SolutionId, cx: &mut App) {
         .update(cx, |s, cx| s.touch_last_opened(&sol_id, cx))
         .log_err();
     let app_state = AppState::global(cx);
-    let task = workspace::open_paths(&paths, app_state, OpenOptions::default(), cx);
+    let mut options = OpenOptions::default();
+    options.open_mode = workspace::OpenMode::NewWindow;
+    let task = workspace::open_paths(&paths, app_state, options, cx);
     cx.spawn(async move |_| {
         task.await.log_err();
     })

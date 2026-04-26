@@ -171,7 +171,9 @@ impl PickerDelegate for OpenSolutionDelegate {
 
         cx.spawn(async move |_, cx| {
             let task = cx.update(|cx| {
-                workspace::open_paths(&paths, app_state, OpenOptions::default(), cx)
+                let mut options = OpenOptions::default();
+                options.open_mode = workspace::OpenMode::NewWindow;
+                workspace::open_paths(&paths, app_state, options, cx)
             });
             task.await?;
             anyhow::Ok(())
