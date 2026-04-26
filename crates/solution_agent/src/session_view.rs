@@ -3,8 +3,9 @@ use acp_thread::{
     ToolCallContent, ToolCallStatus, UserMessage,
 };
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    ParentElement, Render, SharedString, Styled, WeakEntity, Window, div,
+    AnyElement, App, Context, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, ParentElement, Render, SharedString, Styled,
+    StatefulInteractiveElement as _, WeakEntity, Window, div,
 };
 use ui::prelude::*;
 use ui::{Icon, IconName, Label};
@@ -63,6 +64,44 @@ impl SolutionSessionView {
                 .detach_and_log_err(cx);
         });
     }
+
+    fn handle_external_paths_drop(
+        &mut self,
+        paths: &ExternalPaths,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if paths.0.is_empty() {
+            return;
+        }
+        let workspace_root = self
+            .workspace
+            .upgrade()
+            .and_then(|workspace| {
+                workspace.read(cx).visible_worktrees(cx).next().map(|w| {
+                    w.read(cx).abs_path().to_path_buf()
+                })
+            });
+        let mention_text = paths
+            .0
+            .iter()
+            .map(|abs_path| {
+                let display = workspace_root
+                    .as_ref()
+                    .and_then(|root| abs_path.strip_prefix(root).ok())
+                    .map(|rel| rel.to_string_lossy().to_string())
+                    .unwrap_or_else(|| abs_path.to_string_lossy().to_string());
+                format!("@{display}")
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.compose_editor.update(cx, |editor, cx| {
+            editor.insert(&mention_text, window, cx);
+            editor.insert(" ", window, cx);
+        });
+        let focus = self.compose_editor.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+    }
 }
 
 impl Focusable for SolutionSessionView {
@@ -80,9 +119,15 @@ impl Render for SolutionSessionView {
         let session = self.session.read(cx);
         let header = format!("{} • {:?}", session.agent_id, session.state);
         div()
+            .id("solution-session-view")
             .key_context("SolutionSessionView")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::submit_compose))
+            .on_drop(cx.listener(
+                |this, paths: &ExternalPaths, window, cx| {
+                    this.handle_external_paths_drop(paths, window, cx);
+                },
+            ))
             .flex()
             .flex_col()
             .size_full()
