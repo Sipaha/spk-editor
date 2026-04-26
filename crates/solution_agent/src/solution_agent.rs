@@ -5,6 +5,7 @@
 //! for the design rationale.
 
 pub mod model;
+pub(crate) mod db;
 
 pub use model::{
     AgentServerId, SessionState, SolutionSession, SolutionSessionId, SolutionSessionMetadata,

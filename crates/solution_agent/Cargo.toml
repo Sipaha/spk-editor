@@ -22,6 +22,7 @@ agent_servers.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 editor_mcp.workspace = true
+futures.workspace = true
 gpui.workspace = true
 indoc.workspace = true
 language_models.workspace = true
@@ -45,3 +46,4 @@ gpui = { workspace = true, features = ["test-support"] }
 project = { workspace = true, features = ["test-support"] }
 solutions = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+workspace = { workspace = true, features = ["test-support"] }
