@@ -4,6 +4,7 @@
 //! See `docs/superpowers/specs/2026-04-26-solution-scoped-ai-sessions-design.md`
 //! for the design rationale.
 
+pub mod actions;
 pub mod model;
 pub mod adapter;
 pub mod claude_adapter;
@@ -12,6 +13,7 @@ pub mod event_sources;
 pub mod mcp;
 pub mod notifier;
 pub(crate) mod pool;
+pub mod status_item;
 pub mod store;
 
 #[cfg(any(feature = "test-support", test))]
