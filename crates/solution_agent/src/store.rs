@@ -526,20 +526,41 @@ impl SolutionAgentStore {
         cx.spawn(async move |_this, _cx: &mut AsyncApp| create_task.await)
     }
 
-    /// Send a user message to `session_id`. Flips `SessionState` to `Running`
-    /// synchronously (before the returned `Task` is awaited) so the UI shows
-    /// activity immediately, then forwards the prompt to the underlying ACP
-    /// connection. On success, schedules a persistence write of the session
-    /// snapshot. On failure, transitions the session to `Errored`.
+    /// Send a plain-text user message. Convenience wrapper around
+    /// `send_message_blocks` for the common single-text-block case.
     pub fn send_message(
         &mut self,
         session_id: SolutionSessionId,
         content: String,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
+        let blocks = vec![agent_client_protocol::schema::ContentBlock::Text(
+            agent_client_protocol::schema::TextContent::new(content),
+        )];
+        self.send_message_blocks(session_id, blocks, cx)
+    }
+
+    /// Send a structured user message composed of one or more `ContentBlock`s
+    /// (text + images, etc). Flips `SessionState` to `Running` synchronously
+    /// (before the returned `Task` is awaited) so the UI shows activity
+    /// immediately, then forwards the prompt to the underlying ACP connection.
+    /// On success, schedules a persistence write of the session snapshot. On
+    /// failure, transitions the session to `Errored`.
+    pub fn send_message_blocks(
+        &mut self,
+        session_id: SolutionSessionId,
+        blocks: Vec<agent_client_protocol::schema::ContentBlock>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
         let Some(session_entity) = self.sessions.get(&session_id).cloned() else {
             return Task::ready(Err(anyhow!("unknown session {session_id}")));
         };
+
+        if blocks.is_empty() {
+            return Task::ready(Err(anyhow!(
+                "send_message_blocks: at least one ContentBlock required"
+            )));
+        }
 
         // Flip state immediately, before the spawn, so callers observing the
         // session right after this call returns see `Running`.
@@ -561,12 +582,7 @@ impl SolutionAgentStore {
 
         let user_message_id = acp_thread::UserMessageId::new();
         let acp_session_id = acp_thread.read(cx).session_id().clone();
-        let prompt = agent_client_protocol::schema::PromptRequest::new(
-            acp_session_id,
-            vec![agent_client_protocol::schema::ContentBlock::Text(
-                agent_client_protocol::schema::TextContent::new(content),
-            )],
-        );
+        let prompt = agent_client_protocol::schema::PromptRequest::new(acp_session_id, blocks);
 
         let connection = acp_thread.read(cx).connection().clone();
 

@@ -2,9 +2,11 @@ use acp_thread::{
     AgentThreadEntry, AssistantMessage, AssistantMessageChunk, ContentBlock, PlanEntry, ToolCall,
     ToolCallContent, ToolCallStatus, UserMessage,
 };
+use agent_client_protocol::schema as acp;
+use base64::Engine;
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, ParentElement, Render, SharedString, Styled,
+    AnyElement, App, ClipboardEntry, Context, Entity, EventEmitter, ExternalPaths, FocusHandle,
+    Focusable, InteractiveElement as _, IntoElement, ParentElement, Render, SharedString, Styled,
     StatefulInteractiveElement as _, WeakEntity, Window, div,
 };
 use ui::prelude::*;
@@ -14,12 +16,19 @@ use workspace::{Workspace, item::Item};
 use crate::model::{SolutionSession, SolutionSessionId};
 use crate::store::SolutionAgentStore;
 
+struct PendingImage {
+    mime_type: String,
+    data_base64: String,
+    label: SharedString,
+}
+
 pub struct SolutionSessionView {
     session_id: SolutionSessionId,
     session: Entity<SolutionSession>,
     focus_handle: FocusHandle,
     workspace: WeakEntity<Workspace>,
     compose_editor: Entity<editor::Editor>,
+    pending_images: Vec<PendingImage>,
 }
 
 impl SolutionSessionView {
@@ -42,6 +51,7 @@ impl SolutionSessionView {
             focus_handle: cx.focus_handle(),
             workspace,
             compose_editor,
+            pending_images: Vec::new(),
         }
     }
 
@@ -52,17 +62,96 @@ impl SolutionSessionView {
         cx: &mut Context<Self>,
     ) {
         let content = self.compose_editor.read(cx).text(cx);
-        if content.trim().is_empty() {
+        if content.trim().is_empty() && self.pending_images.is_empty() {
             return;
         }
         self.compose_editor
             .update(cx, |e, cx| e.clear(window, cx));
         let session_id = self.session_id;
+
+        if self.pending_images.is_empty() {
+            SolutionAgentStore::global(cx).update(cx, |store, cx| {
+                store
+                    .send_message(session_id, content, cx)
+                    .detach_and_log_err(cx);
+            });
+            return;
+        }
+
+        let images = std::mem::take(&mut self.pending_images);
+        let mut blocks: Vec<acp::ContentBlock> = Vec::with_capacity(images.len() + 1);
+        if !content.trim().is_empty() {
+            blocks.push(acp::ContentBlock::Text(acp::TextContent::new(content)));
+        }
+        for image in images {
+            blocks.push(acp::ContentBlock::Image(acp::ImageContent::new(
+                image.data_base64,
+                image.mime_type,
+            )));
+        }
         SolutionAgentStore::global(cx).update(cx, |store, cx| {
             store
-                .send_message(session_id, content, cx)
+                .send_message_blocks(session_id, blocks, cx)
                 .detach_and_log_err(cx);
         });
+    }
+
+    fn paste_intercept(
+        &mut self,
+        _: &editor::actions::Paste,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(clipboard) = cx.read_from_clipboard() else {
+            return;
+        };
+        // Respect source-app priority: if the first entry is text, fall through
+        // to the editor's default text-paste action. Returning without
+        // consuming via `cx.stop_propagation()` lets the action propagate.
+        let first = clipboard.entries().first();
+        let has_image = matches!(
+            first,
+            Some(ClipboardEntry::Image(_)) | Some(ClipboardEntry::ExternalPaths(_))
+        );
+        if !has_image {
+            return;
+        }
+
+        let mut new_images: Vec<PendingImage> = Vec::new();
+        for entry in clipboard.into_entries() {
+            if let ClipboardEntry::Image(image) = entry {
+                let mime_type = image.format().mime_type().to_string();
+                let data = base64::engine::general_purpose::STANDARD.encode(image.bytes());
+                let label = SharedString::from(format!(
+                    "image #{}",
+                    self.pending_images.len() + new_images.len() + 1
+                ));
+                new_images.push(PendingImage {
+                    mime_type,
+                    data_base64: data,
+                    label,
+                });
+            }
+            // Other entries (paths, strings) — ignore for v1. File paths from
+            // drag-drop are handled separately by handle_external_paths_drop.
+        }
+
+        if new_images.is_empty() {
+            return;
+        }
+
+        let placeholder_text = new_images
+            .iter()
+            .map(|img| format!("[{}]", img.label))
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.pending_images.extend(new_images);
+        self.compose_editor.update(cx, |editor, cx| {
+            editor.insert(&placeholder_text, window, cx);
+            editor.insert(" ", window, cx);
+        });
+        cx.stop_propagation();
+        cx.notify();
     }
 
     fn handle_external_paths_drop(
@@ -118,10 +207,12 @@ impl Render for SolutionSessionView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let session = self.session.read(cx);
         let header = format!("{} • {:?}", session.agent_id, session.state);
+        let pending_image_count = self.pending_images.len();
         div()
             .id("solution-session-view")
             .key_context("SolutionSessionView")
             .track_focus(&self.focus_handle)
+            .capture_action(cx.listener(Self::paste_intercept))
             .on_action(cx.listener(Self::submit_compose))
             .on_drop(cx.listener(
                 |this, paths: &ExternalPaths, window, cx| {
@@ -162,8 +253,8 @@ impl Render for SolutionSessionView {
                 }
                 body
             })
-            .child(
-                div()
+            .child({
+                let mut compose_row = div()
                     .flex()
                     .h_24()
                     .p_2()
@@ -177,8 +268,18 @@ impl Render for SolutionSessionView {
                                 this.submit_compose(&menu::Confirm, window, cx);
                             },
                         )),
-                    ),
-            )
+                    );
+                if pending_image_count > 0 {
+                    compose_row = compose_row.child(
+                        Label::new(format!(
+                            "{pending_image_count} image{} attached",
+                            if pending_image_count == 1 { "" } else { "s" }
+                        ))
+                        .size(LabelSize::XSmall),
+                    );
+                }
+                compose_row
+            })
     }
 }
 

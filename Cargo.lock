@@ -16655,6 +16655,7 @@ dependencies = [
  "anyhow",
  "ashpd",
  "async-channel 2.5.0",
+ "base64 0.22.1",
  "chrono",
  "context_server",
  "editor",
