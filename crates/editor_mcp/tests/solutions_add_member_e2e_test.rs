@@ -251,6 +251,46 @@ async fn add_member_clones_from_local_bare_repo(cx: &mut TestAppContext) {
         .cloned()
         .unwrap_or_default();
     assert!(members.is_empty(), "members should be empty: {members:?}");
+
+    // --- 6. catalog.clear_cache removes the on-disk cache directory ---
+    // The earlier add_member populated the warm clone at
+    // <cache_root>/<repo_key>/. clear_cache should report exactly that path.
+    let resp = call_tool(
+        &mut stream,
+        7,
+        "catalog.clear_cache",
+        json!({"catalog_id": catalog_id}),
+    )
+    .await;
+    let removed = resp
+        .pointer("/result/structuredContent/removed_paths")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_else(|| panic!("clear_cache returned: {resp}"));
+    assert_eq!(removed.len(), 1, "expected one cache dir removed: {removed:?}");
+    let removed_path = removed[0].as_str().expect("path string");
+    assert!(
+        !std::path::Path::new(removed_path).exists(),
+        "{removed_path} should be gone after clear_cache",
+    );
+
+    // Idempotent — second clear_cache for the same id reports zero removals.
+    let resp = call_tool(
+        &mut stream,
+        8,
+        "catalog.clear_cache",
+        json!({"catalog_id": catalog_id}),
+    )
+    .await;
+    let removed = resp
+        .pointer("/result/structuredContent/removed_paths")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        removed.is_empty(),
+        "second clear_cache should be a no-op, got {removed:?}",
+    );
 }
 
 async fn call_tool(stream: &mut UnixStream, id: u64, name: &str, args: Value) -> Value {

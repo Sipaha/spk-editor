@@ -49,6 +49,9 @@ pub fn register(cx: &mut App) {
         server.add_tool(EditCatalogProjectTool);
     });
     editor_mcp::register_tool(cx, |server| {
+        server.add_tool(ClearCacheTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
         server.add_tool(RefreshCacheTool);
     });
     editor_mcp::register_tool(cx, |server| {
@@ -1178,6 +1181,103 @@ impl McpServerTool for EditCatalogProjectTool {
 }
 
 // =====================================================================
+// catalog.clear_cache
+// =====================================================================
+
+/// Delete the on-disk warm clone cache for one catalog entry (when
+/// `catalog_id` is provided) or for every entry (when omitted). Useful
+/// for autonomous test teardown and for forcing the next add_member /
+/// refresh_cache to start from a fresh clone.
+///
+/// Synchronous: runs an `std::fs::remove_dir_all` per affected entry on
+/// the calling thread. Returns the list of removed cache directories.
+/// A missing directory is not an error — it counts as already cleared.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct ClearCacheParams {
+    /// Specific catalog entry to clear. If omitted, clears the cache for
+    /// every catalog entry currently in the store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_id: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ClearCacheParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            catalog_id: Option<String>,
+        }
+        Ok(Self {
+            catalog_id: Option::<Inner>::deserialize(de)?
+                .unwrap_or_default()
+                .catalog_id,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ClearCacheResult {
+    pub removed_paths: Vec<String>,
+}
+
+#[derive(Clone)]
+pub struct ClearCacheTool;
+
+impl McpServerTool for ClearCacheTool {
+    type Input = ClearCacheParams;
+    type Output = ClearCacheResult;
+    const NAME: &'static str = "catalog.clear_cache";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        let urls = cx.update(|cx| -> Result<Vec<String>> {
+            let store = SolutionStore::global(cx);
+            store.read_with(cx, |s, _| {
+                if let Some(id) = input.catalog_id.as_deref() {
+                    let url = s
+                        .catalog()
+                        .iter()
+                        .find(|p| p.id.as_str() == id)
+                        .map(|p| p.remote_url.clone())
+                        .with_context(|| format!("catalog_not_found: {id}"))?;
+                    Ok(vec![url])
+                } else {
+                    Ok(s.catalog()
+                        .iter()
+                        .map(|p| p.remote_url.clone())
+                        .collect())
+                }
+            })
+        })?;
+
+        let cache_root = crate::default_cache_root();
+        let mut removed = Vec::new();
+        for url in urls {
+            let path = crate::cache::cache_path(&cache_root, &url);
+            if path.exists() {
+                std::fs::remove_dir_all(&path)
+                    .with_context(|| format!("removing {}", path.display()))?;
+                removed.push(path.to_string_lossy().into_owned());
+            }
+        }
+
+        let summary = match removed.len() {
+            0 => "no cache directories to remove".to_string(),
+            n => format!("removed {n} cache director{}", if n == 1 { "y" } else { "ies" }),
+        };
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: ClearCacheResult {
+                removed_paths: removed,
+            },
+        })
+    }
+}
+
+// =====================================================================
 // catalog.refresh_cache
 // =====================================================================
 
@@ -2142,27 +2242,135 @@ fn build_visual_tree(solution_id: &str, cx: &mut App) -> Option<VisualNode> {
         .ok()
 }
 
+/// Synthesize what the TitleBar would render for this workspace, without
+/// reaching into the title_bar crate's internals. Mirrors the matching
+/// logic in `crates/title_bar/src/title_bar.rs::TitleBar::active_solution`
+/// + `effective_active_worktree`. Surfacing this here lets autonomous
+/// agents assert on the title bar's semantic content via dump_visual_structure
+/// without needing real-pixel rendering.
+fn build_title_bar_node(workspace: &workspace::Workspace, cx: &App) -> VisualNode {
+    let project = workspace.project().read(cx);
+    let mut children: Vec<VisualNode> = Vec::new();
+
+    // Pick the same worktree the title bar would: the one owning the
+    // active repository, falling back to the first visible worktree.
+    let active_worktree = project
+        .active_repository(cx)
+        .and_then(|repo| {
+            let repo_path = repo.read(cx).work_directory_abs_path.clone();
+            project.visible_worktrees(cx).find(|tree| {
+                let p = tree.read(cx).abs_path();
+                *p == *repo_path || p.starts_with(repo_path.as_ref())
+            })
+        })
+        .or_else(|| project.visible_worktrees(cx).next());
+    let active_worktree_path = active_worktree
+        .as_ref()
+        .map(|tree| tree.read(cx).abs_path());
+
+    if let Some(path) = &active_worktree_path
+        && let Some(store) = SolutionStore::try_global(cx)
+    {
+        let segment = store.read_with(cx, |s, _| {
+            s.solution_for_path(path).map(|sol| sol.name.clone())
+        });
+        if let Some(name) = segment {
+            children.push(VisualNode {
+                kind: "SolutionSegment".to_string(),
+                label: Some(name),
+                visible: true,
+                focused: false,
+                children: Vec::new(),
+            });
+        }
+    }
+
+    if let Some(tree) = active_worktree {
+        let tree = tree.read(cx);
+        let name = tree.root_name_str().to_string();
+        if !name.is_empty() {
+            children.push(VisualNode {
+                kind: "ProjectName".to_string(),
+                label: Some(name),
+                visible: true,
+                focused: false,
+                children: Vec::new(),
+            });
+        }
+    }
+
+    if let Some(repo) = project.active_repository(cx) {
+        let repo = repo.read(cx);
+        if let Some(branch) = repo.branch.as_ref().map(|b| b.name().to_string()) {
+            children.push(VisualNode {
+                kind: "Branch".to_string(),
+                label: Some(branch),
+                visible: true,
+                focused: false,
+                children: Vec::new(),
+            });
+        }
+    }
+
+    VisualNode {
+        kind: "TitleBar".to_string(),
+        label: None,
+        visible: true,
+        focused: false,
+        children,
+    }
+}
+
+/// Synthesize what the StatusBar would render for this workspace.
+/// Currently surfaces the SolutionsStatusItem widget content
+/// (`<solution name>`, `<member count>`); other status bar widgets
+/// remain opaque for now.
+fn build_status_bar_node(workspace: &workspace::Workspace, cx: &App) -> VisualNode {
+    let mut children: Vec<VisualNode> = Vec::new();
+
+    if let Some(store) = SolutionStore::try_global(cx) {
+        let project = workspace.project().read(cx);
+        let mut matching: Option<(String, usize)> = None;
+        for tree in project.worktrees(cx) {
+            let path = tree.read(cx).abs_path();
+            let solution = store.read_with(cx, |s, _| {
+                s.solution_for_path(&path)
+                    .map(|sol| (sol.name.clone(), sol.members.len()))
+            });
+            if let Some(found) = solution {
+                matching = Some(found);
+                break;
+            }
+        }
+        if let Some((name, count)) = matching {
+            children.push(VisualNode {
+                kind: "SolutionsStatusItem".to_string(),
+                label: Some(format!("● {name} · {count} projects")),
+                visible: true,
+                focused: false,
+                children: Vec::new(),
+            });
+        }
+    }
+
+    VisualNode {
+        kind: "StatusBar".to_string(),
+        label: None,
+        visible: workspace.status_bar_visible(cx),
+        focused: false,
+        children,
+    }
+}
+
 fn build_workspace_node(multi: &workspace::MultiWorkspace, cx: &App) -> VisualNode {
     let workspace = multi.workspace().read(cx);
     let mut children = vec![
-        VisualNode {
-            kind: "TitleBar".to_string(),
-            label: None,
-            visible: true,
-            focused: false,
-            children: Vec::new(),
-        },
+        build_title_bar_node(workspace, cx),
         build_dock_node("left", workspace.left_dock(), cx),
         build_pane_area_node(workspace, cx),
         build_dock_node("right", workspace.right_dock(), cx),
         build_dock_node("bottom", workspace.bottom_dock(), cx),
-        VisualNode {
-            kind: "StatusBar".to_string(),
-            label: None,
-            visible: workspace.status_bar_visible(cx),
-            focused: false,
-            children: Vec::new(),
-        },
+        build_status_bar_node(workspace, cx),
     ];
 
     if let Some(modal) = build_modal_node(workspace, cx) {
