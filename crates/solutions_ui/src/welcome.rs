@@ -10,6 +10,7 @@
 //! this section is what the user sees on every fresh launch — it's the
 //! Solutions launcher for the whole editor. See FORK.md §11.
 
+use anyhow::anyhow;
 use chrono::{DateTime, Utc};
 use gpui::{Action, AnyElement, App, IntoElement};
 use schemars::JsonSchema;
@@ -24,7 +25,6 @@ use workspace::{
 };
 
 use crate::actions::NewSolution;
-use crate::modals::AddMemberTo;
 
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize, JsonSchema, Action)]
 #[action(namespace = solutions)]
@@ -148,34 +148,28 @@ fn open_solution(sol_id: SolutionId, cx: &mut App) {
     let Some(store) = SolutionStore::try_global(cx) else {
         return;
     };
-    let paths = match store.read_with(cx, |s, _| s.paths_for_open(&sol_id)) {
+    // For an empty solution we still want to open a window — just one with
+    // `solution.root` as the only worktree. The dock panel detects the
+    // solution from that path and lets the user add members from inside.
+    let paths = match store.read_with(cx, |s, _| -> anyhow::Result<Vec<std::path::PathBuf>> {
+        let paths = s.paths_for_open(&sol_id)?;
+        if !paths.is_empty() {
+            return Ok(paths);
+        }
+        let root = s
+            .solutions()
+            .iter()
+            .find(|sol| sol.id == sol_id)
+            .map(|sol| sol.root.clone())
+            .ok_or_else(|| anyhow!("solution not found: {}", sol_id.0))?;
+        Ok(vec![root])
+    }) {
         Ok(paths) => paths,
         Err(err) => {
-            log::error!("solutions_ui: paths_for_open failed: {err}");
+            log::error!("solutions_ui: resolving paths for {} failed: {err}", sol_id.0);
             return;
         }
     };
-    if paths.is_empty() {
-        // Empty solution: clicking it from Welcome should let the user add the
-        // first member, not fail silently. Dispatch into the active window's
-        // workspace where modals.rs has registered AddMemberTo.
-        if let Some(window) = cx.active_window() {
-            let action = AddMemberTo {
-                solution_id: sol_id.0.clone(),
-            };
-            window
-                .update(cx, |_, window, cx| {
-                    window.dispatch_action(Box::new(action), cx);
-                })
-                .log_err();
-        } else {
-            log::warn!(
-                "solutions_ui: solution {} is empty and no active window to open AddMember picker",
-                sol_id.0
-            );
-        }
-        return;
-    }
     store
         .update(cx, |s, cx| s.touch_last_opened(&sol_id, cx))
         .log_err();
