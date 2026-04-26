@@ -14,6 +14,11 @@ use util::ResultExt as _;
 /// `spk-editor` instance running on the same machine. Without this,
 /// concurrent e2e tests would race the live editor's lock and clobber
 /// the user's `~/.config/spk-editor/mcp.{lock,sock}` files.
+///
+/// For end-to-end probe instances (running a real editor in parallel with the
+/// user's), use `script/run-mcp --runtime-dir DIR` instead — that overrides
+/// `XDG_CONFIG_HOME` / `XDG_DATA_HOME` / `XDG_CACHE_HOME` so the editor's
+/// entire state (settings, db, mcp socket, …) lands in DIR.
 static RUNTIME_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 
 /// Pin the lock + socket paths to a test-owned directory. Must be called

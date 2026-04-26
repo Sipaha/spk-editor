@@ -98,7 +98,19 @@ if (( use_xvfb )) && ! command -v xvfb-run >/dev/null 2>&1; then
     exit 1
 fi
 
-socket_dir="${runtime_dir:-${XDG_CONFIG_HOME:-$HOME/.config}/spk-editor}"
+if [[ -n "$runtime_dir" ]]; then
+    # Full isolation: editor's config / data / cache all land under
+    # $runtime_dir. The editor uses its standard XDG-derived paths, which
+    # means a fresh state — no user settings, themes, keymaps, db, etc.
+    # The MCP socket lands at $runtime_dir/spk-editor/mcp.sock.
+    mkdir -p "$runtime_dir"
+    export XDG_CONFIG_HOME="$runtime_dir"
+    export XDG_DATA_HOME="$runtime_dir"
+    export XDG_CACHE_HOME="$runtime_dir"
+    socket_dir="$runtime_dir/spk-editor"
+else
+    socket_dir="${XDG_CONFIG_HOME:-$HOME/.config}/spk-editor"
+fi
 socket_path="$socket_dir/mcp.sock"
 mkdir -p "$socket_dir"
 
