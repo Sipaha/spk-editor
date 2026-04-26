@@ -59,7 +59,7 @@ A running `spk-editor` instance exposes an MCP server over a Unix socket so an a
 
 **Event subscriptions** broadcast as JSON-RPC `editor/notification` frames. Wired kinds: `operation_progress`, `operation_completed`, `solution_changed`, `buffer_opened`, `buffer_closed`, `buffer_saved`, `buffer_dirty_changed`, `diagnostic_updated`, `lsp_started`, `lsp_stopped`, `window_focused`. Deferred: `selection_changed` (Editor-level, not Buffer), `cli_args_received`, `server_shutting_down`.
 
-**Integration tests** in `crates/editor_mcp/tests/*_e2e_test.rs` spin up the real socket using `paths::config_dir()`. Because they share the well-known socket path with a real running editor, **never run them while a real `spk-editor` instance is up** — the test will collide with the live lock. Run e2e tests serially when the editor is closed.
+**Integration tests** in `crates/editor_mcp/tests/*_e2e_test.rs` are isolated via `editor_mcp::set_runtime_dir_for_test(tempdir)` — each test pins its own `mcp.{lock,sock}` to a tempdir, so they can run safely alongside a live `spk-editor` instance and never touch `~/.config/spk-editor/`. When you write a new e2e test that calls `editor_mcp::start_server`, you MUST call `set_runtime_dir_for_test` first or you will collide with (and corrupt) the user's real lock and socket.
 
 **Known gap:** `workspace.screenshot` returns a 1×1 placeholder in production builds — `gpui::Window::render_to_image` is gated behind `cfg(test|test-support)` upstream. For real visual verification today, use `workspace.dump_visual_structure` plus targeted `cargo test`. Production screenshot needs upstream GPUI work; do not attempt to backfill it as a fork-local change.
 

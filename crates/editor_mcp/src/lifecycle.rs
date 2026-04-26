@@ -6,7 +6,29 @@ use gpui::{App, AppContext as _, Entity, Global};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use util::ResultExt as _;
+
+/// Overrides the directory containing `mcp.lock` and `mcp.sock`. Set by
+/// integration tests to isolate the well-known socket from any live
+/// `spk-editor` instance running on the same machine. Without this,
+/// concurrent e2e tests would race the live editor's lock and clobber
+/// the user's `~/.config/spk-editor/mcp.{lock,sock}` files.
+static RUNTIME_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Pin the lock + socket paths to a test-owned directory. Must be called
+/// before [`start_server`]. Idempotent only with the same value — a second
+/// call with a different path is silently ignored (`OnceLock`).
+pub fn set_runtime_dir_for_test(dir: PathBuf) {
+    let _ = RUNTIME_DIR_OVERRIDE.set(dir);
+}
+
+fn runtime_dir() -> PathBuf {
+    RUNTIME_DIR_OVERRIDE
+        .get()
+        .cloned()
+        .unwrap_or_else(|| paths::config_dir().clone())
+}
 
 #[derive(Debug)]
 pub struct SingleInstanceLock {
@@ -69,11 +91,11 @@ impl Drop for SingleInstanceLock {
 }
 
 pub fn lock_path() -> PathBuf {
-    paths::config_dir().join("mcp.lock")
+    runtime_dir().join("mcp.lock")
 }
 
 pub fn socket_path() -> PathBuf {
-    paths::config_dir().join("mcp.sock")
+    runtime_dir().join("mcp.sock")
 }
 
 struct ActiveServer {

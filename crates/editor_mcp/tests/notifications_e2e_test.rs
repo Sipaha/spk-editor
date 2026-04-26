@@ -5,9 +5,9 @@
 //! `editor_mcp::op_complete_ok`) actually receives a JSON-RPC notification
 //! frame on the same socket.
 //!
-//! Caveat: like `server_e2e_test.rs`, this test uses the real
-//! `paths::config_dir()` for the well-known socket path. It must NOT run
-//! while a real `spk-editor` instance (or another mcp e2e test) is running.
+//! Isolation: pins lock + socket to a tempdir via
+//! `editor_mcp::set_runtime_dir_for_test` so it never touches the user's
+//! `~/.config/spk-editor/mcp.{lock,sock}`.
 
 use gpui::TestAppContext;
 use serde_json::json;
@@ -19,6 +19,9 @@ use std::time::Duration;
 async fn subscribe_and_receive_notification(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
 
+    let runtime_dir = tempfile::tempdir().expect("tempdir");
+    editor_mcp::set_runtime_dir_for_test(runtime_dir.path().to_path_buf());
+
     cx.update(|cx| editor_mcp::init(cx));
 
     let start_result = cx.update(|cx| editor_mcp::start_server(cx));
@@ -28,7 +31,7 @@ async fn subscribe_and_receive_notification(cx: &mut TestAppContext) {
         start_result.err()
     );
 
-    let socket_path = paths::config_dir().join("mcp.sock");
+    let socket_path = runtime_dir.path().join("mcp.sock");
     let mut waited = Duration::ZERO;
     let timeout = Duration::from_secs(10);
     while !socket_path.exists() && waited < timeout {

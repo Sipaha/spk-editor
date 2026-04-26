@@ -14,11 +14,10 @@
 //! 7. Send `tools/call` for `editor.capabilities`, assert
 //!    `result.structuredContent.protocol_version == "2024-11-05"`.
 //!
-//! Caveat: this test uses the real `paths::config_dir()` (NOT a tempdir),
-//! because the well-known socket path is hard-coded to that location. The
-//! test holds the lock for its duration, so it must NOT run while a real
-//! `spk-editor` instance is running. The `mcp.sock` symlink and `mcp.lock`
-//! file are left behind on success — they are harmless artifacts.
+//! Isolation: the test pins the lock + socket directory to a tempdir via
+//! `editor_mcp::set_runtime_dir_for_test` so it can run alongside a live
+//! `spk-editor` instance without colliding on the user's real
+//! `~/.config/spk-editor/mcp.{lock,sock}` files.
 
 use gpui::TestAppContext;
 use serde_json::json;
@@ -29,6 +28,9 @@ use std::time::Duration;
 #[gpui::test]
 async fn end_to_end_capabilities_via_socket(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
+
+    let runtime_dir = tempfile::tempdir().expect("tempdir");
+    editor_mcp::set_runtime_dir_for_test(runtime_dir.path().to_path_buf());
 
     cx.update(|cx| {
         editor_mcp::init(cx);
@@ -41,7 +43,7 @@ async fn end_to_end_capabilities_via_socket(cx: &mut TestAppContext) {
         start_result.err()
     );
 
-    let socket_path = paths::config_dir().join("mcp.sock");
+    let socket_path = runtime_dir.path().join("mcp.sock");
     let mut waited = Duration::ZERO;
     let timeout = Duration::from_secs(10);
     let interval = Duration::from_millis(100);
