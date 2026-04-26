@@ -25,9 +25,12 @@ pub use model::{
     AgentServerId, SessionState, SolutionSession, SolutionSessionId, SolutionSessionMetadata,
 };
 
+use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{App, AppContext, AsyncApp};
+use agent_servers::CustomAgentServer;
+use gpui::{App, AppContext, AsyncApp, SharedString};
+use project::agent_server_store::AgentId;
 
 pub fn init(cx: &mut App) {
     let mut adapters = adapter::AdapterRegistry::new();
@@ -35,6 +38,21 @@ pub fn init(cx: &mut App) {
     let adapters = Arc::new(adapters);
 
     store::SolutionAgentStore::init_global(cx, adapters);
+
+    // Register the AgentServer instance for `claude-acp`. `CustomAgentServer`
+    // is a thin wrapper — its `connect()` looks up the actual subprocess
+    // command via the per-Project `AgentServerStore` at session-creation time,
+    // so this single registration is enough to enable real `claude` spawning
+    // for any open Solution that the user has the CLI installed for.
+    let claude_id = AgentId(SharedString::from(claude_adapter::CLAUDE_ACP_AGENT_ID));
+    let claude_server: Rc<dyn agent_servers::AgentServer> =
+        Rc::new(CustomAgentServer::new(claude_id));
+    store::SolutionAgentStore::global(cx).update(cx, |store, _cx| {
+        store.register_agent_server(
+            SharedString::from(claude_adapter::CLAUDE_ACP_AGENT_ID),
+            claude_server,
+        );
+    });
 
     // Connect the persistence DB asynchronously and wire it into the store
     // once it's ready. Failure to open the DB is logged but non-fatal — the
