@@ -96,7 +96,13 @@ Why: the editor is built around Solutions. Restoring "the last workspace" pins t
 
 How to apply: the default lives in `assets/settings/default.json` (`"restore_on_startup": "none"`). Users can override it in their own settings if they want upstream behavior. The Welcome section renderer in `crates/solutions_ui/src/welcome.rs::render_section` is the single place that defines what the launcher shows — keep it as the only fork-local Welcome section unless there's a strong reason for more.
 
-### 11. Image paste: clipboard `gpui::Image` → base64 → `acp::ContentBlock::Image`
+### 11. Single-instance handoff with no args focuses the existing window (best-effort on Linux)
+
+Why: when the user runs `spk-editor` a second time without path args while another instance is alive, the new process should NOT silently exit while the existing window stays buried. The handoff endpoint (`workspace::mcp::handle_cli_args`) now picks the first existing window and dispatches `Window::activate_window` (X11 `_NET_ACTIVE_WINDOW` ClientMessage).
+
+How to apply: this is best-effort on Linux. Most window managers implement focus-stealing prevention — the WM will only honor an `_NET_ACTIVE_WINDOW` request from a process with a recent user-interaction timestamp. The new `spk-editor` invocation has no such timestamp, so the WM may downgrade the request to a taskbar-flash or ignore it entirely (mutter / KWin do this aggressively; lighter WMs like i3 / sway honor it). `App::activate(...)` is a documented no-op on the upstream Linux backend (`activate is not implemented on Linux, ignoring the call`). User-facing options: disable focus-stealing prevention in the WM, OR launch with an explicit path which goes through `open_paths` and forces a new window.
+
+### 12. Image paste: clipboard `gpui::Image` → base64 → `acp::ContentBlock::Image`
 
 Why: Claude (and other ACP agents that declare the `image` prompt capability) accepts image content blocks alongside text. We want native paste UX without dragging in `MentionSet`. The compose box registers a `capture_action(Paste)` handler that runs **before** the editor's default text-paste, inspects the clipboard, and:
 - if the first entry is text → returns without consuming (action falls through to the editor's text paste)
