@@ -42,7 +42,7 @@ A running `spk-editor` instance exposes an MCP server over a Unix socket so an a
 
 **Socket:** `~/.config/spk-editor/mcp.sock` (Linux). Single-instance — one editor process at a time holds the socket; a second `spk-editor` invocation hands off CLI args via the existing socket and exits. Lock file is `~/.config/spk-editor/mcp.lock`.
 
-**Tool catalog** (49 tools, JSON-RPC 2.0 over the socket — namespaces: `editor.*`, `windows.*`, `solutions.*`, `catalog.*`, `workspace.*`, `project.*`, `diagnostics.*`):
+**Tool catalog** (50 tools, JSON-RPC 2.0 over the socket — namespaces: `editor.*`, `windows.*`, `solutions.*`, `catalog.*`, `workspace.*`, `project.*`, `diagnostics.*`):
 - **Probe / control:** `editor.capabilities`, `editor.handle_cli_args`, `editor.{subscribe,unsubscribe,list_subscriptions}`, `editor.{get_operation,cancel_operation}`
 - **Solutions / catalog (the multi-project workspace abstraction):** `solutions.{list,get,create,rename,delete,open,close,find_for_path,add_member,remove_member,reorder_members}`, `catalog.{list,add_project,remove_project,edit_project,refresh_cache,clear_cache}`
 - **Windows:** `windows.{list,focus,close,dispatch_action,send_keystroke,send_text,click_at,dump_visual_structure}`
