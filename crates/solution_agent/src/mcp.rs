@@ -11,6 +11,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::model::{SolutionSession, SolutionSessionId};
 use crate::store::SolutionAgentStore;
+use gpui::SharedString;
 use solutions::{SolutionId, SolutionStore};
 
 pub fn register(cx: &mut App) {
@@ -29,10 +30,15 @@ pub fn register(cx: &mut App) {
     editor_mcp::register_tool(cx, |server| {
         server.add_tool(CloseSessionTool);
     });
-    // Tasks 5.3 add the remaining 3 tools and re-enable these lines:
-    // editor_mcp::register_tool(cx, |server| server.add_tool(CancelTurnTool));
-    // editor_mcp::register_tool(cx, |server| server.add_tool(RenameSessionTool));
-    // editor_mcp::register_tool(cx, |server| server.add_tool(RestartAgentTool));
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(CancelTurnTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(RenameSessionTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(RestartAgentTool);
+    });
 }
 
 // =====================================================================
@@ -547,6 +553,211 @@ impl McpServerTool for CloseSessionTool {
                 text: "closed".to_string(),
             }],
             structured_content: CloseSessionResult {},
+        })
+    }
+}
+
+// =====================================================================
+// solution_agent.cancel_turn
+// =====================================================================
+
+/// Cancel the in-flight turn on `session_id`. Forwards to
+/// `AgentConnection::cancel`; the session will eventually transition to
+/// `Idle` (or `Errored`) via the regular `AcpThreadEvent` plumbing.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct CancelTurnParams {
+    pub session_id: String,
+}
+
+impl<'de> Deserialize<'de> for CancelTurnParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            session_id: String,
+        }
+        Ok(Self {
+            session_id: Option::<Inner>::deserialize(de)?
+                .unwrap_or_default()
+                .session_id,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct CancelTurnResult {}
+
+#[derive(Clone)]
+pub struct CancelTurnTool;
+
+impl McpServerTool for CancelTurnTool {
+    type Input = CancelTurnParams;
+    type Output = CancelTurnResult;
+    const NAME: &'static str = "solution_agent.cancel_turn";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.session_id.is_empty(),
+            "invalid_params: session_id is required"
+        );
+        let session_id = SolutionSessionId::parse(&input.session_id)
+            .map_err(|e| anyhow!("bad session id: {e}"))?;
+
+        cx.update(|cx| -> Result<()> {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| store.cancel_turn(session_id, cx))?;
+            Ok(())
+        })?;
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: "cancelled".to_string(),
+            }],
+            structured_content: CancelTurnResult {},
+        })
+    }
+}
+
+// =====================================================================
+// solution_agent.rename_session
+// =====================================================================
+
+/// Rename a session's user-visible title.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct RenameSessionParams {
+    pub session_id: String,
+    pub title: String,
+}
+
+impl<'de> Deserialize<'de> for RenameSessionParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            session_id: String,
+            title: String,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            session_id: inner.session_id,
+            title: inner.title,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct RenameSessionResult {}
+
+#[derive(Clone)]
+pub struct RenameSessionTool;
+
+impl McpServerTool for RenameSessionTool {
+    type Input = RenameSessionParams;
+    type Output = RenameSessionResult;
+    const NAME: &'static str = "solution_agent.rename_session";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.session_id.is_empty(),
+            "invalid_params: session_id is required"
+        );
+        anyhow::ensure!(
+            !input.title.is_empty(),
+            "invalid_params: title is required"
+        );
+        let session_id = SolutionSessionId::parse(&input.session_id)
+            .map_err(|e| anyhow!("bad session id: {e}"))?;
+        let title = SharedString::from(input.title);
+
+        cx.update(|cx| -> Result<()> {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| store.rename_session(session_id, title, cx))?;
+            Ok(())
+        })?;
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: "renamed".to_string(),
+            }],
+            structured_content: RenameSessionResult {},
+        })
+    }
+}
+
+// =====================================================================
+// solution_agent.restart_agent
+// =====================================================================
+
+/// Restart the agent backing `session_id`. Drops the pooled subprocess
+/// for the session's `(solution, agent)` pair, closes the existing
+/// session, and opens a fresh one against the same project. v1 does not
+/// replay history. Returns the new session id.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct RestartAgentParams {
+    pub session_id: String,
+}
+
+impl<'de> Deserialize<'de> for RestartAgentParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            session_id: String,
+        }
+        Ok(Self {
+            session_id: Option::<Inner>::deserialize(de)?
+                .unwrap_or_default()
+                .session_id,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct RestartAgentResult {
+    pub session_id: String,
+}
+
+#[derive(Clone)]
+pub struct RestartAgentTool;
+
+impl McpServerTool for RestartAgentTool {
+    type Input = RestartAgentParams;
+    type Output = RestartAgentResult;
+    const NAME: &'static str = "solution_agent.restart_agent";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.session_id.is_empty(),
+            "invalid_params: session_id is required"
+        );
+        let session_id = SolutionSessionId::parse(&input.session_id)
+            .map_err(|e| anyhow!("bad session id: {e}"))?;
+
+        let restart_task = cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| store.restart_agent(session_id, cx))
+        });
+        let new_session_id = restart_task.await?;
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: new_session_id.to_string(),
+            }],
+            structured_content: RestartAgentResult {
+                session_id: new_session_id.to_string(),
+            },
         })
     }
 }

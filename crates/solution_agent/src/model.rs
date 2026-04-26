@@ -64,6 +64,11 @@ pub struct SolutionSession {
     pub created_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
     pub state: SessionState,
+    /// Project the session was created against. Cached so `restart_agent`
+    /// can re-issue `create_session` without the caller having to reach
+    /// back into a workspace window. `None` for prebuilt-session test
+    /// scaffolding that never went through `create_session`.
+    pub project: Option<Entity<project::Project>>,
     /// Subscription to the `AcpThread`'s `AcpThreadEvent` stream. Held so
     /// the callback registered by `SolutionAgentStore::subscribe_to_session`
     /// stays alive for the lifetime of the session. Underscore-prefixed

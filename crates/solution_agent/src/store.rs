@@ -15,7 +15,9 @@ use util::ResultExt;
 
 use crate::adapter::AdapterRegistry;
 use crate::db::SolutionAgentDb;
-use crate::model::{AgentServerId, SessionState, SolutionSession, SolutionSessionId};
+use crate::model::{
+    AgentServerId, SessionState, SolutionSession, SolutionSessionId, SolutionSessionMetadata,
+};
 use crate::notifier;
 use crate::pool::{PooledConnection, SHUTDOWN_DEBOUNCE, SpawnState, SubprocessPool};
 
@@ -214,6 +216,7 @@ impl SolutionAgentStore {
                     created_at: Utc::now(),
                     last_activity_at: Utc::now(),
                     state: SessionState::Idle,
+                    project: Some(project.clone()),
                     _acp_subscription: None,
                 };
                 let entity = cx.new(|_| session);
@@ -404,6 +407,118 @@ impl SolutionAgentStore {
         cx.emit(SolutionAgentStoreEvent::SessionClosed(id));
         cx.notify();
         Ok(())
+    }
+
+    /// Best-effort cancel of an in-flight turn. Forwards to the underlying
+    /// `AgentConnection::cancel`. Errors only when the session is unknown
+    /// or has no live `AcpThread` yet — once the connection accepts the
+    /// cancel request, downstream `AcpThreadEvent::Stopped` (or `Error`)
+    /// drives the state transition through `handle_acp_event`.
+    pub fn cancel_turn(
+        &self,
+        session_id: SolutionSessionId,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let session = self
+            .sessions
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("unknown session {session_id}"))?;
+        let (connection, acp_session_id) = {
+            let s = session.read(cx);
+            let thread = s
+                .acp_thread
+                .as_ref()
+                .ok_or_else(|| anyhow!("session {session_id} has no ACP thread yet"))?;
+            (
+                thread.read(cx).connection().clone(),
+                s.acp_session_id.clone(),
+            )
+        };
+        connection.cancel(&acp_session_id, cx);
+        Ok(())
+    }
+
+    /// Update the user-visible title of a session and persist the change
+    /// (best-effort). Emits `SessionTitleChanged` so the navigator
+    /// re-renders the row immediately.
+    pub fn rename_session(
+        &mut self,
+        session_id: SolutionSessionId,
+        title: SharedString,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let session = self
+            .sessions
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("unknown session {session_id}"))?;
+        session.update(cx, |s, _| s.title = title.clone());
+        if let Some(db) = self.persistence.clone() {
+            let s = session.read(cx);
+            let meta = SolutionSessionMetadata {
+                id: session_id,
+                solution_id: s.solution_id.clone(),
+                agent_id: s.agent_id.clone(),
+                acp_session_id: s.acp_session_id.clone(),
+                title,
+                created_at: s.created_at,
+                last_activity_at: Utc::now(),
+            };
+            db.save_metadata(meta).detach_and_log_err(cx);
+        }
+        cx.emit(SolutionAgentStoreEvent::SessionTitleChanged(session_id));
+        cx.notify();
+        Ok(())
+    }
+
+    /// Restart the agent backing `session_id`: drop the pool entry so the
+    /// next `create_session` call forces a fresh subprocess spawn, close
+    /// the existing session, and open a new one against the cached project.
+    /// v1 does not replay history — the new session starts empty (deferred
+    /// per Phase-5 spec "Open implementation questions" item 5).
+    ///
+    /// Returns the freshly minted `SolutionSessionId` so callers can
+    /// reattach navigator focus to it.
+    pub fn restart_agent(
+        &mut self,
+        session_id: SolutionSessionId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<SolutionSessionId>> {
+        let Some(session) = self.sessions.get(&session_id).cloned() else {
+            return Task::ready(Err(anyhow!("unknown session {session_id}")));
+        };
+        let (solution_id, agent_id, project) = {
+            let s = session.read(cx);
+            let project = match s.project.clone() {
+                Some(project) => project,
+                None => {
+                    return Task::ready(Err(anyhow!(
+                        "session {session_id} has no cached project — was it created via \
+                         register_prebuilt_session?"
+                    )));
+                }
+            };
+            (s.solution_id.clone(), s.agent_id.clone(), project)
+        };
+        let pair = (solution_id.clone(), agent_id.clone());
+        {
+            let mut pool = self.pool.lock();
+            pool.remove(&pair);
+        }
+        // Mark the old session as restarting so the UI can show feedback
+        // before the new session is registered.
+        session.update(cx, |s, _| {
+            s.state = SessionState::Errored(SharedString::from("restarting…"));
+        });
+        cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+        // Best-effort close of the old session; we still spawn the new
+        // one even if removal fails so the user isn't stranded.
+        if let Err(err) = self.close_session(session_id, cx) {
+            log::warn!("restart_agent: close_session({session_id}) failed: {err:?}");
+        }
+        let create_task = self.create_session(solution_id, agent_id, project, cx);
+        cx.spawn(async move |_this, _cx: &mut AsyncApp| create_task.await)
     }
 
     /// Send a user message to `session_id`. Flips `SessionState` to `Running`
@@ -806,6 +921,7 @@ mod tests {
                     created_at: Utc::now(),
                     last_activity_at: Utc::now(),
                     state: SessionState::Idle,
+                    project: None,
                     _acp_subscription: None,
                 });
                 store.sessions.insert(id, entity);
