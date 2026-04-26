@@ -48,12 +48,18 @@ impl SessionState {
 }
 
 /// Live, in-memory representation of one Solution-scoped AI session.
+///
+/// `acp_thread` is `Option` because a `SolutionSession` may exist briefly
+/// without a constructed `AcpThread` (e.g. during test scaffolding before
+/// Task 3.3 wires the real subprocess pool, or in the moment between
+/// session row creation and ACP `new_session` resolving). Production callers
+/// added in Task 3.3 will populate it before exposing the session to the UI.
 pub struct SolutionSession {
     pub id: SolutionSessionId,
     pub solution_id: SolutionId,
     pub agent_id: AgentServerId,
     pub acp_session_id: acp::SessionId,
-    pub acp_thread: Entity<AcpThread>,
+    pub acp_thread: Option<Entity<AcpThread>>,
     pub title: SharedString,
     pub created_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,

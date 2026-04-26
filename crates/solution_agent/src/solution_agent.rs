@@ -8,6 +8,7 @@ pub mod model;
 pub mod adapter;
 pub mod claude_adapter;
 pub(crate) mod db;
+pub mod store;
 
 pub use model::{
     AgentServerId, SessionState, SolutionSession, SolutionSessionId, SolutionSessionMetadata,
