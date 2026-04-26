@@ -26,6 +26,15 @@ pub trait ModalView: ManagedView {
     fn render_bare(&self) -> bool {
         false
     }
+
+    /// Stable identifier for this modal kind, surfaced via
+    /// [`ModalLayer::active_modal_kind`] / [`super::Workspace::active_modal_kind`]
+    /// so external observers (introspection tools, MCP probes) can tell *what*
+    /// is open without holding a `TypeId`. Defaults to `"Modal"`; override in
+    /// concrete modal types (e.g. `"NewSolution"`, `"OpenSolution"`).
+    fn debug_kind(&self) -> &'static str {
+        "Modal"
+    }
 }
 
 trait ModalViewHandle {
@@ -33,6 +42,7 @@ trait ModalViewHandle {
     fn view(&self) -> AnyView;
     fn fade_out_background(&self, cx: &mut App) -> bool;
     fn render_bare(&self, cx: &mut App) -> bool;
+    fn debug_kind(&self, cx: &App) -> &'static str;
 }
 
 impl<V: ModalView> ModalViewHandle for Entity<V> {
@@ -50,6 +60,10 @@ impl<V: ModalView> ModalViewHandle for Entity<V> {
 
     fn render_bare(&self, cx: &mut App) -> bool {
         self.read(cx).render_bare()
+    }
+
+    fn debug_kind(&self, cx: &App) -> &'static str {
+        self.read(cx).debug_kind()
     }
 }
 
@@ -188,6 +202,13 @@ impl ModalLayer {
 
     pub fn has_active_modal(&self) -> bool {
         self.active_modal.is_some()
+    }
+
+    /// Stable kind name of the currently active modal, if any. Used by
+    /// introspection (e.g. `workspace.dump_visual_structure`) to surface
+    /// what modal is open without leaking GPUI type ids.
+    pub fn active_modal_kind(&self, cx: &App) -> Option<&'static str> {
+        self.active_modal.as_ref().map(|m| m.modal.debug_kind(cx))
     }
 }
 

@@ -79,6 +79,9 @@ pub fn register(cx: &mut App) {
         server.add_tool(DumpVisualStructureTool);
     });
     editor_mcp::register_tool(cx, |server| {
+        server.add_tool(DumpWindowStructureTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
         server.add_tool(GetDiagnosticsTool);
     });
     editor_mcp::register_tool(cx, |server| {
@@ -2240,8 +2243,78 @@ impl McpServerTool for DumpVisualStructureTool {
     }
 }
 
+// =====================================================================
+// windows.dump_visual_structure
+// =====================================================================
+
+/// Like `workspace.dump_visual_structure` but keyed by `window_id`
+/// rather than solution. Lets agents introspect any window — including
+/// the welcome window where `solutions.find_for_path` does not apply
+/// and modals belonging to no solution can still be observed.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct DumpWindowStructureParams {
+    pub window_id: String,
+}
+
+impl<'de> Deserialize<'de> for DumpWindowStructureParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            window_id: String,
+        }
+        Ok(Self {
+            window_id: Option::<Inner>::deserialize(de)?
+                .unwrap_or_default()
+                .window_id,
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct DumpWindowStructureTool;
+
+impl McpServerTool for DumpWindowStructureTool {
+    type Input = DumpWindowStructureParams;
+    type Output = DumpVisualStructureResult;
+    const NAME: &'static str = "windows.dump_visual_structure";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.window_id.is_empty(),
+            "invalid_params: window_id is required"
+        );
+        let tree = cx.update(|cx| -> anyhow::Result<VisualNode> {
+            let handle = cx
+                .windows()
+                .into_iter()
+                .find(|h| editor_mcp::format_window_id(h.window_id()) == input.window_id)
+                .with_context(|| format!("window_not_found: {}", input.window_id))?;
+            build_visual_tree_for_window(handle, cx)
+                .with_context(|| format!("window_not_multi_workspace: {}", input.window_id))
+        })?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("structure for {}", input.window_id),
+            }],
+            structured_content: DumpVisualStructureResult { tree },
+        })
+    }
+}
+
 fn build_visual_tree(solution_id: &str, cx: &mut App) -> Option<VisualNode> {
     let handle = find_window_for_solution(solution_id, cx)?;
+    build_visual_tree_for_window(handle, cx)
+}
+
+fn build_visual_tree_for_window(
+    handle: gpui::AnyWindowHandle,
+    cx: &mut App,
+) -> Option<VisualNode> {
     let window_handle = handle.downcast::<workspace::MultiWorkspace>()?;
     window_handle
         .read_with(cx, |multi, cx| build_workspace_node(multi, cx))
@@ -2470,10 +2543,21 @@ fn build_pane_area_node(workspace: &workspace::Workspace, cx: &App) -> VisualNod
     }
 }
 
-// Modal layer access requires API discovery; skip for v1.
-// Phase 7 / follow-up can enrich.
-fn build_modal_node(_workspace: &workspace::Workspace, _cx: &App) -> Option<VisualNode> {
-    None
+/// Surface the active modal as a `Modal(<kind>)` leaf so introspection
+/// tools can verify which modal is open. The kind comes from
+/// [`workspace::ModalView::debug_kind`] — solutions modals override it
+/// with stable strings (`"NewSolution"`, `"AddCatalogProject"`,
+/// `"OpenSolution"`, `"AddMember"`); generic upstream modals fall back
+/// to `"Modal"`.
+fn build_modal_node(workspace: &workspace::Workspace, cx: &App) -> Option<VisualNode> {
+    let kind = workspace.active_modal_kind(cx)?;
+    Some(VisualNode {
+        kind: format!("Modal({kind})"),
+        label: Some(kind.to_string()),
+        visible: true,
+        focused: true,
+        children: Vec::new(),
+    })
 }
 
 // =====================================================================

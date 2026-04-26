@@ -84,7 +84,11 @@ impl Focusable for NewSolutionModal {
     }
 }
 
-impl ModalView for NewSolutionModal {}
+impl ModalView for NewSolutionModal {
+    fn debug_kind(&self) -> &'static str {
+        "NewSolution"
+    }
+}
 
 impl Render for NewSolutionModal {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -194,7 +198,11 @@ impl Focusable for AddCatalogProjectModal {
     }
 }
 
-impl ModalView for AddCatalogProjectModal {}
+impl ModalView for AddCatalogProjectModal {
+    fn debug_kind(&self) -> &'static str {
+        "AddCatalogProject"
+    }
+}
 
 impl Render for AddCatalogProjectModal {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

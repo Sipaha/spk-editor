@@ -52,7 +52,11 @@ impl Focusable for AddMemberPicker {
 }
 
 impl EventEmitter<DismissEvent> for AddMemberPicker {}
-impl ModalView for AddMemberPicker {}
+impl ModalView for AddMemberPicker {
+    fn debug_kind(&self) -> &'static str {
+        "AddMember"
+    }
+}
 
 struct CatalogEntry {
     id: CatalogId,

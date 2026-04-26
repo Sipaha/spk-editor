@@ -49,7 +49,11 @@ impl Focusable for OpenSolutionModal {
 }
 
 impl EventEmitter<DismissEvent> for OpenSolutionModal {}
-impl ModalView for OpenSolutionModal {}
+impl ModalView for OpenSolutionModal {
+    fn debug_kind(&self) -> &'static str {
+        "OpenSolution"
+    }
+}
 
 struct SolutionEntry {
     id: SolutionId,
