@@ -137,9 +137,11 @@
   //         "restore_on_startup": "last_workspace",
   //  3. Do not restore previous workspaces
   //         "restore_on_startup": "none",
-  // SPK Editor: default is "none" so the Welcome page (with the Solutions
-  // list + Create button) is always shown on startup. See FORK.md §11.
-  "restore_on_startup": "none",
+  // SPK Editor: default is "launchpad" so the Welcome page (with the
+  // Solutions list + Create button) is always shown on startup, instead of
+  // restoring the last workspace or opening an untitled buffer. See FORK.md
+  // §10.
+  "restore_on_startup": "launchpad",
   // The default behavior when opening paths from the CLI without
   // an explicit `-e` (existing window) or `-n` (new window) flag.
   //
