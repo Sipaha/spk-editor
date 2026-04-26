@@ -11,6 +11,7 @@ pub mod claude_adapter;
 pub(crate) mod db;
 pub mod event_sources;
 pub mod mcp;
+pub mod navigator;
 pub mod notifier;
 pub(crate) mod pool;
 pub mod session_view;
