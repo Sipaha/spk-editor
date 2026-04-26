@@ -2,16 +2,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, Subscription};
+use gpui::{App, AppContext, AsyncApp, Context, Entity, EventEmitter, Global, Subscription};
 use solutions::{SolutionId, SolutionStore, SolutionStoreEvent};
 
 use crate::adapter::AdapterRegistry;
 use crate::db::SolutionAgentDb;
-use crate::model::{SolutionSession, SolutionSessionId};
+use crate::model::{AgentServerId, SolutionSession, SolutionSessionId};
+use crate::pool::{PooledConnection, SHUTDOWN_DEBOUNCE, SpawnState, SubprocessPool};
 
 pub struct SolutionAgentStore {
     sessions: HashMap<SolutionSessionId, Entity<SolutionSession>>,
     by_solution: HashMap<SolutionId, Vec<SolutionSessionId>>,
+    pool: parking_lot::Mutex<SubprocessPool>,
     persistence: Option<Arc<SolutionAgentDb>>,
     pub(crate) adapters: Arc<AdapterRegistry>,
     _solution_subscription: Option<Subscription>,
@@ -50,6 +52,7 @@ impl SolutionAgentStore {
         Self {
             sessions: HashMap::new(),
             by_solution: HashMap::new(),
+            pool: parking_lot::Mutex::new(SubprocessPool::new()),
             persistence: None,
             adapters,
             _solution_subscription: solution_subscription,
@@ -119,6 +122,74 @@ impl SolutionAgentStore {
         Ok(())
     }
 
+    /// Test-only: pretend a session was added against an existing connection.
+    #[cfg(any(feature = "test-support", test))]
+    pub fn pool_pretend_session_added(
+        &mut self,
+        key: (SolutionId, AgentServerId),
+        connection: std::rc::Rc<dyn acp_thread::AgentConnection>,
+    ) {
+        let mut pool = self.pool.lock();
+        if let Some(entry) = pool.entry_mut(&key) {
+            entry.live_session_count += 1;
+            entry.shutdown_task = None;
+        } else {
+            pool.insert(
+                key,
+                PooledConnection {
+                    state: SpawnState::Ready(connection),
+                    live_session_count: 1,
+                    shutdown_task: None,
+                },
+            );
+        }
+    }
+
+    pub fn pool_release_session(
+        &mut self,
+        key: (SolutionId, AgentServerId),
+        cx: &mut Context<Self>,
+    ) {
+        let needs_arm = {
+            let mut pool = self.pool.lock();
+            let Some(entry) = pool.entry_mut(&key) else {
+                return;
+            };
+            entry.live_session_count = entry.live_session_count.saturating_sub(1);
+            entry.live_session_count == 0
+        };
+        if needs_arm {
+            self.arm_shutdown(key, cx);
+        }
+    }
+
+    fn arm_shutdown(&mut self, key: (SolutionId, AgentServerId), cx: &mut Context<Self>) {
+        let task = cx.spawn({
+            let key = key.clone();
+            async move |this, cx: &mut AsyncApp| {
+                cx.background_executor().timer(SHUTDOWN_DEBOUNCE).await;
+                this.update(cx, |this, _cx| {
+                    let mut pool = this.pool.lock();
+                    if let Some(entry) = pool.entry_mut(&key) {
+                        if entry.live_session_count == 0 {
+                            pool.remove(&key);
+                        }
+                    }
+                })
+                .ok();
+            }
+        });
+        let mut pool = self.pool.lock();
+        if let Some(entry) = pool.entry_mut(&key) {
+            entry.shutdown_task = Some(task);
+        }
+    }
+
+    #[cfg(any(feature = "test-support", test))]
+    pub fn pool_size(&self) -> usize {
+        self.pool.lock().pair_count()
+    }
+
     fn on_solution_event(
         &mut self,
         _: Entity<SolutionStore>,
@@ -170,7 +241,8 @@ mod tests {
     use crate::adapter::AdapterRegistry;
     use crate::model::SessionState;
     use chrono::Utc;
-    use gpui::{SharedString, TestAppContext};
+    use gpui::{SharedString, Task, TestAppContext};
+    use std::rc::Rc;
 
     #[gpui::test]
     fn close_session_removes_from_indices(cx: &mut TestAppContext) {
@@ -204,6 +276,121 @@ mod tests {
                 assert_eq!(store.sessions_for(&SolutionId("sol-a".into())).len(), 0);
                 assert!(store.session(id).is_none());
             });
+        });
+    }
+
+    /// Trivial AgentConnection mock — every method stubs.
+    struct MockConnection;
+
+    impl acp_thread::AgentConnection for MockConnection {
+        fn agent_id(&self) -> project::AgentId {
+            project::AgentId::new("mock-agent")
+        }
+        fn telemetry_id(&self) -> SharedString {
+            SharedString::from("mock")
+        }
+        fn new_session(
+            self: Rc<Self>,
+            _project: gpui::Entity<project::Project>,
+            _work_dirs: util::path_list::PathList,
+            _cx: &mut App,
+        ) -> Task<anyhow::Result<gpui::Entity<acp_thread::AcpThread>>> {
+            Task::ready(Err(anyhow::anyhow!("not used in this test")))
+        }
+        fn auth_methods(&self) -> &[agent_client_protocol::schema::AuthMethod] {
+            &[]
+        }
+        fn authenticate(
+            &self,
+            _method: agent_client_protocol::schema::AuthMethodId,
+            _cx: &mut App,
+        ) -> Task<anyhow::Result<()>> {
+            Task::ready(Ok(()))
+        }
+        fn prompt(
+            &self,
+            _user_message_id: acp_thread::UserMessageId,
+            _params: agent_client_protocol::schema::PromptRequest,
+            _cx: &mut App,
+        ) -> Task<anyhow::Result<agent_client_protocol::schema::PromptResponse>> {
+            Task::ready(Err(anyhow::anyhow!("not used in this test")))
+        }
+        fn cancel(&self, _session_id: &agent_client_protocol::schema::SessionId, _cx: &mut App) {}
+        fn into_any(self: Rc<Self>) -> Rc<dyn std::any::Any> {
+            self
+        }
+    }
+
+    #[gpui::test]
+    async fn pool_release_arms_60s_shutdown_then_drops(cx: &mut TestAppContext) {
+        let registry = Arc::new(AdapterRegistry::new());
+        cx.update(|cx| SolutionAgentStore::init_global(cx, registry));
+
+        let key = (SolutionId("sol-a".into()), SharedString::from("mock-agent"));
+
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, _| {
+                store.pool_pretend_session_added(key.clone(), Rc::new(MockConnection));
+                assert_eq!(store.pool_size(), 1);
+            });
+        });
+
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| {
+                store.pool_release_session(key.clone(), cx);
+            });
+        });
+
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(30));
+        cx.executor().run_until_parked();
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, _| assert_eq!(store.pool_size(), 1));
+        });
+
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(35));
+        cx.executor().run_until_parked();
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, _| assert_eq!(store.pool_size(), 0));
+        });
+    }
+
+    #[gpui::test]
+    async fn shutdown_cancels_when_session_re_added(cx: &mut TestAppContext) {
+        let registry = Arc::new(AdapterRegistry::new());
+        cx.update(|cx| SolutionAgentStore::init_global(cx, registry));
+        let key = (SolutionId("sol-a".into()), SharedString::from("mock-agent"));
+
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| {
+                store.pool_pretend_session_added(key.clone(), Rc::new(MockConnection));
+                store.pool_release_session(key.clone(), cx);
+            });
+        });
+
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(30));
+        cx.executor().run_until_parked();
+
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, _| {
+                store.pool_pretend_session_added(key.clone(), Rc::new(MockConnection));
+            });
+        });
+
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(60));
+        cx.executor().run_until_parked();
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, _| assert_eq!(store.pool_size(), 1));
         });
     }
 }
