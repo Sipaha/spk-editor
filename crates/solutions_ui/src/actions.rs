@@ -1,4 +1,6 @@
-use gpui::actions;
+use gpui::{Action, actions};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 actions!(
     solutions,
@@ -13,3 +15,11 @@ actions!(
         RefreshCacheForCurrent,
     ]
 );
+
+/// Delete a Solution (with disk cleanup) by id. Triggered from the welcome
+/// list's row trash icon; opens a confirmation modal that does the work.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, JsonSchema, Action)]
+#[action(namespace = solutions)]
+pub struct DeleteSolution {
+    pub id: String,
+}

@@ -13,7 +13,7 @@ mod welcome;
 pub use status_bar::SolutionsStatusItem;
 
 pub use actions::{
-    NewSolution, OpenSolution, RefreshCacheForCurrent, ToggleSolutionsPanel,
+    DeleteSolution, NewSolution, OpenSolution, RefreshCacheForCurrent, ToggleSolutionsPanel,
 };
 pub use dock_panel::{SolutionsPanel, load};
 

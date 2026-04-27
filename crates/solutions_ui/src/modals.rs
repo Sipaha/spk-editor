@@ -3,12 +3,13 @@ use gpui::{
     AppContext as _, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, WeakEntity, actions,
 };
 use settings::Settings as _;
-use solutions::{SolutionStore, SolutionsSettings};
+use solutions::{SolutionId, SolutionStore, SolutionsSettings};
+use std::path::PathBuf;
 use ui::prelude::*;
 use util::ResultExt as _;
 use workspace::{ModalView, Workspace};
 
-use crate::actions::NewSolution;
+use crate::actions::{DeleteSolution, NewSolution};
 
 actions!(
     solutions,
@@ -29,6 +30,23 @@ pub fn register(workspace: &mut Workspace, _: Option<&mut Window>, _: &mut Conte
         let weak = cx.weak_entity();
         workspace.toggle_modal(window, cx, |window, cx| {
             AddCatalogProjectModal::new(weak, window, cx)
+        });
+    });
+    workspace.register_action(|workspace, action: &DeleteSolution, window, cx| {
+        let id = SolutionId(action.id.clone());
+        let store = SolutionStore::global(cx);
+        // Look up the solution's display name + root for the modal copy.
+        // If the id is unknown (stale action / already-deleted), do nothing.
+        let Some((name, root)) = store.read_with(cx, |s, _| {
+            s.solutions()
+                .iter()
+                .find(|sol| sol.id == id)
+                .map(|sol| (sol.name.clone(), sol.root.clone()))
+        }) else {
+            return;
+        };
+        workspace.toggle_modal(window, cx, |_window, cx| {
+            DeleteSolutionModal::new(id, name, root, cx)
         });
     });
 }
@@ -249,6 +267,140 @@ impl Render for AddCatalogProjectModal {
                     )
                     .child(
                         Button::new("add", "Add")
+                            .style(ButtonStyle::Filled)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.confirm(&menu::Confirm, window, cx);
+                            })),
+                    ),
+            )
+    }
+}
+
+pub struct DeleteSolutionModal {
+    id: SolutionId,
+    name: String,
+    root: PathBuf,
+    focus_handle: FocusHandle,
+}
+
+impl DeleteSolutionModal {
+    fn new(id: SolutionId, name: String, root: PathBuf, cx: &mut Context<Self>) -> Self {
+        Self {
+            id,
+            name,
+            root,
+            focus_handle: cx.focus_handle(),
+        }
+    }
+
+    fn confirm(&mut self, _: &menu::Confirm, _window: &mut Window, cx: &mut Context<Self>) {
+        let store = SolutionStore::global(cx);
+        let id = self.id.clone();
+        store
+            .update(cx, |s, cx| s.delete_solution(&id, cx))
+            .log_err();
+        // Disk cleanup is best-effort and async — the directory can be huge
+        // (worktrees with full git histories), so we don't want to block the
+        // UI thread. Failures are logged but not surfaced: by this point the
+        // metadata entry is gone, so the user has effectively forgotten the
+        // solution either way.
+        let root = self.root.clone();
+        cx.background_spawn(async move {
+            let result: std::io::Result<()> =
+                smol::unblock(move || std::fs::remove_dir_all(&root)).await;
+            if let Err(err) = result {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    log::warn!(
+                        "delete_solution: removing directory failed: {err} (orphaned files left in place)"
+                    );
+                }
+            }
+        })
+        .detach();
+        cx.emit(DismissEvent);
+    }
+
+    fn cancel(&mut self, _: &menu::Cancel, _window: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(DismissEvent);
+    }
+}
+
+impl EventEmitter<DismissEvent> for DeleteSolutionModal {}
+
+impl Focusable for DeleteSolutionModal {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl ModalView for DeleteSolutionModal {
+    fn debug_kind(&self) -> &'static str {
+        "DeleteSolution"
+    }
+}
+
+impl Render for DeleteSolutionModal {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let path_str = self.root.display().to_string();
+        v_flex()
+            .key_context("DeleteSolutionModal")
+            .on_action(cx.listener(Self::confirm))
+            .on_action(cx.listener(Self::cancel))
+            .track_focus(&self.focus_handle)
+            .w(rems(32.))
+            .p_4()
+            .gap_3()
+            .bg(cx.theme().colors().elevated_surface_background)
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .rounded_md()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Icon::new(IconName::Warning)
+                            .color(Color::Warning)
+                            .size(IconSize::Medium),
+                    )
+                    .child(Label::new("Delete Solution").size(LabelSize::Large)),
+            )
+            .child(
+                Label::new(format!("\"{}\" will be removed from the launcher.", self.name))
+                    .color(Color::Default),
+            )
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        Label::new("All files under this directory will be permanently deleted from disk:")
+                            .color(Color::Muted)
+                            .size(LabelSize::Small),
+                    )
+                    .child(
+                        Label::new(path_str)
+                            .color(Color::Muted)
+                            .size(LabelSize::XSmall),
+                    ),
+            )
+            .child(
+                Label::new("This action cannot be undone.")
+                    .color(Color::Warning)
+                    .size(LabelSize::Small),
+            )
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("cancel", "Cancel").on_click(cx.listener(
+                            |this, _, window, cx| {
+                                this.cancel(&menu::Cancel, window, cx);
+                            },
+                        )),
+                    )
+                    .child(
+                        Button::new("delete", "Delete")
                             .style(ButtonStyle::Filled)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.confirm(&menu::Confirm, window, cx);

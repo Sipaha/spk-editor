@@ -1,5 +1,5 @@
-//! Welcome page integration: renders a Solutions section (full list + Create
-//! button) by plugging into `workspace::register_welcome_section`.
+//! Welcome page integration: renders a Solutions section (full list +
+//! Create button) by plugging into `workspace::register_welcome_section`.
 //!
 //! Lives here (not in `workspace`) so the dependency graph stays one-way:
 //! `solutions_ui → workspace`, never the reverse. Earlier we tried to read
@@ -12,32 +12,22 @@
 
 use anyhow::anyhow;
 use chrono::{DateTime, Utc};
-use gpui::{Action, AnyElement, AnyWindowHandle, App, IntoElement};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use solutions::{SolutionId, SolutionStore, SolutionStoreEvent};
-use ui::prelude::*;
-use ui::{ButtonLike, Divider, DividerColor};
+use gpui::{AnyElement, AnyWindowHandle, App, IntoElement};
+use solutions::{Solution, SolutionId, SolutionStore, SolutionStoreEvent};
+use std::path::PathBuf;
+use ui::{ButtonLike, Divider, DividerColor, IconButtonShape, prelude::*};
 use util::ResultExt as _;
 use workspace::{
     AppState, OpenOptions,
     welcome::{WelcomePage, register_welcome_section},
 };
 
-use crate::actions::NewSolution;
+use crate::actions::{DeleteSolution, NewSolution};
 
-#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, JsonSchema, Action)]
-#[action(namespace = solutions)]
-#[serde(transparent)]
-pub struct OpenRecentSolution {
-    pub index: usize,
-}
-
-/// Wires the Recent Solutions section onto the welcome page and the
-/// `OpenRecentSolution` action handler. Called once from `solutions_ui::init`.
+/// Wires the Recent Solutions section onto the welcome page. Called once
+/// from `solutions_ui::init`.
 pub fn init(cx: &mut App) {
     register_welcome_section(cx, render_section);
-    cx.on_action(open_recent_solution);
 
     // WelcomePage doesn't know about SolutionStore on its own, so without
     // this hook the Recent Solutions section would render once at page
@@ -58,11 +48,11 @@ pub fn init(cx: &mut App) {
 
 fn render_section(cx: &mut App) -> Option<AnyElement> {
     let entries = all_solutions(cx);
-    let mut list = ui::v_flex().w_full().gap_1();
+    let mut list = ui::v_flex().w_full().gap_2();
     list = list.child(
         ui::h_flex()
             .px_1()
-            .mb_2()
+            .mb_1()
             .gap_2()
             .child(
                 Label::new("SOLUTIONS")
@@ -78,14 +68,14 @@ fn render_section(cx: &mut App) -> Option<AnyElement> {
                 .px_1()
                 .py_2()
                 .child(
-                    Label::new("No solutions yet.")
+                    Label::new("No solutions yet — create one to get started.")
                         .color(Color::Muted)
                         .size(LabelSize::Small),
                 ),
         );
     } else {
         for (index, entry) in entries.into_iter().enumerate() {
-            list = list.child(render_row(index, entry));
+            list = list.child(render_card(index, entry, cx));
         }
     }
     list = list.child(render_create_button());
@@ -99,6 +89,7 @@ fn render_create_button() -> impl IntoElement {
         .child(
             ui::h_flex()
                 .gap_2()
+                .px_1()
                 .child(
                     Icon::new(IconName::Plus)
                         .color(Color::Muted)
@@ -111,45 +102,109 @@ fn render_create_button() -> impl IntoElement {
         })
 }
 
-fn render_row(index: usize, entry: RecentSolution) -> impl IntoElement {
+/// IDEA-style card: colored avatar, name, path, last-opened ago.
+/// Trash button on hover.
+fn render_card(index: usize, entry: RecentSolution, cx: &App) -> impl IntoElement {
     let entry_id = entry.id.clone();
-    let mut row = ui::h_flex()
-        .gap_2()
-        .child(
-            Icon::new(IconName::Folder)
-                .color(Color::Muted)
-                .size(IconSize::Small),
-        )
-        .child(Label::new(entry.label));
-    if entry.is_empty {
-        row = row.child(
-            Label::new("(empty)")
-                .color(Color::Muted)
-                .size(LabelSize::XSmall),
-        );
-    }
-    ButtonLike::new(("recent-solution", index))
-        .full_width()
-        .size(ui::ButtonSize::Medium)
-        .child(row)
-        .on_click(move |_, window, cx| {
-            // Pass the welcome window as the source so it gets closed once the
-            // new solution window is up — otherwise the launcher stays around
-            // as an orphan tab the user has to dismiss manually.
-            let source = window.window_handle();
-            open_solution(entry_id.clone(), Some(source), cx);
-        })
-}
+    let entry_id_for_delete = entry.id.clone();
 
-fn open_recent_solution(action: &OpenRecentSolution, cx: &mut App) {
-    let entries = all_solutions(cx);
-    let Some(entry) = entries.get(action.index) else {
-        return;
-    };
-    // Keybind path: no source window. We can't tell whether the trigger came
-    // from a welcome window or some other workspace, and closing the wrong one
-    // would be very surprising.
-    open_solution(entry.id.clone(), None, cx);
+    let avatar_color = avatar_color_for(&entry.label, cx);
+    let initials = initials_of(&entry.label);
+
+    let path_display = display_path(&entry.root);
+    let meta = entry
+        .last_opened_at
+        .map(|ts| relative_time_label(ts, Utc::now()))
+        .unwrap_or_else(|| "never opened".to_string());
+
+    // We can't put `on_mouse_down` on the parent row because then a click
+    // anywhere on the row fires "open" — including on the trash button,
+    // since GPUI's parent listeners run before child `stop_propagation`
+    // takes effect. So the row is a non-clickable layout container; the
+    // "open" handler lives on an inner `clickable_body` div that sits
+    // alongside the trash button as siblings.
+    ui::h_flex()
+        .id(("solution-card-row", index))
+        .w_full()
+        .gap_2()
+        .px_2()
+        .py_2()
+        .rounded_md()
+        .border_1()
+        .border_color(cx.theme().colors().border_variant)
+        .bg(cx.theme().colors().elevated_surface_background)
+        .hover(|s| s.bg(cx.theme().colors().element_hover))
+        .child(
+            ui::h_flex()
+                .id(("solution-card-body", index))
+                .flex_1()
+                .min_w_0()
+                .gap_2()
+                .items_center()
+                .cursor_pointer()
+                .on_click(move |_, window, cx| {
+                    let source = window.window_handle();
+                    open_solution(entry_id.clone(), Some(source), cx);
+                })
+                .child(
+                    ui::h_flex()
+                        .flex_none()
+                        .size_8()
+                        .items_center()
+                        .justify_center()
+                        .rounded_md()
+                        .bg(avatar_color)
+                        .child(
+                            Label::new(initials)
+                                .size(LabelSize::Default)
+                                .color(Color::Custom(gpui::white())),
+                        ),
+                )
+                .child(
+                    ui::v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_0p5()
+                        .child(
+                            ui::h_flex()
+                                .gap_2()
+                                .child(Label::new(entry.label.clone()).size(LabelSize::Default))
+                                .when(entry.is_empty, |this| {
+                                    this.child(
+                                        Label::new("(empty)")
+                                            .color(Color::Muted)
+                                            .size(LabelSize::XSmall),
+                                    )
+                                }),
+                        )
+                        .child(
+                            Label::new(path_display)
+                                .color(Color::Muted)
+                                .size(LabelSize::XSmall)
+                                .truncate(),
+                        ),
+                )
+                .child(
+                    Label::new(meta)
+                        .color(Color::Muted)
+                        .size(LabelSize::XSmall),
+                ),
+        )
+        .child(
+            IconButton::new(("delete-solution", index), IconName::Trash)
+                .shape(IconButtonShape::Square)
+                .icon_size(IconSize::Small)
+                .icon_color(Color::Muted)
+                .tooltip(ui::Tooltip::text("Delete solution"))
+                .on_click(move |_, window, cx| {
+                    window.dispatch_action(
+                        Box::new(DeleteSolution {
+                            id: entry_id_for_delete.0.clone(),
+                        }),
+                        cx,
+                    );
+                }),
+        )
 }
 
 fn open_solution(sol_id: SolutionId, source_window: Option<AnyWindowHandle>, cx: &mut App) {
@@ -177,7 +232,11 @@ fn open_solution(sol_id: SolutionId, source_window: Option<AnyWindowHandle>, cx:
         } else {
             s.paths_for_open(&sol_id)?
         };
-        Ok(OpenInfo { paths, name, is_empty })
+        Ok(OpenInfo {
+            paths,
+            name,
+            is_empty,
+        })
     }) {
         Ok(info) => info,
         Err(err) => {
@@ -226,20 +285,18 @@ fn open_solution(sol_id: SolutionId, source_window: Option<AnyWindowHandle>, cx:
                     .log_err();
             });
         }
-        let Some(source) = source_window else {
-            return;
-        };
-        // Defensive: only close if it's not the same window we just opened.
-        // open_paths with NewWindow always creates a new one today, but a
-        // future change that reuses a window would otherwise close the
-        // window the user just opened.
+        // Defensive: don't close the source window if `open_paths` reused it
+        // (today NewWindow always creates a fresh one, but a future change
+        // could reuse — closing it would kill the window the user just
+        // opened). When the keybind path supplies no source, nothing to do.
+        let Some(source) = source_window else { return };
         if source.window_id() == opened.window.window_id() {
             return;
         }
         cx.update(|cx| {
-            source
-                .update(cx, |_, window, _| window.remove_window())
-                .log_err();
+            if let Err(err) = source.update(cx, |_, window, _| window.remove_window()) {
+                log::warn!("solutions_ui: failed to close welcome window: {err}");
+            }
         });
     })
     .detach();
@@ -249,7 +306,9 @@ fn open_solution(sol_id: SolutionId, source_window: Option<AnyWindowHandle>, cx:
 struct RecentSolution {
     id: SolutionId,
     label: String,
+    root: PathBuf,
     is_empty: bool,
+    last_opened_at: Option<DateTime<Utc>>,
 }
 
 #[cfg(test)]
@@ -265,35 +324,97 @@ fn all_solutions(cx: &App) -> Vec<RecentSolution> {
     let Some(store) = SolutionStore::try_global(cx) else {
         return Vec::new();
     };
-    let mut sols: Vec<(SolutionId, String, Option<DateTime<Utc>>, bool)> = store
-        .read_with(cx, |s, _| {
-            s.solutions()
-                .iter()
-                .map(|sol| {
-                    (
-                        sol.id.clone(),
-                        sol.name.clone(),
-                        sol.last_opened_at,
-                        sol.members.is_empty(),
-                    )
-                })
-                .collect()
-        });
+    let mut sols: Vec<RecentSolution> = store.read_with(cx, |s, _| {
+        s.solutions()
+            .iter()
+            .map(|sol: &Solution| RecentSolution {
+                id: sol.id.clone(),
+                label: sol.name.clone(),
+                root: sol.root.clone(),
+                is_empty: sol.members.is_empty(),
+                last_opened_at: sol.last_opened_at,
+            })
+            .collect()
+    });
     // Opened solutions first, ordered by last_opened_at desc (newest first).
     // Never-opened solutions follow, kept in their store insertion order.
-    sols.sort_by(|a, b| match (a.2, b.2) {
+    sols.sort_by(|a, b| match (a.last_opened_at, b.last_opened_at) {
         (Some(ts_a), Some(ts_b)) => ts_b.cmp(&ts_a),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
     });
-    sols.into_iter()
-        .map(|(id, name, _, is_empty)| RecentSolution {
-            id,
-            label: name,
-            is_empty,
-        })
-        .collect()
+    sols
+}
+
+fn initials_of(name: &str) -> String {
+    let parts: Vec<&str> = name.split_whitespace().collect();
+    if parts.is_empty() {
+        return "?".into();
+    }
+    if parts.len() == 1 {
+        let s = parts[0];
+        return s.chars().take(2).collect::<String>().to_uppercase();
+    }
+    let mut s = String::new();
+    for p in parts.iter().take(2) {
+        if let Some(c) = p.chars().next() {
+            s.push(c.to_ascii_uppercase());
+        }
+    }
+    if s.is_empty() {
+        "?".into()
+    } else {
+        s
+    }
+}
+
+/// Pick a stable accent color from the theme palette by hashing the name.
+/// Same name → same color across launches.
+fn avatar_color_for(name: &str, cx: &App) -> gpui::Hsla {
+    let palette = &cx.theme().colors();
+    let candidates = [
+        palette.terminal_ansi_red,
+        palette.terminal_ansi_green,
+        palette.terminal_ansi_yellow,
+        palette.terminal_ansi_blue,
+        palette.terminal_ansi_magenta,
+        palette.terminal_ansi_cyan,
+    ];
+    let h = name
+        .bytes()
+        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+    candidates[(h as usize) % candidates.len()]
+}
+
+fn display_path(p: &std::path::Path) -> String {
+    let s = p.to_string_lossy().to_string();
+    if let Ok(home) = std::env::var("HOME") {
+        if let Some(rest) = s.strip_prefix(&home) {
+            return format!("~{rest}");
+        }
+    }
+    s
+}
+
+fn relative_time_label(ts: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let delta = now.signed_duration_since(ts);
+    let secs = delta.num_seconds();
+    if secs < 60 {
+        "just now".into()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else if secs < 7 * 86_400 {
+        format!("{}d ago", secs / 86_400)
+    } else if secs < 30 * 86_400 {
+        format!("{}w ago", secs / (7 * 86_400))
+    } else if secs < 365 * 86_400 {
+        format!("{}mo ago", secs / (30 * 86_400))
+    } else {
+        format!("{}y ago", secs / (365 * 86_400))
+    }
 }
 
 #[cfg(test)]
@@ -366,5 +487,25 @@ mod tests {
             assert_eq!(entries[3].label, "Unopen1");
             assert_eq!(entries[4].label, "Unopen2");
         });
+    }
+
+    #[test]
+    fn initials_basic() {
+        assert_eq!(initials_of("Alpha"), "AL");
+        assert_eq!(initials_of("Alpha Bravo"), "AB");
+        assert_eq!(initials_of("alpha bravo charlie"), "AB");
+        assert_eq!(initials_of(""), "?");
+        assert_eq!(initials_of("   "), "?");
+    }
+
+    #[test]
+    fn relative_time_buckets() {
+        let now = Utc::now();
+        let m5 = now - chrono::Duration::minutes(5);
+        let h2 = now - chrono::Duration::hours(2);
+        let d3 = now - chrono::Duration::days(3);
+        assert_eq!(relative_time_label(m5, now), "5m ago");
+        assert_eq!(relative_time_label(h2, now), "2h ago");
+        assert_eq!(relative_time_label(d3, now), "3d ago");
     }
 }
