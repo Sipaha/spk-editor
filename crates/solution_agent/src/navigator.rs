@@ -64,7 +64,11 @@ impl SolutionSessionsNavigator {
             workspace,
             project,
             focus_handle: cx.focus_handle(),
-            width: px(420.0),
+            // Bottom dock — see Panel::position. Height (not width) for the
+            // bottom orientation; chat dialogs often produce wide outputs
+            // (long bash command lines, file paths, code blocks) and a
+            // narrow right-dock truncates them awkwardly.
+            width: px(380.0),
             active_solution: None,
             open_sessions: Vec::new(),
             selected_index: None,
@@ -409,11 +413,18 @@ impl Panel for SolutionSessionsNavigator {
     }
 
     fn position(&self, _: &Window, _: &App) -> DockPosition {
-        DockPosition::Right
+        // Bottom by default — chat dialogs frequently include wide content
+        // (long command lines, file paths, code blocks) that the typical
+        // right-dock width truncates. Users can drag it to left/right if
+        // they prefer the side layout.
+        DockPosition::Bottom
     }
 
     fn position_is_valid(&self, p: DockPosition) -> bool {
-        matches!(p, DockPosition::Right | DockPosition::Left)
+        matches!(
+            p,
+            DockPosition::Right | DockPosition::Left | DockPosition::Bottom
+        )
     }
 
     fn set_position(&mut self, _: DockPosition, _: &mut Window, _: &mut Context<Self>) {}
