@@ -10,8 +10,8 @@ use gpui::{
     StatefulInteractiveElement as _, WeakEntity, Window, div,
 };
 use ui::prelude::*;
-use ui::{Icon, IconName, Label};
-use workspace::{Workspace, item::Item};
+use ui::Label;
+use workspace::Workspace;
 
 use crate::model::{SolutionSession, SolutionSessionId};
 use crate::store::SolutionAgentStore;
@@ -205,8 +205,12 @@ impl EventEmitter<SolutionSessionViewEvent> for SolutionSessionView {}
 
 impl Render for SolutionSessionView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The view used to render its own header (which leaked Debug-formatted
+        // SessionState as JSON-looking goo) and was an upstream `Item` so it
+        // could open as a workspace pane tab. Both are gone now: the chat
+        // panel hosts views inside its own tab strip + status row, so this
+        // view is just the conversation + compose box.
         let session = self.session.read(cx);
-        let header = format!("{} • {:?}", session.agent_id, session.state);
         let pending_image_count = self.pending_images.len();
         div()
             .id("solution-session-view")
@@ -223,15 +227,6 @@ impl Render for SolutionSessionView {
             .flex_col()
             .size_full()
             .bg(cx.theme().colors().panel_background)
-            .child(
-                div()
-                    .flex()
-                    .h_8()
-                    .px_3()
-                    .border_b_1()
-                    .border_color(cx.theme().colors().border)
-                    .child(Label::new(header)),
-            )
             .child({
                 let mut body = div()
                     .id("solution-session-conversation")
@@ -280,22 +275,6 @@ impl Render for SolutionSessionView {
                 }
                 compose_row
             })
-    }
-}
-
-impl Item for SolutionSessionView {
-    type Event = SolutionSessionViewEvent;
-
-    fn tab_content_text(&self, _detail: usize, cx: &App) -> SharedString {
-        self.session.read(cx).title.clone()
-    }
-
-    fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
-        Some(Icon::new(IconName::AiClaude))
-    }
-
-    fn telemetry_event_text(&self) -> Option<&'static str> {
-        Some("solution_agent_session")
     }
 }
 

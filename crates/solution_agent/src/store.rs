@@ -582,9 +582,28 @@ impl SolutionAgentStore {
 
         let user_message_id = acp_thread::UserMessageId::new();
         let acp_session_id = acp_thread.read(cx).session_id().clone();
-        let prompt = agent_client_protocol::schema::PromptRequest::new(acp_session_id, blocks);
+        let prompt =
+            agent_client_protocol::schema::PromptRequest::new(acp_session_id, blocks.clone());
 
         let connection = acp_thread.read(cx).connection().clone();
+
+        // Optimistic echo: append the user message into the thread *before*
+        // shipping the prompt so the UI shows it immediately. The
+        // claude-acp wrapper does not echo user messages back as
+        // `UserMessageChunk` updates, so without this the user types
+        // "привет", sees only the assistant reply, and can't tell what
+        // they sent. AcpThread::push_user_content_block keys off the
+        // message_id so if a future agent does echo, the echo coalesces
+        // into the same entry instead of duplicating it.
+        acp_thread.update(cx, |thread, cx| {
+            for block in &blocks {
+                thread.push_user_content_block(
+                    Some(user_message_id.clone()),
+                    block.clone(),
+                    cx,
+                );
+            }
+        });
 
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let prompt_task = cx.update(|cx| connection.prompt(user_message_id, prompt, cx));

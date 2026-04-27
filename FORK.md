@@ -74,11 +74,11 @@ Why: defensive namespacing. Other future subsystems might emit `session_*` event
 
 How to apply: any new event from `solution_agent` must follow the same prefix. Tests/consumers reference `agent_session_created`, `agent_session_state_changed`, etc.
 
-### 7. Each session = first-class pane `Item`, not a tab inside a dock panel
+### 7. Sessions live INSIDE the right-dock chat panel, not as workspace pane Items (reversed)
 
-Why: parallel-session UX needs split view ("session A on the left, code being changed on the right"). Tabs inside a dock panel can't sit next to a code buffer in the editor area without `detach`-style hacks. Pane items naturally support split, drag, alongside-code layouts — Zed is built around them.
+Why: an earlier draft tried "sessions as pane items + side-panel navigator". In practice the navigator just duplicated the editor's tab strip (same uuid in two places) and the chat ended up competing with code for the main editor area without users actually wanting that split — the "session A next to code on the right" use case is rare while "where is my chat?" was constant. The flagship-AI-editor pattern (Cursor / Cody / Copilot Chat / upstream Zed AgentPanel) puts chat in a dedicated docked panel with its own internal tab strip, and that is what users expect.
 
-How to apply: `SolutionSessionView` implements `workspace::Item`. The `SolutionSessionsNavigator` panel is a compact navigator only; the actual chat lives in panes.
+How to apply: `SolutionSessionsNavigator` (in `crates/solution_agent/src/navigator.rs`) owns the open-sessions list, tab strip, status row, and "+ New <Adapter> Session" footer. `SolutionSessionView` is a plain `gpui::Render` (no `workspace::Item` impl) and is hosted as a child of the navigator. Do NOT add `Item`/`add_item_to_active_pane` for sessions — re-introducing the duplication.
 
 ### 8. AI auth via CLI subscription, NOT API keys
 

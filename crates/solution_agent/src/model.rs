@@ -45,6 +45,25 @@ impl SessionState {
     pub fn is_terminal_for_notification(&self) -> bool {
         matches!(self, Self::Idle | Self::AwaitingInput | Self::Errored(_))
     }
+
+    /// Short, user-facing status label. Use this in the UI instead of
+    /// `format!("{:?}", state)` — Debug renders the `Running` variant as
+    /// `Running { started_at: Instant { tv_sec: 148873, tv_nsec: ... } }`,
+    /// which is what we previously leaked into the session-view header.
+    pub fn short_label(&self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Running { .. } => "Running",
+            Self::AwaitingInput => "Awaiting input",
+            Self::Errored(_) => "Error",
+        }
+    }
+}
+
+impl std::fmt::Display for SessionState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.short_label())
+    }
 }
 
 /// Live, in-memory representation of one Solution-scoped AI session.
