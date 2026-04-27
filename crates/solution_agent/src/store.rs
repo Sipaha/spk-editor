@@ -434,7 +434,11 @@ impl SolutionAgentStore {
             };
 
             let session_id = this.update(cx, |store, cx| {
-                let session_id = SolutionSessionId::new();
+                // Reuse the metadata's existing internal id — minting a fresh
+                // SolutionSessionId on every resume duplicated the row in the
+                // History popover (each restart added another "Session
+                // <new-uuid>" pointing at the same `acp_session_id`).
+                let session_id = meta.id;
                 let session = SolutionSession {
                     id: session_id,
                     solution_id: meta.solution_id.clone(),

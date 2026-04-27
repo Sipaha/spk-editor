@@ -93,6 +93,16 @@ pub struct SolutionSessionView {
     /// thread streams; we update an existing entity's source rather than
     /// recreating it so partial-parsed content keeps rendering smoothly.
     markdown_cache: HashMap<(usize, usize), CachedMarkdown>,
+    /// Tracks the conversation body's scroll offset so we can both auto-
+    /// scroll on new messages and detect when the user has manually
+    /// scrolled away from the bottom.
+    conversation_scroll: gpui::ScrollHandle,
+    /// "Sticky to bottom" mode: when true, every render that observes new
+    /// content snaps the conversation to the latest line; when false, the
+    /// user has scrolled up and we leave their position alone (and render
+    /// a "Jump to latest" affordance). Mouse-wheel and scroll-bar drags
+    /// flip the flag; clicking the affordance flips it back.
+    stuck_to_bottom: bool,
 }
 
 impl SolutionSessionView {
@@ -150,6 +160,11 @@ impl SolutionSessionView {
             resize_start_y: px(0.0),
             resize_start_height: px(DEFAULT_COMPOSE_HEIGHT),
             markdown_cache: HashMap::new(),
+            conversation_scroll: gpui::ScrollHandle::new(),
+            // Default to "follow latest" — chat panels are read-as-it-arrives
+            // surfaces. The flag flips off the first time the user scrolls
+            // away from the bottom (mouse wheel up, scrollbar drag, etc.).
+            stuck_to_bottom: true,
         }
     }
 
@@ -284,6 +299,34 @@ impl SolutionSessionView {
         find.matches = matches;
     }
 
+    /// Floating "Jump to latest" affordance shown in the bottom-right of the
+    /// conversation body when the user has scrolled away from the tail. Only
+    /// visible while `stuck_to_bottom` is false; clicking restores stickiness
+    /// + snaps the scroll to the latest entry.
+    fn render_jump_to_latest(&self, cx: &mut Context<Self>) -> AnyElement {
+        let btn = ui::IconButton::new("solution-session-jump-to-latest", IconName::ArrowDown)
+            .shape(ui::IconButtonShape::Square)
+            .icon_size(IconSize::Small)
+            .icon_color(Color::Default)
+            .tooltip(ui::Tooltip::text("Jump to latest"))
+            .on_click(cx.listener(|this, _, _window, cx| {
+                this.stuck_to_bottom = true;
+                this.conversation_scroll.scroll_to_bottom();
+                cx.notify();
+            }));
+        div()
+            .absolute()
+            .bottom_3()
+            .right_3()
+            .rounded_full()
+            .shadow_md()
+            .bg(cx.theme().colors().elevated_surface_background)
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .child(btn)
+            .into_any_element()
+    }
+
     fn render_find_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let find = self.find.as_ref()?;
         let total = find.matches.len();
@@ -366,6 +409,10 @@ impl SolutionSessionView {
         }
         self.compose_editor
             .update(cx, |e, cx| e.clear(window, cx));
+        // Sending implies "I want to follow what happens next." Re-stick to
+        // the bottom even if the user had scrolled up to read older context.
+        self.stuck_to_bottom = true;
+        self.conversation_scroll.scroll_to_bottom();
         let session_id = self.session_id;
 
         if self.pending_images.is_empty() {
@@ -640,6 +687,18 @@ impl Render for SolutionSessionView {
             .bg(cx.theme().colors().panel_background)
             .when_some(find_bar, |this, bar| this.child(bar))
             .child({
+                // Body + "Jump to latest" affordance share a relative wrapper
+                // so the button can position absolute against the scrolling
+                // body without escaping it. flex_1 + min_h_0 mirrors the body
+                // div pattern (see comment on body) so this wrapper is what
+                // takes the available space in the column.
+                let stuck = self.stuck_to_bottom;
+                if stuck {
+                    // Flag the next layout to snap to the bottom — does
+                    // nothing visible if we're already there, otherwise
+                    // catches new entries that grew past the viewport.
+                    self.conversation_scroll.scroll_to_bottom();
+                }
                 let mut body = div()
                     .id("solution-session-conversation")
                     .flex_1()
@@ -652,7 +711,21 @@ impl Render for SolutionSessionView {
                     // upstream agent_ui thread_view.rs:3224 for the same fix.
                     .min_h_0()
                     .p_3()
-                    .overflow_y_scroll();
+                    .overflow_y_scroll()
+                    .track_scroll(&self.conversation_scroll)
+                    .on_scroll_wheel(cx.listener(|this, _ev, _window, cx| {
+                        // Any wheel input from the user means they're taking
+                        // manual control. Detach from the bottom; the user
+                        // explicitly re-attaches via the "Jump to latest"
+                        // button or by sending a message. Re-checking the
+                        // post-scroll offset to auto-restick at the bottom
+                        // would race with `scroll_to_bottom` and produce a
+                        // snap-back-down loop.
+                        if this.stuck_to_bottom {
+                            this.stuck_to_bottom = false;
+                            cx.notify();
+                        }
+                    }));
                 if let Some(thread) = session.acp_thread.as_ref() {
                     let thread = thread.read(cx);
                     let entries = thread.entries();
@@ -673,7 +746,12 @@ impl Render for SolutionSessionView {
                 } else {
                     body = body.child(Label::new("(no thread yet)").size(LabelSize::Small));
                 }
-                body
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(body)
+                    .when(!stuck, |this| this.child(self.render_jump_to_latest(cx)))
             })
             .child(
                 // Resize handle: thin, full-width strip on top of the

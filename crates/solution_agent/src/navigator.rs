@@ -149,6 +149,14 @@ impl SolutionSessionsNavigator {
             };
             // last_activity_at desc — newest first.
             metas.sort_by(|a, b| b.last_activity_at.cmp(&a.last_activity_at));
+            // Dedup by acp_session_id keeping the freshest row. Old fork-local
+            // bug: `resume_session` used to mint a new internal id every time,
+            // leaving multiple rows with the same agent-side session pointer.
+            // The mint-fresh-id behaviour is gone now (commit message TBD)
+            // but legacy rows might still be in the local DB.
+            let mut seen: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            metas.retain(|m| seen.insert(m.acp_session_id.0.to_string()));
             this.update(cx, |this, cx| {
                 if this.active_solution.as_ref() == Some(&solution_id) {
                     this.historic_sessions = metas;
