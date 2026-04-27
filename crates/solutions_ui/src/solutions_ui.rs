@@ -4,6 +4,7 @@
 mod actions;
 mod add_member_picker;
 mod dock_panel;
+mod empty_solution_page;
 mod modals;
 mod picker;
 mod status_bar;

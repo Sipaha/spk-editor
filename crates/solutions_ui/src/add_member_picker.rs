@@ -10,6 +10,8 @@ use ui::{ListItem, ListItemSpacing, prelude::*};
 use util::ResultExt as _;
 use workspace::{ModalView, Workspace};
 
+use crate::modals::AddCatalogProject;
+
 pub struct AddMemberPicker {
     picker: Entity<Picker<AddMemberDelegate>>,
 }
@@ -64,11 +66,20 @@ struct CatalogEntry {
     remote_url: String,
 }
 
+// The picker shows real catalog entries plus a synthetic "+" row so the
+// user can jump to AddCatalogProject without first dismissing this modal.
+// Without it, an empty catalog would dead-end the flow ("nothing to pick"
+// with no path forward).
+enum PickerEntry {
+    Catalog(CatalogEntry),
+    AddNew,
+}
+
 pub struct AddMemberDelegate {
-    _workspace: WeakEntity<Workspace>,
+    workspace: WeakEntity<Workspace>,
     modal: WeakEntity<AddMemberPicker>,
     solution_id: SolutionId,
-    candidates: Vec<CatalogEntry>,
+    candidates: Vec<PickerEntry>,
     matches: Vec<usize>,
     selected_index: usize,
 }
@@ -81,7 +92,7 @@ impl AddMemberDelegate {
         cx: &mut App,
     ) -> Self {
         let store = SolutionStore::global(cx);
-        let candidates: Vec<CatalogEntry> = store.read_with(cx, |s, _| {
+        let mut candidates: Vec<PickerEntry> = store.read_with(cx, |s, _| {
             let already_in_solution: std::collections::HashSet<CatalogId> = s
                 .solutions()
                 .iter()
@@ -91,16 +102,19 @@ impl AddMemberDelegate {
             s.catalog()
                 .iter()
                 .filter(|c| !already_in_solution.contains(&c.id))
-                .map(|c| CatalogEntry {
-                    id: c.id.clone(),
-                    name: c.name.clone(),
-                    remote_url: c.remote_url.clone(),
+                .map(|c| {
+                    PickerEntry::Catalog(CatalogEntry {
+                        id: c.id.clone(),
+                        name: c.name.clone(),
+                        remote_url: c.remote_url.clone(),
+                    })
                 })
                 .collect()
         });
+        candidates.push(PickerEntry::AddNew);
         let matches = (0..candidates.len()).collect();
         Self {
-            _workspace: workspace,
+            workspace,
             modal,
             solution_id,
             candidates,
@@ -147,9 +161,15 @@ impl PickerDelegate for AddMemberDelegate {
             self.candidates
                 .iter()
                 .enumerate()
-                .filter(|(_, e)| {
-                    e.name.to_lowercase().contains(&query)
-                        || e.remote_url.to_lowercase().contains(&query)
+                .filter(|(_, e)| match e {
+                    PickerEntry::Catalog(c) => {
+                        c.name.to_lowercase().contains(&query)
+                            || c.remote_url.to_lowercase().contains(&query)
+                    }
+                    // Always keep the "+ Add new project to catalog" entry
+                    // visible — it is the escape hatch when the search misses
+                    // and the user wants to add what they were looking for.
+                    PickerEntry::AddNew => true,
                 })
                 .map(|(i, _)| i)
                 .collect()
@@ -167,21 +187,32 @@ impl PickerDelegate for AddMemberDelegate {
         let Some(entry) = self.candidates.get(idx) else {
             return;
         };
-        let cat_id = entry.id.clone();
-        let sol_id = self.solution_id.clone();
-
-        let cache_root = default_cache_root();
-        let solutions_root = SolutionsSettings::get_global(cx).root.clone();
-        let _ = solutions_root;
-
-        let store = SolutionStore::global(cx);
-        let task = store.update(cx, |s, cx| s.add_member(sol_id, cat_id, cache_root, cx));
-        cx.spawn(async move |_, _cx| {
-            task.await
-        })
-        .detach_and_log_err(cx);
-
-        self.dismissed(window, cx);
+        match entry {
+            PickerEntry::Catalog(catalog) => {
+                let cat_id = catalog.id.clone();
+                let sol_id = self.solution_id.clone();
+                let cache_root = default_cache_root();
+                let solutions_root = SolutionsSettings::get_global(cx).root.clone();
+                let _ = solutions_root;
+                let store = SolutionStore::global(cx);
+                let task = store.update(cx, |s, cx| s.add_member(sol_id, cat_id, cache_root, cx));
+                cx.spawn(async move |_, _cx| task.await)
+                    .detach_and_log_err(cx);
+                self.dismissed(window, cx);
+            }
+            PickerEntry::AddNew => {
+                // Hand off to the AddCatalogProject modal — once the user
+                // adds it the new project shows up in the catalog and they
+                // can re-open this picker to assign it to the solution.
+                self.dismissed(window, cx);
+                let Some(workspace) = self.workspace.upgrade() else {
+                    return;
+                };
+                workspace.update(cx, |_, cx| {
+                    window.dispatch_action(Box::new(AddCatalogProject), cx);
+                });
+            }
+        }
     }
 
     fn dismissed(&mut self, _: &mut Window, cx: &mut Context<Picker<Self>>) {
@@ -202,13 +233,25 @@ impl PickerDelegate for AddMemberDelegate {
         let item = ListItem::new(ix)
             .inset(true)
             .spacing(ListItemSpacing::Sparse)
-            .toggle_state(selected)
-            .child(Label::new(entry.name.clone()))
-            .end_slot(
-                Label::new(entry.remote_url.clone())
-                    .color(Color::Muted)
-                    .size(LabelSize::Small),
-            );
+            .toggle_state(selected);
+        let item = match entry {
+            PickerEntry::Catalog(c) => item
+                .child(Label::new(c.name.clone()))
+                .end_slot(
+                    Label::new(c.remote_url.clone())
+                        .color(Color::Muted)
+                        .size(LabelSize::Small),
+                ),
+            PickerEntry::AddNew => item
+                .start_slot(
+                    Icon::new(IconName::Plus)
+                        .color(Color::Muted)
+                        .size(IconSize::Small),
+                )
+                .child(
+                    Label::new("Add new project to catalog…").color(Color::Accent),
+                ),
+        };
         Some(item)
     }
 }

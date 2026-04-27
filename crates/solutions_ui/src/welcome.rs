@@ -157,22 +157,29 @@ fn open_solution(sol_id: SolutionId, source_window: Option<AnyWindowHandle>, cx:
         return;
     };
     // For an empty solution we still want to open a window — just one with
-    // `solution.root` as the only worktree. The dock panel detects the
-    // solution from that path and lets the user add members from inside.
-    let paths = match store.read_with(cx, |s, _| -> anyhow::Result<Vec<std::path::PathBuf>> {
-        let paths = s.paths_for_open(&sol_id)?;
-        if !paths.is_empty() {
-            return Ok(paths);
-        }
-        let root = s
+    // `solution.root` as the only worktree, plus an EmptySolutionPage item
+    // so the user has a CTA instead of a blank workspace.
+    struct OpenInfo {
+        paths: Vec<std::path::PathBuf>,
+        name: String,
+        is_empty: bool,
+    }
+    let info = match store.read_with(cx, |s, _| -> anyhow::Result<OpenInfo> {
+        let solution = s
             .solutions()
             .iter()
             .find(|sol| sol.id == sol_id)
-            .map(|sol| sol.root.clone())
             .ok_or_else(|| anyhow!("solution not found: {}", sol_id.0))?;
-        Ok(vec![root])
+        let is_empty = solution.members.is_empty();
+        let name = solution.name.clone();
+        let paths = if is_empty {
+            vec![solution.root.clone()]
+        } else {
+            s.paths_for_open(&sol_id)?
+        };
+        Ok(OpenInfo { paths, name, is_empty })
     }) {
-        Ok(paths) => paths,
+        Ok(info) => info,
         Err(err) => {
             log::error!("solutions_ui: resolving paths for {} failed: {err}", sol_id.0);
             return;
@@ -184,11 +191,41 @@ fn open_solution(sol_id: SolutionId, source_window: Option<AnyWindowHandle>, cx:
     let app_state = AppState::global(cx);
     let mut options = OpenOptions::default();
     options.open_mode = workspace::OpenMode::NewWindow;
-    let task = workspace::open_paths(&paths, app_state, options, cx);
+    let task = workspace::open_paths(&info.paths, app_state, options, cx);
     cx.spawn(async move |cx| {
         let Some(opened) = task.await.log_err() else {
             return;
         };
+        if info.is_empty {
+            let sol_id_for_page = sol_id.clone();
+            let name_for_page = info.name.clone();
+            cx.update(|cx| {
+                opened
+                    .window
+                    .update(cx, |multi_workspace, window, cx| {
+                        let workspace = multi_workspace.workspace().clone();
+                        let weak_workspace = workspace.downgrade();
+                        workspace.update(cx, |ws, cx| {
+                            let page = cx.new(|cx| {
+                                crate::empty_solution_page::EmptySolutionPage::new(
+                                    sol_id_for_page,
+                                    name_for_page,
+                                    weak_workspace,
+                                    cx,
+                                )
+                            });
+                            ws.add_item_to_active_pane(
+                                Box::new(page),
+                                None,
+                                true,
+                                window,
+                                cx,
+                            );
+                        });
+                    })
+                    .log_err();
+            });
+        }
         let Some(source) = source_window else {
             return;
         };
