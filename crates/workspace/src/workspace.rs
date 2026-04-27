@@ -13250,6 +13250,10 @@ mod tests {
                 workspace.resize_left_dock(px(350.), window, cx);
             });
 
+            // KVP persistence is debounced (200 ms trailing edge) so that
+            // mouse-drag doesn't pummel SQLite at 60 Hz; advance past the
+            // window before asserting the row was written.
+            cx.executor().advance_clock(Duration::from_millis(250));
             cx.run_until_parked();
 
             let persisted = workspace.read_with(cx, |workspace, cx| {
@@ -13311,6 +13315,7 @@ mod tests {
                 workspace.resize_right_dock(px(300.), window, cx);
             });
 
+            cx.executor().advance_clock(Duration::from_millis(250));
             cx.run_until_parked();
 
             let persisted = workspace

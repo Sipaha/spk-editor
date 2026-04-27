@@ -7,11 +7,12 @@ use client::proto;
 use db::kvp::KeyValueStore;
 
 use gpui::{
-    Action, Anchor, AnyView, App, Axis, Context, Entity, EntityId, EventEmitter, FocusHandle,
-    Focusable, IntoElement, KeyContext, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement,
-    Render, SharedString, StyleRefinement, Styled, Subscription, WeakEntity, Window, deferred, div,
-    px,
+    Action, Anchor, AnyView, App, Axis, AppContext as _, Context, Entity, EntityId, EventEmitter,
+    FocusHandle, Focusable, IntoElement, KeyContext, MouseButton, MouseDownEvent, MouseUpEvent,
+    ParentElement, Render, SharedString, StyleRefinement, Styled, Subscription, Task, WeakEntity,
+    Window, deferred, div, px,
 };
+use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use settings::{Settings, SettingsStore};
 use std::sync::Arc;
@@ -265,6 +266,12 @@ pub struct Dock {
     pub(crate) serialized_dock: Option<DockData>,
     zoom_layer_open: bool,
     modal_layer: Entity<ModalLayer>,
+    /// Debounce token for KVP-backed size persistence. While the user is
+    /// dragging the resize handle the listener fires per mouse-move (60+/s);
+    /// each fire used to schedule its own `cx.background_spawn` write,
+    /// piling up SQLite tasks and showing up as visible drag lag. We coalesce
+    /// to a single trailing-edge write after the user stops moving the mouse.
+    _persist_panel_size_task: Option<Task<()>>,
     _subscriptions: [Subscription; 2],
 }
 
@@ -396,6 +403,7 @@ impl Dock {
                 is_open: false,
                 focus_handle: focus_handle.clone(),
                 focus_follows_mouse: WorkspaceSettings::get_global(cx).focus_follows_mouse,
+                _persist_panel_size_task: None,
                 _subscriptions: [focus_subscription, zoom_subscription],
                 serialized_dock: None,
                 zoom_layer_open: false,
@@ -949,17 +957,36 @@ impl Dock {
         {
             let (panel_key, size_state) =
                 resize_panel_entry(self.position, entry, size, flex, window, cx);
+            self.schedule_persist_panel_size(panel_key, size_state, cx);
+            cx.notify();
+        }
+    }
 
-            let workspace = self.workspace.clone();
-            cx.defer(move |cx| {
+    /// Trailing-edge debounce of the KVP write for the active panel's size.
+    /// Replaces a per-mouse-move `cx.background_spawn` (which the resize
+    /// listener fired at ~60 Hz, swamping the SQLite executor and showing up
+    /// as visible drag jitter) with a single write 200 ms after the last
+    /// resize. Dropping the previous task cancels its pending timer, so we
+    /// only ever persist the trailing position the user rests on.
+    fn schedule_persist_panel_size(
+        &mut self,
+        panel_key: &'static str,
+        size_state: PanelSizeState,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = self.workspace.clone();
+        self._persist_panel_size_task = Some(cx.spawn(async move |_, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(200))
+                .await;
+            cx.update(|cx| {
                 if let Some(workspace) = workspace.upgrade() {
                     workspace.update(cx, |workspace, cx| {
                         workspace.persist_panel_size_state(panel_key, size_state, cx);
                     });
                 }
             });
-            cx.notify();
-        }
+        }));
     }
 
     pub fn resize_all_panels(
@@ -995,16 +1022,23 @@ impl Dock {
             }
         }
 
+        // Same trailing-edge debounce as `resize_active_panel` — drag fires
+        // 60+ events/s, immediate persistence created visible jitter.
         let workspace = self.workspace.clone();
-        cx.defer(move |cx| {
-            if let Some(workspace) = workspace.upgrade() {
-                workspace.update(cx, |workspace, cx| {
-                    for (panel_key, size_state) in size_states_to_persist {
-                        workspace.persist_panel_size_state(panel_key, size_state, cx);
-                    }
-                });
-            }
-        });
+        self._persist_panel_size_task = Some(cx.spawn(async move |_, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(200))
+                .await;
+            cx.update(|cx| {
+                if let Some(workspace) = workspace.upgrade() {
+                    workspace.update(cx, |workspace, cx| {
+                        for (panel_key, size_state) in size_states_to_persist {
+                            workspace.persist_panel_size_state(panel_key, size_state, cx);
+                        }
+                    });
+                }
+            });
+        }));
 
         cx.notify();
     }
