@@ -26,7 +26,10 @@ use editor::{Editor, MultiBuffer};
 use extension_host::ExtensionStore;
 use feature_flags::{FeatureFlagAppExt as _, PanicFeatureFlag};
 use fs::Fs;
-use futures::FutureExt as _;
+// SPK Editor: FutureExt was used by initialize_agent_panel — keep the import
+// commented (instead of deleted) so re-enabling the agent panel is a one-line
+// flip without re-discovering which trait `.map()` came from.
+// use futures::FutureExt as _;
 use futures::{StreamExt, channel::mpsc, select_biased};
 use git_ui::commit_view::CommitViewToolbar;
 use git_ui::git_panel::GitPanel;
@@ -746,8 +749,15 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(solutions_panel, workspace_handle.clone(), cx.clone()),
             // add_panel_when_ready(channels_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
-            initialize_agent_panel(workspace_handle, cx.clone()).map(|r| r.log_err()),
+            // SPK Editor: agent_panel disabled — this fork's AI story is the
+            // solution_agent crate (per-Solution Claude Code sessions). Leaving
+            // upstream's AgentPanel registered creates a parallel, unconfigured
+            // AI surface that confuses users about where to find AI features.
+            // agent_ui::init still runs because other subsystems depend on it
+            // (inline_assistant, rules_library, ConfigureContextServerModal).
+            // initialize_agent_panel(workspace_handle, cx.clone()).map(|r| r.log_err()),
         );
+        let _ = workspace_handle;
 
         anyhow::Ok(())
     })
@@ -813,6 +823,10 @@ fn ensure_agent_panel_for_workspace(
     })
 }
 
+// SPK Editor: kept in tree but no longer called (see futures::join! above).
+// Leaving it here preserves merge-friendliness with upstream and means
+// re-enabling the panel is a one-line uncomment in `initialize_panels`.
+#[allow(dead_code)]
 async fn initialize_agent_panel(
     workspace_handle: WeakEntity<Workspace>,
     mut cx: AsyncWindowContext,

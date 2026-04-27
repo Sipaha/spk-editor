@@ -15,16 +15,18 @@ For fork **philosophy** (rebrand identifiers, what's disabled, build conventions
 
 ## Disabled upstream subsystems
 
-See `.rules` § "What's disabled" for the table. Brief: `auto_update`, `telemetry`, `collab` / `collab_ui`, sign-in, native cloud LLM (`CloudLanguageModelProvider`), `zeta` edit prediction, Sentry uploads, 41 CI workflows. Code stays in tree, init/dispatch/UI sites are commented out (`if false { … }` is fine) — keeps upstream-merge-friendliness.
+See `.rules` § "What's disabled" for the table. Brief: `auto_update`, `telemetry`, `collab` / `collab_ui`, sign-in, native cloud LLM (`CloudLanguageModelProvider`), `zeta` edit prediction, Sentry uploads, 41 CI workflows, **`agent_ui::AgentPanel` dock panel + Welcome `render_agent_card`** (the fork's AI is `solution_agent`; upstream's panel is a parallel unconfigured surface). Code stays in tree, init/dispatch/UI sites are commented out (`if false { … }` is fine) — keeps upstream-merge-friendliness.
 
 ## Touched upstream files (additive only — NEVER refactor for style)
 
 | File | Change | Owning fork crate |
 |---|---|---|
 | `crates/zed/src/main.rs` | `editor_mcp::init`, `solutions::init`, `solutions_ui::init`, `solution_agent::init` calls inserted in startup flow. Various subsystem inits commented out. | mixed |
+| `crates/zed/src/zed.rs` | `initialize_agent_panel` call commented out in `futures::join!` (fn kept under `#[allow(dead_code)]` for one-line re-enable). | `solution_agent` |
 | `crates/zed/Cargo.toml` | Workspace deps on the four fork crates. | mixed |
 | `crates/title_bar/src/title_bar.rs` | New segment for active Solution / project / branch. | `solutions_ui` |
 | `crates/welcome/src/welcome.rs` | Recent Solutions section + buttons. | `solutions_ui` |
+| `crates/workspace/src/welcome.rs` | `render_agent_card` gated off via `false &&` — fork uses `solution_agent`, not upstream agent panel. | `solution_agent` |
 | `crates/paths/src/paths.rs` | `.zed` → `.spke` rename for per-worktree config dir. | rebrand |
 | `assets/keymaps/default-*.json` | Default shortcuts for Solutions / sessions. | `solutions_ui` |
 | `assets/settings/default.json` | Default `solutions.root`. | `solutions` |

@@ -538,7 +538,13 @@ impl Render for WelcomePage {
                     .child(first_section.render(Default::default(), &self.focus_handle))
                     .children(render_registered_sections(cx))
                     .child(second_section)
-                    .when(ai_enabled && !showing_recent_projects, |this| {
+                    // SPK Editor: hidden — this fork's AI story is the
+                    // solution_agent crate (per-Solution Claude Code
+                    // sessions). The generic "Open Agent Panel" CTA points
+                    // at upstream's agent_ui, which is a parallel,
+                    // unconfigured surface in this fork and just confuses
+                    // users about where to find AI. See FORK.md.
+                    .when(false && ai_enabled && !showing_recent_projects, |this| {
                         let agent_tab_index = next_tab_index;
                         next_tab_index += 1;
                         this.child(self.render_agent_card(agent_tab_index, cx))
