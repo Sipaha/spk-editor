@@ -17,5 +17,13 @@ actions!(
         CloseSession,
         /// Restart the agent subprocess for the active session.
         RestartAgent,
+        /// Open or focus the in-session find bar (Ctrl+F over chat history).
+        FindInSession,
+        /// Move to the next match in the in-session find bar.
+        FindNextMatch,
+        /// Move to the previous match in the in-session find bar.
+        FindPreviousMatch,
+        /// Close the in-session find bar.
+        FindClose,
     ]
 );

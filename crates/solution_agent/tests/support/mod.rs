@@ -15,11 +15,19 @@ use smol::net::unix::UnixStream;
 /// Poll for the MCP socket to appear (the server creates it asynchronously
 /// after `start_server`). Returns whether the socket existed before the
 /// timeout elapsed.
+///
+/// `smol::Timer::after` is used (instead of GPUI's executor timer) because
+/// the wait is for a filesystem-level event whose progress doesn't depend
+/// on `run_until_parked`. Promoting this to the GPUI executor would just
+/// add a dependency without changing observable behavior.
 pub async fn wait_for_socket(path: &Path, timeout: Duration) -> bool {
     let mut waited = Duration::ZERO;
     let interval = Duration::from_millis(50);
     while !path.exists() && waited < timeout {
-        smol::Timer::after(interval).await;
+        #[allow(clippy::disallowed_methods)]
+        {
+            smol::Timer::after(interval).await;
+        }
         waited += interval;
     }
     path.exists()

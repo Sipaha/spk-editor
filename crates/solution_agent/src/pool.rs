@@ -17,6 +17,7 @@ use crate::model::AgentServerId;
 /// the synthetic-project path is reserved for a follow-up that decides
 /// whether sessions get a dedicated worktree or share the workspace project.
 #[cfg(not(any(feature = "test-support", test)))]
+#[allow(dead_code)]
 pub fn make_production_project_for_solution(
     _solution_root: &std::path::Path,
     _cx: &mut gpui::App,
@@ -33,6 +34,10 @@ pub(crate) const SHUTDOWN_DEBOUNCE: Duration = Duration::from_secs(60);
 pub(crate) enum SpawnState {
     Pending(Shared<Task<Result<Rc<dyn AgentConnection>, std::sync::Arc<anyhow::Error>>>>),
     Ready(Rc<dyn AgentConnection>),
+    // The wrapped error is captured but never inspected today — kept for
+    // future use (e.g. surfacing to the UI). Discriminant-only matching is
+    // intentional, hence the allow.
+    #[allow(dead_code)]
     Failed(std::sync::Arc<anyhow::Error>),
 }
 
@@ -68,6 +73,7 @@ impl SubprocessPool {
         self.entries.remove(key);
     }
 
+    #[allow(dead_code)]
     pub fn keys_for_solution<'a>(
         &'a self,
         solution_id: &'a SolutionId,

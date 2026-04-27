@@ -16,10 +16,11 @@ use gpui::{
     StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, px,
 };
 use solutions::{SolutionId, SolutionStore, SolutionStoreEvent};
-use ui::ButtonLike;
 use ui::prelude::*;
-use ui::{IconName, Label, LabelSize};
-use util::ResultExt as _;
+use ui::{
+    Button, ButtonStyle, CommonAnimationExt, ContextMenu, Icon, IconName, Label, LabelSize,
+    PopoverMenu,
+};
 use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
@@ -29,6 +30,16 @@ use crate::actions::FocusNavigator;
 use crate::model::{AgentServerId, SolutionSession};
 use crate::session_view::SolutionSessionView;
 use crate::store::SolutionAgentStore;
+
+/// In-flight `create_session` task. Rendered as a placeholder tab with a
+/// spinner so the user gets immediate feedback (the real session takes
+/// 3-4s to start because we have to spawn the agent subprocess + handshake
+/// over ACP before the conversation thread exists).
+struct PendingCreation {
+    id: u64,
+    display_name: SharedString,
+    icon: IconName,
+}
 
 pub struct SolutionSessionsNavigator {
     workspace: WeakEntity<Workspace>,
@@ -43,6 +54,12 @@ pub struct SolutionSessionsNavigator {
     /// One `SolutionSessionView` entity per opened session, kept in this
     /// HashMap so re-selecting a tab does not reset its compose-box state.
     views: HashMap<crate::model::SolutionSessionId, Entity<SolutionSessionView>>,
+    /// In-flight session creations. Each entry renders as a spinner-tab and
+    /// is removed when its `create_session` task resolves (success or
+    /// error). Multiple entries can coexist if the user clicks "+" again
+    /// before the first finishes.
+    pending: Vec<PendingCreation>,
+    next_pending_id: u64,
     _store_subscription: Subscription,
     _solutions_subscription: Option<Subscription>,
 }
@@ -73,6 +90,8 @@ impl SolutionSessionsNavigator {
             open_sessions: Vec::new(),
             selected_index: None,
             views: HashMap::default(),
+            pending: Vec::new(),
+            next_pending_id: 0,
             _store_subscription: store_subscription,
             _solutions_subscription: solutions_subscription,
         }
@@ -84,10 +103,12 @@ impl SolutionSessionsNavigator {
             self.active_solution = new_id;
             // Different solution → wipe panel-local tabs. Sessions themselves
             // stay alive in the store so they reappear when the user comes
-            // back to that solution.
+            // back to that solution. Drop any in-flight pending creations
+            // too — they were started against the previous solution.
             self.open_sessions.clear();
             self.selected_index = None;
             self.views.clear();
+            self.pending.clear();
             cx.notify();
         }
     }
@@ -155,7 +176,7 @@ impl SolutionSessionsNavigator {
     }
 
     fn create_and_open_session(
-        &self,
+        &mut self,
         agent_id: AgentServerId,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -168,33 +189,145 @@ impl SolutionSessionsNavigator {
         };
         let project = workspace.read(cx).project().clone();
         let store = SolutionAgentStore::global(cx);
+        // Resolve adapter metadata for the placeholder tab. If the adapter
+        // is somehow unregistered between click and dispatch we still go
+        // ahead with the create — the placeholder just shows the raw id.
+        let (display_name, icon) = store.read_with(cx, |s, _| {
+            s.adapters
+                .get(&agent_id)
+                .map(|a| (a.display_name(), a.icon()))
+                .unwrap_or_else(|| (SharedString::from(agent_id.to_string()), IconName::Sparkle))
+        });
+        let pending_id = self.next_pending_id;
+        self.next_pending_id += 1;
+        self.pending.push(PendingCreation {
+            id: pending_id,
+            display_name,
+            icon,
+        });
+        cx.notify();
+
         let task = store.update(cx, |store, cx| {
             store.create_session(solution_id, agent_id, project, cx)
         });
         cx.spawn_in(window, async move |this, cx| {
-            let session_id = task
-                .await
-                .context("create_session failed")
-                .log_err()
-                .ok_or(())?;
+            let result = task.await.context("create_session failed");
             this.update_in(cx, |this, window, cx| {
-                let session = SolutionAgentStore::global(cx)
-                    .read_with(cx, |s, _| s.session(session_id));
-                if let Some(session) = session {
-                    this.open_session(session_id, session, window, cx);
+                this.pending.retain(|p| p.id != pending_id);
+                match result {
+                    Ok(session_id) => {
+                        let session = SolutionAgentStore::global(cx)
+                            .read_with(cx, |s, _| s.session(session_id));
+                        if let Some(session) = session {
+                            this.open_session(session_id, session, window, cx);
+                        } else {
+                            cx.notify();
+                        }
+                    }
+                    Err(err) => {
+                        log::error!("create_session failed: {err:?}");
+                        cx.notify();
+                    }
                 }
             })
             .ok();
-            Ok::<_, ()>(())
         })
         .detach();
     }
 
+    fn render_new_session_button(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.active_solution.is_none() {
+            return None;
+        }
+        let store = SolutionAgentStore::global(cx);
+        let adapters = store.read_with(cx, |s, _| {
+            s.adapters
+                .supported_ids()
+                .iter()
+                .filter_map(|id| {
+                    let adapter = s.adapters.get(id)?;
+                    Some((id.clone(), adapter.display_name(), adapter.icon()))
+                })
+                .collect::<Vec<_>>()
+        });
+        if adapters.is_empty() {
+            return None;
+        }
+        // Single adapter: full-text button "+ New {Adapter} Session" so the
+        // user knows immediately what clicking it does (the previous icon-
+        // only "+" was nearly invisible against the strip background).
+        // Multiple adapters: generic "+ New Session" that opens a chooser.
+        let label: SharedString = if adapters.len() == 1 {
+            SharedString::from(format!("New {} Session", adapters[0].1))
+        } else {
+            SharedString::from("New Session")
+        };
+        let trigger = Button::new("solution-sessions-new", label)
+            .style(ButtonStyle::Subtle)
+            .label_size(LabelSize::Small)
+            .start_icon(
+                Icon::new(IconName::Plus)
+                    .size(IconSize::Small)
+                    .color(Color::Muted),
+            );
+        let element = if adapters.len() == 1 {
+            // Skip the popover on the single-adapter path; one click creates.
+            let (agent_id, _name, _icon) = adapters.into_iter().next().expect("adapters is non-empty");
+            trigger
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.create_and_open_session(agent_id.clone(), window, cx);
+                }))
+                .into_any_element()
+        } else {
+            PopoverMenu::new("solution-sessions-new-popover")
+                .trigger(trigger)
+                .menu({
+                    let weak = cx.entity().downgrade();
+                    move |window, cx| {
+                        let adapters = adapters.clone();
+                        let weak = weak.clone();
+                        Some(ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
+                            for (agent_id, name, icon) in adapters {
+                                let weak = weak.clone();
+                                let agent_id_for_action = agent_id.clone();
+                                menu = menu.entry(name, None, {
+                                    let _ = icon;
+                                    move |window, cx| {
+                                        if let Some(this) = weak.upgrade() {
+                                            this.update(cx, |this, cx| {
+                                                this.create_and_open_session(
+                                                    agent_id_for_action.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        }
+                                    }
+                                });
+                            }
+                            menu
+                        }))
+                    }
+                })
+                .into_any_element()
+        };
+        Some(element)
+    }
+
     fn render_tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // Tab strip is a single horizontal flex row that scrolls
+        // horizontally as a whole. Tabs, spinner placeholders for in-flight
+        // creations, and the "+ New Session" button are all siblings — the
+        // button appears right after the last tab (Chrome-style) so it is
+        // always visible and discoverable, instead of being pinned to the
+        // far right where it visually blended into the dock background.
         let mut strip = div()
             .id("solution-sessions-tab-strip")
             .flex()
+            .flex_none()
+            .items_center()
             .h_8()
+            .bg(cx.theme().colors().tab_bar_background)
             .border_b_1()
             .border_color(cx.theme().colors().border_variant)
             .overflow_x_scroll();
@@ -244,6 +377,40 @@ impl SolutionSessionsNavigator {
                 );
             strip = strip.child(tab);
         }
+        for pending in &self.pending {
+            strip = strip.child(
+                div()
+                    .id(SharedString::from(format!("pending-tab-{}", pending.id)))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .bg(cx.theme().colors().tab_inactive_background)
+                    .border_r_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .child(
+                        Icon::new(pending.icon)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        Icon::new(IconName::ArrowCircle)
+                            .size(IconSize::Small)
+                            .color(Color::Muted)
+                            .with_rotate_animation(2),
+                    )
+                    .child(
+                        Label::new(format!("Starting {}…", pending.display_name))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
+            );
+        }
+        if let Some(new_btn) = self.render_new_session_button(cx) {
+            // px_2 = breathing room around the button so it doesn't bump
+            // straight against the right edge of the last tab.
+            strip = strip.child(div().px_2().flex_none().child(new_btn));
+        }
         strip
     }
 
@@ -280,64 +447,6 @@ impl SolutionSessionsNavigator {
         )
     }
 
-    fn render_footer(
-        &self,
-        has_active_solution: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let mut footer = div()
-            .px_2()
-            .py_2()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .border_t_1()
-            .border_color(cx.theme().colors().border_variant);
-        if !has_active_solution {
-            return footer;
-        }
-        let store = SolutionAgentStore::global(cx);
-        let adapter_buttons = store.read_with(cx, |s, _| {
-            s.adapters
-                .supported_ids()
-                .iter()
-                .filter_map(|id| {
-                    let adapter = s.adapters.get(id)?;
-                    Some((id.clone(), adapter.display_name(), adapter.icon()))
-                })
-                .collect::<Vec<_>>()
-        });
-        for (id, display_name, icon) in adapter_buttons {
-            let agent_id = id.clone();
-            footer = footer.child(
-                ButtonLike::new(SharedString::from(format!("new-session-{id}")))
-                    .full_width()
-                    .size(ui::ButtonSize::Medium)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.create_and_open_session(agent_id.clone(), window, cx);
-                    }))
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .px_2()
-                            .items_center()
-                            .child(
-                                Icon::new(IconName::Plus)
-                                    .color(Color::Muted)
-                                    .size(IconSize::Small),
-                            )
-                            .child(
-                                Icon::new(icon)
-                                    .color(Color::Muted)
-                                    .size(IconSize::Small),
-                            )
-                            .child(Label::new(format!("New {display_name} Session"))),
-                    ),
-            );
-        }
-        footer
-    }
 }
 
 impl Focusable for SolutionSessionsNavigator {
@@ -388,7 +497,7 @@ impl Render for SolutionSessionsNavigator {
                 .items_center()
                 .justify_center()
                 .child(
-                    Label::new("No session selected. Click + below.")
+                    Label::new("No session selected. Click + above to start one.")
                         .color(Color::Muted)
                         .size(LabelSize::Small),
                 )
@@ -400,13 +509,19 @@ impl Render for SolutionSessionsNavigator {
             .flex()
             .flex_col()
             .size_full();
-        if !self.open_sessions.is_empty() {
+        // Always render the tab strip when a solution is active, even with
+        // zero open tabs — the strip hosts the "+" button which is the
+        // entrypoint for creating the first session. Previously the strip
+        // was hidden until at least one tab existed and the "+" lived in
+        // a footer; merging them here gives a single, predictable home for
+        // session controls (matches Cursor / VS Code chat UX).
+        if has_active_solution {
             root = root.child(self.render_tab_strip(cx));
             if let Some(status) = self.render_status_row(active_view.as_ref(), cx) {
                 root = root.child(status);
             }
         }
-        root.child(body).child(self.render_footer(has_active_solution, cx))
+        root.child(body)
     }
 }
 
