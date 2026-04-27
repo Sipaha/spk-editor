@@ -1,11 +1,11 @@
 //! Right-dock chat panel for Solution-scoped AI sessions.
 //!
 //! Hosts ALL session UI: tab strip across the top, active session view in the
-//! body, "+ New <Adapter> Session" buttons in the footer. Sessions are NOT
-//! workspace pane items — overrides FORK.md decision #7 in favour of the
-//! flagship-AI-editor pattern (Cursor / Cody / Copilot Chat / upstream Zed
-//! AgentPanel) where chat lives in its own dedicated docked panel rather than
-//! competing with code for the main editor area.
+//! body, "+ New Session" button in the strip. Sessions are NOT workspace pane
+//! items — overrides FORK.md decision #7 in favour of the flagship-AI-editor
+//! pattern (Cursor / Cody / Copilot Chat / upstream Zed AgentPanel) where
+//! chat lives in its own dedicated docked panel rather than competing with
+//! code for the main editor area.
 
 use std::collections::HashMap;
 
@@ -27,7 +27,7 @@ use workspace::{
 };
 
 use crate::actions::FocusNavigator;
-use crate::model::{AgentServerId, SolutionSession};
+use crate::model::{AgentServerId, SolutionSession, SolutionSessionMetadata};
 use crate::session_view::SolutionSessionView;
 use crate::store::SolutionAgentStore;
 
@@ -60,6 +60,11 @@ pub struct SolutionSessionsNavigator {
     /// before the first finishes.
     pending: Vec<PendingCreation>,
     next_pending_id: u64,
+    /// Snapshot of persisted sessions for `active_solution`, sorted by
+    /// `last_activity_at` desc. Loaded async from the DB whenever the
+    /// active solution changes; populates the History popover and the
+    /// "Continue last session" empty-state CTA.
+    historic_sessions: Vec<SolutionSessionMetadata>,
     _store_subscription: Subscription,
     _solutions_subscription: Option<Subscription>,
 }
@@ -71,13 +76,19 @@ impl SolutionSessionsNavigator {
         cx: &mut Context<Self>,
     ) -> Self {
         let store = SolutionAgentStore::global(cx);
-        let store_subscription = cx.subscribe(&store, |_, _, _, cx| cx.notify());
+        // Keep the historic-sessions snapshot in sync with the DB —
+        // create/close persists rows, so the history popover would otherwise
+        // get stale until the user switched solutions.
+        let store_subscription = cx.subscribe(&store, |this, _, _, cx| {
+            this.refresh_historic_sessions(cx);
+            cx.notify();
+        });
         let solutions_subscription = SolutionStore::try_global(cx).map(|sol_store| {
             cx.subscribe(&sol_store, |this, _, _: &SolutionStoreEvent, cx| {
                 this.refresh_active_solution(cx);
             })
         });
-        Self {
+        let mut this = Self {
             workspace,
             project,
             focus_handle: cx.focus_handle(),
@@ -92,9 +103,12 @@ impl SolutionSessionsNavigator {
             views: HashMap::default(),
             pending: Vec::new(),
             next_pending_id: 0,
+            historic_sessions: Vec::new(),
             _store_subscription: store_subscription,
             _solutions_subscription: solutions_subscription,
-        }
+        };
+        this.refresh_active_solution(cx);
+        this
     }
 
     pub fn refresh_active_solution(&mut self, cx: &mut Context<Self>) {
@@ -109,8 +123,40 @@ impl SolutionSessionsNavigator {
             self.selected_index = None;
             self.views.clear();
             self.pending.clear();
+            self.historic_sessions.clear();
             cx.notify();
         }
+        // Always refresh DB metadata when called — sessions get persisted
+        // mid-conversation, so the "history" list needs to update on every
+        // store event, not just on solution changes.
+        self.refresh_historic_sessions(cx);
+    }
+
+    fn refresh_historic_sessions(&mut self, cx: &mut Context<Self>) {
+        let Some(solution_id) = self.active_solution.clone() else {
+            self.historic_sessions.clear();
+            return;
+        };
+        let store = SolutionAgentStore::global(cx);
+        let Some(db) = store.read_with(cx, |s, _| s.db()) else {
+            return;
+        };
+        let task = db.list_for_solution(solution_id.clone());
+        cx.spawn(async move |this, cx| {
+            let Ok(mut metas) = task.await else {
+                return;
+            };
+            // last_activity_at desc — newest first.
+            metas.sort_by(|a, b| b.last_activity_at.cmp(&a.last_activity_at));
+            this.update(cx, |this, cx| {
+                if this.active_solution.as_ref() == Some(&solution_id) {
+                    this.historic_sessions = metas;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn derive_active_solution(&self, cx: &App) -> Option<SolutionId> {
@@ -235,6 +281,64 @@ impl SolutionSessionsNavigator {
         .detach();
     }
 
+    /// Resume a persisted session: asks the store to reattach via ACP
+    /// `load_session` (or `resume_session`), then opens its tab. Renders a
+    /// pending placeholder while the ACP handshake completes — same pattern
+    /// as `create_and_open_session`.
+    fn resume_and_open(
+        &mut self,
+        meta: SolutionSessionMetadata,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let project = workspace.read(cx).project().clone();
+        let store = SolutionAgentStore::global(cx);
+        let (display_name, icon) = store.read_with(cx, |s, _| {
+            s.adapters
+                .get(&meta.agent_id)
+                .map(|a| (a.display_name(), a.icon()))
+                .unwrap_or_else(|| (meta.title.clone(), IconName::Sparkle))
+        });
+        let pending_id = self.next_pending_id;
+        self.next_pending_id += 1;
+        self.pending.push(PendingCreation {
+            id: pending_id,
+            display_name,
+            icon,
+        });
+        cx.notify();
+
+        let task = store.update(cx, |store, cx| {
+            store.resume_session(meta, project, cx)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await.context("resume_session failed");
+            this.update_in(cx, |this, window, cx| {
+                this.pending.retain(|p| p.id != pending_id);
+                match result {
+                    Ok(session_id) => {
+                        let session = SolutionAgentStore::global(cx)
+                            .read_with(cx, |s, _| s.session(session_id));
+                        if let Some(session) = session {
+                            this.open_session(session_id, session, window, cx);
+                        } else {
+                            cx.notify();
+                        }
+                    }
+                    Err(err) => {
+                        log::error!("resume_session failed: {err:?}");
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn render_new_session_button(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         if self.active_solution.is_none() {
             return None;
@@ -253,15 +357,12 @@ impl SolutionSessionsNavigator {
         if adapters.is_empty() {
             return None;
         }
-        // Single adapter: full-text button "+ New {Adapter} Session" so the
-        // user knows immediately what clicking it does (the previous icon-
-        // only "+" was nearly invisible against the strip background).
-        // Multiple adapters: generic "+ New Session" that opens a chooser.
-        let label: SharedString = if adapters.len() == 1 {
-            SharedString::from(format!("New {} Session", adapters[0].1))
-        } else {
-            SharedString::from("New Session")
-        };
+        // The label stays adapter-agnostic on purpose — never hardcode a
+        // specific neural network ("Claude", "Gemini", …) into the chrome.
+        // The single-vs-multi-adapter distinction only changes whether the
+        // click creates immediately or opens a chooser; the user-facing
+        // string is the same in both cases.
+        let label = SharedString::from("New Session");
         let trigger = Button::new("solution-sessions-new", label)
             .style(ButtonStyle::Subtle)
             .label_size(LabelSize::Small)
@@ -411,7 +512,67 @@ impl SolutionSessionsNavigator {
             // straight against the right edge of the last tab.
             strip = strip.child(div().px_2().flex_none().child(new_btn));
         }
+        if let Some(history_btn) = self.render_history_button(cx) {
+            strip = strip.child(div().pr_2().flex_none().child(history_btn));
+        }
         strip
+    }
+
+    /// History popover trigger (clock icon). Lists the last 12 persisted
+    /// sessions for the active solution; clicking a row resumes that
+    /// session through `SolutionAgentStore::resume_session`.
+    ///
+    /// Hidden when there's nothing in the DB yet — no point rendering an
+    /// always-empty popover.
+    fn render_history_button(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.active_solution.is_none() || self.historic_sessions.is_empty() {
+            return None;
+        }
+        let metas: Vec<SolutionSessionMetadata> = self
+            .historic_sessions
+            .iter()
+            .take(12)
+            .cloned()
+            .collect();
+        let trigger = ui::IconButton::new("solution-sessions-history", IconName::HistoryRerun)
+            .icon_size(IconSize::Small)
+            .icon_color(Color::Muted)
+            .tooltip(ui::Tooltip::text("Recent sessions"));
+        let weak = cx.entity().downgrade();
+        Some(
+            PopoverMenu::new("solution-sessions-history-popover")
+                .trigger(trigger)
+                .menu(move |window, cx| {
+                    let metas = metas.clone();
+                    let weak = weak.clone();
+                    Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
+                        for meta in metas {
+                            let weak = weak.clone();
+                            let meta_for_action = meta.clone();
+                            let label = format!(
+                                "{}  ·  {}",
+                                meta.title,
+                                relative_time_short(meta.last_activity_at, chrono::Utc::now()),
+                            );
+                            menu = menu.entry(
+                                SharedString::from(label),
+                                None,
+                                move |window, cx| {
+                                    if let Some(this) = weak.upgrade() {
+                                        let meta = meta_for_action.clone();
+                                        this.update(cx, |this, cx| {
+                                            this.resume_and_open(meta, window, cx);
+                                        });
+                                    }
+                                },
+                            );
+                        }
+                        menu
+                    }))
+                })
+                .anchor(gpui::Anchor::TopRight)
+                .into_any_element(),
+        )
     }
 
     fn render_status_row(
@@ -490,18 +651,56 @@ impl Render for SolutionSessionsNavigator {
         } else if let Some(view) = active_view.clone() {
             div().flex_1().min_h_0().child(view).into_any_element()
         } else {
-            div()
+            // No tab open. Offer "Continue last session" as the primary CTA
+            // when the DB has at least one persisted session for this
+            // solution; falls back to a plain hint pointing at the "+"
+            // button when there's nothing to resume.
+            let last_meta = self.historic_sessions.first().cloned();
+            let mut empty = div()
                 .flex_1()
                 .min_h_0()
                 .flex()
+                .flex_col()
+                .gap_3()
                 .items_center()
                 .justify_center()
-                .child(
+                .px_3();
+            if let Some(meta) = last_meta {
+                let title = meta.title.clone();
+                let activity = relative_time_short(meta.last_activity_at, chrono::Utc::now());
+                empty = empty
+                    .child(
+                        Label::new(format!("Last session: {title}  ·  {activity}"))
+                            .color(Color::Muted)
+                            .size(LabelSize::XSmall),
+                    )
+                    .child(
+                        Button::new("solution-sessions-continue-last", "Continue last session")
+                            .style(ButtonStyle::Filled)
+                            .label_size(LabelSize::Small)
+                            .start_icon(
+                                Icon::new(IconName::HistoryRerun)
+                                    .size(IconSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let meta = meta.clone();
+                                this.resume_and_open(meta, window, cx);
+                            })),
+                    )
+                    .child(
+                        Label::new("…or start a fresh one with + above.")
+                            .color(Color::Muted)
+                            .size(LabelSize::XSmall),
+                    );
+            } else {
+                empty = empty.child(
                     Label::new("No session selected. Click + above to start one.")
                         .color(Color::Muted)
                         .size(LabelSize::Small),
-                )
-                .into_any_element()
+                );
+            }
+            empty.into_any_element()
         };
         let mut root = div()
             .key_context("SolutionSessionsNavigator")
@@ -572,3 +771,24 @@ impl Panel for SolutionSessionsNavigator {
     }
 }
 
+
+/// Compact "X ago" formatter mirroring `solutions_ui::welcome::relative_time_label`
+/// but kept local to avoid a fork-internal cross-crate dep cycle.
+fn relative_time_short(ts: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> String {
+    let secs = now.signed_duration_since(ts).num_seconds();
+    if secs < 60 {
+        "just now".into()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else if secs < 7 * 86_400 {
+        format!("{}d ago", secs / 86_400)
+    } else if secs < 30 * 86_400 {
+        format!("{}w ago", secs / (7 * 86_400))
+    } else if secs < 365 * 86_400 {
+        format!("{}mo ago", secs / (30 * 86_400))
+    } else {
+        format!("{}y ago", secs / (365 * 86_400))
+    }
+}

@@ -144,6 +144,13 @@ impl SolutionAgentStore {
         self.persistence = Some(db);
     }
 
+    /// Returns the database handle if set. Used by the navigator to list
+    /// historic sessions (those persisted across editor restarts) for the
+    /// "Resume" / "Continue last session" affordances.
+    pub fn db(&self) -> Option<Arc<SolutionAgentDb>> {
+        self.persistence.clone()
+    }
+
     /// Create a new ACP session for `(solution_id, agent_id)`, multiplexed
     /// onto a shared subprocess via the pool. The caller passes the `project`
     /// to use for the session: production callers pass the active workspace's
@@ -237,6 +244,162 @@ impl SolutionAgentStore {
                     .get(&session_id)
                     .ok_or_else(|| anyhow!("session vanished after insert"))?
                     .update(cx, |s, _| s._acp_subscription = Some(sub));
+                store.persist_session_row(session_id, cx);
+                cx.emit(SolutionAgentStoreEvent::SessionCreated(session_id));
+                cx.notify();
+                anyhow::Ok(session_id)
+            })??;
+
+            Ok(session_id)
+        })
+    }
+
+    /// Persist the row for `session_id` to the DB so the History popover and
+    /// "Continue last session" CTA pick it up across editor restarts. No-op
+    /// when persistence is disabled (test contexts).
+    fn persist_session_row(&self, session_id: SolutionSessionId, cx: &mut Context<Self>) {
+        let Some(db) = self.persistence.clone() else {
+            return;
+        };
+        let Some(session) = self.sessions.get(&session_id) else {
+            return;
+        };
+        let s = session.read(cx);
+        let meta = SolutionSessionMetadata {
+            id: session_id,
+            solution_id: s.solution_id.clone(),
+            agent_id: s.agent_id.clone(),
+            acp_session_id: s.acp_session_id.clone(),
+            title: s.title.clone(),
+            created_at: s.created_at,
+            last_activity_at: s.last_activity_at,
+        };
+        db.save_metadata(meta).detach_and_log_err(cx);
+    }
+
+    /// Resume a session from its persisted metadata: spawns / reuses the
+    /// pooled connection and asks the agent to attach to the saved
+    /// `acp_session_id`. Falls back to `resume_session` (history-less
+    /// reattach) if `load_session` (full replay) isn't supported. If the
+    /// metadata is already in-memory the existing session is returned.
+    ///
+    /// Returns the live `SolutionSessionId`. The caller can then look up
+    /// the entity via `session(id)` and open it in the navigator.
+    pub fn resume_session(
+        &mut self,
+        meta: SolutionSessionMetadata,
+        project: Entity<project::Project>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<SolutionSessionId>> {
+        // Already hot? Return the existing session id directly.
+        if let Some(existing) = self
+            .by_solution
+            .get(&meta.solution_id)
+            .into_iter()
+            .flatten()
+            .find(|sid| {
+                self.sessions
+                    .get(sid)
+                    .map(|s| s.read(cx).acp_session_id == meta.acp_session_id)
+                    .unwrap_or(false)
+            })
+            .cloned()
+        {
+            return Task::ready(Ok(existing));
+        }
+
+        let pair = (meta.solution_id.clone(), meta.agent_id.clone());
+
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let solution = cx.update(|cx| {
+                SolutionStore::try_global(cx)
+                    .ok_or_else(|| anyhow!("SolutionStore global is not initialised"))
+                    .and_then(|store| {
+                        store
+                            .read(cx)
+                            .solutions()
+                            .iter()
+                            .find(|s| s.id == meta.solution_id)
+                            .cloned()
+                            .ok_or_else(|| anyhow!("solution {:?} not found", meta.solution_id))
+                    })
+            })?;
+
+            let connection_task = this.update(cx, |store, cx| {
+                store.get_or_spawn_connection(pair.clone(), &solution, project.clone(), cx)
+            })?;
+            let connection = connection_task.await?;
+
+            let work_dirs = util::path_list::PathList::new(&[
+                solution.root.to_string_lossy().into_owned()
+            ]);
+            let acp_session_id = meta.acp_session_id.clone();
+            let title_for_load = Some(meta.title.clone());
+
+            let acp_thread_task: Task<Result<Entity<acp_thread::AcpThread>>> = cx.update(|cx| {
+                if connection.supports_load_session() {
+                    Ok(connection.clone().load_session(
+                        acp_session_id.clone(),
+                        project.clone(),
+                        work_dirs.clone(),
+                        title_for_load.clone(),
+                        cx,
+                    ))
+                } else if connection.supports_resume_session() {
+                    Ok(connection.clone().resume_session(
+                        acp_session_id.clone(),
+                        project.clone(),
+                        work_dirs.clone(),
+                        title_for_load.clone(),
+                        cx,
+                    ))
+                } else {
+                    Err(anyhow!(
+                        "agent {:?} does not support loading or resuming sessions",
+                        meta.agent_id,
+                    ))
+                }
+            })?;
+            let acp_thread = match acp_thread_task.await {
+                Ok(thread) => thread,
+                Err(err) => {
+                    this.update(cx, |store, cx| {
+                        store.pool_release_session(pair.clone(), cx);
+                    })
+                    .ok();
+                    return Err(err);
+                }
+            };
+
+            let session_id = this.update(cx, |store, cx| {
+                let session_id = SolutionSessionId::new();
+                let session = SolutionSession {
+                    id: session_id,
+                    solution_id: meta.solution_id.clone(),
+                    agent_id: meta.agent_id.clone(),
+                    acp_session_id: acp_thread.read(cx).session_id().clone(),
+                    acp_thread: Some(acp_thread.clone()),
+                    title: meta.title.clone(),
+                    created_at: meta.created_at,
+                    last_activity_at: Utc::now(),
+                    state: SessionState::Idle,
+                    project: Some(project.clone()),
+                    _acp_subscription: None,
+                };
+                let entity = cx.new(|_| session);
+                store.sessions.insert(session_id, entity);
+                store
+                    .by_solution
+                    .entry(meta.solution_id.clone())
+                    .or_default()
+                    .push(session_id);
+                let sub = store.subscribe_to_session(session_id, acp_thread, cx);
+                store
+                    .sessions
+                    .get(&session_id)
+                    .ok_or_else(|| anyhow!("session vanished after insert"))?
+                    .update(cx, |s, _| s._acp_subscription = Some(sub));
+                store.persist_session_row(session_id, cx);
                 cx.emit(SolutionAgentStoreEvent::SessionCreated(session_id));
                 cx.notify();
                 anyhow::Ok(session_id)

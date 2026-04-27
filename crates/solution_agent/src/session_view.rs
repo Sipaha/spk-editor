@@ -593,6 +593,15 @@ impl Render for SolutionSessionView {
             Some(cx.theme().colors().editor_foreground.opacity(0.05));
 
         let session = self.session.read(cx);
+        // Resolve the assistant label dynamically from the session's adapter
+        // — never bake a specific provider name into the chrome. Falls back
+        // to a generic "Assistant" if the adapter is gone (config edited
+        // mid-session, etc.).
+        let assistant_label: SharedString = SolutionAgentStore::try_global(cx)
+            .and_then(|store| {
+                store.read_with(cx, |s, _| s.adapters.get(&session.agent_id).map(|a| a.display_name()))
+            })
+            .unwrap_or_else(|| SharedString::from("Assistant"));
         let pending_image_count = self.pending_images.len();
         div()
             .id("solution-session-view")
@@ -656,6 +665,7 @@ impl Render for SolutionSessionView {
                                 entry,
                                 &markdown_for,
                                 &markdown_style,
+                                &assistant_label,
                                 cx,
                             ));
                         }
@@ -881,6 +891,7 @@ fn render_entry(
     entry: &AgentThreadEntry,
     markdown_for: &HashMap<(usize, usize), Entity<Markdown>>,
     style: &MarkdownStyle,
+    assistant_label: &SharedString,
     cx: &App,
 ) -> AnyElement {
     match entry {
@@ -888,7 +899,7 @@ fn render_entry(
             render_user_message(entry_idx, message, markdown_for, style, cx)
         }
         AgentThreadEntry::AssistantMessage(message) => {
-            render_assistant_message(entry_idx, message, markdown_for, style, cx)
+            render_assistant_message(entry_idx, message, markdown_for, style, assistant_label, cx)
         }
         AgentThreadEntry::ToolCall(call) => {
             render_tool_call(entry_idx, call, markdown_for, style, cx)
@@ -948,6 +959,7 @@ fn render_assistant_message(
     message: &AssistantMessage,
     markdown_for: &HashMap<(usize, usize), Entity<Markdown>>,
     style: &MarkdownStyle,
+    assistant_label: &SharedString,
     cx: &App,
 ) -> AnyElement {
     let mut container = v_flex()
@@ -964,7 +976,7 @@ fn render_assistant_message(
                         .color(Color::Accent),
                 )
                 .child(
-                    Label::new("Claude")
+                    Label::new(assistant_label.clone())
                         .size(LabelSize::XSmall)
                         .color(Color::Muted),
                 ),
