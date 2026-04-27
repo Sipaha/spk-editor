@@ -10,6 +10,7 @@ mod picker;
 mod status_bar;
 mod welcome;
 
+pub use empty_solution_page::EmptySolutionPage;
 pub use status_bar::SolutionsStatusItem;
 
 pub use actions::{

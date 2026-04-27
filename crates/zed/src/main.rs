@@ -909,6 +909,12 @@ fn main() {
             )
         };
 
+        // `--solution <name-or-id>` short-circuits the normal restore /
+        // welcome flow: resolve the solution from the global SolutionStore
+        // (initialised earlier in `solutions::init`) and open its members
+        // directly. Falls through to the standard path on lookup failure
+        // so the user sees the welcome screen and gets a hint via log.
+        let solution_arg = args.solution.clone();
         let restore_task = match open_rx
             .try_recv()
             .ok()
@@ -921,6 +927,14 @@ fn main() {
             None => cx.spawn({
                 let app_state = app_state.clone();
                 async move |cx| {
+                    if let Some(name_or_id) = solution_arg
+                        && open_solution_by_name_or_id(&name_or_id, app_state.clone(), cx)
+                            .await
+                            .log_err()
+                            .unwrap_or(false)
+                    {
+                        return;
+                    }
                     if let Err(e) = restore_or_create_workspace(app_state, cx).await {
                         fail_to_open_window_async(e, cx)
                     }
@@ -1410,6 +1424,106 @@ async fn installation_id(db: KeyValueStore) -> Result<IdType> {
     Ok(IdType::New(installation_id))
 }
 
+/// Resolve a Solution by either its `name` or `id` slug, then open its
+/// member worktrees in a new workspace window. Empty solutions get the
+/// `EmptySolutionPage` placeholder so the user lands somewhere actionable
+/// instead of an empty pane.
+///
+/// Returns `Ok(true)` when the lookup succeeded and a window opened,
+/// `Ok(false)` when no solution matched (caller should fall back to the
+/// normal restore-or-welcome flow), and `Err(_)` for unrecoverable
+/// failures (no SolutionStore initialised, IO errors during open_paths).
+async fn open_solution_by_name_or_id(
+    name_or_id: &str,
+    app_state: Arc<AppState>,
+    cx: &mut AsyncApp,
+) -> Result<bool> {
+    use solutions::{SolutionId, SolutionStore};
+
+    struct Resolved {
+        id: SolutionId,
+        paths: Vec<PathBuf>,
+        name: String,
+        is_empty: bool,
+    }
+
+    let resolved: Option<Resolved> = cx.update(|cx| -> Result<Option<Resolved>> {
+        let Some(store) = SolutionStore::try_global(cx) else {
+            return Ok(None);
+        };
+        store.read_with(cx, |s, _| {
+            let Some(sol) = s
+                .solutions()
+                .iter()
+                .find(|sol| sol.id.0 == name_or_id || sol.name == name_or_id)
+            else {
+                return Ok::<_, anyhow::Error>(None);
+            };
+            let is_empty = sol.members.is_empty();
+            let paths = if is_empty {
+                vec![sol.root.clone()]
+            } else {
+                s.paths_for_open(&sol.id)?
+            };
+            Ok(Some(Resolved {
+                id: sol.id.clone(),
+                paths,
+                name: sol.name.clone(),
+                is_empty,
+            }))
+        })
+    })?;
+
+    let Some(resolved) = resolved else {
+        log::warn!(
+            "spk-editor: --solution {name_or_id:?} not found in solutions.json; falling back to welcome"
+        );
+        return Ok(false);
+    };
+
+    cx.update(|cx| {
+        if let Some(store) = SolutionStore::try_global(cx) {
+            store
+                .update(cx, |s, cx| s.touch_last_opened(&resolved.id, cx))
+                .log_err();
+        }
+    });
+
+    let mut options = workspace::OpenOptions::default();
+    options.open_mode = workspace::OpenMode::NewWindow;
+    let task = cx.update(|cx| {
+        workspace::open_paths(&resolved.paths, app_state.clone(), options, cx)
+    });
+    let opened = task.await?;
+
+    if resolved.is_empty {
+        let sol_id = resolved.id.clone();
+        let name = resolved.name.clone();
+        cx.update(|cx| {
+            opened
+                .window
+                .update(cx, |multi_workspace, window, cx| {
+                    let workspace = multi_workspace.workspace().clone();
+                    let weak_workspace = workspace.downgrade();
+                    workspace.update(cx, |ws, cx| {
+                        let page = cx.new(|cx| {
+                            solutions_ui::EmptySolutionPage::new(
+                                sol_id.clone(),
+                                name.clone(),
+                                weak_workspace,
+                                cx,
+                            )
+                        });
+                        ws.add_item_to_active_pane(Box::new(page), None, true, window, cx);
+                    });
+                })
+                .log_err();
+        });
+    }
+
+    Ok(true)
+}
+
 pub(crate) async fn restore_or_create_workspace(
     app_state: Arc<AppState>,
     cx: &mut AsyncApp,
@@ -1688,6 +1802,18 @@ struct Args {
     ///
     /// URLs can either be `file://` or `spk-editor://` scheme.
     paths_or_urls: Vec<String>,
+
+    /// Open a Solution by name or id and skip the Welcome screen.
+    ///
+    /// Looks up the named entry in `~/.config/spk-editor/solutions.json`
+    /// (matching either the human-readable `name` or the slug `id`) and
+    /// opens its member worktrees in a new window. If the solution has no
+    /// members yet, the window opens at `solution.root` with the empty-
+    /// solution placeholder page so the user can add projects.
+    ///
+    /// Example: `spk-editor --solution probe-test`
+    #[arg(long, value_name = "NAME-OR-ID")]
+    solution: Option<String>,
 
     /// Pairs of file paths to diff. Can be specified multiple times.
     /// When directories are provided, recurses into them and shows all changed files in a single multi-diff view.
