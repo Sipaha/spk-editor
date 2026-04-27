@@ -12,7 +12,7 @@
 
 use anyhow::anyhow;
 use chrono::{DateTime, Utc};
-use gpui::{Action, AnyElement, App, IntoElement};
+use gpui::{Action, AnyElement, AnyWindowHandle, App, IntoElement};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use solutions::{SolutionId, SolutionStore, SolutionStoreEvent};
@@ -112,6 +112,7 @@ fn render_create_button() -> impl IntoElement {
 }
 
 fn render_row(index: usize, entry: RecentSolution) -> impl IntoElement {
+    let entry_id = entry.id.clone();
     let mut row = ui::h_flex()
         .gap_2()
         .child(
@@ -132,7 +133,11 @@ fn render_row(index: usize, entry: RecentSolution) -> impl IntoElement {
         .size(ui::ButtonSize::Medium)
         .child(row)
         .on_click(move |_, window, cx| {
-            window.dispatch_action(Box::new(OpenRecentSolution { index }), cx);
+            // Pass the welcome window as the source so it gets closed once the
+            // new solution window is up — otherwise the launcher stays around
+            // as an orphan tab the user has to dismiss manually.
+            let source = window.window_handle();
+            open_solution(entry_id.clone(), Some(source), cx);
         })
 }
 
@@ -141,10 +146,13 @@ fn open_recent_solution(action: &OpenRecentSolution, cx: &mut App) {
     let Some(entry) = entries.get(action.index) else {
         return;
     };
-    open_solution(entry.id.clone(), cx);
+    // Keybind path: no source window. We can't tell whether the trigger came
+    // from a welcome window or some other workspace, and closing the wrong one
+    // would be very surprising.
+    open_solution(entry.id.clone(), None, cx);
 }
 
-fn open_solution(sol_id: SolutionId, cx: &mut App) {
+fn open_solution(sol_id: SolutionId, source_window: Option<AnyWindowHandle>, cx: &mut App) {
     let Some(store) = SolutionStore::try_global(cx) else {
         return;
     };
@@ -177,8 +185,25 @@ fn open_solution(sol_id: SolutionId, cx: &mut App) {
     let mut options = OpenOptions::default();
     options.open_mode = workspace::OpenMode::NewWindow;
     let task = workspace::open_paths(&paths, app_state, options, cx);
-    cx.spawn(async move |_| {
-        task.await.log_err();
+    cx.spawn(async move |cx| {
+        let Some(opened) = task.await.log_err() else {
+            return;
+        };
+        let Some(source) = source_window else {
+            return;
+        };
+        // Defensive: only close if it's not the same window we just opened.
+        // open_paths with NewWindow always creates a new one today, but a
+        // future change that reuses a window would otherwise close the
+        // window the user just opened.
+        if source.window_id() == opened.window.window_id() {
+            return;
+        }
+        cx.update(|cx| {
+            source
+                .update(cx, |_, window, _| window.remove_window())
+                .log_err();
+        });
     })
     .detach();
 }

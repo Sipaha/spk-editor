@@ -11,6 +11,10 @@
 #   script/run-mcp --debug        # use the dev (debug) build — much faster to
 #                                 # rebuild during iteration; runtime is slower
 #   script/run-mcp --release      # use target/release/spk-editor (default)
+#   script/run-mcp --skip-onboarding  # pre-seed kvp so the Onboarding screen
+#                                     # is skipped (only meaningful with
+#                                     # --runtime-dir on a fresh dir; requires
+#                                     # the sqlite3 CLI tool)
 #   script/run-mcp -- <args>      # pass extra args to spk-editor
 #
 # Behavior:
@@ -29,6 +33,7 @@ mode=""
 forward_args=()
 runtime_dir=""
 profile="release"
+skip_onboarding=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -51,6 +56,10 @@ while [[ $# -gt 0 ]]; do
         --runtime-dir)
             runtime_dir="$2"
             shift 2
+            ;;
+        --skip-onboarding)
+            skip_onboarding=1
+            shift
             ;;
         --)
             shift
@@ -116,6 +125,42 @@ mkdir -p "$socket_dir"
 
 # Remove a stale socket so the wait loop below sees a fresh one.
 [[ -L "$socket_path" || -S "$socket_path" ]] && rm -f "$socket_path"
+
+if (( skip_onboarding )); then
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        echo "[run-mcp] --skip-onboarding requires the sqlite3 CLI" >&2
+        exit 1
+    fi
+    # Seed first_open in the per-channel kvp DB so main.rs takes the
+    # launchpad branch instead of show_onboarding_view. main.rs uses
+    # KeyValueStore::global(cx), which reads from 0-{channel}/db.sqlite —
+    # NOT 0-global/db.sqlite (that one is GlobalKeyValueStore, used only
+    # for cross-channel things like installation_id).
+    #
+    # Local dev builds and unmodified `cargo build --release` both read
+    # crates/zed/RELEASE_CHANNEL, which is "dev" in this fork. Seed every
+    # known channel so this works regardless of which binary the user
+    # eventually runs against this runtime dir.
+    data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/spk-editor"
+    for channel in dev stable preview nightly; do
+        db_dir="$data_dir/db/0-$channel"
+        db_file="$db_dir/db.sqlite"
+        mkdir -p "$db_dir"
+        sqlite3 "$db_file" <<'EOF'
+CREATE TABLE IF NOT EXISTS migrations (
+    domain TEXT, step INTEGER, migration TEXT
+);
+CREATE TABLE IF NOT EXISTS kv_store (
+    key TEXT PRIMARY KEY, value TEXT NOT NULL
+) STRICT;
+INSERT OR IGNORE INTO migrations VALUES (
+    'KeyValueStore', 0,
+    'CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;'
+);
+INSERT OR REPLACE INTO kv_store VALUES ('first_open', '1');
+EOF
+    done
+fi
 
 cleanup() {
     if [[ -n "${editor_pid:-}" ]] && kill -0 "$editor_pid" 2>/dev/null; then
