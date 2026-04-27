@@ -361,9 +361,15 @@ impl Render for SolutionSessionsNavigator {
             .selected_index
             .and_then(|i| self.open_sessions.get(i).copied())
             .and_then(|sid| self.views.get(&sid).cloned());
+        // `min_h_0` on every body branch + on the wrapper that hosts the
+        // session view: without it, the inner conversation grows past the
+        // panel's allocated height (no scroll, compose row pushed below
+        // the visible area). flex_1 alone is not enough — flex children
+        // default to `min-height: auto` which equals content height.
         let body: gpui::AnyElement = if !has_active_solution {
             div()
                 .flex_1()
+                .min_h_0()
                 .px_3()
                 .py_4()
                 .child(
@@ -373,10 +379,11 @@ impl Render for SolutionSessionsNavigator {
                 )
                 .into_any_element()
         } else if let Some(view) = active_view.clone() {
-            div().flex_1().child(view).into_any_element()
+            div().flex_1().min_h_0().child(view).into_any_element()
         } else {
             div()
                 .flex_1()
+                .min_h_0()
                 .flex()
                 .items_center()
                 .justify_center()

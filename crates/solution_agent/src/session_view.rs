@@ -231,6 +231,14 @@ impl Render for SolutionSessionView {
                 let mut body = div()
                     .id("solution-session-conversation")
                     .flex_1()
+                    // Without min_h_0 a flex-child defaults to min-height:auto
+                    // which equals its content height — long conversations
+                    // then push the compose row off the bottom of the panel
+                    // *and* prevent overflow_y_scroll from ever kicking in
+                    // (no overflow because the container grew to fit). This
+                    // is the standard scrollable-flex-column pattern; see
+                    // upstream agent_ui thread_view.rs:3224 for the same fix.
+                    .min_h_0()
                     .p_3()
                     .overflow_y_scroll();
                 if let Some(thread) = session.acp_thread.as_ref() {
@@ -308,10 +316,23 @@ fn render_assistant_message(message: &AssistantMessage, cx: &App) -> AnyElement 
         .bg(cx.theme().colors().surface_background)
         .rounded_md()
         .child(Label::new("Assistant").size(LabelSize::XSmall));
+    // While the agent is mid-turn we may have only `Thought` chunks — show
+    // them so the user has feedback that something is happening. Once any
+    // real `Message` chunk arrives the thoughts become noise (Claude was
+    // just reasoning) and we drop them. Mirrors Cursor / upstream Zed
+    // AgentPanel which hide reasoning tokens behind a collapsed
+    // "Reasoned for Xs" disclosure once the answer starts streaming.
+    let has_message = message
+        .chunks
+        .iter()
+        .any(|c| matches!(c, AssistantMessageChunk::Message { .. }));
     for chunk in &message.chunks {
         let (prefix, block) = match chunk {
             AssistantMessageChunk::Message { block } => (None, block),
-            AssistantMessageChunk::Thought { block } => (Some("thinking: "), block),
+            AssistantMessageChunk::Thought { block } if !has_message => {
+                (Some("thinking: "), block)
+            }
+            AssistantMessageChunk::Thought { .. } => continue,
         };
         let mut text = content_block_text(block, cx);
         if let Some(prefix) = prefix {
