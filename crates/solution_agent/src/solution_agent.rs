@@ -76,20 +76,58 @@ pub fn init(cx: &mut App) {
     mcp::register(cx);
     event_sources::install(cx);
 
-    // Workspace hook for navigator + status item registration. NOTE: the
-    // navigator's `set_active_solution` is intentionally left UNWIRED in v1 —
-    // the navigator will render an empty "Sessions" panel until a setter is
-    // called from outside (e.g. when the workspace's first project root maps
-    // to a Solution). Wiring that signal is deferred to a follow-up; the live
-    // MCP probe (Task 7.2) will surface this gap if it matters.
+    // Workspace hook for navigator + status item registration. The navigator
+    // derives its active Solution from the workspace's project worktrees on
+    // construction; SolutionStore subscriptions inside the navigator itself
+    // refresh that derivation when Solutions change. We re-derive on every
+    // project event too, so adding/removing a worktree retargets the panel.
     cx.observe_new::<workspace::Workspace>(|workspace, window, cx| {
         let Some(window) = window else {
             return;
         };
 
         let weak = workspace.weak_handle();
-        let navigator = cx.new(|cx| navigator::SolutionSessionsNavigator::new(weak, cx));
+        let weak_project = workspace.project().downgrade();
+        let navigator = cx
+            .new(|cx| navigator::SolutionSessionsNavigator::new(weak, weak_project, cx));
+
+        // Initial active-solution derivation is deferred to the next App tick
+        // so it runs *after* the surrounding `observe_new<Workspace>` update
+        // closes — calling `workspace.read(cx)` synchronously here panics
+        // with "cannot read Workspace while it is already being updated".
+        cx.defer({
+            let nav = navigator.downgrade();
+            move |cx| {
+                nav.update(cx, |nav, cx| nav.refresh_active_solution(cx))
+                    .ok();
+            }
+        });
+
+        // Project worktrees can come and go after the workspace opens (think
+        // `solutions.add_member` mid-session). Drive `refresh_active_solution`
+        // from project events so the panel retargets without the user having
+        // to close and reopen the workspace.
+        let project = workspace.project().clone();
+        cx.subscribe(&project, {
+            let nav = navigator.downgrade();
+            move |_, _, _: &project::Event, cx| {
+                nav.update(cx, |nav, cx| nav.refresh_active_solution(cx))
+                    .ok();
+            }
+        })
+        .detach();
+
         workspace.add_panel(navigator, window, cx);
+
+        // Without this handler the panel's `toggle_action` (returned from
+        // `Panel::toggle_action`) dispatches into a void: the sidebar icon
+        // click and the keybind both look wired but the dock never reveals.
+        workspace.register_action(
+            |workspace, _: &actions::FocusNavigator, window, cx| {
+                workspace
+                    .toggle_panel_focus::<navigator::SolutionSessionsNavigator>(window, cx);
+            },
+        );
 
         let status_item = cx.new(|cx| status_item::SolutionAgentStatusItem::new(cx));
         workspace.status_bar().update(cx, |bar, cx| {

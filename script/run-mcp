@@ -141,22 +141,23 @@ if (( skip_onboarding )); then
     # crates/zed/RELEASE_CHANNEL, which is "dev" in this fork. Seed every
     # known channel so this works regardless of which binary the user
     # eventually runs against this runtime dir.
+    #
+    # Only the kv_store table is created (CREATE IF NOT EXISTS keeps it
+    # idempotent). The `migrations` table is intentionally NOT touched —
+    # sqlez populates it itself on first open. Manually inserting rows
+    # here is dangerous: the table has no UNIQUE constraint, so repeat
+    # invocations stack duplicates and sqlez ends up reading "step N" =
+    # "the Nth row" out of order, then aborts with "Migration changed
+    # for KeyValueStore at step N" and falls back to an in-memory DB.
     data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/spk-editor"
     for channel in dev stable preview nightly; do
         db_dir="$data_dir/db/0-$channel"
         db_file="$db_dir/db.sqlite"
         mkdir -p "$db_dir"
         sqlite3 "$db_file" <<'EOF'
-CREATE TABLE IF NOT EXISTS migrations (
-    domain TEXT, step INTEGER, migration TEXT
-);
 CREATE TABLE IF NOT EXISTS kv_store (
     key TEXT PRIMARY KEY, value TEXT NOT NULL
 ) STRICT;
-INSERT OR IGNORE INTO migrations VALUES (
-    'KeyValueStore', 0,
-    'CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;'
-);
 INSERT OR REPLACE INTO kv_store VALUES ('first_open', '1');
 EOF
     done
