@@ -746,8 +746,14 @@ impl Render for SolutionSessionView {
                 } else {
                     body = body.child(Label::new("(no thread yet)").size(LabelSize::Small));
                 }
+                // The wrapper has to be a flex column so the body's `.flex_1()
+                // .min_h_0()` actually claims height; without `.flex().flex_col()`
+                // here the body collapsed to its content height, killing the
+                // overflow_y_scroll.
                 div()
                     .relative()
+                    .flex()
+                    .flex_col()
                     .flex_1()
                     .min_h_0()
                     .child(body)
