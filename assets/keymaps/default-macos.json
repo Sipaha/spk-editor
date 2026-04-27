@@ -309,6 +309,16 @@
     },
   },
   {
+    // See linux keymap: Enter sends, Shift+Enter newlines in the Solution-agent
+    // chat compose box.
+    "context": "SolutionSessionView > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "enter": "menu::Confirm",
+      "shift-enter": "editor::Newline",
+    },
+  },
+  {
     "context": "AgentConfiguration",
     "bindings": {
       "ctrl--": "pane::GoBack",

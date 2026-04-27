@@ -272,6 +272,18 @@
     },
   },
   {
+    // Compose box inside the Solution-agent chat panel: Enter sends, Shift+Enter
+    // inserts a newline (Cursor / Claude Code CLI / Slack convention). Without
+    // this override the editor's default `enter: editor::Newline` swallows the
+    // submit, so the menu::Confirm handler on `SolutionSessionView` never sees
+    // the keystroke.
+    "context": "SolutionSessionView > Editor",
+    "bindings": {
+      "enter": "menu::Confirm",
+      "shift-enter": "editor::Newline",
+    },
+  },
+  {
     "context": "AcpThread > ModeSelector",
     "bindings": {
       "ctrl-enter": "menu::Confirm",
