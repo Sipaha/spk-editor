@@ -70,6 +70,18 @@ impl SolutionAgentDb {
         "})?()
         .map_err(|e| anyhow!("Failed to create solution_sessions table: {}", e))?;
 
+        // Idempotent ALTER for the History popover preview + token-usage
+        // display. SQLite has no `ADD COLUMN IF NOT EXISTS`, so we ignore
+        // the "duplicate column" error on already-migrated DBs.
+        for ddl in [
+            "ALTER TABLE solution_sessions ADD COLUMN preview TEXT",
+            "ALTER TABLE solution_sessions ADD COLUMN total_tokens INTEGER",
+        ] {
+            if let Ok(mut run) = connection.exec(ddl) {
+                let _ = run();
+            }
+        }
+
         connection.exec(indoc! {"
             CREATE INDEX IF NOT EXISTS idx_session_by_solution
                 ON solution_sessions (solution_id, last_activity_at DESC)
@@ -138,18 +150,35 @@ fn insert_or_update_metadata(
     connection: &Connection,
     meta: &SolutionSessionMetadata,
 ) -> Result<()> {
-    let mut insert = connection.exec_bound::<(String, String, String, Arc<str>, String, i64, i64)>(indoc! {"
+    // `preview` and `total_tokens` use COALESCE so a metadata write that
+    // doesn't have those fields populated yet (e.g. fresh-session insert at
+    // create time) doesn't clobber values an event-driven update wrote
+    // earlier in the same session.
+    let mut insert = connection.exec_bound::<(
+        String,
+        String,
+        String,
+        Arc<str>,
+        String,
+        i64,
+        i64,
+        Option<String>,
+        Option<i64>,
+    )>(indoc! {"
         INSERT INTO solution_sessions (
-            id, solution_id, agent_id, acp_session_id, title, created_at, last_activity_at
+            id, solution_id, agent_id, acp_session_id, title,
+            created_at, last_activity_at, preview, total_tokens
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
         ON CONFLICT(id) DO UPDATE SET
             solution_id      = excluded.solution_id,
             agent_id         = excluded.agent_id,
             acp_session_id   = excluded.acp_session_id,
             title            = excluded.title,
             created_at       = excluded.created_at,
-            last_activity_at = excluded.last_activity_at
+            last_activity_at = excluded.last_activity_at,
+            preview          = COALESCE(excluded.preview, preview),
+            total_tokens     = COALESCE(excluded.total_tokens, total_tokens)
     "})?;
 
     insert((
@@ -160,6 +189,8 @@ fn insert_or_update_metadata(
         meta.title.to_string(),
         meta.created_at.timestamp_millis(),
         meta.last_activity_at.timestamp_millis(),
+        meta.preview.as_ref().map(|s| s.to_string()),
+        meta.total_tokens.map(|t| t as i64),
     ))?;
 
     Ok(())
@@ -201,17 +232,41 @@ fn select_metadata_for_solution(
     connection: &Connection,
     solution_id: &SolutionId,
 ) -> Result<Vec<SolutionSessionMetadata>> {
-    let mut select = connection
-        .select_bound::<String, (String, String, String, Arc<str>, String, i64, i64)>(indoc! {"
-            SELECT id, solution_id, agent_id, acp_session_id, title, created_at, last_activity_at
-            FROM solution_sessions
-            WHERE solution_id = ?
-            ORDER BY last_activity_at DESC
-        "})?;
+    let mut select = connection.select_bound::<
+        String,
+        (
+            String,
+            String,
+            String,
+            Arc<str>,
+            String,
+            i64,
+            i64,
+            Option<String>,
+            Option<i64>,
+        ),
+    >(indoc! {"
+        SELECT id, solution_id, agent_id, acp_session_id, title,
+               created_at, last_activity_at, preview, total_tokens
+        FROM solution_sessions
+        WHERE solution_id = ?
+        ORDER BY last_activity_at DESC
+    "})?;
 
     let rows = select(solution_id.0.clone())?;
     let mut out = Vec::with_capacity(rows.len());
-    for (id, solution_id, agent_id, acp_session_id, title, created_at, last_activity_at) in rows {
+    for (
+        id,
+        solution_id,
+        agent_id,
+        acp_session_id,
+        title,
+        created_at,
+        last_activity_at,
+        preview,
+        total_tokens,
+    ) in rows
+    {
         let id = SolutionSessionId::parse(&id)
             .map_err(|e| anyhow!("invalid SolutionSessionId in db: {e}"))?;
         let created_at = DateTime::<Utc>::from_timestamp_millis(created_at)
@@ -227,6 +282,8 @@ fn select_metadata_for_solution(
             title: SharedString::from(title),
             created_at,
             last_activity_at,
+            preview: preview.map(SharedString::from),
+            total_tokens: total_tokens.map(|t| t as u64),
         });
     }
     Ok(out)
@@ -250,6 +307,8 @@ mod tests {
             last_activity_at: Utc
                 .timestamp_millis_opt(1_700_000_000_000 + seq as i64 * 1000)
                 .unwrap(),
+            preview: None,
+            total_tokens: None,
         }
     }
 

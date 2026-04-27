@@ -592,11 +592,23 @@ impl SolutionSessionsNavigator {
                         for meta in metas {
                             let weak = weak.clone();
                             let meta_for_action = meta.clone();
-                            let label = format!(
+                            // Compose: "<preview-or-title>  ·  <time>  ·  <Ntok>"
+                            // Preview takes precedence over the placeholder
+                            // "Session <uuid>" title because identical titles
+                            // are exactly the case the user wanted to fix.
+                            let primary = meta
+                                .preview
+                                .as_deref()
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or(meta.title.as_ref());
+                            let mut label = format!(
                                 "{}  ·  {}",
-                                meta.title,
+                                primary,
                                 relative_time_short(meta.last_activity_at, chrono::Utc::now()),
                             );
+                            if let Some(tokens) = meta.total_tokens {
+                                label.push_str(&format!("  ·  {}", format_tokens(tokens)));
+                            }
                             menu = menu.entry(
                                 SharedString::from(label),
                                 None,
@@ -709,11 +721,20 @@ impl Render for SolutionSessionsNavigator {
                 .justify_center()
                 .px_3();
             if let Some(meta) = last_meta {
-                let title = meta.title.clone();
+                let primary = meta
+                    .preview
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(meta.title.as_ref())
+                    .to_string();
                 let activity = relative_time_short(meta.last_activity_at, chrono::Utc::now());
+                let mut header = format!("Last session: {primary}  ·  {activity}");
+                if let Some(tokens) = meta.total_tokens {
+                    header.push_str(&format!("  ·  {}", format_tokens(tokens)));
+                }
                 empty = empty
                     .child(
-                        Label::new(format!("Last session: {title}  ·  {activity}"))
+                        Label::new(header)
                             .color(Color::Muted)
                             .size(LabelSize::XSmall),
                     )
@@ -814,6 +835,17 @@ impl Panel for SolutionSessionsNavigator {
     }
 }
 
+
+/// Compact token count, "12.3k tok" / "456 tok", for the History popover.
+fn format_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M tok", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k tok", tokens as f64 / 1_000.0)
+    } else {
+        format!("{} tok", tokens)
+    }
+}
 
 /// Compact "X ago" formatter mirroring `solutions_ui::welcome::relative_time_label`
 /// but kept local to avoid a fork-internal cross-crate dep cycle.

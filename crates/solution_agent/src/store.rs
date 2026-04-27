@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use agent_client_protocol::schema as acp;
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use futures::FutureExt;
@@ -66,6 +67,50 @@ impl Global for GlobalSolutionAgentStore {}
 struct PersistedSession {
     title: String,
     entry_summaries: Vec<String>,
+}
+
+/// First user prompt, normalised to a single line and truncated, for the
+/// History popover label. Returns `None` if the thread has no user message
+/// yet — caller's COALESCE keeps the previously-stored preview in that case.
+fn extract_preview(entries: &[acp_thread::AgentThreadEntry]) -> Option<gpui::SharedString> {
+    let first_user = entries.iter().find_map(|entry| match entry {
+        acp_thread::AgentThreadEntry::UserMessage(msg) => Some(msg),
+        _ => None,
+    })?;
+    // `chunks` is the raw ACP payload from the agent and contains the user's
+    // typed text verbatim; `content` is the same data wrapped in a render-
+    // ready `Markdown` entity that requires `&App` to read. We don't have
+    // `cx` here (called from event-handler contexts that already hold a
+    // mutable borrow of the store), so we walk chunks instead.
+    let mut text = String::new();
+    for chunk in &first_user.chunks {
+        let chunk_text = match chunk {
+            acp::ContentBlock::Text(t) => t.text.as_str(),
+            _ => continue,
+        };
+        if !text.is_empty() && !text.ends_with(' ') {
+            text.push(' ');
+        }
+        text.push_str(chunk_text);
+        if text.len() >= 200 {
+            break;
+        }
+    }
+    let collapsed: String = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    let truncated = if collapsed.chars().count() > 80 {
+        let mut s: String = collapsed.chars().take(77).collect();
+        s.push('…');
+        s
+    } else {
+        collapsed
+    };
+    Some(gpui::SharedString::from(truncated))
 }
 
 fn serializable_snapshot(session: &SolutionSession, cx: &App) -> Vec<u8> {
@@ -265,6 +310,21 @@ impl SolutionAgentStore {
             return;
         };
         let s = session.read(cx);
+        // Pull the dialog preview + total token count from the live thread.
+        // Both are `None` until the user sends the first prompt and the agent
+        // emits a usage update, respectively. The DB write uses COALESCE so a
+        // None on a follow-up insert never clobbers a previously-stored value.
+        let (preview, total_tokens) = s
+            .acp_thread
+            .as_ref()
+            .map(|thread| {
+                let thread = thread.read(cx);
+                (
+                    extract_preview(thread.entries()),
+                    thread.token_usage().map(|u| u.input_tokens + u.output_tokens),
+                )
+            })
+            .unwrap_or((None, None));
         let meta = SolutionSessionMetadata {
             id: session_id,
             solution_id: s.solution_id.clone(),
@@ -273,6 +333,8 @@ impl SolutionAgentStore {
             title: s.title.clone(),
             created_at: s.created_at,
             last_activity_at: s.last_activity_at,
+            preview,
+            total_tokens,
         };
         db.save_metadata(meta).detach_and_log_err(cx);
     }
@@ -622,19 +684,10 @@ impl SolutionAgentStore {
             .cloned()
             .ok_or_else(|| anyhow!("unknown session {session_id}"))?;
         session.update(cx, |s, _| s.title = title.clone());
-        if let Some(db) = self.persistence.clone() {
-            let s = session.read(cx);
-            let meta = SolutionSessionMetadata {
-                id: session_id,
-                solution_id: s.solution_id.clone(),
-                agent_id: s.agent_id.clone(),
-                acp_session_id: s.acp_session_id.clone(),
-                title,
-                created_at: s.created_at,
-                last_activity_at: Utc::now(),
-            };
-            db.save_metadata(meta).detach_and_log_err(cx);
-        }
+        // Reuse `persist_session_row` so preview + token columns get
+        // populated from the live thread instead of being NULL'd by this
+        // title-only write path.
+        self.persist_session_row(session_id, cx);
         cx.emit(SolutionAgentStoreEvent::SessionTitleChanged(session_id));
         cx.notify();
         Ok(())
@@ -887,6 +940,9 @@ impl SolutionAgentStore {
                 if let Some(s) = self.sessions.get(&session_id).cloned() {
                     s.update(cx, |s, _| s.last_activity_at = Utc::now());
                 }
+                // First user message appends a NewEntry — refresh DB so the
+                // History popover preview stops being NULL.
+                self.persist_session_row(session_id, cx);
                 cx.emit(SolutionAgentStoreEvent::SessionMessageAppended(session_id));
             }
             acp_thread::AcpThreadEvent::Stopped(_) => {
@@ -894,6 +950,9 @@ impl SolutionAgentStore {
                 if let Some(s) = self.sessions.get(&session_id).cloned() {
                     s.update(cx, |s, _| s.last_activity_at = Utc::now());
                 }
+                // Token usage is finalised on turn completion — refresh DB
+                // so the History popover token column reflects the latest.
+                self.persist_session_row(session_id, cx);
             }
             acp_thread::AcpThreadEvent::Error
             | acp_thread::AcpThreadEvent::LoadError(_) => {

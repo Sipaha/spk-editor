@@ -106,4 +106,12 @@ pub struct SolutionSessionMetadata {
     pub title: SharedString,
     pub created_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
+    /// First user prompt (truncated) so the History popover can disambiguate
+    /// otherwise-identical "Session <uuid>" rows. `None` for sessions that
+    /// haven't received a user message yet.
+    pub preview: Option<SharedString>,
+    /// Cumulative tokens (input + output) reported by the agent in
+    /// session_update events. Surfaces in the History popover so the user
+    /// can pick a heavy/light session.
+    pub total_tokens: Option<u64>,
 }
