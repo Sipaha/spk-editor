@@ -11,7 +11,11 @@
     "light": "One Light",
     "dark": "One Dark",
   },
-  "icon_theme": "Zed (Default)",
+  // SPK Editor: defaults to Material Icon Theme (colored file/folder icons)
+  // instead of upstream "Zed (Default)" (monochrome). The extension is
+  // listed in auto_install_extensions so a fresh install pulls it from
+  // the zed.dev registry on first launch.
+  "icon_theme": "Material Icon Theme",
   // The name of a base set of key bindings to use.
   // This setting can take six values, each named after another
   // text editor:
@@ -2040,6 +2044,11 @@
   // and change the value to `false`.
   "auto_install_extensions": {
     "html": true,
+    // SPK Editor: bundled by default so a fresh install lands on colored
+    // file/folder icons (the upstream "Zed (Default)" theme is monochrome,
+    // which makes the project tree feel grey vs IDEA's coloured one). The
+    // matching default lives at the top of this file: "icon_theme": "Material Icon Theme".
+    "material-icon-theme": true,
   },
   // The capabilities granted to extensions.
   //

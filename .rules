@@ -22,11 +22,12 @@ SPK Editor is a personal fork of [Zed](https://github.com/zed-industries/zed) ma
 | `zeta` (edit prediction) | `EditPredictionProvider::Zed` arm returns `None`; default `provider:"none"` |
 | Sentry uploads | `upload_panic`/`upload_minidump`/`upload_build_timings` all early-return; local panic logs preserved |
 | CI workflows | 41 workflows hard-disabled (`if: false`); `run_tests.yml` is `workflow_dispatch:` only |
+| `agent_ui::AgentPanel` dock + Welcome agent card | `initialize_agent_panel` not called from `crates/zed/src/zed.rs::initialize_panels`; `crates/workspace/src/welcome.rs::render_agent_card` gated off via `false &&`. `agent_ui::init` still runs (inline_assistant / rules_library / context_server modal depend on it) — only the user-facing panel surface is hidden. Fork uses `solution_agent` for AI. |
 
 ## What's kept
 
 - **Extension registry on `zed.dev`** — extensions panel still browses / installs from upstream registry.
-- **External agents via ACP** (Claude Code subprocess, Gemini CLI, etc.) — `agent_servers` + `acp*` + ACP entries in `agent_ui` are the primary AI integration. AI in this fork = `claude` subprocess, NOT API tokens.
+- **External agents via ACP** (Claude Code subprocess, Gemini CLI, etc.) — `agent_servers` + `acp*` are wired up; the upstream `AgentPanel` UI surface is hidden in this fork. AI in this fork = `claude` subprocess driven by `solution_agent`, NOT API tokens.
 - **BYOK providers** (Copilot, Anthropic via API key, Ollama, etc.) — defined but not promoted in UI.
 - **Multi-project Solutions** (`solutions` + `solutions_ui`) — group N catalog projects into one window. See `FORK.md`.
 - **Solution-scoped AI sessions** (`solution_agent`) — N parallel Claude Code sessions per Solution, multiplexed onto a shared subprocess per `(solution, agent)` pair. Auth via subscription, not API key. See `FORK.md`.
