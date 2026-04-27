@@ -24,6 +24,7 @@ use ui::{
 use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
+    notifications::{NotificationId, simple_message_notification::MessageNotification},
 };
 
 use crate::actions::FocusNavigator;
@@ -311,11 +312,13 @@ impl SolutionSessionsNavigator {
         });
         cx.notify();
 
+        let solution_session_id = meta.id;
+        let session_title = meta.title.clone();
         let task = store.update(cx, |store, cx| {
             store.resume_session(meta, project, cx)
         });
         cx.spawn_in(window, async move |this, cx| {
-            let result = task.await.context("resume_session failed");
+            let result = task.await;
             this.update_in(cx, |this, window, cx| {
                 this.pending.retain(|p| p.id != pending_id);
                 match result {
@@ -329,7 +332,47 @@ impl SolutionSessionsNavigator {
                         }
                     }
                     Err(err) => {
+                        let err_str = format!("{err:#}");
                         log::error!("resume_session failed: {err:?}");
+                        // claude-acp returns JSON-RPC "Resource not found"
+                        // (-32002) when the agent has no record of the
+                        // session — happens for sessions that never sent a
+                        // message (claude only flushes to ~/.claude/projects
+                        // on first turn) or after manual purges. The DB row
+                        // is unrecoverable in that case, so drop it so the
+                        // History popover stops offering it.
+                        let resource_gone = err_str.contains("Resource not found")
+                            || err_str.contains("-32002");
+                        if resource_gone {
+                            let db = SolutionAgentStore::global(cx)
+                                .read_with(cx, |s, _| s.db());
+                            if let Some(db) = db {
+                                cx.background_spawn(async move {
+                                    db.delete(solution_session_id).await
+                                })
+                                .detach_and_log_err(cx);
+                            }
+                            this.refresh_historic_sessions(cx);
+                        }
+                        let user_msg: SharedString = if resource_gone {
+                            format!(
+                                "\"{session_title}\" can't be resumed — the agent no longer has it (empty session, or the agent's storage was cleared). Removed from history."
+                            ).into()
+                        } else {
+                            format!("Resuming \"{session_title}\" failed: {err_str}").into()
+                        };
+                        if let Some(workspace) = this.workspace.upgrade() {
+                            workspace.update(cx, |workspace, cx| {
+                                struct ResumeFailedNotification;
+                                workspace.show_notification(
+                                    NotificationId::unique::<ResumeFailedNotification>(),
+                                    cx,
+                                    move |cx| {
+                                        cx.new(|cx| MessageNotification::new(user_msg, cx))
+                                    },
+                                );
+                            });
+                        }
                         cx.notify();
                     }
                 }
