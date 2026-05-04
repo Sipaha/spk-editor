@@ -25,5 +25,7 @@ actions!(
         FindPreviousMatch,
         /// Close the in-session find bar.
         FindClose,
+        /// Cancel the agent's in-flight response in the active session.
+        StopResponse,
     ]
 );

@@ -138,7 +138,7 @@ use std::{
     time::Duration,
 };
 use task::{DebugScenario, SharedTaskContext, SpawnInTerminal};
-use theme::{ActiveTheme, SystemAppearance};
+use theme::ActiveTheme;
 use theme_settings::ThemeSettings;
 pub use toolbar::{
     PaneSearchBarCallbacks, Toolbar, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView,
@@ -1351,6 +1351,9 @@ pub struct Workspace {
     left_dock: Entity<Dock>,
     bottom_dock: Entity<Dock>,
     right_dock: Entity<Dock>,
+    left_dock_strip: Entity<PanelButtons>,
+    right_dock_strip: Entity<PanelButtons>,
+    bottom_dock_strip: Entity<PanelButtons>,
     panes: Vec<Entity<Pane>>,
     panes_by_item: HashMap<EntityId, WeakEntity<Pane>>,
     active_pane: Entity<Pane>,
@@ -1633,7 +1636,6 @@ impl Workspace {
                 cx,
             );
             center_pane.set_can_split(Some(Arc::new(|_, _, _, _| true)));
-            center_pane.set_should_display_welcome_page(true);
             center_pane
         });
         cx.subscribe_in(&center_pane, window, Self::handle_pane_event)
@@ -1692,20 +1694,18 @@ impl Workspace {
         let left_dock = Dock::new(DockPosition::Left, modal_layer.clone(), window, cx);
         let bottom_dock = Dock::new(DockPosition::Bottom, modal_layer.clone(), window, cx);
         let right_dock = Dock::new(DockPosition::Right, modal_layer.clone(), window, cx);
-        let left_dock_buttons = cx.new(|cx| PanelButtons::new(left_dock.clone(), cx));
-        let bottom_dock_buttons = cx.new(|cx| PanelButtons::new(bottom_dock.clone(), cx));
-        let right_dock_buttons = cx.new(|cx| PanelButtons::new(right_dock.clone(), cx));
+        // IDEA-style edge strips: vertical PanelButtons living on the workspace
+        // sides (rendered in `Workspace::render`) instead of as small icons in
+        // the status bar.
+        let left_dock_strip = cx.new(|cx| PanelButtons::new_vertical(left_dock.clone(), cx));
+        let bottom_dock_strip = cx.new(|cx| PanelButtons::new_vertical(bottom_dock.clone(), cx));
+        let right_dock_strip = cx.new(|cx| PanelButtons::new_vertical(right_dock.clone(), cx));
         let multi_workspace = window
             .root::<MultiWorkspace>()
             .flatten()
             .map(|mw| mw.downgrade());
         let status_bar = cx.new(|cx| {
-            let mut status_bar =
-                StatusBar::new(&center_pane.clone(), multi_workspace.clone(), window, cx);
-            status_bar.add_left_item(left_dock_buttons, window, cx);
-            status_bar.add_right_item(right_dock_buttons, window, cx);
-            status_bar.add_right_item(bottom_dock_buttons, window, cx);
-            status_bar
+            StatusBar::new(&center_pane.clone(), multi_workspace.clone(), window, cx)
         });
 
         let session_id = app_state.session.read(cx).id().to_owned();
@@ -1744,14 +1744,7 @@ impl Workspace {
                 }));
                 cx.notify();
             }),
-            cx.observe_window_appearance(window, |_, window, cx| {
-                let window_appearance = window.appearance();
-
-                *SystemAppearance::global_mut(cx) = SystemAppearance(window_appearance.into());
-
-                theme_settings::reload_theme(cx);
-                theme_settings::reload_icon_theme(cx);
-            }),
+            theme_settings::track_window_appearance(window, cx),
             cx.on_release({
                 let weak_handle = weak_handle.clone();
                 move |this, cx| {
@@ -1791,6 +1784,9 @@ impl Workspace {
             left_dock,
             bottom_dock,
             right_dock,
+            left_dock_strip,
+            right_dock_strip,
+            bottom_dock_strip,
             _panels_task: None,
             project: project.clone(),
             follower_states: Default::default(),
@@ -1844,6 +1840,27 @@ impl Workspace {
         open_mode: OpenMode,
         cx: &mut App,
     ) -> Task<anyhow::Result<OpenResult>> {
+        Self::new_local_with_visibility(
+            abs_paths, app_state, requesting_window, env, init, open_mode, true, cx,
+        )
+    }
+
+    /// Like `new_local`, but lets the caller decide whether the
+    /// resulting worktrees show in the project panel. Solutions UI
+    /// uses `visible = false` for the placeholder worktree of an
+    /// "empty" solution — the workspace knows about the solution root
+    /// for path lookups, but the project panel stays clean (just the
+    /// `EmptySolutionPage` CTA).
+    pub fn new_local_with_visibility(
+        abs_paths: Vec<PathBuf>,
+        app_state: Arc<AppState>,
+        requesting_window: Option<WindowHandle<MultiWorkspace>>,
+        env: Option<HashMap<String, String>>,
+        init: Option<Box<dyn FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>) + Send>>,
+        open_mode: OpenMode,
+        visible: bool,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<OpenResult>> {
         let project_handle = Project::local(
             app_state.client.clone(),
             app_state.node_runtime.clone(),
@@ -1880,7 +1897,7 @@ impl Workspace {
             for path in paths_to_open.into_iter() {
                 if let Some((_, project_entry)) = cx
                     .update(|cx| {
-                        Workspace::project_path_for_path(project_handle.clone(), &path, true, cx)
+                        Workspace::project_path_for_path(project_handle.clone(), &path, visible, cx)
                     })
                     .await
                     .log_err()
@@ -1988,16 +2005,35 @@ impl Workspace {
                         && let Some(display) = workspace.display
                         && let Some(bounds) = workspace.window_bounds.as_ref()
                     {
-                        // Reopening an existing workspace - restore its saved bounds
+                        // Reopening an existing workspace - restore its saved bounds.
                         (Some(bounds.0), Some(display))
-                    } else if let Some((display, bounds)) =
-                        persistence::read_default_window_bounds(&kvp)
-                    {
-                        // New or empty workspace - use the last known window bounds
-                        (Some(bounds), Some(display))
                     } else {
-                        // New window - let GPUI's default_bounds() handle cascading
-                        (None, None)
+                        // No project-specific bounds: always centre on the
+                        // current display rather than restoring the global
+                        // "last-known" bounds from `read_default_window_bounds`.
+                        // Upstream's behaviour was to retain whatever the
+                        // user last left, which on a fork that frequently
+                        // wipes its profile (debug builds, fresh checkouts)
+                        // pinned the Welcome window to the top-left corner
+                        // every launch. Persisted bounds still apply when
+                        // the path list matches an existing workspace.
+                        let _ = &kvp;
+                        // Compact launcher-shaped default — wider than
+                        // necessary just makes the Welcome / project
+                        // picker feel half-empty. Welcome's content
+                        // column (see `welcome.rs`) is sized to fit
+                        // inside this. Users can resize once they open
+                        // a real project.
+                        let centered = cx.update(|cx| {
+                            gpui::WindowBounds::centered(
+                                gpui::Size {
+                                    width: gpui::px(720.0),
+                                    height: gpui::px(720.0),
+                                },
+                                cx,
+                            )
+                        });
+                        (Some(centered), None)
                     };
 
                     // Use the serialized workspace to construct the new window
@@ -7593,6 +7629,40 @@ impl Workspace {
             )
     }
 
+    /// Vertical IDEA-style strip pinned to the left edge of the workspace.
+    /// Hosts left-dock toggles at the top and bottom-dock toggles at the
+    /// bottom, separated by a flex spacer so they stick to opposite ends.
+    fn render_left_dock_strip(&self, cx: &mut App) -> Div {
+        let colors = cx.theme().colors();
+        v_flex()
+            .flex_none()
+            .h_full()
+            .px_1()
+            .py_2()
+            .gap_2()
+            .border_r_1()
+            .border_color(colors.border)
+            .bg(colors.status_bar_background)
+            .child(self.left_dock_strip.clone())
+            .child(div().flex_1())
+            .child(self.bottom_dock_strip.clone())
+    }
+
+    /// Vertical strip pinned to the right edge — hosts right-dock toggles.
+    fn render_right_dock_strip(&self, cx: &mut App) -> Div {
+        let colors = cx.theme().colors();
+        v_flex()
+            .flex_none()
+            .h_full()
+            .px_1()
+            .py_2()
+            .gap_2()
+            .border_l_1()
+            .border_color(colors.border)
+            .bg(colors.status_bar_background)
+            .child(self.right_dock_strip.clone())
+    }
+
     fn render_dock(
         &self,
         position: DockPosition,
@@ -8398,7 +8468,7 @@ impl Render for Workspace {
                                 ))
                             })
                             .child({
-                                match bottom_dock_layout {
+                                let dock_layout_body = match bottom_dock_layout {
                                     BottomDockLayout::Full => div()
                                         .flex()
                                         .flex_col()
@@ -8636,7 +8706,21 @@ impl Render for Workspace {
                                             window,
                                             cx,
                                         )),
-                                }
+                                };
+
+                                h_flex()
+                                    .h_full()
+                                    .w_full()
+                                    .overflow_hidden()
+                                    .child(self.render_left_dock_strip(cx))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .h_full()
+                                            .overflow_hidden()
+                                            .child(dock_layout_body),
+                                    )
+                                    .child(self.render_right_dock_strip(cx))
                             })
                             .children(self.zoomed.as_ref().and_then(|view| {
                                 let zoomed_view = view.upgrade()?;
@@ -9788,15 +9872,23 @@ pub fn open_paths(
             } else {
                 None
             };
+            // Honor `OpenVisible::None` when the caller wants the
+            // worktrees attached to the workspace but hidden from the
+            // project panel — Solutions UI uses this for the empty-
+            // solution placeholder so the user only sees the
+            // `EmptySolutionPage` CTA, not the otherwise-empty
+            // solution root directory.
+            let visible = !matches!(open_options.visible, Some(OpenVisible::None));
             let result = cx
                 .update(move |cx| {
-                    Workspace::new_local(
+                    Workspace::new_local_with_visibility(
                         abs_paths,
                         app_state.clone(),
                         open_options.requesting_window,
                         open_options.env,
                         init,
                         open_options.open_mode,
+                        visible,
                         cx,
                     )
                 })

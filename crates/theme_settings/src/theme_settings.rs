@@ -195,6 +195,34 @@ pub fn reload_icon_theme(cx: &mut App) {
     cx.refresh_windows();
 }
 
+/// Pushes the window's current OS appearance (light/dark) into the
+/// global `SystemAppearance` and reloads the theme + icon theme so a
+/// `theme.mode = "system"` setting immediately resolves to the right
+/// variant. Use this when constructing a top-level window root view
+/// — without it, windows that paint before any subscribed window
+/// reads the appearance see the default Light value and pick the
+/// wrong theme on a dark system.
+pub fn apply_window_appearance(window: &gpui::Window, cx: &mut App) {
+    *theme::SystemAppearance::global_mut(cx) =
+        theme::SystemAppearance(window.appearance().into());
+    reload_theme(cx);
+    reload_icon_theme(cx);
+}
+
+/// Same as `apply_window_appearance` but additionally subscribes to
+/// the window's appearance change signal — when the OS flips
+/// light↔dark the global `SystemAppearance` is kept in sync. Returns
+/// the subscription; drop it to unsubscribe.
+pub fn track_window_appearance<V: 'static>(
+    window: &mut gpui::Window,
+    cx: &mut gpui::Context<V>,
+) -> gpui::Subscription {
+    apply_window_appearance(window, cx);
+    cx.observe_window_appearance(window, |_, window, cx| {
+        apply_window_appearance(window, cx);
+    })
+}
+
 /// Loads the themes bundled with the Zed binary into the registry.
 pub fn load_bundled_themes(registry: &ThemeRegistry) {
     let theme_paths = registry

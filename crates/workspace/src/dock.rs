@@ -340,6 +340,7 @@ struct PanelEntry {
 
 pub struct PanelButtons {
     dock: Entity<Dock>,
+    vertical: bool,
     _settings_subscription: Subscription,
 }
 
@@ -1210,6 +1211,20 @@ impl PanelButtons {
         let settings_subscription = cx.observe_global::<SettingsStore>(|_, cx| cx.notify());
         Self {
             dock,
+            vertical: false,
+            _settings_subscription: settings_subscription,
+        }
+    }
+
+    /// Vertical layout used by the IDEA-style edge strips on the workspace.
+    /// Buttons render top-to-bottom with larger icons; no horizontal dividers
+    /// or right-side reversal.
+    pub fn new_vertical(dock: Entity<Dock>, cx: &mut Context<Self>) -> Self {
+        cx.observe(&dock, |_, _, cx| cx.notify()).detach();
+        let settings_subscription = cx.observe_global::<SettingsStore>(|_, cx| cx.notify());
+        Self {
+            dock,
+            vertical: true,
             _settings_subscription: settings_subscription,
         }
     }
@@ -1221,10 +1236,24 @@ impl Render for PanelButtons {
         let active_index = dock.active_panel_index;
         let is_open = dock.is_open;
         let dock_position = dock.position;
+        let vertical = self.vertical;
 
-        let (menu_anchor, menu_attach) = match dock.position {
-            DockPosition::Left => (Anchor::BottomLeft, Anchor::TopLeft),
-            DockPosition::Bottom | DockPosition::Right => (Anchor::BottomRight, Anchor::TopRight),
+        let (menu_anchor, menu_attach) = if vertical {
+            match dock.position {
+                // Right-strip menus pop out to the left of the button.
+                DockPosition::Right => (Anchor::TopRight, Anchor::TopLeft),
+                // Left-strip and bottom-on-left-strip menus pop out to the right.
+                DockPosition::Left | DockPosition::Bottom => {
+                    (Anchor::TopLeft, Anchor::TopRight)
+                }
+            }
+        } else {
+            match dock.position {
+                DockPosition::Left => (Anchor::BottomLeft, Anchor::TopLeft),
+                DockPosition::Bottom | DockPosition::Right => {
+                    (Anchor::BottomRight, Anchor::TopRight)
+                }
+            }
         };
 
         let dock_entity = self.dock.clone();
@@ -1354,8 +1383,13 @@ impl Render for PanelButtons {
                         .trigger(move |is_active, _window, _cx| {
                             // Include active state in element ID to invalidate the cached
                             // tooltip when panel state changes (e.g., via keyboard shortcut)
+                            let icon_size = if vertical {
+                                IconSize::Medium
+                            } else {
+                                IconSize::Small
+                            };
                             let button = IconButton::new((name, is_active_button as u64), icon)
-                                .icon_size(IconSize::Small)
+                                .icon_size(icon_size)
                                 .toggle_state(is_active_button)
                                 .on_click({
                                     let action = action.boxed_clone();
@@ -1382,11 +1416,15 @@ impl Render for PanelButtons {
             })
             .collect();
 
-        if dock_position == DockPosition::Right {
+        if !vertical && dock_position == DockPosition::Right {
             buttons.reverse();
         }
 
         let has_buttons = !buttons.is_empty();
+
+        if vertical {
+            return v_flex().gap_1().children(buttons).into_any_element();
+        }
 
         h_flex()
             .gap_1()
@@ -1400,6 +1438,7 @@ impl Render for PanelButtons {
             .when(has_buttons && dock.position == DockPosition::Left, |this| {
                 this.child(Divider::vertical().color(DividerColor::Border))
             })
+            .into_any_element()
     }
 }
 

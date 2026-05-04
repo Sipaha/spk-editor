@@ -11,6 +11,49 @@ use util::rel_path::RelPath;
 /// A default editorconfig file name to use when resolving project settings.
 pub const EDITORCONFIG_NAME: &str = ".editorconfig";
 
+/// True when this build should use a `-dev` directory suffix to keep
+/// developer state separate from a production install's database,
+/// sessions, MCP socket, and so on.
+///
+/// Default rule:
+///   * Debug builds (`cfg!(debug_assertions)`) → `true`
+///   * Release builds → `false`
+///
+/// Override (in either direction) via the `SPK_EDITOR_DEV_DIRS` env
+/// var: set to `1` / `true` to force the dev suffix on (useful when
+/// you want a release-shaped binary to write to a sandboxed dir),
+/// set to `0` / `false` to force it off (useful when a debug build
+/// needs to pick up the user's actual production data — e.g. trying
+/// to reproduce a bug against their workspace database).
+fn use_dev_suffix() -> bool {
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| match std::env::var("SPK_EDITOR_DEV_DIRS") {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => cfg!(debug_assertions),
+    })
+}
+
+/// Kebab-case directory name (Linux / generic). See `use_dev_suffix`.
+pub fn dir_name_kebab() -> &'static str {
+    if use_dev_suffix() {
+        "spk-editor-dev"
+    } else {
+        "spk-editor"
+    }
+}
+
+/// PascalCase directory name (macOS / Windows). See `use_dev_suffix`.
+pub fn dir_name_pascal() -> &'static str {
+    if use_dev_suffix() {
+        "SpkEditor-Dev"
+    } else {
+        "SpkEditor"
+    }
+}
+
 /// A custom data directory override, set only by `set_custom_data_dir`.
 /// This is used to override the default data directory location.
 /// The directory will be created if it doesn't exist when set.
@@ -83,24 +126,37 @@ pub fn set_custom_data_dir(dir: &str) -> &'static PathBuf {
     })
 }
 
+/// Single root directory under which **all** profile state lives —
+/// config, data, cache, logs, solutions, the lot. We tuck everything
+/// into a hidden `~/.spk/` namespace so `~/` doesn't accumulate
+/// per-app dotfree folders, and so sibling SPK tools can colocate
+/// their own state under the same umbrella.
+///
+/// Layout:
+///   `~/.spk/spk-editor/` — release profile of this editor
+///   `~/.spk/spk-editor-dev/` — debug profile of this editor
+///   `~/.spk/<other-spk-tool>/` — sibling apps drop their state here
+///
+/// Windows / macOS get the same single-folder layout (no native
+/// `Application Support` / `AppData` split) so the cleanup story
+/// stays one-line everywhere: `rm -rf ~/.spk/spk-editor[-dev]`.
+pub fn base_dir() -> &'static PathBuf {
+    static BASE_DIR: OnceLock<PathBuf> = OnceLock::new();
+    BASE_DIR.get_or_init(|| {
+        if let Some(custom) = CUSTOM_DATA_DIR.get() {
+            return custom.clone();
+        }
+        home_dir().join(".spk").join(dir_name_kebab())
+    })
+}
+
 /// Returns the path to the configuration directory used by SPK Editor.
 pub fn config_dir() -> &'static PathBuf {
     CONFIG_DIR.get_or_init(|| {
         if let Some(custom_dir) = CUSTOM_DATA_DIR.get() {
             custom_dir.join("config")
-        } else if cfg!(target_os = "windows") {
-            dirs::config_dir()
-                .expect("failed to determine RoamingAppData directory")
-                .join("SpkEditor")
-        } else if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-            if let Ok(flatpak_xdg_config) = std::env::var("FLATPAK_XDG_CONFIG_HOME") {
-                flatpak_xdg_config.into()
-            } else {
-                dirs::config_dir().expect("failed to determine XDG_CONFIG_HOME directory")
-            }
-            .join("spk-editor")
         } else {
-            home_dir().join(".config").join("spk-editor")
+            base_dir().join("config")
         }
     })
 }
@@ -110,75 +166,21 @@ pub fn data_dir() -> &'static PathBuf {
     CURRENT_DATA_DIR.get_or_init(|| {
         if let Some(custom_dir) = CUSTOM_DATA_DIR.get() {
             custom_dir.clone()
-        } else if cfg!(target_os = "macos") {
-            home_dir().join("Library/Application Support/SpkEditor")
-        } else if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-            if let Ok(flatpak_xdg_data) = std::env::var("FLATPAK_XDG_DATA_HOME") {
-                flatpak_xdg_data.into()
-            } else {
-                dirs::data_local_dir().expect("failed to determine XDG_DATA_HOME directory")
-            }
-            .join("spk-editor")
-        } else if cfg!(target_os = "windows") {
-            dirs::data_local_dir()
-                .expect("failed to determine LocalAppData directory")
-                .join("SpkEditor")
         } else {
-            config_dir().clone() // Fallback
+            base_dir().join("data")
         }
     })
 }
 
 pub fn state_dir() -> &'static PathBuf {
     static STATE_DIR: OnceLock<PathBuf> = OnceLock::new();
-    STATE_DIR.get_or_init(|| {
-        if cfg!(target_os = "macos") {
-            return home_dir().join(".local").join("state").join("SpkEditor");
-        }
-
-        if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-            return if let Ok(flatpak_xdg_state) = std::env::var("FLATPAK_XDG_STATE_HOME") {
-                flatpak_xdg_state.into()
-            } else {
-                dirs::state_dir().expect("failed to determine XDG_STATE_HOME directory")
-            }
-            .join("spk-editor");
-        } else {
-            // Windows
-            return dirs::data_local_dir()
-                .expect("failed to determine LocalAppData directory")
-                .join("SpkEditor");
-        }
-    })
+    STATE_DIR.get_or_init(|| base_dir().join("state"))
 }
 
-/// Returns the path to the temp directory used by SPK Editor.
+/// Returns the path to the temp / cache directory used by SPK Editor.
 pub fn temp_dir() -> &'static PathBuf {
     static TEMP_DIR: OnceLock<PathBuf> = OnceLock::new();
-    TEMP_DIR.get_or_init(|| {
-        if cfg!(target_os = "macos") {
-            return dirs::cache_dir()
-                .expect("failed to determine cachesDirectory directory")
-                .join("SpkEditor");
-        }
-
-        if cfg!(target_os = "windows") {
-            return dirs::cache_dir()
-                .expect("failed to determine LocalAppData directory")
-                .join("SpkEditor");
-        }
-
-        if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-            return if let Ok(flatpak_xdg_cache) = std::env::var("FLATPAK_XDG_CACHE_HOME") {
-                flatpak_xdg_cache.into()
-            } else {
-                dirs::cache_dir().expect("failed to determine XDG_CACHE_HOME directory")
-            }
-            .join("spk-editor");
-        }
-
-        home_dir().join(".cache").join("spk-editor")
-    })
+    TEMP_DIR.get_or_init(|| base_dir().join("cache"))
 }
 
 /// Returns the path to the hang traces directory.
@@ -190,13 +192,7 @@ pub fn hang_traces_dir() -> &'static PathBuf {
 /// Returns the path to the logs directory.
 pub fn logs_dir() -> &'static PathBuf {
     static LOGS_DIR: OnceLock<PathBuf> = OnceLock::new();
-    LOGS_DIR.get_or_init(|| {
-        if cfg!(target_os = "macos") {
-            home_dir().join("Library/Logs/SpkEditor")
-        } else {
-            data_dir().join("logs")
-        }
-    })
+    LOGS_DIR.get_or_init(|| base_dir().join("logs"))
 }
 
 /// Returns the path to the SPK Editor server directory on this SSH host.

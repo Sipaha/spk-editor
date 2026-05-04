@@ -10,44 +10,171 @@
 //! this section is what the user sees on every fresh launch — it's the
 //! Solutions launcher for the whole editor. See FORK.md §11.
 
-use anyhow::anyhow;
 use chrono::{DateTime, Utc};
-use gpui::{AnyElement, AnyWindowHandle, App, IntoElement};
-use solutions::{Solution, SolutionId, SolutionStore, SolutionStoreEvent};
+use editor::{Editor, EditorEvent};
+use gpui::{
+    AnyElement, App, ClickEvent, Entity, Focusable, Global, IntoElement, MouseButton, Window,
+};
+use settings::Settings as _;
+use solutions::{Solution, SolutionId, SolutionStore, SolutionStoreEvent, SolutionsSettings};
 use std::path::PathBuf;
 use ui::{ButtonLike, Divider, DividerColor, IconButtonShape, prelude::*};
 use util::ResultExt as _;
-use workspace::{
-    AppState, OpenOptions,
-    welcome::{WelcomePage, register_welcome_section},
-};
+use workspace::welcome::{WelcomeWindow, register_welcome_section};
 
-use crate::actions::{DeleteSolution, NewSolution};
+use crate::actions::DeleteSolution;
+use crate::open::{OpenIntent, open_solution};
 
-/// Wires the Recent Solutions section onto the welcome page. Called once
-/// from `solutions_ui::init`.
+/// Welcome-window-scoped state for the inline name prompt used by both
+/// "Create new solution" and per-row "Rename". Lives as a `Global`
+/// because the section renderer is a stateless `Fn(&mut App)` closure
+/// (see `register_welcome_section`) and can't carry per-window fields
+/// of its own. Reset on every new launcher window.
+struct WelcomeEditState {
+    editor: Entity<Editor>,
+    mode: WelcomeEditMode,
+}
+
+#[derive(Clone)]
+enum WelcomeEditMode {
+    Idle,
+    Creating,
+    Renaming(SolutionId),
+}
+
+impl Global for WelcomeEditState {}
+
+/// Wires the Recent Solutions section into the launcher window. Called
+/// once from `solutions_ui::init`.
 pub fn init(cx: &mut App) {
     register_welcome_section(cx, render_section);
 
-    // WelcomePage doesn't know about SolutionStore on its own, so without
-    // this hook the Recent Solutions section would render once at page
-    // construction and then stay frozen. We subscribe each new WelcomePage
-    // to SolutionStoreEvent::Changed and call `cx.notify` to re-run the
-    // section renderer after `solutions.open` / `delete` / `touch_last_opened`.
-    cx.observe_new::<WelcomePage>(|_page, _window, cx| {
+    // The launcher window doesn't know about SolutionStore on its own,
+    // so without this hook the Recent Solutions section would render
+    // once at window construction and then stay frozen. We subscribe
+    // each new launcher window to SolutionStoreEvent::Changed and call
+    // `cx.notify` to re-run the section renderer after solution
+    // create/delete/touch. Also (re)create the inline-edit Editor used
+    // by the Create / Rename prompts so it lives in this window's
+    // entity tree.
+    cx.observe_new::<WelcomeWindow>(|_window_view, window, cx| {
         let Some(store) = SolutionStore::try_global(cx) else {
             return;
         };
-        cx.subscribe(&store, |_page, _store, _event: &SolutionStoreEvent, cx| {
-            cx.notify();
-        })
+        cx.subscribe(
+            &store,
+            |_window_view, _store, _event: &SolutionStoreEvent, cx| {
+                cx.notify();
+            },
+        )
         .detach();
+
+        let Some(window) = window else {
+            return;
+        };
+        install_edit_state(window, cx);
     })
     .detach();
 }
 
+fn install_edit_state(window: &mut Window, cx: &mut gpui::Context<WelcomeWindow>) {
+    let editor = cx.new(|cx| Editor::single_line(window, cx));
+    // Submit on Enter is wired through the EditorEvent stream — a
+    // dedicated Edited handler would also work, but `BufferEdited` is
+    // the one event that fires both for typing and for `set_text`
+    // (which we use when entering rename mode), so subscribing here
+    // avoids duplicating the bookkeeping.
+    cx.subscribe(&editor, on_editor_event).detach();
+    cx.set_global(WelcomeEditState {
+        editor,
+        mode: WelcomeEditMode::Idle,
+    });
+}
+
+fn on_editor_event(
+    _: &mut WelcomeWindow,
+    _editor: Entity<Editor>,
+    _event: &EditorEvent,
+    cx: &mut gpui::Context<WelcomeWindow>,
+) {
+    // The editor itself notifies on its own; we rerender the launcher
+    // when the global state changes (via cx.notify from finish/cancel).
+    cx.notify();
+}
+
+fn finish_edit(commit: bool, window: &mut Window, cx: &mut App) {
+    let Some(state) = cx.try_global::<WelcomeEditState>() else {
+        return;
+    };
+    let mode = state.mode.clone();
+    let editor = state.editor.clone();
+    let raw = editor.read(cx).text(cx);
+    let name = raw.trim().to_string();
+
+    if commit && !name.is_empty() {
+        if let Some(store) = SolutionStore::try_global(cx) {
+            match mode {
+                WelcomeEditMode::Creating => {
+                    let root = SolutionsSettings::get_global(cx).root.clone();
+                    let sol_id = store.update(cx, |s, cx| s.create_solution(&name, root, cx));
+                    if let Some(sol_id) = sol_id.log_err() {
+                        reset_edit_state(&editor, window, cx);
+                        open_solution(sol_id, None, OpenIntent::SameWindow, cx);
+                        return;
+                    }
+                }
+                WelcomeEditMode::Renaming(id) => {
+                    store
+                        .update(cx, |s, cx| s.rename_solution(&id, &name, cx))
+                        .log_err();
+                }
+                WelcomeEditMode::Idle => {}
+            }
+        }
+    }
+    reset_edit_state(&editor, window, cx);
+}
+
+fn reset_edit_state(editor: &Entity<Editor>, window: &mut Window, cx: &mut App) {
+    editor.update(cx, |editor, cx| editor.set_text("", window, cx));
+    cx.update_global::<WelcomeEditState, _>(|state, _| {
+        state.mode = WelcomeEditMode::Idle;
+    });
+    refresh_welcome(cx);
+}
+
+fn refresh_welcome(cx: &mut App) {
+    if let Some(handle) = workspace::welcome::find_existing(cx) {
+        handle.update(cx, |_, _, cx| cx.notify()).ok();
+    }
+}
+
+fn enter_mode(mode: WelcomeEditMode, prefill: &str, window: &mut Window, cx: &mut App) {
+    let Some(editor) = cx
+        .try_global::<WelcomeEditState>()
+        .map(|s| s.editor.clone())
+    else {
+        return;
+    };
+    editor.update(cx, |editor, cx| {
+        editor.set_text(prefill, window, cx);
+        editor.select_all(&editor::actions::SelectAll, window, cx);
+    });
+    let focus = editor.focus_handle(cx);
+    cx.update_global::<WelcomeEditState, _>(|state, _| {
+        state.mode = mode;
+    });
+    refresh_welcome(cx);
+    window.focus(&focus, cx);
+}
+
 fn render_section(cx: &mut App) -> Option<AnyElement> {
     let entries = all_solutions(cx);
+    let mode = cx
+        .try_global::<WelcomeEditState>()
+        .map(|s| s.mode.clone())
+        .unwrap_or(WelcomeEditMode::Idle);
+
     let mut list = ui::v_flex().w_full().gap_2();
     list = list.child(
         ui::h_flex()
@@ -75,11 +202,43 @@ fn render_section(cx: &mut App) -> Option<AnyElement> {
         );
     } else {
         for (index, entry) in entries.into_iter().enumerate() {
-            list = list.child(render_card(index, entry, cx));
+            let renaming = matches!(&mode, WelcomeEditMode::Renaming(id) if id == &entry.id);
+            list = list.child(render_card(index, entry, renaming, cx));
         }
     }
-    list = list.child(render_create_button());
+    if matches!(mode, WelcomeEditMode::Creating) {
+        list = list.child(render_inline_editor(cx, "Solution name"));
+    } else {
+        list = list.child(render_create_button());
+    }
     Some(list.into_any_element())
+}
+
+fn render_inline_editor(cx: &mut App, _placeholder: &str) -> impl IntoElement {
+    let editor = cx
+        .try_global::<WelcomeEditState>()
+        .map(|s| s.editor.clone());
+    let Some(editor) = editor else {
+        return ui::div().into_any_element();
+    };
+    ui::h_flex()
+        .key_context("WelcomeNamePrompt")
+        .on_action(|_: &menu::Confirm, window, cx| finish_edit(true, window, cx))
+        .on_action(|_: &menu::Cancel, window, cx| finish_edit(false, window, cx))
+        .w_full()
+        .gap_2()
+        .px_1()
+        .child(div().flex_1().child(editor))
+        .child(
+            ui::Button::new("welcome-prompt-confirm", "OK")
+                .style(ui::ButtonStyle::Filled)
+                .on_click(|_, window, cx| finish_edit(true, window, cx)),
+        )
+        .child(
+            ui::Button::new("welcome-prompt-cancel", "Cancel")
+                .on_click(|_, window, cx| finish_edit(false, window, cx)),
+        )
+        .into_any_element()
 }
 
 fn render_create_button() -> impl IntoElement {
@@ -98,15 +257,29 @@ fn render_create_button() -> impl IntoElement {
                 .child(Label::new("Create new solution")),
         )
         .on_click(|_, window, cx| {
-            window.dispatch_action(Box::new(NewSolution), cx);
+            // Welcome is its own top-level window with no `Workspace`
+            // context, so the workspace-scoped `NewSolution` action
+            // wouldn't reach a handler here. Switch the section into
+            // an inline name-prompt; commit creates the solution via
+            // SolutionStore directly and routes through the shared
+            // open flow — opens it in a fresh workspace window and
+            // retires the launcher.
+            enter_mode(WelcomeEditMode::Creating, "", window, cx);
         })
 }
 
 /// IDEA-style card: colored avatar, name, path, last-opened ago.
-/// Trash button on hover.
-fn render_card(index: usize, entry: RecentSolution, cx: &App) -> impl IntoElement {
+/// Trash + rename buttons on hover.
+fn render_card(
+    index: usize,
+    entry: RecentSolution,
+    renaming: bool,
+    cx: &App,
+) -> impl IntoElement {
     let entry_id = entry.id.clone();
     let entry_id_for_delete = entry.id.clone();
+    let entry_id_for_rename = entry.id.clone();
+    let original_name = entry.label.clone();
 
     let avatar_color = avatar_color_for(&entry.label, cx);
     let initials = initials_of(&entry.label);
@@ -142,9 +315,14 @@ fn render_card(index: usize, entry: RecentSolution, cx: &App) -> impl IntoElemen
                 .gap_2()
                 .items_center()
                 .cursor_pointer()
-                .on_click(move |_, window, cx| {
-                    let source = window.window_handle();
-                    open_solution(entry_id.clone(), Some(source), cx);
+                .on_click(move |event: &ClickEvent, window, cx| {
+                    let source = window.window_handle().downcast();
+                    let intent = if click_button(event) == Some(MouseButton::Middle) {
+                        OpenIntent::NewWindow
+                    } else {
+                        OpenIntent::SameWindow
+                    };
+                    open_solution(entry_id.clone(), source, intent, cx);
                 })
                 .child(
                     ui::h_flex()
@@ -168,13 +346,40 @@ fn render_card(index: usize, entry: RecentSolution, cx: &App) -> impl IntoElemen
                         .child(
                             ui::h_flex()
                                 .gap_2()
-                                .child(Label::new(entry.label.clone()).size(LabelSize::Default))
-                                .when(entry.is_empty, |this| {
-                                    this.child(
-                                        Label::new("(empty)")
-                                            .color(Color::Muted)
-                                            .size(LabelSize::XSmall),
-                                    )
+                                .when(renaming, |this| {
+                                    this.key_context("WelcomeNamePrompt")
+                                        .on_action(|_: &menu::Confirm, window, cx| {
+                                            finish_edit(true, window, cx)
+                                        })
+                                        .on_action(|_: &menu::Cancel, window, cx| {
+                                            finish_edit(false, window, cx)
+                                        })
+                                })
+                                .map(|row| {
+                                    if renaming {
+                                        if let Some(state) = cx.try_global::<WelcomeEditState>() {
+                                            row.child(
+                                                div().flex_1().child(state.editor.clone()),
+                                            )
+                                        } else {
+                                            row.child(
+                                                Label::new(entry.label.clone())
+                                                    .size(LabelSize::Default),
+                                            )
+                                        }
+                                    } else {
+                                        row.child(
+                                            Label::new(entry.label.clone())
+                                                .size(LabelSize::Default),
+                                        )
+                                        .when(entry.is_empty, |this| {
+                                            this.child(
+                                                Label::new("(empty)")
+                                                    .color(Color::Muted)
+                                                    .size(LabelSize::XSmall),
+                                            )
+                                        })
+                                    }
                                 }),
                         )
                         .child(
@@ -190,116 +395,57 @@ fn render_card(index: usize, entry: RecentSolution, cx: &App) -> impl IntoElemen
                         .size(LabelSize::XSmall),
                 ),
         )
-        .child(
-            IconButton::new(("delete-solution", index), IconName::Trash)
-                .shape(IconButtonShape::Square)
-                .icon_size(IconSize::Small)
-                .icon_color(Color::Muted)
-                .tooltip(ui::Tooltip::text("Delete solution"))
-                .on_click(move |_, window, cx| {
-                    window.dispatch_action(
-                        Box::new(DeleteSolution {
-                            id: entry_id_for_delete.0.clone(),
-                        }),
-                        cx,
-                    );
-                }),
-        )
-}
-
-fn open_solution(sol_id: SolutionId, source_window: Option<AnyWindowHandle>, cx: &mut App) {
-    let Some(store) = SolutionStore::try_global(cx) else {
-        return;
-    };
-    // For an empty solution we still want to open a window — just one with
-    // `solution.root` as the only worktree, plus an EmptySolutionPage item
-    // so the user has a CTA instead of a blank workspace.
-    struct OpenInfo {
-        paths: Vec<std::path::PathBuf>,
-        name: String,
-        is_empty: bool,
-    }
-    let info = match store.read_with(cx, |s, _| -> anyhow::Result<OpenInfo> {
-        let solution = s
-            .solutions()
-            .iter()
-            .find(|sol| sol.id == sol_id)
-            .ok_or_else(|| anyhow!("solution not found: {}", sol_id.0))?;
-        let is_empty = solution.members.is_empty();
-        let name = solution.name.clone();
-        let paths = if is_empty {
-            vec![solution.root.clone()]
-        } else {
-            s.paths_for_open(&sol_id)?
-        };
-        Ok(OpenInfo {
-            paths,
-            name,
-            is_empty,
-        })
-    }) {
-        Ok(info) => info,
-        Err(err) => {
-            log::error!("solutions_ui: resolving paths for {} failed: {err}", sol_id.0);
-            return;
-        }
-    };
-    store
-        .update(cx, |s, cx| s.touch_last_opened(&sol_id, cx))
-        .log_err();
-    let app_state = AppState::global(cx);
-    let mut options = OpenOptions::default();
-    options.open_mode = workspace::OpenMode::NewWindow;
-    let task = workspace::open_paths(&info.paths, app_state, options, cx);
-    cx.spawn(async move |cx| {
-        let Some(opened) = task.await.log_err() else {
-            return;
-        };
-        if info.is_empty {
-            let sol_id_for_page = sol_id.clone();
-            let name_for_page = info.name.clone();
-            cx.update(|cx| {
-                opened
-                    .window
-                    .update(cx, |multi_workspace, window, cx| {
-                        let workspace = multi_workspace.workspace().clone();
-                        let weak_workspace = workspace.downgrade();
-                        workspace.update(cx, |ws, cx| {
-                            let page = cx.new(|cx| {
-                                crate::empty_solution_page::EmptySolutionPage::new(
-                                    sol_id_for_page,
-                                    name_for_page,
-                                    weak_workspace,
-                                    cx,
-                                )
-                            });
-                            ws.add_item_to_active_pane(
-                                Box::new(page),
-                                None,
-                                true,
+        .map(|row| {
+            if renaming {
+                row.child(
+                    ui::Button::new(("rename-confirm", index), "OK")
+                        .style(ui::ButtonStyle::Filled)
+                        .on_click(|_, window, cx| finish_edit(true, window, cx)),
+                )
+                .child(
+                    ui::Button::new(("rename-cancel", index), "Cancel")
+                        .on_click(|_, window, cx| finish_edit(false, window, cx)),
+                )
+            } else {
+                row.child(
+                    IconButton::new(("rename-solution", index), IconName::Pencil)
+                        .shape(IconButtonShape::Square)
+                        .icon_size(IconSize::Small)
+                        .icon_color(Color::Muted)
+                        .tooltip(ui::Tooltip::text("Rename solution"))
+                        .on_click(move |_, window, cx| {
+                            enter_mode(
+                                WelcomeEditMode::Renaming(entry_id_for_rename.clone()),
+                                &original_name,
                                 window,
                                 cx,
                             );
-                        });
-                    })
-                    .log_err();
-            });
-        }
-        // Defensive: don't close the source window if `open_paths` reused it
-        // (today NewWindow always creates a fresh one, but a future change
-        // could reuse — closing it would kill the window the user just
-        // opened). When the keybind path supplies no source, nothing to do.
-        let Some(source) = source_window else { return };
-        if source.window_id() == opened.window.window_id() {
-            return;
-        }
-        cx.update(|cx| {
-            if let Err(err) = source.update(cx, |_, window, _| window.remove_window()) {
-                log::warn!("solutions_ui: failed to close welcome window: {err}");
+                        }),
+                )
+                .child(
+                    IconButton::new(("delete-solution", index), IconName::Trash)
+                        .shape(IconButtonShape::Square)
+                        .icon_size(IconSize::Small)
+                        .icon_color(Color::Muted)
+                        .tooltip(ui::Tooltip::text("Delete solution"))
+                        .on_click(move |_, window, cx| {
+                            window.dispatch_action(
+                                Box::new(DeleteSolution {
+                                    id: entry_id_for_delete.0.clone(),
+                                }),
+                                cx,
+                            );
+                        }),
+                )
             }
-        });
-    })
-    .detach();
+        })
+}
+
+fn click_button(event: &ClickEvent) -> Option<MouseButton> {
+    match event {
+        ClickEvent::Mouse(mouse) => Some(mouse.down.button),
+        _ => None,
+    }
 }
 
 #[cfg_attr(test, derive(Debug))]

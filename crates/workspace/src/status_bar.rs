@@ -35,7 +35,9 @@ trait StatusItemViewHandle: Send {
 struct SidebarStatus {
     open: bool,
     side: SidebarSide,
+    #[allow(dead_code)]
     has_notifications: bool,
+    #[allow(dead_code)]
     show_toggle: bool,
 }
 
@@ -113,36 +115,31 @@ impl Render for StatusBar {
 impl StatusBar {
     fn render_left_tools(
         &self,
-        sidebar: &SidebarStatus,
-        cx: &mut Context<Self>,
+        _sidebar: &SidebarStatus,
+        _cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        // SPK fork: sidebar is disabled (see `zed::zed::initialize_workspace`),
+        // so the status-bar toggle that normally re-opens it is hidden.
         h_flex()
             .gap_1()
             .min_w_0()
             .overflow_x_hidden()
-            .when(
-                sidebar.show_toggle && !sidebar.open && sidebar.side == SidebarSide::Left,
-                |this| this.child(self.render_sidebar_toggle(sidebar, cx)),
-            )
             .children(self.left_items.iter().map(|item| item.to_any()))
     }
 
     fn render_right_tools(
         &self,
-        sidebar: &SidebarStatus,
-        cx: &mut Context<Self>,
+        _sidebar: &SidebarStatus,
+        _cx: &mut Context<Self>,
     ) -> impl IntoElement {
         h_flex()
             .flex_shrink_0()
             .gap_1()
             .overflow_x_hidden()
             .children(self.right_items.iter().rev().map(|item| item.to_any()))
-            .when(
-                sidebar.show_toggle && !sidebar.open && sidebar.side == SidebarSide::Right,
-                |this| this.child(self.render_sidebar_toggle(sidebar, cx)),
-            )
     }
 
+    #[allow(dead_code)]
     fn render_sidebar_toggle(
         &self,
         sidebar: &SidebarStatus,

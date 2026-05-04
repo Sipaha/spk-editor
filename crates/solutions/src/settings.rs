@@ -14,20 +14,22 @@ impl Default for SolutionsSettings {
     }
 }
 
+/// Default solutions storage root: `<base_dir>/solutions`. The base
+/// directory comes from `paths::base_dir()` (single-folder profile —
+/// `~/spk-editor` for release, `~/spk-editor-dev` for debug, or any
+/// `set_custom_data_dir` override) so all per-profile state lives in
+/// one place.
 fn default_root() -> PathBuf {
-    PathBuf::from(shellexpand::tilde("~/spk-editor/solutions").into_owned())
+    paths::base_dir().join("solutions")
 }
 
 impl Settings for SolutionsSettings {
     fn from_settings(content: &settings::SettingsContent) -> Self {
-        let raw = content
-            .solutions
-            .as_ref()
-            .and_then(|s| s.root.clone())
-            .unwrap_or_else(|| "~/spk-editor/solutions".to_string());
-        Self {
-            root: PathBuf::from(shellexpand::tilde(&raw).into_owned()),
-        }
+        let root = match content.solutions.as_ref().and_then(|s| s.root.clone()) {
+            Some(raw) => PathBuf::from(shellexpand::tilde(&raw).into_owned()),
+            None => default_root(),
+        };
+        Self { root }
     }
 }
 
@@ -43,6 +45,10 @@ mod tests {
             "tilde was not expanded: {}",
             s.root.display()
         );
-        assert!(s.root.ends_with("spk-editor/solutions"));
+        // Root is `~/spk-editor/solutions` in release and
+        // `~/spk-editor-dev/solutions` in debug. Either way the last
+        // segment is `solutions` and the parent matches the active
+        // base directory name.
+        assert!(s.root.ends_with("solutions"));
     }
 }

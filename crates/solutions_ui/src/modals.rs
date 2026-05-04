@@ -1,6 +1,7 @@
-use editor::Editor;
+use editor::{Editor, EditorEvent};
 use gpui::{
-    AppContext as _, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, WeakEntity, actions,
+    AppContext as _, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Subscription,
+    WeakEntity, actions,
 };
 use settings::Settings as _;
 use solutions::{SolutionId, SolutionStore, SolutionsSettings};
@@ -154,6 +155,7 @@ pub struct AddCatalogProjectModal {
     branch_editor: Entity<Editor>,
     _workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
+    _url_subscription: Subscription,
 }
 
 impl AddCatalogProjectModal {
@@ -179,12 +181,38 @@ impl AddCatalogProjectModal {
             editor.set_placeholder_text("Default branch (optional)", window, cx);
         });
         let focus_handle = cx.focus_handle();
+
+        // Auto-fill the Name field from the Remote URL while the user types,
+        // unless they have already put something in Name themselves. We treat
+        // a manually-cleared name as "empty" too — typing in URL again will
+        // refill, which is the simpler / less surprising rule than tracking a
+        // sticky "user-modified" bit.
+        let url_subscription =
+            cx.subscribe_in(&url_editor, window, |this, url_editor, event, window, cx| {
+                if !matches!(event, EditorEvent::Edited { .. } | EditorEvent::BufferEdited) {
+                    return;
+                }
+                let current_name = this.name_editor.read(cx).text(cx);
+                if !current_name.trim().is_empty() {
+                    return;
+                }
+                let url = url_editor.read(cx).text(cx);
+                let derived = derive_project_name_from_url(&url);
+                if derived.is_empty() {
+                    return;
+                }
+                this.name_editor.update(cx, |editor, cx| {
+                    editor.set_text(derived, window, cx);
+                });
+            });
+
         Self {
             name_editor,
             url_editor,
             branch_editor,
             _workspace: workspace,
             focus_handle,
+            _url_subscription: url_subscription,
         }
     }
 
@@ -208,6 +236,18 @@ impl AddCatalogProjectModal {
     }
 }
 
+/// Extracts a project name from a remote URL. Handles the three forms users
+/// usually paste:
+///
+/// - `git@host:org/repo.git` → `repo`
+/// - `https://host/org/repo.git` → `repo`
+/// - `https://host/org/repo` → `repo`
+fn derive_project_name_from_url(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    let last = trimmed.rsplit(['/', ':']).next().unwrap_or("");
+    last.trim_end_matches(".git").to_string()
+}
+
 impl EventEmitter<DismissEvent> for AddCatalogProjectModal {}
 
 impl Focusable for AddCatalogProjectModal {
@@ -219,6 +259,13 @@ impl Focusable for AddCatalogProjectModal {
 impl ModalView for AddCatalogProjectModal {
     fn debug_kind(&self) -> &'static str {
         "AddCatalogProject"
+    }
+
+    /// Don't fall over for a stray click on the overlay — the user is
+    /// in the middle of typing project metadata. Dismiss only via the
+    /// explicit "Cancel" button or the Escape action.
+    fn dismiss_on_overlay_click(&self) -> bool {
+        false
     }
 }
 
@@ -374,19 +421,16 @@ impl Render for DeleteSolutionModal {
                     .gap_1()
                     .child(
                         Label::new("All files under this directory will be permanently deleted from disk:")
-                            .color(Color::Muted)
-                            .size(LabelSize::Small),
+                            .color(Color::Muted),
                     )
                     .child(
                         Label::new(path_str)
-                            .color(Color::Muted)
-                            .size(LabelSize::XSmall),
+                            .color(Color::Muted),
                     ),
             )
             .child(
                 Label::new("This action cannot be undone.")
-                    .color(Color::Warning)
-                    .size(LabelSize::Small),
+                    .color(Color::Warning),
             )
             .child(
                 h_flex()

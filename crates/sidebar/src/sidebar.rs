@@ -22,10 +22,12 @@ use feature_flags::{
     AgentThreadWorktreeLabel, AgentThreadWorktreeLabelFlag, FeatureFlag, FeatureFlagAppExt as _,
 };
 use gpui::{
-    Action as _, AnyElement, App, ClickEvent, Context, DismissEvent, Entity, EntityId, FocusHandle,
-    Focusable, KeyContext, ListState, Modifiers, Pixels, Render, SharedString, Task, WeakEntity,
-    Window, WindowHandle, linear_color_stop, linear_gradient, list, prelude::*, px,
+    AnyElement, App, ClickEvent, Context, DismissEvent, Entity, EntityId, FocusHandle, Focusable,
+    KeyContext, ListState, Modifiers, Pixels, Render, SharedString, Task, WeakEntity, Window,
+    WindowHandle, linear_color_stop, linear_gradient, list, prelude::*, px,
 };
+#[cfg(test)]
+use gpui::Action as _;
 use menu::{
     Cancel, Confirm, SelectChild, SelectFirst, SelectLast, SelectNext, SelectParent, SelectPrevious,
 };
@@ -52,7 +54,7 @@ use util::ResultExt as _;
 use util::path_list::PathList;
 use workspace::{
     CloseWindow, FocusWorkspaceSidebar, MultiWorkspace, MultiWorkspaceEvent, NextProject,
-    NextThread, Open, OpenMode, PreviousProject, PreviousThread, ProjectGroupKey, SaveIntent,
+    NextThread, OpenMode, PreviousProject, PreviousThread, ProjectGroupKey, SaveIntent,
     Sidebar as WorkspaceSidebar, SidebarSide, Toast, ToggleWorkspaceSidebar, Workspace,
     notifications::NotificationId, sidebar_side_context_menu,
 };
@@ -4374,38 +4376,16 @@ impl Sidebar {
             .gap_1()
             .track_focus(&self.focus_handle(cx))
             .child(
-                Button::new("open_project", "Open Project")
-                    .full_width()
-                    .key_binding(KeyBinding::for_action(&workspace::Open::default(), cx))
-                    .on_click(|_, window, cx| {
-                        let side = match AgentSettings::get_global(cx).sidebar_side() {
-                            SidebarSide::Left => "left",
-                            SidebarSide::Right => "right",
-                        };
-                        telemetry::event!("Sidebar Add Project Clicked", side = side);
-                        window.dispatch_action(
-                            Open {
-                                create_new_window: false,
-                            }
-                            .boxed_clone(),
-                            cx,
-                        );
-                    }),
+                Label::new("Solution is empty")
+                    .size(LabelSize::Small)
+                    .color(Color::Default),
             )
             .child(
-                h_flex()
-                    .w_1_2()
-                    .gap_2()
-                    .child(Divider::horizontal().color(ui::DividerColor::Border))
-                    .child(Label::new("or").size(LabelSize::XSmall).color(Color::Muted))
-                    .child(Divider::horizontal().color(ui::DividerColor::Border)),
-            )
-            .child(
-                Button::new("clone_repo", "Clone Repository")
-                    .full_width()
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(git::Clone.boxed_clone(), cx);
-                    }),
+                div().w_full().text_center().child(
+                    Label::new("Add projects from the catalog to start working.")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                ),
             )
     }
 

@@ -7,13 +7,15 @@
 //! chat lives in its own dedicated docked panel rather than competing with
 //! code for the main editor area.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Context as _;
+use util::ResultExt as _;
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window, div, px,
+    Animation, AnimationExt, App, Context, ElementId, Entity, EventEmitter, FocusHandle,
+    Focusable, InteractiveElement, IntoElement, MouseButton, ParentElement, Render,
+    SharedString, StatefulInteractiveElement, Styled, Subscription, WeakEntity, Window,
+    div, px, pulsating_between,
 };
 use solutions::{SolutionId, SolutionStore, SolutionStoreEvent};
 use ui::prelude::*;
@@ -28,7 +30,7 @@ use workspace::{
 };
 
 use crate::actions::FocusNavigator;
-use crate::model::{AgentServerId, SolutionSession, SolutionSessionMetadata};
+use crate::model::{AgentServerId, SessionState, SolutionSession, SolutionSessionMetadata};
 use crate::session_view::SolutionSessionView;
 use crate::store::SolutionAgentStore;
 
@@ -40,6 +42,75 @@ struct PendingCreation {
     id: u64,
     display_name: SharedString,
     icon: IconName,
+}
+
+/// Visual state shown next to a session tab title. Drives both the colour
+/// of the dot and whether it pulses, so glance-reading the tab strip
+/// answers "which sessions need me / are still working / are stuck."
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum SessionStatusIndicator {
+    /// `Idle` — nothing in flight, last turn finished cleanly. Muted
+    /// dot so every tab has a visual marker but a quiet session
+    /// doesn't compete with active ones.
+    Idle,
+    /// `Running` — agent is actively processing. Pulses to make a
+    /// running tab clearly distinct from a static "needs attention"
+    /// dot.
+    Working,
+    /// `AwaitingInput` — agent is parked waiting for the user. Static
+    /// warning-coloured dot so the user notices on return.
+    AwaitingUser,
+    /// `Errored` — last turn failed; user must read the error and
+    /// decide what to do.
+    Errored,
+}
+
+fn session_status_indicator(state: &SessionState) -> SessionStatusIndicator {
+    match state {
+        SessionState::Idle => SessionStatusIndicator::Idle,
+        SessionState::Running { .. } => SessionStatusIndicator::Working,
+        SessionState::AwaitingInput => SessionStatusIndicator::AwaitingUser,
+        SessionState::Errored(_) => SessionStatusIndicator::Errored,
+    }
+}
+
+fn render_status_dot(status: SessionStatusIndicator, cx: &App) -> gpui::AnyElement {
+    let (color, tooltip): (Color, &'static str) = match status {
+        SessionStatusIndicator::Idle => (Color::Muted, "Idle"),
+        SessionStatusIndicator::Working => (Color::Info, "Agent is working"),
+        SessionStatusIndicator::AwaitingUser => (Color::Warning, "Awaiting your input"),
+        SessionStatusIndicator::Errored => (Color::Error, "Session errored"),
+    };
+    let dot = div()
+        .flex_none()
+        .size(px(8.0))
+        .rounded_full()
+        .bg(color.color(cx));
+    // Pulse the "Working" dot so a glance distinguishes "in progress" from
+    // a static "needs attention" marker. The opacity sweep matches the
+    // upstream pattern in `ai_setting_item.rs`.
+    let dot: gpui::AnyElement = if matches!(status, SessionStatusIndicator::Working) {
+        dot.with_animation(
+            ElementId::Name(format!("solution-tab-status-pulse-{:?}", status).into()),
+            Animation::new(std::time::Duration::from_secs(2))
+                .repeat()
+                .with_easing(pulsating_between(0.4, 1.0)),
+            |element: gpui::Div, delta| element.opacity(delta),
+        )
+        .into_any_element()
+    } else {
+        dot.into_any_element()
+    };
+    div()
+        .id(SharedString::from(format!(
+            "solution-tab-status-{:?}",
+            status
+        )))
+        .flex_none()
+        .pr_1()
+        .tooltip(ui::Tooltip::text(tooltip))
+        .child(dot)
+        .into_any_element()
 }
 
 pub struct SolutionSessionsNavigator {
@@ -66,8 +137,37 @@ pub struct SolutionSessionsNavigator {
     /// active solution changes; populates the History popover and the
     /// "Continue last session" empty-state CTA.
     historic_sessions: Vec<SolutionSessionMetadata>,
+    /// In-progress tab-rename. `None` means no tab is being renamed.
+    /// While `Some`, the targeted tab swaps its label for the inline
+    /// editor and the pencil button is replaced with a checkmark.
+    /// Cleared on commit / cancel / tab-switch.
+    renaming: Option<RenamingTab>,
+    /// Per-session model name cache for the status row. Filled lazily
+    /// on the first render that asks for a session's model — the ACP
+    /// `selected_model` accessor is async (round-trip to the agent), so
+    /// we kick off a fetch and store the result here for synchronous
+    /// reads on subsequent frames.
+    cached_models: HashMap<crate::model::SolutionSessionId, SharedString>,
+    /// Sessions for which a model fetch is in-flight, used to dedupe
+    /// the spawn so the status row doesn't fire a fresh request every
+    /// time the agent emits a token-update event.
+    pending_model_fetches: HashSet<crate::model::SolutionSessionId>,
     _store_subscription: Subscription,
     _solutions_subscription: Option<Subscription>,
+}
+
+/// Per-rename mutable state. The editor entity is owned here so the
+/// inline editor's text persists across re-renders triggered by
+/// unrelated store events (new entries arriving in another tab, etc.).
+/// In-flight tab rename. `prior_selected_index` is captured when the
+/// rename starts so we can restore the selection state on commit /
+/// cancel — without it, force-selecting the renaming tab would leave
+/// it permanently active even when the user was renaming an inactive
+/// tab and never wanted to switch focus.
+struct RenamingTab {
+    id: crate::model::SolutionSessionId,
+    editor: Entity<editor::Editor>,
+    prior_selected_index: Option<usize>,
 }
 
 impl SolutionSessionsNavigator {
@@ -105,6 +205,9 @@ impl SolutionSessionsNavigator {
             pending: Vec::new(),
             next_pending_id: 0,
             historic_sessions: Vec::new(),
+            renaming: None,
+            cached_models: HashMap::default(),
+            pending_model_fetches: HashSet::default(),
             _store_subscription: store_subscription,
             _solutions_subscription: solutions_subscription,
         };
@@ -171,7 +274,12 @@ impl SolutionSessionsNavigator {
     fn derive_active_solution(&self, cx: &App) -> Option<SolutionId> {
         let project = self.project.upgrade()?;
         let store = SolutionStore::try_global(cx)?;
-        let worktrees = project.read(cx).visible_worktrees(cx).collect::<Vec<_>>();
+        // Iterate ALL worktrees, not just visible ones — an "empty"
+        // solution attaches its `solution.root` as a hidden worktree
+        // (so the project panel stays clean for the EmptySolutionPage)
+        // but we still need to recognise the solution as active so
+        // the agent navigator shows up.
+        let worktrees = project.read(cx).worktrees(cx).collect::<Vec<_>>();
         for worktree in worktrees {
             let path = worktree.read(cx).abs_path();
             let id = store
@@ -216,6 +324,15 @@ impl SolutionSessionsNavigator {
         }
         let session_id = self.open_sessions.remove(idx);
         self.views.remove(&session_id);
+        // If the closed tab was being renamed, the rename slot points
+        // at a session that no longer exists in this strip — drop it.
+        if self
+            .renaming
+            .as_ref()
+            .is_some_and(|r| r.id == session_id)
+        {
+            self.renaming = None;
+        }
         if let Some(sel) = self.selected_index {
             self.selected_index = if self.open_sessions.is_empty() {
                 None
@@ -230,9 +347,84 @@ impl SolutionSessionsNavigator {
         cx.notify();
     }
 
+    /// Enter inline-rename mode for `id`. Spawns a single-line editor
+    /// pre-filled with the current title and grabs focus so the user
+    /// can immediately start typing. Idempotent — re-clicking the
+    /// pencil while already renaming the same tab is a no-op.
+    fn start_rename(
+        &mut self,
+        id: crate::model::SolutionSessionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.renaming.as_ref().is_some_and(|r| r.id == id) {
+            return;
+        }
+        let current_title = SolutionAgentStore::global(cx)
+            .read_with(cx, |s, _| s.session(id))
+            .map(|entity| entity.read(cx).title.to_string())
+            .unwrap_or_default();
+        let editor = cx.new(|cx| {
+            let mut e = editor::Editor::single_line(window, cx);
+            e.set_text(current_title, window, cx);
+            // Pre-select the whole title so a fresh keystroke
+            // overwrites it (Chrome-rename behavior). Without
+            // select_all the cursor lands at the end of the title and
+            // typing appends instead.
+            e.select_all(&editor::actions::SelectAll, window, cx);
+            e
+        });
+        let focus = editor.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        // Force-select the renaming tab so it doesn't read as
+        // `tab_inactive_background` (near-black in most themes) for the
+        // duration of the edit. Capture the previous selection so we
+        // can put it back when the rename ends — otherwise renaming an
+        // inactive tab silently switches focus to it.
+        let prior_selected_index = self.selected_index;
+        if let Some(idx) = self.open_sessions.iter().position(|sid| *sid == id) {
+            self.selected_index = Some(idx);
+        }
+        self.renaming = Some(RenamingTab {
+            id,
+            editor,
+            prior_selected_index,
+        });
+        cx.notify();
+    }
+
+    /// Commit the in-progress rename. Empty / whitespace-only input
+    /// is treated as Cancel — leaves the existing title alone instead
+    /// of blanking the tab.
+    fn commit_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.renaming.take() else {
+            return;
+        };
+        let new_title = state.editor.read(cx).text(cx);
+        let new_title = new_title.trim();
+        if !new_title.is_empty() {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| {
+                let _ = store.rename_session(state.id, SharedString::from(new_title), cx);
+            });
+        }
+        // Restore selection so renaming an inactive tab doesn't silently
+        // become a "switch to this tab" gesture.
+        self.selected_index = state.prior_selected_index;
+        cx.notify();
+    }
+
+    fn cancel_rename(&mut self, cx: &mut Context<Self>) {
+        if let Some(state) = self.renaming.take() {
+            self.selected_index = state.prior_selected_index;
+            cx.notify();
+        }
+    }
+
     fn create_and_open_session(
         &mut self,
         agent_id: AgentServerId,
+        cwd: Option<std::path::PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -255,6 +447,7 @@ impl SolutionSessionsNavigator {
         });
         let pending_id = self.next_pending_id;
         self.next_pending_id += 1;
+        let pending_label_for_err = display_name.clone();
         self.pending.push(PendingCreation {
             id: pending_id,
             display_name,
@@ -263,7 +456,7 @@ impl SolutionSessionsNavigator {
         cx.notify();
 
         let task = store.update(cx, |store, cx| {
-            store.create_session(solution_id, agent_id, project, cx)
+            store.create_session_with_cwd(solution_id, agent_id, project, cwd, cx)
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await.context("create_session failed");
@@ -280,7 +473,26 @@ impl SolutionSessionsNavigator {
                         }
                     }
                     Err(err) => {
+                        let err_str = format!("{err:#}");
                         log::error!("create_session failed: {err:?}");
+                        // Mirror the resume-side toast — without it the
+                        // body lloader just disappears with no clue why.
+                        let user_msg: SharedString = format!(
+                            "Couldn't start a new {pending_label_for_err} session: {err_str}"
+                        )
+                        .into();
+                        if let Some(workspace) = this.workspace.upgrade() {
+                            workspace.update(cx, |workspace, cx| {
+                                struct CreateFailedNotification;
+                                workspace.show_notification(
+                                    NotificationId::unique::<CreateFailedNotification>(),
+                                    cx,
+                                    move |cx| {
+                                        cx.new(|cx| MessageNotification::new(user_msg, cx))
+                                    },
+                                );
+                            });
+                        }
                         cx.notify();
                     }
                 }
@@ -391,9 +603,7 @@ impl SolutionSessionsNavigator {
     }
 
     fn render_new_session_button(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        if self.active_solution.is_none() {
-            return None;
-        }
+        let solution_id = self.active_solution.clone()?;
         let store = SolutionAgentStore::global(cx);
         let adapters = store.read_with(cx, |s, _| {
             s.adapters
@@ -408,61 +618,124 @@ impl SolutionSessionsNavigator {
         if adapters.is_empty() {
             return None;
         }
+        // Resolve the solution's root + member project paths/names. The
+        // root entry is always offered so users who want a top-level
+        // session don't have to pick a specific project.
+        struct CwdChoice {
+            label: SharedString,
+            path: Option<std::path::PathBuf>,
+        }
+        let solutions_store = solutions::SolutionStore::try_global(cx);
+        let cwd_choices: Vec<CwdChoice> = solutions_store
+            .as_ref()
+            .map(|store| {
+                store.read_with(cx, |store, _| {
+                    let mut choices = vec![CwdChoice {
+                        label: "Solution root".into(),
+                        path: None,
+                    }];
+                    if let Some(solution) =
+                        store.solutions().iter().find(|s| s.id == solution_id)
+                    {
+                        for member in &solution.members {
+                            let name = store
+                                .catalog()
+                                .iter()
+                                .find(|c| c.id == member.catalog_id)
+                                .map(|c| c.name.clone())
+                                .unwrap_or_else(|| member.catalog_id.0.clone());
+                            choices.push(CwdChoice {
+                                label: name.into(),
+                                path: Some(member.local_path.clone()),
+                            });
+                        }
+                    }
+                    choices
+                })
+            })
+            .unwrap_or_else(|| {
+                vec![CwdChoice {
+                    label: "Solution root".into(),
+                    path: None,
+                }]
+            });
+
         // The label stays adapter-agnostic on purpose — never hardcode a
         // specific neural network ("Claude", "Gemini", …) into the chrome.
-        // The single-vs-multi-adapter distinction only changes whether the
-        // click creates immediately or opens a chooser; the user-facing
-        // string is the same in both cases.
         let label = SharedString::from("New Session");
         let trigger = Button::new("solution-sessions-new", label)
             .style(ButtonStyle::Subtle)
-            .label_size(LabelSize::Small)
+            .label_size(LabelSize::Default)
             .start_icon(
                 Icon::new(IconName::Plus)
                     .size(IconSize::Small)
                     .color(Color::Muted),
             );
-        let element = if adapters.len() == 1 {
-            // Skip the popover on the single-adapter path; one click creates.
-            let (agent_id, _name, _icon) = adapters.into_iter().next().expect("adapters is non-empty");
-            trigger
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.create_and_open_session(agent_id.clone(), window, cx);
-                }))
-                .into_any_element()
-        } else {
-            PopoverMenu::new("solution-sessions-new-popover")
-                .trigger(trigger)
-                .menu({
-                    let weak = cx.entity().downgrade();
-                    move |window, cx| {
-                        let adapters = adapters.clone();
-                        let weak = weak.clone();
-                        Some(ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
-                            for (agent_id, name, icon) in adapters {
+
+        // When there's only one project root choice AND a single
+        // adapter, skip the popover — one click creates the session.
+        if cwd_choices.len() == 1 && adapters.len() == 1 {
+            let (agent_id, _, _) = adapters.into_iter().next().expect("non-empty");
+            return Some(
+                trigger
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.create_and_open_session(agent_id.clone(), None, window, cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+
+        let element = PopoverMenu::new("solution-sessions-new-popover")
+            .trigger(trigger)
+            .menu({
+                let weak = cx.entity().downgrade();
+                let adapters = adapters.clone();
+                move |window, cx| {
+                    let adapters = adapters.clone();
+                    let weak = weak.clone();
+                    let cwd_choices: Vec<(SharedString, Option<std::path::PathBuf>)> =
+                        cwd_choices
+                            .iter()
+                            .map(|c| (c.label.clone(), c.path.clone()))
+                            .collect();
+                    Some(ContextMenu::build(
+                        window,
+                        cx,
+                        move |mut menu, _window, _cx| {
+                            // Pick the project root. Adapter selection is
+                            // implicit: we pass the first registered
+                            // adapter, since the fork ships with a single
+                            // ACP adapter (Claude). If a future build
+                            // registers more, we'd extend this with a
+                            // submenu — but until then, an extra layer
+                            // of clicks for an irrelevant choice is
+                            // worse UX than this default.
+                            let primary_agent =
+                                adapters.first().map(|(id, _, _)| id.clone());
+                            for (label, path) in cwd_choices {
                                 let weak = weak.clone();
-                                let agent_id_for_action = agent_id.clone();
-                                menu = menu.entry(name, None, {
-                                    let _ = icon;
-                                    move |window, cx| {
-                                        if let Some(this) = weak.upgrade() {
-                                            this.update(cx, |this, cx| {
-                                                this.create_and_open_session(
-                                                    agent_id_for_action.clone(),
-                                                    window,
-                                                    cx,
-                                                );
-                                            });
-                                        }
-                                    }
+                                let agent = primary_agent.clone();
+                                menu = menu.entry(label, None, move |window, cx| {
+                                    let Some(this) = weak.upgrade() else {
+                                        return;
+                                    };
+                                    let Some(agent) = agent.clone() else {
+                                        return;
+                                    };
+                                    let path = path.clone();
+                                    this.update(cx, move |this, cx| {
+                                        this.create_and_open_session(
+                                            agent, path, window, cx,
+                                        );
+                                    });
                                 });
                             }
                             menu
-                        }))
-                    }
-                })
-                .into_any_element()
-        };
+                        },
+                    ))
+                }
+            })
+            .into_any_element();
         Some(element)
     }
 
@@ -486,17 +759,33 @@ impl SolutionSessionsNavigator {
         for (idx, session_id) in self.open_sessions.iter().enumerate() {
             let selected = self.selected_index == Some(idx);
             let session_id_for_select = *session_id;
-            let title = SolutionAgentStore::global(cx)
-                .read_with(cx, |s, _| s.session(session_id_for_select))
+            let session_entity = SolutionAgentStore::global(cx)
+                .read_with(cx, |s, _| s.session(session_id_for_select));
+            let title = session_entity
+                .as_ref()
                 .map(|entity| entity.read(cx).title.clone())
-                .unwrap_or_else(|| SharedString::from("Session"));
+                .unwrap_or_else(|| SharedString::from(session_id_for_select.to_string()));
+            let status = session_entity
+                .as_ref()
+                .map(|entity| session_status_indicator(&entity.read(cx).state))
+                .unwrap_or(SessionStatusIndicator::Idle);
             let bg = if selected {
                 cx.theme().colors().tab_active_background
             } else {
                 cx.theme().colors().tab_inactive_background
             };
+            let is_renaming = self
+                .renaming
+                .as_ref()
+                .is_some_and(|r| r.id == session_id_for_select);
+            // Per-tab hover group so the pencil shows only when the
+            // user is mousing over THIS tab — keeps the strip clean
+            // when scanning multiple sessions at once.
+            let tab_group =
+                SharedString::from(format!("tab-group-{session_id_for_select}"));
             let tab = div()
                 .id(SharedString::from(format!("tab-{}", session_id_for_select)))
+                .group(tab_group.clone())
                 .flex()
                 .items_center()
                 .gap_1()
@@ -504,29 +793,80 @@ impl SolutionSessionsNavigator {
                 .bg(bg)
                 .border_r_1()
                 .border_color(cx.theme().colors().border_variant)
-                .child(Label::new(title).size(LabelSize::Small))
-                .child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "close-{}",
-                            session_id_for_select
-                        )))
-                        .px_1()
-                        .child(Label::new("×").size(LabelSize::Small))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, _, cx| {
-                                this.close_tab(idx, cx);
-                            }),
-                        ),
-                )
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| {
-                        this.selected_index = Some(idx);
-                        cx.notify();
-                    }),
-                );
+                .child(render_status_dot(status, cx));
+            let tab = if is_renaming {
+                // Inline edit mode: replace label with single-line
+                // editor + checkmark / cancel. Click-through on the
+                // tab body during rename would commit-by-accident, so
+                // we don't attach the select handler in this branch.
+                let editor = self
+                    .renaming
+                    .as_ref()
+                    .map(|r| r.editor.clone())
+                    .expect("is_renaming guarded by self.renaming.is_some()");
+                tab.child(div().w(px(160.0)).child(editor))
+                    .child(
+                        IconButton::new(
+                            SharedString::from(format!("rename-ok-{session_id_for_select}")),
+                            IconName::Check,
+                        )
+                        .icon_size(IconSize::Small)
+                        .icon_color(Color::Success)
+                        .tooltip(ui::Tooltip::text("Save (Enter)"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.commit_rename(cx);
+                        })),
+                    )
+                    .child(
+                        IconButton::new(
+                            SharedString::from(format!("rename-cancel-{session_id_for_select}")),
+                            IconName::Close,
+                        )
+                        .icon_size(IconSize::Small)
+                        .icon_color(Color::Muted)
+                        .tooltip(ui::Tooltip::text("Cancel (Esc)"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.cancel_rename(cx);
+                        })),
+                    )
+            } else {
+                // Normal mode: label + pencil + close.
+                let pencil_id =
+                    SharedString::from(format!("rename-{session_id_for_select}"));
+                tab.child(Label::new(title).size(LabelSize::Default))
+                    .child(
+                        IconButton::new(pencil_id, IconName::Pencil)
+                            .icon_size(IconSize::Small)
+                            .icon_color(Color::Muted)
+                            .tooltip(ui::Tooltip::text("Rename session"))
+                            .visible_on_hover(tab_group.clone())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.start_rename(session_id_for_select, window, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!(
+                                "close-{}",
+                                session_id_for_select
+                            )))
+                            .px_1()
+                            .child(Label::new("×").size(LabelSize::Default))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.close_tab(idx, cx);
+                                }),
+                            ),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.selected_index = Some(idx);
+                            cx.notify();
+                        }),
+                    )
+            };
             strip = strip.child(tab);
         }
         for pending in &self.pending {
@@ -638,40 +978,435 @@ impl SolutionSessionsNavigator {
         )
     }
 
-    fn render_status_row(
+    /// Clickable card for the empty-state "Recent sessions" list. Two-line
+    /// layout: preview as the visual anchor (Default size, truncated), then
+    /// "<time ago>  ·  <Ntok>" as a muted Small subline. Each card resumes
+    /// its session on left-click via `resume_and_open`.
+    fn render_history_card(
         &self,
+        meta: SolutionSessionMetadata,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let primary = meta
+            .preview
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(meta.title.as_ref())
+            .to_string();
+        let activity = relative_time_short(meta.last_activity_at, chrono::Utc::now());
+        let mut subline = activity;
+        if let Some(tokens) = meta.total_tokens {
+            subline.push_str(&format!("  ·  {}", format_tokens(tokens)));
+        }
+        let id = SharedString::from(format!("history-card-{}", meta.id));
+        let meta_for_action = meta;
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .gap_3()
+            .px_3()
+            .py_2()
+            .w_full()
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().colors().border_variant)
+            .bg(cx.theme().colors().elevated_surface_background)
+            .hover(|s| s.bg(cx.theme().colors().element_hover))
+            .cursor_pointer()
+            .child(
+                Icon::new(IconName::HistoryRerun)
+                    .size(IconSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(Label::new(primary).size(LabelSize::Default).truncate())
+                    .child(
+                        Label::new(subline)
+                            .color(Color::Muted)
+                            .size(LabelSize::Small),
+                    ),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    let meta = meta_for_action.clone();
+                    this.resume_and_open(meta, window, cx);
+                }),
+            )
+    }
+
+    /// Resolves the agent's currently-selected model name asynchronously
+    /// and stores it in `cached_models`. The status row reads this cache
+    /// on subsequent renders. We dedupe in-flight fetches via
+    /// `pending_model_fetches` so the row doesn't fire a fresh request
+    /// every frame.
+    fn ensure_model_loaded(
+        &mut self,
+        session_id: crate::model::SolutionSessionId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.cached_models.contains_key(&session_id)
+            || self.pending_model_fetches.contains(&session_id)
+        {
+            return;
+        }
+        let store = SolutionAgentStore::global(cx);
+        let Some(thread) = store
+            .read(cx)
+            .session(session_id)
+            .and_then(|s| s.read(cx).acp_thread.clone())
+        else {
+            return;
+        };
+        let acp_session_id = thread.read(cx).session_id().clone();
+        let connection = thread.read(cx).connection().clone();
+        let Some(selector) = connection.model_selector(&acp_session_id) else {
+            return;
+        };
+        let task = selector.selected_model(cx);
+        self.pending_model_fetches.insert(session_id);
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                this.pending_model_fetches.remove(&session_id);
+                if let Ok(info) = result {
+                    this.cached_models.insert(session_id, info.name);
+                    cx.notify();
+                }
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
+    fn render_status_row(
+        &mut self,
         active_view: Option<&Entity<SolutionSessionView>>,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
+        let session_id = self.selected_index.and_then(|i| self.open_sessions.get(i).copied())?;
         let session = active_view.and_then(|v| {
-            let session_id = self.selected_index.and_then(|i| self.open_sessions.get(i).copied())?;
             let _ = v;
             SolutionAgentStore::global(cx).read_with(cx, |s, _| s.session(session_id))
         })?;
         let s = session.read(cx);
         let agent_id = s.agent_id.clone();
         let state_text = SharedString::from(s.state.short_label());
+        let is_idle = matches!(s.state, SessionState::Idle);
+        let usage = s
+            .acp_thread
+            .as_ref()
+            .and_then(|thread| thread.read(cx).token_usage().cloned());
+        // Synchronous read of the agent's current session mode
+        // ("default", "plan", …). Claude exposes this via ACP — when
+        // the connection doesn't implement modes (e.g. mock test
+        // adapter) we just hide the segment.
+        let mode_text: Option<SharedString> = s.acp_thread.as_ref().and_then(|thread| {
+            let thread = thread.read(cx);
+            let modes = thread.connection().session_modes(thread.session_id(), cx)?;
+            let current = modes.current_mode();
+            modes
+                .all_modes()
+                .into_iter()
+                .find(|m| m.id == current)
+                .map(|m| SharedString::from(m.name))
+                .or_else(|| Some(SharedString::from(current.0.to_string())))
+        });
+        let _ = s;
+        // Kick off a model lookup if we don't have one cached yet.
+        // Stored in `cached_models` for synchronous reads on later
+        // frames; the spawn de-dupes via `pending_model_fetches`.
+        self.ensure_model_loaded(session_id, cx);
+        let model_text = self.cached_models.get(&session_id).cloned();
+
+        let used = usage.as_ref().map(|u| u.used_tokens).unwrap_or(0);
+        // claude-acp doesn't always populate `max_tokens` (it's gated by an
+        // upstream beta flag). Fall back to the Claude Opus 4 context
+        // window so the meter and the compact button stay meaningful.
+        let max = usage
+            .as_ref()
+            .map(|u| u.max_tokens)
+            .filter(|m| *m > 0)
+            .unwrap_or(DEFAULT_CONTEXT_WINDOW);
+        let pct = if max == 0 {
+            0.0
+        } else {
+            (used as f64 / max as f64).clamp(0.0, 1.0)
+        };
+        let meter_text = SharedString::from(format!(
+            "{} / {} · {:.1}%",
+            format_tokens_compact(used),
+            format_tokens_compact(max),
+            pct * 100.0
+        ));
+        let bar_color = if pct >= 0.8 {
+            cx.theme().status().error
+        } else if pct >= 0.5 {
+            cx.theme().status().warning
+        } else {
+            cx.theme().colors().text_accent
+        };
+
+        // The compact prompt + the agent's dump need real headroom (~3k
+        // for the prompt, ~10–20k for state.md / decisions.md / next.md
+        // / continue.md combined). A percentage gate misbehaves across
+        // model sizes — 10 % of a 200 k window is only 20 k tokens
+        // (tight) while 10 % of a 1 M window is 100 k (more than
+        // enough). Tie the disable threshold to absolute remaining
+        // tokens instead so the button stays usable on long-context
+        // models even past 90 %.
+        let remaining = max.saturating_sub(used);
+        let too_full = remaining < COMPACT_HEADROOM_MIN_TOKENS;
+        let compact_enabled = is_idle && pct >= COMPACT_BUTTON_MIN_PCT && !too_full;
+        let compact_warning = pct >= COMPACT_BUTTON_WARN_PCT && !too_full;
+        let compact_tooltip: SharedString = if !is_idle {
+            "Wait for the current turn to finish before compacting".into()
+        } else if too_full {
+            format!(
+                "Only {} of headroom left — start a fresh session manually",
+                format_tokens(remaining)
+            )
+            .into()
+        } else if !compact_enabled {
+            "Conversation is short — compact later".into()
+        } else if compact_warning {
+            "Context is filling up — compact recommended".into()
+        } else {
+            "Compact context: agent dumps a summary, then a fresh session continues".into()
+        };
+
+        let compact_button = {
+            // `Archive` reads as "stash the current conversation away
+            // and start a fresh context" — a much closer fit for the
+            // compact action than `Sparkle`, which carries an
+            // AI/magic connotation we don't want here.
+            let mut btn = IconButton::new("solution-status-compact", IconName::Archive)
+                .icon_size(IconSize::Small)
+                .icon_color(if compact_warning {
+                    Color::Warning
+                } else {
+                    Color::Muted
+                })
+                .tooltip(ui::Tooltip::text(compact_tooltip));
+            if compact_enabled {
+                btn = btn.on_click(cx.listener(move |this, _, _, cx| {
+                    this.start_compact(session_id, cx);
+                }));
+            } else {
+                btn = btn.disabled(true);
+            }
+            btn.into_any_element()
+        };
+
+        // Token meter sits on the LEFT so the user's eye doesn't have
+        // to chase across the whole status row to read it. Width is
+        // pinned (`flex_none` on each piece) so a state transition
+        // ("Idle" → "Awaiting input" — different chars) re-flows the
+        // *right-hand* tail of the row but never nudges the meter
+        // sideways. The visual "% used" anchor stays put as the
+        // conversation breathes.
         Some(
             div()
                 .flex()
                 .items_center()
                 .gap_2()
                 .px_3()
-                .h_6()
+                .h_7()
                 .border_b_1()
                 .border_color(cx.theme().colors().border_variant)
                 .child(
+                    div()
+                        .flex_none()
+                        .child(
+                            Label::new(meter_text)
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(72.0))
+                        .h(px(4.0))
+                        .rounded_full()
+                        .bg(cx.theme().colors().border)
+                        .child(
+                            div()
+                                .h_full()
+                                .w(relative((pct as f32).clamp(0.0, 1.0)))
+                                .rounded_full()
+                                .bg(bar_color),
+                        ),
+                )
+                .child(div().flex_none().child(compact_button))
+                .child(
                     Label::new(agent_id)
                         .color(Color::Muted)
-                        .size(LabelSize::XSmall),
+                        .size(LabelSize::Small),
                 )
-                .child(Label::new("·").color(Color::Muted).size(LabelSize::XSmall))
-                .child(Label::new(state_text).size(LabelSize::XSmall))
+                .when_some(model_text, |this, model| {
+                    this.child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
+                        .child(
+                            Label::new(model)
+                                .color(Color::Muted)
+                                .size(LabelSize::Small),
+                        )
+                })
+                .when_some(mode_text, |this, mode| {
+                    this.child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
+                        .child(Label::new(mode).color(Color::Muted).size(LabelSize::Small))
+                })
+                .child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
+                .child(Label::new(state_text).size(LabelSize::Small))
                 .into_any_element(),
         )
     }
 
+    /// Renders the current compact-instruction template, creates the
+    /// per-rotation handoff directory, and ships the rendered prompt as
+    /// a regular user message. The agent then writes its summary files
+    /// into that directory and (after we've handed it `compact_dir`)
+    /// calls back via `solution_agent.compact_session`.
+    fn start_compact(&self, session_id: crate::model::SolutionSessionId, cx: &mut Context<Self>) {
+        let store = SolutionAgentStore::global(cx);
+        let Some(session_entity) = store.read_with(cx, |s, _| s.session(session_id)) else {
+            return;
+        };
+        let s = session_entity.read(cx);
+        if !matches!(s.state, SessionState::Idle) {
+            return;
+        }
+        let solution_id = s.solution_id.clone();
+        let agent_id = s.agent_id.clone();
+        let started_at = s.created_at;
+        // Snapshot the count *before* rotation: the dump dir captures
+        // the context being closed (`c01` for the first compact, `c02`
+        // for the second, …). After the agent finishes writing files
+        // and `compact_session` runs, the session's context_count
+        // increments to count + 1 for the next round.
+        let context_count = s.context_count;
+        let usage = s
+            .acp_thread
+            .as_ref()
+            .and_then(|thread| thread.read(cx).token_usage().cloned());
+        let used = usage.as_ref().map(|u| u.used_tokens).unwrap_or(0);
+        let max = usage
+            .as_ref()
+            .map(|u| u.max_tokens)
+            .filter(|m| *m > 0)
+            .unwrap_or(DEFAULT_CONTEXT_WINDOW);
+        let _ = s;
+
+        let solution_root = match SolutionStore::try_global(cx).and_then(|store| {
+            store.read_with(cx, |s, _| {
+                s.solutions()
+                    .iter()
+                    .find(|sol| sol.id == solution_id)
+                    .map(|sol| sol.root.clone())
+            })
+        }) {
+            Some(root) => root,
+            None => {
+                self.toast_error(
+                    SharedString::from(format!(
+                        "Compact failed: solution {:?} not registered",
+                        solution_id.0
+                    )),
+                    cx,
+                );
+                return;
+            }
+        };
+
+        // `<root>/.agents/<sid>/c<count>/` — `c01`, `c02`, … so a
+        // single `<sid>` directory groups every rotation of one
+        // logical conversation. The leading `c` keeps the names from
+        // accidentally colliding with the legacy timestamp scheme.
+        let context_label = format!("c{context_count:02}");
+        let compact_dir = solution_root
+            .join(".agents")
+            .join(session_id.to_string())
+            .join(&context_label);
+        if let Err(err) = std::fs::create_dir_all(&compact_dir) {
+            self.toast_error(
+                SharedString::from(format!(
+                    "Compact failed: cannot create {}: {err}",
+                    compact_dir.display()
+                )),
+                cx,
+            );
+            return;
+        }
+
+        let mut compact_dir_str = compact_dir.to_string_lossy().to_string();
+        if !compact_dir_str.ends_with(std::path::MAIN_SEPARATOR) {
+            compact_dir_str.push(std::path::MAIN_SEPARATOR);
+        }
+
+        let rendered = COMPACT_INSTRUCTIONS_TEMPLATE
+            .replace("{{session_id}}", &session_id.to_string())
+            .replace("{{compact_dir}}", &compact_dir_str)
+            .replace("{{solution_id}}", solution_id.0.as_str())
+            .replace("{{agent_id}}", agent_id.as_ref())
+            .replace("{{started_at_iso}}", &started_at.to_rfc3339())
+            .replace("{{tokens_used}}", &used.to_string())
+            .replace("{{tokens_max}}", &max.to_string());
+
+        store.update(cx, |store, cx| {
+            store.send_message(session_id, rendered, cx).detach_and_log_err(cx);
+        });
+    }
+
+    fn toast_error(&self, message: SharedString, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            log::warn!("solution_agent toast (no workspace): {message}");
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            struct CompactFailed;
+            workspace.show_notification(
+                NotificationId::unique::<CompactFailed>(),
+                cx,
+                move |cx| cx.new(|cx| MessageNotification::new(message, cx)),
+            );
+        });
+    }
 }
+
+/// Hardcoded fallback when claude-acp doesn't advertise the model's
+/// context-window size (the field is gated by an upstream beta flag).
+/// 1M matches Claude Opus 4 with the long-context flag enabled, which
+/// is the default for this fork.
+const DEFAULT_CONTEXT_WINDOW: u64 = 1_000_000;
+
+/// Compact button activation threshold. Below this the conversation is
+/// too short for a compact to be worth the round-trip.
+const COMPACT_BUTTON_MIN_PCT: f64 = 0.20;
+
+/// Threshold at which the compact button paints in warning colour.
+/// Past this, the user should rotate before the model starts dropping
+/// context off the back of the window.
+const COMPACT_BUTTON_WARN_PCT: f64 = 0.50;
+
+/// Minimum free tokens we require before allowing a compact: enough
+/// for the instruction prompt (~3 k) and the agent's dump (state.md +
+/// decisions.md + next.md + continue.md, typically ~10–20 k combined),
+/// plus a buffer for tool-call traces. Below this, refuse the button —
+/// a half-truncated compact loses more than just starting over does.
+const COMPACT_HEADROOM_MIN_TOKENS: u64 = 30_000;
+
+/// Markdown template fed to the agent on compact. `{{var}}` placeholders
+/// are filled from session state at click time. Source-of-truth lives in
+/// the resources file so the prose can be reviewed without recompiling.
+const COMPACT_INSTRUCTIONS_TEMPLATE: &str =
+    include_str!("../resources/compact_context_instructions.md");
 
 impl Focusable for SolutionSessionsNavigator {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
@@ -713,12 +1448,45 @@ impl Render for SolutionSessionsNavigator {
                 .into_any_element()
         } else if let Some(view) = active_view.clone() {
             div().flex_1().min_h_0().child(view).into_any_element()
+        } else if let Some(pending) = self.pending.first() {
+            // The strip already shows a spinner-tab for in-flight starts,
+            // but at 12px tall it's easy to miss — especially on resume,
+            // where the user clicked a big body card and expects the body
+            // to react. Mirror the same icon + label centred in the panel
+            // body so the click gets unambiguous feedback.
+            let label = SharedString::from(format!("Starting {}…", pending.display_name));
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .items_center()
+                .justify_center()
+                .px_4()
+                .child(
+                    Icon::new(IconName::ArrowCircle)
+                        .size(IconSize::Medium)
+                        .color(Color::Muted)
+                        .with_rotate_animation(2),
+                )
+                .child(Label::new(label).size(LabelSize::Default))
+                .child(
+                    Label::new("Reattaching to the agent — this can take a few seconds.")
+                        .color(Color::Muted)
+                        .size(LabelSize::Small),
+                )
+                .into_any_element()
         } else {
-            // No tab open. Offer "Continue last session" as the primary CTA
-            // when the DB has at least one persisted session for this
-            // solution; falls back to a plain hint pointing at the "+"
-            // button when there's nothing to resume.
-            let last_meta = self.historic_sessions.first().cloned();
+            // No tab open. Offer up to 3 recent sessions as clickable cards
+            // when the DB has anything persisted for this solution; falls
+            // back to a plain hint pointing at the "+" button otherwise.
+            // Three cards (vs the previous single CTA) lets users land
+            // directly on the right session when they alternate between a
+            // few parallel threads — common with Claude where you keep one
+            // session per coarse task.
+            let last_metas: Vec<_> =
+                self.historic_sessions.iter().take(3).cloned().collect();
             let mut empty = div()
                 .flex_1()
                 .min_h_0()
@@ -727,49 +1495,33 @@ impl Render for SolutionSessionsNavigator {
                 .gap_3()
                 .items_center()
                 .justify_center()
-                .px_3();
-            if let Some(meta) = last_meta {
-                let primary = meta
-                    .preview
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(meta.title.as_ref())
-                    .to_string();
-                let activity = relative_time_short(meta.last_activity_at, chrono::Utc::now());
-                let mut header = format!("Last session: {primary}  ·  {activity}");
-                if let Some(tokens) = meta.total_tokens {
-                    header.push_str(&format!("  ·  {}", format_tokens(tokens)));
+                .px_4();
+            if !last_metas.is_empty() {
+                let heading = if last_metas.len() == 1 {
+                    "Recent session"
+                } else {
+                    "Recent sessions"
+                };
+                empty = empty.child(Label::new(heading).size(LabelSize::Large));
+                let mut list = div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .w_full()
+                    .max_w(px(440.0));
+                for meta in last_metas {
+                    list = list.child(self.render_history_card(meta, cx));
                 }
-                empty = empty
-                    .child(
-                        Label::new(header)
-                            .color(Color::Muted)
-                            .size(LabelSize::XSmall),
-                    )
-                    .child(
-                        Button::new("solution-sessions-continue-last", "Continue last session")
-                            .style(ButtonStyle::Filled)
-                            .label_size(LabelSize::Small)
-                            .start_icon(
-                                Icon::new(IconName::HistoryRerun)
-                                    .size(IconSize::Small)
-                                    .color(Color::Muted),
-                            )
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                let meta = meta.clone();
-                                this.resume_and_open(meta, window, cx);
-                            })),
-                    )
-                    .child(
-                        Label::new("…or start a fresh one with + above.")
-                            .color(Color::Muted)
-                            .size(LabelSize::XSmall),
-                    );
+                empty = empty.child(list).child(
+                    Label::new("Or start a fresh one with + above.")
+                        .color(Color::Muted)
+                        .size(LabelSize::Small),
+                );
             } else {
                 empty = empty.child(
                     Label::new("No session selected. Click + above to start one.")
                         .color(Color::Muted)
-                        .size(LabelSize::Small),
+                        .size(LabelSize::Default),
                 );
             }
             empty.into_any_element()
@@ -779,7 +1531,21 @@ impl Render for SolutionSessionsNavigator {
             .track_focus(&self.focus_handle)
             .flex()
             .flex_col()
-            .size_full();
+            .size_full()
+            // Inline tab-rename uses the standard menu actions: Enter
+            // to commit, Esc to cancel. We listen on the panel root
+            // (not the tab strip) so the actions still reach us when
+            // the rename editor swallows focus.
+            .on_action(cx.listener(|this, _: &menu::Confirm, _, cx| {
+                if this.renaming.is_some() {
+                    this.commit_rename(cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &menu::Cancel, _, cx| {
+                if this.renaming.is_some() {
+                    this.cancel_rename(cx);
+                }
+            }));
         // Always render the tab strip when a solution is active, even with
         // zero open tabs — the strip hosts the "+" button which is the
         // entrypoint for creating the first session. Previously the strip
@@ -852,6 +1618,19 @@ fn format_tokens(tokens: u64) -> String {
         format!("{:.1}k tok", tokens as f64 / 1_000.0)
     } else {
         format!("{} tok", tokens)
+    }
+}
+
+/// Short token count, "12.3k" / "456", with no unit suffix. Used in the
+/// status row where the magnitudes of the two operands ("used / max")
+/// already make their meaning unambiguous.
+fn format_tokens_compact(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
     }
 }
 

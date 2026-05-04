@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -60,13 +61,16 @@ impl EventEmitter<SolutionAgentStoreEvent> for SolutionAgentStore {}
 struct GlobalSolutionAgentStore(Entity<SolutionAgentStore>);
 impl Global for GlobalSolutionAgentStore {}
 
-/// On-disk snapshot of a session. v1 only captures enough state to label
-/// a session in the navigator on rehydration; the full transcript is left
-/// out until the rehydration path (Phase 4) needs it.
+/// On-disk snapshot of a session. Persisted as a JSON blob in the
+/// `acp_thread_blob` column so MCP / future archive UIs can rehydrate
+/// the conversation transcript even after the session was closed.
+///
+/// Public so downstream tools (`solution_agent.read_session_history`)
+/// can deserialize the same blob the store wrote.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
-struct PersistedSession {
-    title: String,
-    entry_summaries: Vec<String>,
+pub struct PersistedSession {
+    pub title: String,
+    pub entry_summaries: Vec<String>,
 }
 
 /// First user prompt, normalised to a single line and truncated, for the
@@ -111,6 +115,17 @@ fn extract_preview(entries: &[acp_thread::AgentThreadEntry]) -> Option<gpui::Sha
         collapsed
     };
     Some(gpui::SharedString::from(truncated))
+}
+
+/// Placeholder title for a brand-new session, before claude-acp emits a
+/// `TitleUpdated` describing the actual conversation. Keeps the tab
+/// readable: 5 hex chars of the UUID is enough to disambiguate adjacent
+/// tabs without smearing the entire UUID across the strip.
+fn short_session_title(session_id: SolutionSessionId) -> SharedString {
+    // SolutionSessionId is already 8 chars — no trimming needed; the
+    // raw form is short enough to read at a glance and uniquely
+    // identifies the session in `.agents/<id>/` paths.
+    SharedString::from(session_id.to_string())
 }
 
 fn serializable_snapshot(session: &SolutionSession, cx: &App) -> Vec<u8> {
@@ -213,6 +228,21 @@ impl SolutionAgentStore {
         project: Entity<project::Project>,
         cx: &mut Context<Self>,
     ) -> Task<Result<SolutionSessionId>> {
+        self.create_session_with_cwd(solution_id, agent_id, project, None, cx)
+    }
+
+    /// Same as `create_session`, but lets the caller pin the session's
+    /// working directory to a specific path inside the solution (e.g.
+    /// a member project root) instead of defaulting to `solution.root`.
+    /// Pass `None` for the default behavior.
+    pub fn create_session_with_cwd(
+        &mut self,
+        solution_id: SolutionId,
+        agent_id: AgentServerId,
+        project: Entity<project::Project>,
+        cwd: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<SolutionSessionId>> {
         let pair = (solution_id.clone(), agent_id.clone());
 
         cx.spawn(async move |this, cx: &mut AsyncApp| {
@@ -239,8 +269,9 @@ impl SolutionAgentStore {
             let connection = connection_task.await?;
 
             // 3. Create an ACP session on that connection.
+            let work_dir = cwd.unwrap_or_else(|| solution.root.clone());
             let work_dirs = util::path_list::PathList::new(&[
-                solution.root.to_string_lossy().into_owned()
+                work_dir.to_string_lossy().into_owned()
             ]);
             let acp_thread_task = cx.update(|cx| {
                 connection.clone().new_session(project.clone(), work_dirs, cx)
@@ -269,12 +300,14 @@ impl SolutionAgentStore {
                     agent_id: agent_id.clone(),
                     acp_session_id,
                     acp_thread: Some(acp_thread.clone()),
-                    title: SharedString::from(format!("Session {}", session_id)),
+                    title: short_session_title(session_id),
                     created_at: Utc::now(),
                     last_activity_at: Utc::now(),
                     state: SessionState::Idle,
+                    context_count: 1,
                     project: Some(project.clone()),
                     _acp_subscription: None,
+                    pending_messages: std::collections::VecDeque::new(),
                 };
                 let entity = cx.new(|_| session);
                 store.sessions.insert(session_id, entity);
@@ -319,9 +352,17 @@ impl SolutionAgentStore {
             .as_ref()
             .map(|thread| {
                 let thread = thread.read(cx);
+                // `used_tokens` is the cumulative context usage that
+                // claude-acp reports via `SessionUpdate::UsageUpdate`
+                // — same number the status-row meter shows live. We
+                // used to persist `input_tokens + output_tokens`,
+                // which only covers the LAST turn (gated by the
+                // ACP-beta response.usage path), so a 33k-token
+                // session resumed as 700 tokens. Saving used_tokens
+                // keeps the persisted value aligned with the meter.
                 (
                     extract_preview(thread.entries()),
-                    thread.token_usage().map(|u| u.input_tokens + u.output_tokens),
+                    thread.token_usage().map(|u| u.used_tokens),
                 )
             })
             .unwrap_or((None, None));
@@ -335,6 +376,7 @@ impl SolutionAgentStore {
             last_activity_at: s.last_activity_at,
             preview,
             total_tokens,
+            context_count: s.context_count,
         };
         db.save_metadata(meta).detach_and_log_err(cx);
     }
@@ -449,8 +491,10 @@ impl SolutionAgentStore {
                     created_at: meta.created_at,
                     last_activity_at: Utc::now(),
                     state: SessionState::Idle,
+                    context_count: meta.context_count,
                     project: Some(project.clone()),
                     _acp_subscription: None,
+                    pending_messages: std::collections::VecDeque::new(),
                 };
                 let entity = cx.new(|_| session);
                 store.sessions.insert(session_id, entity);
@@ -459,6 +503,23 @@ impl SolutionAgentStore {
                     .entry(meta.solution_id.clone())
                     .or_default()
                     .push(session_id);
+                // Re-seed token usage from the persisted metadata so the
+                // status-row meter doesn't claim "0 tokens" for a long
+                // resumed conversation. We only have a coarse aggregate
+                // (`total_tokens`); the model will fill in the
+                // input/output split + max_tokens on the next turn via
+                // session_update events.
+                if let Some(total) = meta.total_tokens {
+                    acp_thread.update(cx, |thread, cx| {
+                        thread.update_token_usage(
+                            Some(acp_thread::TokenUsage {
+                                used_tokens: total,
+                                ..Default::default()
+                            }),
+                            cx,
+                        );
+                    });
+                }
                 let sub = store.subscribe_to_session(session_id, acp_thread, cx);
                 store
                     .sessions
@@ -466,6 +527,13 @@ impl SolutionAgentStore {
                     .ok_or_else(|| anyhow!("session vanished after insert"))?
                     .update(cx, |s, _| s._acp_subscription = Some(sub));
                 store.persist_session_row(session_id, cx);
+                // Resume re-livens a previously soft-closed row. Clear
+                // the marker so MCP `read_session_history` (and any
+                // future "Archived sessions" UI) reports it as live
+                // again until the user closes the tab next time.
+                if let Some(db) = &store.persistence {
+                    db.mark_closed(session_id, None).detach_and_log_err(cx);
+                }
                 cx.emit(SolutionAgentStoreEvent::SessionCreated(session_id));
                 cx.notify();
                 anyhow::Ok(session_id)
@@ -635,8 +703,13 @@ impl SolutionAgentStore {
         if let Some(list) = self.by_solution.get_mut(&solution_id) {
             list.retain(|sid| *sid != id);
         }
+        // Soft-close: keep the persisted blob so downstream tooling
+        // (MCP read_session_history, future "View archived sessions"
+        // UI, etc.) can still read the transcript. Hard-delete only
+        // happens when the whole solution is removed via
+        // `delete_for_solution`.
         if let Some(db) = &self.persistence {
-            db.delete(id).detach_and_log_err(cx);
+            db.mark_closed(id, Some(Utc::now())).detach_and_log_err(cx);
         }
         cx.emit(SolutionAgentStoreEvent::SessionClosed(id));
         cx.notify();
@@ -746,6 +819,102 @@ impl SolutionAgentStore {
         cx.spawn(async move |_this, _cx: &mut AsyncApp| create_task.await)
     }
 
+    /// In-place context rotation: drop the current AcpThread, spawn a
+    /// fresh ACP-level session against the SAME pooled connection, and
+    /// graft it onto the existing `SolutionSession`. The user-facing
+    /// `SolutionSessionId` and tab identity stay stable so dump
+    /// directories from successive compacts cluster under one
+    /// `<root>/.agents/<sid>/` tree, distinguishable only by the
+    /// `context_count` (= which rotation).
+    ///
+    /// Different from `restart_agent` in two ways:
+    ///   1. Keeps `SolutionSessionId` (restart_agent mints a fresh
+    ///      one because its goal is "this session is broken — please
+    ///      give me a clean slate" while rotate's goal is "same
+    ///      conversation, just freed up the context window").
+    ///   2. Reuses the same pooled subprocess (restart_agent drops
+    ///      the pool entry to force a subprocess respawn).
+    pub fn rotate_context(
+        &mut self,
+        session_id: SolutionSessionId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<u32>> {
+        let Some(session_entity) = self.sessions.get(&session_id).cloned() else {
+            return Task::ready(Err(anyhow!("unknown session {session_id}")));
+        };
+        let (solution_id, agent_id, project, current_count) = {
+            let s = session_entity.read(cx);
+            let project = match s.project.clone() {
+                Some(project) => project,
+                None => {
+                    return Task::ready(Err(anyhow!(
+                        "session {session_id} has no cached project — rotate_context not supported \
+                         for prebuilt test sessions"
+                    )));
+                }
+            };
+            (
+                s.solution_id.clone(),
+                s.agent_id.clone(),
+                project,
+                s.context_count,
+            )
+        };
+        let pair = (solution_id.clone(), agent_id);
+
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            // Resolve the live Solution so `connection.new_session`
+            // gets a real cwd.
+            let solution = cx.update(|cx| {
+                SolutionStore::try_global(cx)
+                    .ok_or_else(|| anyhow!("SolutionStore global is not initialised"))
+                    .and_then(|store| {
+                        store
+                            .read(cx)
+                            .solutions()
+                            .iter()
+                            .find(|s| s.id == solution_id)
+                            .cloned()
+                            .ok_or_else(|| anyhow!("solution {:?} not found", solution_id))
+                    })
+            })?;
+            let connection_task = this.update(cx, |store, cx| {
+                store.get_or_spawn_connection(pair.clone(), &solution, project.clone(), cx)
+            })?;
+            let connection = connection_task.await?;
+            let work_dirs = util::path_list::PathList::new(&[
+                solution.root.to_string_lossy().into_owned(),
+            ]);
+            let new_thread_task = cx.update(|cx| {
+                connection.clone().new_session(project.clone(), work_dirs, cx)
+            });
+            let new_thread = new_thread_task.await?;
+
+            let new_count = this.update(cx, |store, cx| {
+                let new_acp_session_id = new_thread.read(cx).session_id().clone();
+                let new_count = current_count.saturating_add(1);
+                session_entity.update(cx, |s, _| {
+                    s.acp_thread = Some(new_thread.clone());
+                    s.acp_session_id = new_acp_session_id;
+                    s.context_count = new_count;
+                    s.state = SessionState::Idle;
+                    s.last_activity_at = Utc::now();
+                });
+                // Re-subscribe to the new AcpThread's event stream.
+                // Dropping the old subscription unhooks us from the
+                // dead thread automatically.
+                let new_sub = store.subscribe_to_session(session_id, new_thread, cx);
+                session_entity.update(cx, |s, _| s._acp_subscription = Some(new_sub));
+                store.persist_session_row(session_id, cx);
+                cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+                cx.notify();
+                new_count
+            })?;
+
+            Ok(new_count)
+        })
+    }
+
     /// Send a plain-text user message. Convenience wrapper around
     /// `send_message_blocks` for the common single-text-block case.
     pub fn send_message(
@@ -782,6 +951,36 @@ impl SolutionAgentStore {
             )));
         }
 
+        // Already running? Queue the message instead of restarting the
+        // turn — matches Claude Code CLI's "type follow-ups while the
+        // agent is still working" behaviour. Subsequent queued sends
+        // are *merged* into the existing pending entry (separated by a
+        // blank line) so the user sees a single ghost bubble that
+        // grows, not a stack of fragments. Flush is one big prompt to
+        // the agent, sent once `Stopped` fires.
+        let already_running = matches!(
+            session_entity.read(cx).state,
+            SessionState::Running { .. }
+        );
+        if already_running {
+            session_entity.update(cx, |s, _| {
+                if let Some(last) = s.pending_messages.back_mut() {
+                    last.push(agent_client_protocol::schema::ContentBlock::Text(
+                        agent_client_protocol::schema::TextContent::new(
+                            "\n\n".to_string(),
+                        ),
+                    ));
+                    last.extend(blocks);
+                } else {
+                    s.pending_messages.push_back(blocks);
+                }
+                s.last_activity_at = Utc::now();
+            });
+            cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+            cx.notify();
+            return Task::ready(Ok(()));
+        }
+
         // Flip state immediately, before the spawn, so callers observing the
         // session right after this call returns see `Running`.
         session_entity.update(cx, |s, _| {
@@ -800,36 +999,24 @@ impl SolutionAgentStore {
             )));
         };
 
-        let user_message_id = acp_thread::UserMessageId::new();
-        let acp_session_id = acp_thread.read(cx).session_id().clone();
-        let prompt =
-            agent_client_protocol::schema::PromptRequest::new(acp_session_id, blocks.clone());
-
-        let connection = acp_thread.read(cx).connection().clone();
-
-        // Optimistic echo: append the user message into the thread *before*
-        // shipping the prompt so the UI shows it immediately. The
-        // claude-acp wrapper does not echo user messages back as
-        // `UserMessageChunk` updates, so without this the user types
-        // "привет", sees only the assistant reply, and can't tell what
-        // they sent. AcpThread::push_user_content_block keys off the
-        // message_id so if a future agent does echo, the echo coalesces
-        // into the same entry instead of duplicating it.
-        acp_thread.update(cx, |thread, cx| {
-            for block in &blocks {
-                thread.push_user_content_block(
-                    Some(user_message_id.clone()),
-                    block.clone(),
-                    cx,
-                );
-            }
-        });
+        // Route through `AcpThread::send` (not `connection.prompt` directly)
+        // so the turn runs inside `run_turn`. That wrapper appends the
+        // user message, drives streaming-text flushing, and — crucially —
+        // emits `AcpThreadEvent::Stopped` on success / `Error` on failure.
+        // Without those events the store-side subscription never sees the
+        // turn end, so `SessionState` stays stuck on `Running` after the
+        // assistant has already replied.
+        let send_task = acp_thread.update(cx, |thread, cx| thread.send(blocks, cx));
 
         cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let prompt_task = cx.update(|cx| connection.prompt(user_message_id, prompt, cx));
-            let result = prompt_task.await;
+            let result = send_task.await;
             match &result {
                 Err(err) => {
+                    // run_turn already emitted `AcpThreadEvent::Error`,
+                    // which the store subscription translated into
+                    // `Errored("agent error")`. Overwrite that with the
+                    // specific error string so the user sees the actual
+                    // cause instead of a generic placeholder.
                     let err_message = SharedString::from(err.to_string());
                     this.update(cx, |store, cx| {
                         if let Some(s) = store.sessions.get(&session_id).cloned() {
@@ -842,13 +1029,23 @@ impl SolutionAgentStore {
                     })?;
                 }
                 Ok(_) => {
+                    // Stopped event already transitioned state to Idle
+                    // via the store subscription; just persist the snapshot.
                     this.update(cx, |store, cx| {
                         store.persist_session_blob(session_id, cx);
                     })?;
                 }
             }
-            result.map(|_| ())
+            result.map(|_| ()).map_err(|err| anyhow!(err))
         })
+    }
+
+    /// Returns a clone of the persistence handle if one was configured
+    /// (i.e. the editor is running with a real on-disk DB, not the test
+    /// in-memory mode). Used by MCP tools that need to read archived
+    /// session blobs without re-hydrating the full session.
+    pub fn persistence(&self) -> Option<Arc<crate::db::SolutionAgentDb>> {
+        self.persistence.clone()
     }
 
     /// Schedule a debounce-friendly write of the session's serialised snapshot
@@ -956,6 +1153,51 @@ impl SolutionAgentStore {
                 }
                 // Token usage is finalised on turn completion — refresh DB
                 // so the History popover token column reflects the latest.
+                self.persist_session_row(session_id, cx);
+                // Flush queued follow-ups (if any). All pending entries
+                // are drained and concatenated into ONE send — the user
+                // typed them as a fast-fire stream while the agent was
+                // working, so it's their joint intent for the next turn
+                // rather than N independent prompts. A Cancelled stop
+                // (user pressed Stop) is treated as "abandon what I
+                // queued too": the queue is cleared without sending.
+                if let acp_thread::AcpThreadEvent::Stopped(reason) = event {
+                    if matches!(reason, agent_client_protocol::schema::StopReason::Cancelled) {
+                        if let Some(s) = self.sessions.get(&session_id).cloned() {
+                            s.update(cx, |s, _| s.pending_messages.clear());
+                        }
+                    } else {
+                        let drained: Vec<_> = self
+                            .sessions
+                            .get(&session_id)
+                            .cloned()
+                            .map(|s| {
+                                s.update(cx, |s, _| {
+                                    s.pending_messages.drain(..).collect::<Vec<_>>()
+                                })
+                            })
+                            .unwrap_or_default();
+                        if !drained.is_empty() {
+                            // Flatten N queued messages into one Vec.
+                            // Each was its own send-press, but we coalesce
+                            // them so the agent gets a single prompt.
+                            let combined: Vec<_> =
+                                drained.into_iter().flatten().collect();
+                            if !combined.is_empty() {
+                                self.send_message_blocks(session_id, combined, cx)
+                                    .detach();
+                            }
+                        }
+                    }
+                }
+            }
+            acp_thread::AcpThreadEvent::TokenUsageUpdated => {
+                // claude-acp ships incremental usage during a turn, not
+                // just at the end. Persist on every update so a session
+                // closed mid-turn (or right before `Stopped` fires)
+                // resumes with the correct meter — without this the DB
+                // value lags behind the live meter and a resume drops
+                // back to whatever the previous Stopped wrote.
                 self.persist_session_row(session_id, cx);
             }
             acp_thread::AcpThreadEvent::Error
@@ -1188,8 +1430,10 @@ mod tests {
                     created_at: Utc::now(),
                     last_activity_at: Utc::now(),
                     state: SessionState::Idle,
+                    context_count: 1,
                     project: None,
                     _acp_subscription: None,
+                    pending_messages: std::collections::VecDeque::new(),
                 });
                 store.sessions.insert(id, entity);
                 store

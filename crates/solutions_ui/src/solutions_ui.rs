@@ -6,11 +6,13 @@ mod add_member_picker;
 mod dock_panel;
 mod empty_solution_page;
 mod modals;
+mod open;
 mod picker;
 mod status_bar;
 mod welcome;
 
 pub use empty_solution_page::EmptySolutionPage;
+pub use open::{OpenIntent, open_solution};
 pub use status_bar::SolutionsStatusItem;
 
 pub use actions::{

@@ -7,9 +7,10 @@ use picker::{Picker, PickerDelegate};
 use solutions::{SolutionId, SolutionStore};
 use ui::{ListItem, ListItemSpacing, prelude::*};
 use util::ResultExt as _;
-use workspace::{AppState, ModalView, OpenOptions, Workspace};
+use workspace::{ModalView, Workspace};
 
 use crate::actions::OpenSolution;
+use crate::open::{OpenIntent, open_solution};
 
 pub struct OpenSolutionModal {
     picker: Entity<Picker<OpenSolutionDelegate>>,
@@ -153,39 +154,9 @@ impl PickerDelegate for OpenSolutionDelegate {
             return;
         };
         let sol_id = entry.id.clone();
-
-        let store = SolutionStore::global(cx);
-        let paths = match store.read_with(cx, |s, _| s.paths_for_open(&sol_id)) {
-            Ok(paths) => paths,
-            Err(err) => {
-                log::error!("solutions_ui: paths_for_open failed: {err}");
-                self.dismissed(window, cx);
-                return;
-            }
-        };
-        if paths.is_empty() {
-            self.dismissed(window, cx);
-            return;
-        }
-        let app_state = AppState::global(cx);
-
-        store
-            .update(cx, |s, cx| s.touch_last_opened(&sol_id, cx))
-            .log_err();
-
-        cx.spawn(async move |_, cx| {
-            let task = cx.update(|cx| {
-                let mut options = OpenOptions::default();
-                options.open_mode = workspace::OpenMode::NewWindow;
-                workspace::open_paths(&paths, app_state, options, cx)
-            });
-            task.await?;
-            anyhow::Ok(())
-        })
-        .detach_and_log_err(cx);
-
+        let source = window.window_handle().downcast();
+        open_solution(sol_id, source, OpenIntent::SameWindow, cx);
         self.dismissed(window, cx);
-        let _ = self.workspace.upgrade();
     }
 
     fn dismissed(&mut self, _: &mut Window, cx: &mut Context<Picker<Self>>) {

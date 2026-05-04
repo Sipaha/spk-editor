@@ -70,7 +70,6 @@ use settings::{
     initial_local_debug_tasks_content, initial_project_settings_content, initial_tasks_content,
     update_settings_file,
 };
-use sidebar::Sidebar;
 
 use std::{
     borrow::Cow,
@@ -474,17 +473,12 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         )
         .detach();
 
-        cx.defer(move |cx| {
-            window_handle
-                .update(cx, |_, window, cx| {
-                    let sidebar =
-                        cx.new(|cx| Sidebar::new(multi_workspace_handle.clone(), window, cx));
-                    multi_workspace_handle.update(cx, |multi_workspace, cx| {
-                        multi_workspace.register_sidebar(sidebar, cx);
-                    });
-                })
-                .ok();
-        });
+        // SPK fork: Sidebar (the IDEA-style left panel) is hidden — solutions
+        // already provide project/thread navigation, so the upstream agent
+        // sidebar is redundant and just adds an empty surface. The crate
+        // stays in tree for upstream-merge friendliness; only the
+        // registration site is gated.
+        let _ = (window_handle, multi_workspace_handle);
     })
     .detach();
 

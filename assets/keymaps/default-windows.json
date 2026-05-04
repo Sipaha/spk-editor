@@ -1560,6 +1560,7 @@
     "context": "SolutionSessionView",
     "bindings": {
       "ctrl-f": "solution_agent::FindInSession",
+      "escape": "solution_agent::StopResponse",
     },
   },
   {

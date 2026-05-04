@@ -1528,7 +1528,6 @@ pub(crate) async fn restore_or_create_workspace(
     app_state: Arc<AppState>,
     cx: &mut AsyncApp,
 ) -> Result<()> {
-    let kvp = cx.update(|cx| KeyValueStore::global(cx));
     if let Some(multi_workspaces) = restorable_workspaces(cx, &app_state).await {
         let mut error_count = 0;
         for multi_workspace in multi_workspaces {
@@ -1658,26 +1657,16 @@ pub(crate) async fn restore_or_create_workspace(
             })
             .await?;
         }
-    } else if matches!(kvp.read_kvp(FIRST_OPEN), Ok(None)) {
-        cx.update(|cx| show_onboarding_view(app_state, cx)).await?;
     } else {
-        cx.update(|cx| {
-            workspace::open_new(
-                Default::default(),
-                app_state,
-                cx,
-                |workspace, window, cx| {
-                    let restore_on_startup = WorkspaceSettings::get_global(cx).restore_on_startup;
-                    match restore_on_startup {
-                        workspace::RestoreOnStartupBehavior::Launchpad => {}
-                        _ => {
-                            Editor::new_file(workspace, &Default::default(), window, cx);
-                        }
-                    }
-                },
-            )
-        })
-        .await?;
+        // SPK fork: Welcome is the launcher for every cold launch, not
+        // just the very first one. Upstream's `FIRST_OPEN` gate split
+        // the flow into "show onboarding once, then open an empty
+        // workspace forever after"; with Solutions as the project model
+        // an empty workspace is meaningless, so we always send the
+        // user to the Welcome window where they can pick or create a
+        // Solution.
+        let _ = FIRST_OPEN;
+        cx.update(|cx| show_onboarding_view(app_state, cx)).await?;
     }
 
     Ok(())

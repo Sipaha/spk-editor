@@ -60,8 +60,8 @@ use std::{
 };
 use theme_settings::ThemeSettings;
 use ui::{
-    Color, ContextMenu, ContextMenuEntry, DecoratedIcon, Divider, Icon, IconDecoration,
-    IconDecorationKind, IndentGuideColors, IndentGuideLayout, Indicator, KeyBinding, Label,
+    Color, ContextMenu, ContextMenuEntry, DecoratedIcon, Icon, IconDecoration,
+    IconDecorationKind, IndentGuideColors, IndentGuideLayout, Indicator, Label,
     LabelSize, ListItem, ListItemSpacing, ScrollAxes, ScrollableHandle, Scrollbars,
     StickyCandidate, Tooltip, WithScrollbar, prelude::*, v_flex,
 };
@@ -5690,7 +5690,14 @@ impl ProjectPanel {
                             }
                         }
                     } else if kind.is_dir() {
+                        // Single click on a folder selects it but no longer
+                        // toggles its expansion — the chevron in the row
+                        // owns toggle. Double-click on the folder name
+                        // still toggles, mirroring IDEA's behaviour where
+                        // power-users can double-click anywhere on the row
+                        // to expand without aiming at the chevron.
                         project_panel.marked_entries.clear();
+                        project_panel.selection = Some(selection);
                         if is_sticky
                             && let Some((_, _, index)) =
                                 project_panel.index_for_entry(entry_id, worktree_id)
@@ -5715,10 +5722,14 @@ impl ProjectPanel {
                             });
                             return;
                         }
-                        if event.modifiers().alt {
-                            project_panel.toggle_expand_all(entry_id, window, cx);
+                        if event.click_count() > 1 {
+                            if event.modifiers().alt {
+                                project_panel.toggle_expand_all(entry_id, window, cx);
+                            } else {
+                                project_panel.toggle_expanded(entry_id, window, cx);
+                            }
                         } else {
-                            project_panel.toggle_expanded(entry_id, window, cx);
+                            cx.notify();
                         }
                     } else {
                         let preview_tabs_enabled =
@@ -5804,6 +5815,60 @@ impl ProjectPanel {
                             )
                         },
                     )
+                    .child(if kind.is_dir() {
+                        // IDEA-style expand/collapse chevron in front of every
+                        // directory. Click on the chevron toggles expansion
+                        // and stops propagation so the row's `on_click`
+                        // (which now only selects, no longer toggles) doesn't
+                        // re-fire. Files get an invisible spacer of the same
+                        // size so file names line up horizontally with folder
+                        // names that have the chevron prefix.
+                        let chevron_id = SharedString::from(format!("chevron-{entry_id:?}"));
+                        h_flex()
+                            .id(chevron_id)
+                            .size(IconSize::Small.rems())
+                            .flex_none()
+                            .cursor_pointer()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |_, _, _, cx| {
+                                    // Block the row's mouse_down handler so a
+                                    // click on the chevron doesn't also flip
+                                    // selection state on top of toggling.
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .on_click(cx.listener(
+                                move |this, event: &gpui::ClickEvent, window, cx| {
+                                    if event.is_right_click() {
+                                        return;
+                                    }
+                                    cx.stop_propagation();
+                                    if event.modifiers().alt {
+                                        this.toggle_expand_all(entry_id, window, cx);
+                                    } else {
+                                        this.toggle_expanded(entry_id, window, cx);
+                                    }
+                                },
+                            ))
+                            .child(
+                                Icon::new(if details.is_expanded {
+                                    IconName::ChevronDown
+                                } else {
+                                    IconName::ChevronRight
+                                })
+                                .size(IconSize::Small)
+                                .color(Color::Muted),
+                            )
+                    } else {
+                        h_flex()
+                            .id(SharedString::from(format!(
+                                "chevron-spacer-{entry_id:?}"
+                            )))
+                            .size(IconSize::Small.rems())
+                            .flex_none()
+                            .invisible()
+                    })
                     .child(if let Some(icon) = &icon {
                         if let Some((_, decoration_color)) =
                             entry_diagnostic_aware_icon_decoration_and_color(diagnostic_severity)
@@ -6248,6 +6313,59 @@ impl ProjectPanel {
             worktree_id,
             canonical_path: entry.canonical_path.clone(),
         }
+    }
+
+    /// Compact toolbar pinned above the entry list. Hosts the
+    /// "Select Opened File" button (IDEA-style "find current file in
+    /// the tree" affordance). The bound action `pane::RevealInProjectPanel`
+    /// also lives on the keymap (`ctrl-shift-e` on Linux), but a
+    /// visible button is the discoverable path most users will reach
+    /// for first.
+    fn render_toolbar(&self, cx: &Context<Self>) -> impl IntoElement {
+        h_flex()
+            .id("project-panel-toolbar")
+            .flex_none()
+            .h_7()
+            .px_2()
+            .gap_1()
+            .border_b_1()
+            .border_color(cx.theme().colors().border_variant)
+            .child(
+                IconButton::new("project-panel-select-opened-file", IconName::Crosshair)
+                    .icon_size(IconSize::Small)
+                    .icon_color(Color::Muted)
+                    .tooltip(Tooltip::for_action_title(
+                        "Select Opened File",
+                        &workspace::pane::RevealInProjectPanel::default(),
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.select_opened_file(window, cx);
+                    })),
+            )
+    }
+
+    /// Reveal the file backing the workspace's active editor in the
+    /// tree, expanding parents along the way and scrolling it into
+    /// view. Mirrors `pane::RevealInProjectPanel` but invoked from
+    /// the panel itself (so the user never has to switch focus into
+    /// the editor pane just to dispatch the action).
+    fn select_opened_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let entry_id = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .active_pane()
+                .read(cx)
+                .active_item()
+                .and_then(|item| item.project_entry_ids(cx).first().copied())
+        });
+        let Some(entry_id) = entry_id else {
+            return;
+        };
+        let project = self.project.clone();
+        self.reveal_entry(project, entry_id, false, window, cx)
+            .log_err();
     }
 
     fn dispatch_context(&self, window: &Window, cx: &Context<Self>) -> KeyContext {
@@ -6703,6 +6821,7 @@ impl Render for ProjectPanel {
                 .track_focus(&self.focus_handle(cx))
                 .child(
                     v_flex()
+                        .child(self.render_toolbar(cx))
                         .child(
                             uniform_list("entries", item_count, {
                                 cx.processor(|this, range: Range<usize>, window, cx| {
@@ -7104,53 +7223,25 @@ impl Render for ProjectPanel {
                     .with_priority(3)
                 }))
         } else {
-            let focus_handle = self.focus_handle(cx);
-
+            // SPK fork: workspaces always belong to a Solution, so the
+            // upstream "Open Project / Clone Repository" empty state is
+            // never the right CTA. Show a plain message; the
+            // solutions_ui dock already offers the catalog picker.
             v_flex()
                 .id("empty-project_panel")
                 .p_4()
                 .size_full()
-                .items_center()
                 .justify_center()
                 .gap_1()
+                .text_center()
+                .text_size(rems(0.8125))
                 .track_focus(&self.focus_handle(cx))
+                .child(div().w_full().child("Solution is empty"))
                 .child(
-                    Button::new("open_project", "Open Project")
-                        .full_width()
-                        .key_binding(KeyBinding::for_action_in(
-                            &workspace::Open::default(),
-                            &focus_handle,
-                            cx,
-                        ))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.workspace
-                                .update(cx, |_, cx| {
-                                    window.dispatch_action(
-                                        workspace::Open::default().boxed_clone(),
-                                        cx,
-                                    );
-                                })
-                                .log_err();
-                        })),
-                )
-                .child(
-                    h_flex()
-                        .w_1_2()
-                        .gap_2()
-                        .child(Divider::horizontal())
-                        .child(Label::new("or").size(LabelSize::XSmall).color(Color::Muted))
-                        .child(Divider::horizontal()),
-                )
-                .child(
-                    Button::new("clone_repo", "Clone Repository")
-                        .full_width()
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.workspace
-                                .update(cx, |_, cx| {
-                                    window.dispatch_action(git::Clone.boxed_clone(), cx);
-                                })
-                                .log_err();
-                        })),
+                    div()
+                        .w_full()
+                        .text_color(cx.theme().colors().text_muted)
+                        .child("Add projects from the catalog to start working."),
                 )
                 .when(is_local, |div| {
                     div.when(panel_settings.drag_and_drop, |div| {

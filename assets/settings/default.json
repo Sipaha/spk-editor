@@ -930,9 +930,12 @@
     "expand_outlines_with_depth": 100,
   },
   "solutions": {
-    // Default root directory for new Solutions. Existing Solutions store
-    // absolute paths and are unaffected by changes to this setting.
-    "root": "~/spk-editor/solutions",
+    // Default root directory for new Solutions. Leave commented out to
+    // pick up the runtime default — `<base_dir>/solutions`, where
+    // `<base_dir>` is `~/spk-editor` in release and `~/spk-editor-dev`
+    // in debug. Set this to override (existing Solutions store
+    // absolute paths and are unaffected by changes to this setting).
+    // "root": "~/spk-editor/solutions",
   },
   "collaboration_panel": {
     // Whether to show the collaboration panel button in the status bar.
@@ -1586,8 +1589,10 @@
     "gutter_debounce": 0,
     // Control whether the git blame information is shown inline,
     // in the currently focused line.
+    // SPK fork: off by default — the inline annotation is noisy on every
+    // line; users who want it can flip this to `true`.
     "inline_blame": {
-      "enabled": true,
+      "enabled": false,
       // Sets a delay after which the inline blame information is shown.
       // Delay is restarted with every cursor movement.
       "delay_ms": 0,

@@ -27,6 +27,7 @@ schemars.workspace = true
 serde.workspace = true
 settings.workspace = true
 smol.workspace = true
+solution_agent.workspace = true
 solutions.workspace = true
 theme.workspace = true
 ui.workspace = true

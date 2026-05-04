@@ -71,11 +71,17 @@ impl SolutionAgentDb {
         .map_err(|e| anyhow!("Failed to create solution_sessions table: {}", e))?;
 
         // Idempotent ALTER for the History popover preview + token-usage
-        // display. SQLite has no `ADD COLUMN IF NOT EXISTS`, so we ignore
-        // the "duplicate column" error on already-migrated DBs.
+        // display + soft-close marker. SQLite has no `ADD COLUMN IF NOT
+        // EXISTS`, so we ignore the "duplicate column" error on
+        // already-migrated DBs. `closed_at` is the timestamp at which
+        // `close_session` was called; rows with NULL are still live
+        // (or were live in a previous editor process and never closed
+        // cleanly — treated as live on next launch).
         for ddl in [
             "ALTER TABLE solution_sessions ADD COLUMN preview TEXT",
             "ALTER TABLE solution_sessions ADD COLUMN total_tokens INTEGER",
+            "ALTER TABLE solution_sessions ADD COLUMN closed_at INTEGER",
+            "ALTER TABLE solution_sessions ADD COLUMN context_count INTEGER NOT NULL DEFAULT 1",
         ] {
             if let Ok(mut run) = connection.exec(ddl) {
                 let _ = run();
@@ -137,6 +143,41 @@ impl SolutionAgentDb {
         })
     }
 
+    /// Soft-close: mark the row's `closed_at` so MCP / UI can distinguish
+    /// archived sessions from live ones, but keep `acp_thread_blob` so
+    /// downstream tooling can still read the conversation transcript
+    /// after the user closes the tab.
+    ///
+    /// Pass `None` to clear the marker (called from resume_session) so a
+    /// previously-closed session that the user reopened is reported as
+    /// live again.
+    pub fn mark_closed(
+        &self,
+        id: SolutionSessionId,
+        closed_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Task<Result<()>> {
+        let connection = self.connection.clone();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            mark_closed_by_id(&connection, id, closed_at)
+        })
+    }
+
+    /// Looks up the closed_at timestamp for `id`. `None` means the row
+    /// is live (or doesn't exist — the two are indistinguishable here;
+    /// callers that care about distinguishing should also check the
+    /// in-memory store).
+    pub fn closed_at(
+        &self,
+        id: SolutionSessionId,
+    ) -> Task<Result<Option<chrono::DateTime<chrono::Utc>>>> {
+        let connection = self.connection.clone();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            select_closed_at(&connection, id)
+        })
+    }
+
     pub fn delete_for_solution(&self, solution_id: SolutionId) -> Task<Result<()>> {
         let connection = self.connection.clone();
         self.executor.spawn(async move {
@@ -164,12 +205,14 @@ fn insert_or_update_metadata(
         i64,
         Option<String>,
         Option<i64>,
+        i64,
     )>(indoc! {"
         INSERT INTO solution_sessions (
             id, solution_id, agent_id, acp_session_id, title,
-            created_at, last_activity_at, preview, total_tokens
+            created_at, last_activity_at, preview, total_tokens,
+            context_count
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
         ON CONFLICT(id) DO UPDATE SET
             solution_id      = excluded.solution_id,
             agent_id         = excluded.agent_id,
@@ -178,7 +221,8 @@ fn insert_or_update_metadata(
             created_at       = excluded.created_at,
             last_activity_at = excluded.last_activity_at,
             preview          = COALESCE(excluded.preview, preview),
-            total_tokens     = COALESCE(excluded.total_tokens, total_tokens)
+            total_tokens     = COALESCE(excluded.total_tokens, total_tokens),
+            context_count    = excluded.context_count
     "})?;
 
     insert((
@@ -191,6 +235,7 @@ fn insert_or_update_metadata(
         meta.last_activity_at.timestamp_millis(),
         meta.preview.as_ref().map(|s| s.to_string()),
         meta.total_tokens.map(|t| t as i64),
+        meta.context_count as i64,
     ))?;
 
     Ok(())
@@ -210,6 +255,36 @@ fn select_blob(connection: &Connection, id: SolutionSessionId) -> Result<Option<
     "})?;
     let rows = select(id.to_string())?;
     Ok(rows.into_iter().next().flatten())
+}
+
+fn mark_closed_by_id(
+    connection: &Connection,
+    id: SolutionSessionId,
+    closed_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<()> {
+    let mut update = connection.exec_bound::<(Option<i64>, String)>(indoc! {"
+        UPDATE solution_sessions SET closed_at = ?1 WHERE id = ?2
+    "})?;
+    update((
+        closed_at.map(|ts| ts.timestamp_millis()),
+        id.to_string(),
+    ))?;
+    Ok(())
+}
+
+fn select_closed_at(
+    connection: &Connection,
+    id: SolutionSessionId,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+    let mut select = connection.select_bound::<String, Option<i64>>(indoc! {"
+        SELECT closed_at FROM solution_sessions WHERE id = ? LIMIT 1
+    "})?;
+    let rows = select(id.to_string())?;
+    Ok(rows
+        .into_iter()
+        .next()
+        .flatten()
+        .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis))
 }
 
 fn delete_by_id(connection: &Connection, id: SolutionSessionId) -> Result<()> {
@@ -244,10 +319,12 @@ fn select_metadata_for_solution(
             i64,
             Option<String>,
             Option<i64>,
+            i64,
         ),
     >(indoc! {"
         SELECT id, solution_id, agent_id, acp_session_id, title,
-               created_at, last_activity_at, preview, total_tokens
+               created_at, last_activity_at, preview, total_tokens,
+               context_count
         FROM solution_sessions
         WHERE solution_id = ?
         ORDER BY last_activity_at DESC
@@ -265,6 +342,7 @@ fn select_metadata_for_solution(
         last_activity_at,
         preview,
         total_tokens,
+        context_count,
     ) in rows
     {
         let id = SolutionSessionId::parse(&id)
@@ -284,6 +362,7 @@ fn select_metadata_for_solution(
             last_activity_at,
             preview: preview.map(SharedString::from),
             total_tokens: total_tokens.map(|t| t as u64),
+            context_count: context_count.max(1) as u32,
         });
     }
     Ok(out)
@@ -309,6 +388,7 @@ mod tests {
                 .unwrap(),
             preview: None,
             total_tokens: None,
+            context_count: 1,
         }
     }
 

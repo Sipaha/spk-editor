@@ -418,7 +418,6 @@ pub struct Pane {
         Option<Arc<dyn Fn(&mut Self, &dyn Any, &mut Window, &mut Context<Self>) -> bool>>,
     can_toggle_zoom: bool,
     should_display_tab_bar: Rc<dyn Fn(&Window, &mut Context<Pane>) -> bool>,
-    should_display_welcome_page: bool,
     render_tab_bar_buttons: Rc<
         dyn Fn(
             &mut Pane,
@@ -450,7 +449,6 @@ pub struct Pane {
     diagnostic_summary_update: Task<()>,
     /// If a certain project item wants to get recreated with specific data, it can persist its data before the recreation here.
     pub project_item_restoration_data: HashMap<ProjectItemKind, Box<dyn Any + Send>>,
-    welcome_page: Option<Entity<crate::welcome::WelcomePage>>,
 
     pub in_center_group: bool,
 }
@@ -603,7 +601,6 @@ impl Pane {
             can_split_predicate: None,
             can_toggle_zoom: true,
             should_display_tab_bar: Rc::new(|_, cx| TabBarSettings::get_global(cx).show),
-            should_display_welcome_page: false,
             render_tab_bar_buttons: Rc::new(default_render_tab_bar_buttons),
             render_tab_bar: Rc::new(Self::render_tab_bar),
             show_tab_bar_buttons: TabBarSettings::get_global(cx).show_tab_bar_buttons,
@@ -622,7 +619,6 @@ impl Pane {
             focus_follows_mouse: WorkspaceSettings::get_global(cx).focus_follows_mouse,
             diagnostic_summary_update: Task::ready(()),
             project_item_restoration_data: HashMap::default(),
-            welcome_page: None,
             in_center_group: false,
         }
     }
@@ -709,12 +705,6 @@ impl Pane {
             {
                 self.last_focus_handle_by_item
                     .insert(active_item.item_id(), focused.downgrade());
-            }
-        } else if self.should_display_welcome_page
-            && let Some(welcome_page) = self.welcome_page.as_ref()
-        {
-            if self.focus_handle.is_focused(window) {
-                welcome_page.read(cx).focus_handle(cx).focus(window, cx);
             }
         }
     }
@@ -831,10 +821,6 @@ impl Pane {
         F: 'static + Fn(&Window, &mut Context<Pane>) -> bool,
     {
         self.should_display_tab_bar = Rc::new(should_display_tab_bar);
-    }
-
-    pub fn set_should_display_welcome_page(&mut self, should_display_welcome_page: bool) {
-        self.should_display_welcome_page = should_display_welcome_page;
     }
 
     pub fn set_can_split(
@@ -4492,17 +4478,13 @@ impl Render for Pane {
                                         }
                                     },
                                 ));
-                            if has_worktrees || !self.should_display_welcome_page {
-                                placeholder
-                            } else {
-                                if self.welcome_page.is_none() {
-                                    let workspace = self.workspace.clone();
-                                    self.welcome_page = Some(cx.new(|cx| {
-                                        crate::welcome::WelcomePage::new(workspace, window, cx)
-                                    }));
-                                }
-                                placeholder.child(self.welcome_page.clone().unwrap())
-                            }
+                            // SPK fork: empty pane just shows the
+                            // placeholder. Welcome lives in its own
+                            // dedicated launcher window
+                            // (`workspace::welcome::WelcomeWindow`),
+                            // never inside a workspace pane.
+                            let _ = has_worktrees;
+                            placeholder
                         }
                         .focus_follows_mouse(self.focus_follows_mouse, cx)
                     })
