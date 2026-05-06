@@ -20,10 +20,14 @@
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
-use gpui::{App, Entity, Task, WeakEntity, Window};
+use context_server::listener::{McpServerTool, ToolResponse};
+use context_server::types::ToolResponseContent;
+use gpui::{App, AsyncApp, Entity, Task, WeakEntity, Window};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use solutions::{SolutionId, SolutionStore, SolutionTabsSnapshot};
 use util::ResultExt as _;
-use workspace::{OpenOptions, OpenVisible, SaveIntent, Workspace};
+use workspace::{MultiWorkspace, OpenOptions, OpenVisible, SaveIntent, Workspace};
 
 /// Run an in-place Solution switch on the given `Workspace`. Steps:
 ///
@@ -117,7 +121,18 @@ pub fn switch_active_solution_in_place(
         })?;
         swap_task.await?;
 
-        // Step 4: restore tabs.
+        // Step 4: close all currently-open editor items. Their
+        // ProjectPaths point at the *previous* Solution's worktrees,
+        // which we just demounted; leaving them in place produces
+        // stale tabs whose buffers' worktrees no longer exist
+        // (visible to MCP / panels as ghost entries that read garbage
+        // when activated). This step runs whether or not the target
+        // Solution has a saved snapshot — a "first visit" target
+        // ends with an empty pane, matching the user's mental model
+        // of "I never had any tabs in this Solution yet."
+        close_all_editor_items(&workspace, cx).await?;
+
+        // Step 5: replay target Solution's snapshot, if any.
         let snapshot = cx
             .update(|_, cx| {
                 SolutionStore::try_global(cx).and_then(|store| {
@@ -127,7 +142,6 @@ pub fn switch_active_solution_in_place(
             .ok()
             .flatten();
         if let Some(snapshot) = snapshot {
-            close_all_editor_items(&workspace, cx).await?;
             for path in &snapshot.open_paths {
                 let task = workspace.update_in(cx, |workspace, window, cx| {
                     let mut options = OpenOptions::default();
@@ -164,6 +178,116 @@ fn previous_solution_id(
             .map(|sol| sol.id.clone())
     })
     .map_err(Into::into)
+}
+
+// =====================================================================
+// MCP tool: solutions.switch
+// =====================================================================
+//
+// Switch the *active* Solution shown in a given window without
+// recreating its `Workspace`. Wraps `switch_active_solution_in_place`
+// for autonomous agents driving the editor over the MCP socket; the
+// `solutions.open` tool stays as the "open in a new window" path.
+//
+// Errors mirror what the orchestrator surfaces:
+//   - `window_not_found`        — `window_id` doesn't match any open window
+//   - `window_not_multi_workspace` — window isn't a `MultiWorkspace`
+//   - `solution_not_found`      — `solution_id` not registered in the store
+// All other errors propagate as the orchestrator's `Result<()>` text.
+
+/// Switch the active Solution within an existing window in-place.
+/// Keeps the same `Workspace`/`Project`/dock entities, swaps worktrees
+/// inside the existing `Project`, and replays per-Solution open-tabs
+/// from `SolutionStore::tab_snapshots`. See module docs for full
+/// behaviour.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct SwitchSolutionParams {
+    pub window_id: String,
+    pub solution_id: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct SwitchSolutionResult {
+    pub window_id: String,
+    pub solution_id: String,
+}
+
+#[derive(Clone)]
+pub struct SwitchSolutionTool;
+
+impl McpServerTool for SwitchSolutionTool {
+    type Input = SwitchSolutionParams;
+    type Output = SwitchSolutionResult;
+    const NAME: &'static str = "solutions.switch";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.window_id.is_empty(),
+            "invalid_params: window_id is required"
+        );
+        anyhow::ensure!(
+            !input.solution_id.is_empty(),
+            "invalid_params: solution_id is required"
+        );
+        let target_id = SolutionId(input.solution_id.clone());
+        let window_id_str = input.window_id.clone();
+
+        // Resolve the window + active workspace, then schedule the
+        // switch on that window's foreground tick. Orchestrator
+        // returns `Task<Result<()>>` which we await.
+        let task: Task<anyhow::Result<()>> = cx
+            .update(|cx| -> anyhow::Result<Task<anyhow::Result<()>>> {
+                anyhow::ensure!(
+                    SolutionStore::try_global(cx)
+                        .map(|store| {
+                            store
+                                .read(cx)
+                                .solutions()
+                                .iter()
+                                .any(|s| s.id == target_id)
+                        })
+                        .unwrap_or(false),
+                    "solution_not_found: {}",
+                    target_id.0,
+                );
+                let handle = cx
+                    .windows()
+                    .into_iter()
+                    .find(|h| editor_mcp::format_window_id(h.window_id()) == window_id_str)
+                    .with_context(|| format!("window_not_found: {window_id_str}"))?;
+                let multi = handle
+                    .downcast::<MultiWorkspace>()
+                    .with_context(|| format!("window_not_multi_workspace: {window_id_str}"))?;
+                multi
+                    .update(cx, |multi_workspace, window, cx| {
+                        let workspace = multi_workspace.workspace().clone().downgrade();
+                        switch_active_solution_in_place(workspace, target_id.clone(), window, cx)
+                    })
+                    .map_err(anyhow::Error::from)
+            })?;
+        task.await?;
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("switched to {} in {}", input.solution_id, input.window_id),
+            }],
+            structured_content: SwitchSolutionResult {
+                window_id: input.window_id,
+                solution_id: input.solution_id,
+            },
+        })
+    }
+}
+
+pub fn register_mcp(cx: &mut App) {
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(SwitchSolutionTool);
+    });
 }
 
 async fn close_all_editor_items(

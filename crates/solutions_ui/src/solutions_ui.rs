@@ -29,4 +29,5 @@ pub fn init(cx: &mut App) {
     cx.observe_new(picker::OpenSolutionModal::register).detach();
     cx.observe_new(modals::register).detach();
     welcome::init(cx);
+    switch::register_mcp(cx);
 }
