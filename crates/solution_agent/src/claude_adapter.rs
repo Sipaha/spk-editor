@@ -100,6 +100,7 @@ mod tests {
         assert!(prompt.contains("- ecos-app"));
         assert!(prompt.contains("CLAUDE.md"));
         assert!(prompt.contains("Stay inside the solution"));
+        assert!(prompt.contains("per-action go-ahead"));
     }
 
     #[test]
