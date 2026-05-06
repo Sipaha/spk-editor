@@ -2055,6 +2055,13 @@ impl Render for SolutionSessionView {
                     .flex_col()
                     .flex_1()
                     .min_h_0()
+                    // Belt-and-suspenders clip: the navigator's panel
+                    // body wrapper already adds `overflow_hidden`, but
+                    // a path that hosts this view *outside* the
+                    // navigator (e.g. a future tear-out / standalone
+                    // window) would lose it. Clipping here too costs
+                    // nothing and immunises the view against that.
+                    .overflow_hidden()
                     .child(
                         // Inner `.relative()` wrapper isolates the "jump to
                         // latest" overlay's positioning context to the

@@ -1139,7 +1139,21 @@ impl Render for SolutionSessionsNavigator {
                 )
                 .into_any_element()
         } else if let Some(view) = active_view {
-            div().flex_1().min_h_0().child(view).into_any_element()
+            // `overflow_hidden` clips the session view's content to
+            // its flex allocation. Without it, an unusually tall
+            // entry inside the conversation list (e.g. a multi-screen
+            // assistant message containing a stack trace) overflows
+            // past the wrapper despite `flex_1 + min_h_0` — those
+            // tell the *flex layout* not to inflate the box, but they
+            // don't clip painting. The visual symptom is the message
+            // bubble bleeding up onto the tab strip and down onto the
+            // status row / compose box.
+            div()
+                .flex_1()
+                .min_h_0()
+                .overflow_hidden()
+                .child(view)
+                .into_any_element()
         } else if let Some(pending) = self.pending.first() {
             // The strip already shows a spinner-tab for in-flight starts,
             // but at 12px tall it's easy to miss — especially on resume,
