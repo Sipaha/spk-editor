@@ -1268,10 +1268,9 @@ impl SolutionSessionView {
 
     /// Drop a single text block into `pending_send` and start the
     /// cold-resume handshake. Used by callers outside the compose path
-    /// (status-row Compact-from-cold) that need to drive the same
-    /// "wake the agent, then send" flow without going through the
-    /// editor. No images supported — the only known caller (compact
-    /// instructions) is text-only.
+    /// that need to drive the same "wake the agent, then send" flow
+    /// without going through the editor. No images supported — the
+    /// argument must be plain text.
     pub(crate) fn enqueue_text_pending_send_and_resume(
         &mut self,
         text: String,

@@ -145,9 +145,6 @@ impl SolutionSessionsNavigator {
     ///
     /// No-ops if there's no rendered prompt (template render +
     /// mkdir already toasted the failure) or if the view is gone.
-    ///
-    /// Called from the status-row compact button (Task 5). The
-    /// `#[allow(dead_code)]` is temporary — Task 5 wires the call site.
     #[allow(dead_code)]
     pub(crate) fn start_compact_from_cold(
         &self,
@@ -263,8 +260,6 @@ mod tests {
 
         let mut vcx = VisualTestContext::from_window(*workspace_window, cx);
 
-        // Insert the cold session into the store and build the navigator
-        // + view entities inside the window context.
         let (navigator_entity, view_entity) = vcx.update(|window, cx| {
             let store = SolutionAgentStore::global(cx);
             let session = store.update(cx, |store, cx| {
