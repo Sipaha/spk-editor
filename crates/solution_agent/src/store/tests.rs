@@ -649,6 +649,50 @@ async fn reset_context_swaps_acp_thread_without_bumping_count(cx: &mut TestAppCo
 }
 
 #[gpui::test]
+async fn reset_context_clears_cold_entries(cx: &mut TestAppContext) {
+    let (session_id, _old_thread, _tmp) = create_session_with_thread(cx).await;
+
+    // Stamp a fake cold entry so we can prove `reset_context` clears it.
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let session = store.session(session_id).expect("session exists");
+            session.update(cx, |s, _| {
+                s.cold_entries
+                    .push(acp_thread::AgentThreadEntry::AssistantMessage(
+                        acp_thread::AssistantMessage {
+                            chunks: Vec::new(),
+                            indented: false,
+                            is_subagent_output: false,
+                        },
+                    ));
+            });
+            cx.notify();
+        });
+    });
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| store.reset_context(session_id, cx))
+    })
+    .await
+    .expect("reset_context");
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let session = store.session(session_id).expect("session exists");
+            let s = session.read(cx);
+            assert!(
+                s.cold_entries.is_empty(),
+                "reset_context should drop cold_entries (was {:?})",
+                s.cold_entries.len()
+            );
+        });
+    });
+}
+
+#[gpui::test]
 async fn late_send_error_is_dropped_when_session_was_reset(cx: &mut TestAppContext) {
     // Race regression guard: `/clear` (reset_context) swapping the
     // AcpThread mid-turn must not let the OLD turn's late `Err`

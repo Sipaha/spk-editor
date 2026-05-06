@@ -1381,6 +1381,7 @@ impl SolutionAgentStore {
                     // — "Done in Xs" must not survive a context wipe.
                     s.cached_total_tokens = None;
                     s.last_turn_duration = None;
+                    s.cold_entries.clear();
                 });
                 let new_sub = store.subscribe_to_session(session_id, new_thread, cx);
                 session_entity.update(cx, |s, _| s._acp_subscription = Some(new_sub));
