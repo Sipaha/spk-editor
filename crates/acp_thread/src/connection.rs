@@ -56,6 +56,27 @@ pub trait AgentConnection {
         cx: &mut App,
     ) -> Task<Result<Entity<AcpThread>>>;
 
+    /// Create a new session and forward an `_meta` payload as part of
+    /// the underlying `NewSessionRequest`. The `_meta` field is the
+    /// ACP-defined extensibility channel — agents that understand
+    /// specific keys (e.g. `claude-agent-acp` reads `_meta.systemPrompt`
+    /// to seed Claude's system prompt for the session) act on it; agents
+    /// that don't ignore unknown keys per the protocol contract.
+    ///
+    /// Default impl drops `extra_meta` and falls back to `new_session`,
+    /// so adapters that don't speak `_meta` are unaffected. ACP-backed
+    /// connections override this to splice the map into the outbound
+    /// request alongside any meta they were already going to send.
+    fn new_session_with_meta(
+        self: Rc<Self>,
+        project: Entity<Project>,
+        work_dirs: PathList,
+        _extra_meta: Option<acp::Meta>,
+        cx: &mut App,
+    ) -> Task<Result<Entity<AcpThread>>> {
+        self.new_session(project, work_dirs, cx)
+    }
+
     /// Whether this agent supports loading existing sessions.
     fn supports_load_session(&self) -> bool {
         false

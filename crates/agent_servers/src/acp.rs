@@ -1266,6 +1266,16 @@ impl AgentConnection for AcpConnection {
         work_dirs: PathList,
         cx: &mut App,
     ) -> Task<Result<Entity<AcpThread>>> {
+        self.new_session_with_meta(project, work_dirs, None, cx)
+    }
+
+    fn new_session_with_meta(
+        self: Rc<Self>,
+        project: Entity<Project>,
+        work_dirs: PathList,
+        extra_meta: Option<acp::Meta>,
+        cx: &mut App,
+    ) -> Task<Result<Entity<AcpThread>>> {
         // TODO: remove this once ACP supports multiple working directories
         let Some(cwd) = work_dirs.ordered_paths().next().cloned() else {
             return Task::ready(Err(anyhow!("Working directory cannot be empty")));
@@ -1274,12 +1284,13 @@ impl AgentConnection for AcpConnection {
         let mcp_servers = mcp_servers_for_project(&project, cx);
 
         cx.spawn(async move |cx| {
-            let response = into_foreground_future(
-                self.connection
-                    .send_request(acp::NewSessionRequest::new(cwd.clone()).mcp_servers(mcp_servers)),
-            )
-            .await
-            .map_err(map_acp_error)?;
+            let mut request = acp::NewSessionRequest::new(cwd.clone()).mcp_servers(mcp_servers);
+            if let Some(meta) = extra_meta {
+                request = request.meta(meta);
+            }
+            let response = into_foreground_future(self.connection.send_request(request))
+                .await
+                .map_err(map_acp_error)?;
 
             let (modes, models, config_options) =
                 config_state(response.modes, response.models, response.config_options);
@@ -2941,47 +2952,49 @@ fn mcp_servers_for_project(project: &Entity<Project>, cx: &App) -> Vec<acp::McpS
     let context_server_store = project.read(cx).context_server_store().read(cx);
     let is_local = project.read(cx).is_local();
     let mut servers: Vec<acp::McpServer> = spk_editor_mcp_bridge_server().into_iter().collect();
-    servers.extend(context_server_store
-        .configured_server_ids()
-        .iter()
-        .filter_map(|id| {
-            let configuration = context_server_store.configuration_for_server(id)?;
-            match &*configuration {
-                project::context_server_store::ContextServerConfiguration::Custom {
-                    command,
-                    remote,
-                    ..
+    servers.extend(
+        context_server_store
+            .configured_server_ids()
+            .iter()
+            .filter_map(|id| {
+                let configuration = context_server_store.configuration_for_server(id)?;
+                match &*configuration {
+                    project::context_server_store::ContextServerConfiguration::Custom {
+                        command,
+                        remote,
+                        ..
+                    }
+                    | project::context_server_store::ContextServerConfiguration::Extension {
+                        command,
+                        remote,
+                        ..
+                    } if is_local || *remote => Some(acp::McpServer::Stdio(
+                        acp::McpServerStdio::new(id.0.to_string(), &command.path)
+                            .args(command.args.clone())
+                            .env(if let Some(env) = command.env.as_ref() {
+                                env.iter()
+                                    .map(|(name, value)| acp::EnvVariable::new(name, value))
+                                    .collect()
+                            } else {
+                                vec![]
+                            }),
+                    )),
+                    project::context_server_store::ContextServerConfiguration::Http {
+                        url,
+                        headers,
+                        timeout: _,
+                    } => Some(acp::McpServer::Http(
+                        acp::McpServerHttp::new(id.0.to_string(), url.to_string()).headers(
+                            headers
+                                .iter()
+                                .map(|(name, value)| acp::HttpHeader::new(name, value))
+                                .collect(),
+                        ),
+                    )),
+                    _ => None,
                 }
-                | project::context_server_store::ContextServerConfiguration::Extension {
-                    command,
-                    remote,
-                    ..
-                } if is_local || *remote => Some(acp::McpServer::Stdio(
-                    acp::McpServerStdio::new(id.0.to_string(), &command.path)
-                        .args(command.args.clone())
-                        .env(if let Some(env) = command.env.as_ref() {
-                            env.iter()
-                                .map(|(name, value)| acp::EnvVariable::new(name, value))
-                                .collect()
-                        } else {
-                            vec![]
-                        }),
-                )),
-                project::context_server_store::ContextServerConfiguration::Http {
-                    url,
-                    headers,
-                    timeout: _,
-                } => Some(acp::McpServer::Http(
-                    acp::McpServerHttp::new(id.0.to_string(), url.to_string()).headers(
-                        headers
-                            .iter()
-                            .map(|(name, value)| acp::HttpHeader::new(name, value))
-                            .collect(),
-                    ),
-                )),
-                _ => None,
-            }
-        }));
+            }),
+    );
     servers
 }
 
@@ -3001,8 +3014,10 @@ fn spk_editor_mcp_bridge_server() -> Option<acp::McpServer> {
     }
     let exe = std::env::current_exe().ok()?;
     Some(acp::McpServer::Stdio(
-        acp::McpServerStdio::new("spk-editor", exe.to_string_lossy().as_ref())
-            .args(vec!["--nc".to_string(), socket.to_string_lossy().into_owned()]),
+        acp::McpServerStdio::new("spk-editor", exe.to_string_lossy().as_ref()).args(vec![
+            "--nc".to_string(),
+            socket.to_string_lossy().into_owned(),
+        ]),
     ))
 }
 
