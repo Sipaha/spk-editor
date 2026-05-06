@@ -382,6 +382,20 @@ impl SolutionSessionView {
         // Detect any thread that is already attached at construction
         // (e.g. after `resume_session`) and wire its lifecycle hooks.
         view.sync_thread_subscription(cx);
+        // Cold-tab init: `sync_thread_subscription` early-returns when
+        // `new_id == last_thread_entity_id`, which is `None == None`
+        // for a freshly-constructed cold view — meaning `list_state`
+        // never gets sized from `cold_entries` and the virtualized
+        // list paints zero rows even though the conversation has been
+        // hydrated. Seed it explicitly here so a restored cold tab
+        // shows up on first frame, and tail-anchor so we land on the
+        // latest message instead of the head.
+        let cold_count = view.session.read(cx).cold_entries.len();
+        if view.session.read(cx).acp_thread.is_none() && cold_count > 0 {
+            view.list_state.reset(cold_count);
+            view.list_state.set_follow_mode(FollowMode::Tail);
+            view.list_state.scroll_to_end();
+        }
         view
     }
 
