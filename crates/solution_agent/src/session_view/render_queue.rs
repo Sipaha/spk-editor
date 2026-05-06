@@ -206,12 +206,14 @@ impl SolutionSessionView {
             })
             .collect();
 
-        let bubble_bg = cx.theme().colors().text_accent.opacity(0.06);
-        let border_color = cx.theme().colors().text_accent.opacity(0.4);
-        // Reuse the cached markdown widget refreshed by
-        // `ensure_resuming_markdown` in the render pre-pass — minting
-        // a fresh `Markdown::new` here per frame leaves an unparsed
-        // entity (paints empty), which is the bug the cache fixes.
+        // Match the live `render_user_message` bubble styling exactly
+        // — `text_accent.opacity(0.12)` background, `max_w(0.85)`
+        // wrapper, no dashed border. The user wanted the optimistic
+        // message to look identical to a normal sent message; the
+        // "agent is attaching" cue is delivered by the status row's
+        // "Resuming…" badge instead, so there's no need for a
+        // visually distinct ghost.
+        let bubble_bg = cx.theme().colors().text_accent.opacity(0.12);
         let body: gpui::AnyElement = match (
             self.resuming_markdown.clone(),
             self.markdown_style_for_render.clone(),
@@ -238,24 +240,18 @@ impl SolutionSessionView {
             _ => return None,
         };
 
-        // Just the bubble — the rotating "Resuming…" indicator was
-        // moved to the status-row state badge so the chat doesn't
-        // duplicate the same "agent attaching" cue twice. The bubble
-        // alone confirms "I received your text"; the status row
-        // confirms "I'm working on attaching the subprocess".
-        let bubble = h_flex().w_full().child(
+        let bubble = h_flex().child(
             div()
                 .relative()
-                .w_full()
+                .max_w(relative(0.85))
                 .px_2p5()
                 .py_1()
                 .bg(bubble_bg)
-                .border_1()
-                .border_dashed()
-                .border_color(border_color)
                 .rounded_md()
                 .child(body),
         );
-        Some(v_flex().w_full().px_1().child(bubble))
+        // `mb_3` mirrors `render_user_message`'s bottom margin so the
+        // optimistic bubble breathes the same as live user messages.
+        Some(v_flex().w_full().px_1().mb_3().child(bubble))
     }
 }
