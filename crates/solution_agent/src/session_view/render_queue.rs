@@ -11,13 +11,18 @@
 
 use std::sync::Arc;
 
-use gpui::{Context, Div, ParentElement, SharedString, StatefulInteractiveElement, Styled};
+use agent_client_protocol::schema as acp;
+use gpui::{
+    Context, Div, IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled,
+};
 use markdown::MarkdownElement;
 use ui::prelude::*;
-use ui::{Color, Icon, IconName, IconSize, Label, LabelSize, Tooltip};
+use ui::{Color, CommonAnimationExt, Icon, IconName, IconSize, Label, LabelSize, Tooltip};
 
 use super::SolutionSessionView;
-use crate::conversation_render::{decode_image_local, open_image_preview};
+use crate::conversation_render::{
+    clean_user_message_text, decode_image_local, open_image_preview, pending_blocks_preview,
+};
 use crate::model::SessionState;
 
 impl SolutionSessionView {
@@ -175,5 +180,102 @@ impl SolutionSessionView {
         }
         section = section.child(strip);
         Some(section)
+    }
+
+    /// Optimistic-resume section painted while a cold tab is doing its
+    /// 3-4 s ACP handshake after the user clicked Send. Shows the
+    /// queued text as a muted ghost bubble plus a "Starting agent…"
+    /// spinner so the chat reflects the action immediately — without
+    /// this the cold-resume path looked like Send did nothing for
+    /// several seconds. Returns `None` outside the resuming window;
+    /// `pending_send`/`resuming` are both cleared by
+    /// `flush_pending_send_if_ready` once the live thread attaches,
+    /// at which point `acp_thread.send` re-emits the message as a
+    /// real `UserMessage` entry and the ghost goes away.
+    pub(super) fn render_resuming_section(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        if !self.resuming {
+            return None;
+        }
+        let blocks = self.pending_send.as_ref()?;
+        let raw = pending_blocks_preview(blocks, cx);
+        let text = clean_user_message_text(&raw);
+        let images: Vec<Arc<gpui::Image>> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                acp::ContentBlock::Image(img) => decode_image_local(img),
+                _ => None,
+            })
+            .collect();
+
+        let bubble_bg = cx.theme().colors().text_accent.opacity(0.06);
+        let border_color = cx.theme().colors().text_accent.opacity(0.4);
+        let body: gpui::AnyElement = if text.is_empty() && images.is_empty() {
+            gpui::Empty.into_any_element()
+        } else if !text.is_empty() {
+            // No `Markdown` widget cache here — the bubble lives only
+            // for the 3-4 s handshake window, and its source is
+            // captured at Send time and never edited. A flat `Label`
+            // is selectable enough for that lifetime; the
+            // `[image #N](spk-image://idx)` link rewriting still works
+            // because we run `clean_user_message_text` above and then
+            // hand the text to a `Markdown` widget below for the
+            // selectable+clickable variant.
+            let md_entity =
+                cx.new(|cx| markdown::Markdown::new(text.clone().into(), None, None, cx));
+            let style = self.markdown_style_for_render.clone()?;
+            let images_for_handler = images;
+            MarkdownElement::new(md_entity, style)
+                .on_url_click(move |url, window, cx| {
+                    if let Some(idx_str) = url.strip_prefix("spk-image://")
+                        && let Ok(idx) = idx_str.parse::<usize>()
+                        && let Some(image) = images_for_handler.get(idx).cloned()
+                    {
+                        open_image_preview(image, window, cx);
+                        return;
+                    }
+                    cx.open_url(url.as_ref());
+                })
+                .into_any_element()
+        } else {
+            Label::new(SharedString::from("(image only)"))
+                .size(LabelSize::Small)
+                .color(Color::Muted)
+                .into_any_element()
+        };
+
+        let bubble = h_flex().w_full().child(
+            div()
+                .relative()
+                .w_full()
+                .px_2p5()
+                .py_1()
+                .bg(bubble_bg)
+                .border_1()
+                .border_dashed()
+                .border_color(border_color)
+                .rounded_md()
+                .child(body),
+        );
+        let spinner = h_flex()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .items_center()
+            .child(
+                Icon::new(IconName::ArrowCircle)
+                    .size(IconSize::XSmall)
+                    .color(Color::Accent)
+                    .with_rotate_animation(2),
+            )
+            .child(
+                Label::new(SharedString::from("Starting agent…"))
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted)
+                    .italic(),
+            );
+        Some(v_flex().w_full().px_1().child(bubble).child(spinner))
     }
 }

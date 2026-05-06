@@ -1890,6 +1890,14 @@ impl Render for SolutionSessionView {
                 // returns `None` when the queue is empty so the
                 // `.when_some(...)` site below skips the row entirely.
                 let pending_section = self.render_pending_section(window, cx);
+                // Optimistic-resume section: while a cold tab is
+                // resuming after a Send, paint the user's text as a
+                // muted ghost bubble + "Starting agent…" spinner so
+                // the chat shows immediate feedback for the 3-4 s
+                // ACP handshake. Without this, clicking Send on a
+                // cold tab looked like nothing happened until the
+                // agent attached.
+                let resuming_section = self.render_resuming_section(cx);
 
                 // The "Thinking… Ns" indicator now lives in the status
                 // row (see `status_row::render_status_row`) so it
@@ -1975,6 +1983,7 @@ impl Render for SolutionSessionView {
                             }),
                     )
                     .when_some(pending_section, |this, section| this.child(section))
+                    .when_some(resuming_section, |this, section| this.child(section))
             })
             .children({
                 // Status row sits directly above the compose box: token
