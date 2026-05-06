@@ -1636,6 +1636,7 @@
     "context": "SolutionSessionView",
     "bindings": {
       "cmd-f": "solution_agent::FindInSession",
+      "cmd-shift-v": "solution_agent::PasteWithoutFormatting",
       "escape": "solution_agent::StopResponse",
     },
   },

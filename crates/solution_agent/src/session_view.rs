@@ -19,7 +19,10 @@ use workspace::{
     notifications::{NotificationId, simple_message_notification::MessageNotification},
 };
 
-use crate::actions::{FindClose, FindInSession, FindNextMatch, FindPreviousMatch, StopResponse};
+use crate::actions::{
+    FindClose, FindInSession, FindNextMatch, FindPreviousMatch, PasteWithoutFormatting,
+    StopResponse,
+};
 use crate::conversation_render::{
     FindMatch, entry_text_spans, find_all, matches_for_span, render_entry,
 };
@@ -1302,6 +1305,37 @@ impl SolutionSessionView {
         });
     }
 
+    /// Paste only the text portion of the clipboard, skipping any
+    /// image / file-path entries that `paste_intercept` would have
+    /// turned into a pending image. Used to bypass the auto-image
+    /// flow when a user has copied "image + caption" from a browser
+    /// and wants only the caption.
+    fn paste_without_formatting(
+        &mut self,
+        _: &PasteWithoutFormatting,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(clipboard) = cx.read_from_clipboard() else {
+            return;
+        };
+        // `ClipboardItem::text()` concatenates every `ClipboardEntry::String`
+        // and falls back to ExternalPaths if no string entry exists.
+        // Image entries are skipped, which is exactly the "without
+        // formatting" semantic we want.
+        let Some(text) = clipboard.text() else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        self.compose_editor.update(cx, |editor, cx| {
+            editor.insert(&text, window, cx);
+        });
+        cx.stop_propagation();
+        cx.notify();
+    }
+
     fn paste_intercept(
         &mut self,
         _: &editor::actions::Paste,
@@ -1601,6 +1635,10 @@ impl Render for SolutionSessionView {
             .key_context("SolutionSessionView")
             .track_focus(&self.focus_handle)
             .capture_action(cx.listener(Self::paste_intercept))
+            // capture (top-down) so the editor's own Ctrl-V handler
+            // never sees this action — otherwise the editor would
+            // ALSO run on its own paste path and double-insert.
+            .capture_action(cx.listener(Self::paste_without_formatting))
             // `capture_action` (top-down dispatch) so this runs BEFORE
             // the editor's own `MoveUp` handler. If the recall handler
             // doesn't `cx.stop_propagation()`, the editor sees the

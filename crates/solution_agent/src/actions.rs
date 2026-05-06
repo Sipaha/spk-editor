@@ -27,5 +27,10 @@ actions!(
         FindClose,
         /// Cancel the agent's in-flight response in the active session.
         StopResponse,
+        /// Paste only the text portion of the clipboard into the
+        /// compose editor — skips images / file paths / any rich
+        /// content the default Ctrl-V would have wrapped into a
+        /// pending image. Bound to Ctrl/Cmd-Shift-V.
+        PasteWithoutFormatting,
     ]
 );
