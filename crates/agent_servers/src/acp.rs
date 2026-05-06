@@ -2940,7 +2940,8 @@ mod tests {
 fn mcp_servers_for_project(project: &Entity<Project>, cx: &App) -> Vec<acp::McpServer> {
     let context_server_store = project.read(cx).context_server_store().read(cx);
     let is_local = project.read(cx).is_local();
-    context_server_store
+    let mut servers: Vec<acp::McpServer> = spk_editor_mcp_bridge_server().into_iter().collect();
+    servers.extend(context_server_store
         .configured_server_ids()
         .iter()
         .filter_map(|id| {
@@ -2980,8 +2981,29 @@ fn mcp_servers_for_project(project: &Entity<Project>, cx: &App) -> Vec<acp::McpS
                 )),
                 _ => None,
             }
-        })
-        .collect()
+        }));
+    servers
+}
+
+/// SPK Editor fork: build an `McpServer::Stdio` entry that points at the
+/// embedded editor MCP socket via the editor binary's own `--nc` bridge.
+/// This is what makes `solution_agent.*` / `solutions.*` / `editor.*` /
+/// `windows.*` / etc. tools visible to the spawned ACP subagent
+/// (claude-acp, codex-acp, …) — without it, those tools live behind the
+/// Unix socket that the subagent has no transport for. Returns `None`
+/// when the socket file is missing (test harnesses, headless runs that
+/// failed to start the server) or when `current_exe` cannot be resolved
+/// (CI sandbox, etc.). See FORK.md decision 14.
+fn spk_editor_mcp_bridge_server() -> Option<acp::McpServer> {
+    let socket = editor_mcp::socket_path();
+    if !socket.exists() {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    Some(acp::McpServer::Stdio(
+        acp::McpServerStdio::new("spk-editor", exe.to_string_lossy().as_ref())
+            .args(vec!["--nc".to_string(), socket.to_string_lossy().into_owned()]),
+    ))
 }
 
 fn config_state(

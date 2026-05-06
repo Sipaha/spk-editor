@@ -25,12 +25,22 @@ pub struct NotificationDecision {
 /// gate suppresses notifications for fast turns; `Errored` always notifies
 /// regardless of elapsed time. When the originating session is currently
 /// focused in the UI, no notification fires.
+///
+/// `has_pending_messages` lets the caller signal that the session is about
+/// to immediately start another turn (drain its `pending_messages` queue
+/// — see `SolutionAgentStore::handle_acp_event` Stopped branch). In that
+/// case we suppress `Completed` notifications: the user expects "all my
+/// queued follow-ups done" as one logical unit of work and a per-turn
+/// ping in the middle is noise. `AwaitingInput` and `Errored` still fire
+/// — those mean the session is actually parked / broken regardless of
+/// the queue.
 pub fn decide_notification(
     session_id: SolutionSessionId,
     previous: &SessionState,
     next: &SessionState,
     now: Instant,
     is_focused: bool,
+    has_pending_messages: bool,
 ) -> Option<NotificationDecision> {
     let prev_started = match previous {
         SessionState::Running {
@@ -48,6 +58,10 @@ pub fn decide_notification(
     };
 
     if is_focused {
+        return None;
+    }
+
+    if matches!(kind, NotifyKind::Completed) && has_pending_messages {
         return None;
     }
 
@@ -106,9 +120,7 @@ pub fn dispatch(decision: &NotificationDecision, title: &str, body: &str, _cx: &
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     {
         let _ = (title, body);
-        log::warn!(
-            "OS notifications not implemented for this platform; decision: {decision:?}"
-        );
+        log::warn!("OS notifications not implemented for this platform; decision: {decision:?}");
     }
 }
 
@@ -126,7 +138,7 @@ mod tests {
         };
         let next = SessionState::Idle;
         assert_eq!(
-            decide_notification(SolutionSessionId::new(), &prev, &next, now, false),
+            decide_notification(SolutionSessionId::new(), &prev, &next, now, false, false),
             None
         );
     }
@@ -140,7 +152,8 @@ mod tests {
             notified: false,
         };
         let next = SessionState::Idle;
-        let decision = decide_notification(SolutionSessionId::new(), &prev, &next, now, false);
+        let decision =
+            decide_notification(SolutionSessionId::new(), &prev, &next, now, false, false);
         assert!(matches!(decision, Some(d) if d.kind == NotifyKind::Completed));
     }
 
@@ -154,7 +167,7 @@ mod tests {
         };
         let next = SessionState::Idle;
         assert_eq!(
-            decide_notification(SolutionSessionId::new(), &prev, &next, now, true),
+            decide_notification(SolutionSessionId::new(), &prev, &next, now, true, false),
             None
         );
     }
@@ -168,7 +181,44 @@ mod tests {
             notified: false,
         };
         let next = SessionState::Errored("boom".into());
-        let decision = decide_notification(SolutionSessionId::new(), &prev, &next, now, false);
+        let decision =
+            decide_notification(SolutionSessionId::new(), &prev, &next, now, false, false);
         assert!(matches!(decision, Some(d) if d.kind == NotifyKind::Errored));
+    }
+
+    #[test]
+    fn completed_suppressed_when_queue_has_more_messages() {
+        let started = Instant::now();
+        let now = started + NOTIFICATION_THRESHOLD;
+        let prev = SessionState::Running {
+            started_at: started,
+            notified: false,
+        };
+        let next = SessionState::Idle;
+        // Even past the 5-minute threshold, "Done" is suppressed when
+        // the next queued message will start another turn immediately —
+        // the user wants one notification at the end of all their
+        // follow-ups, not per-turn.
+        assert_eq!(
+            decide_notification(SolutionSessionId::new(), &prev, &next, now, false, true),
+            None
+        );
+    }
+
+    #[test]
+    fn awaiting_input_still_notifies_with_pending_queue() {
+        let started = Instant::now();
+        let now = started + NOTIFICATION_THRESHOLD;
+        let prev = SessionState::Running {
+            started_at: started,
+            notified: false,
+        };
+        let next = SessionState::AwaitingInput;
+        // AwaitingInput parks the session and DOESN'T drain the queue
+        // automatically — the user must approve a tool call. Notify
+        // even with pending messages.
+        let decision =
+            decide_notification(SolutionSessionId::new(), &prev, &next, now, false, true);
+        assert!(matches!(decision, Some(d) if d.kind == NotifyKind::AwaitingInput));
     }
 }

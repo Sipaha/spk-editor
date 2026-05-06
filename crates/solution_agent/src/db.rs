@@ -82,6 +82,10 @@ impl SolutionAgentDb {
             "ALTER TABLE solution_sessions ADD COLUMN total_tokens INTEGER",
             "ALTER TABLE solution_sessions ADD COLUMN closed_at INTEGER",
             "ALTER TABLE solution_sessions ADD COLUMN context_count INTEGER NOT NULL DEFAULT 1",
+            // Working directory the session was created against. NULL
+            // for rows written before this column existed — the resume
+            // path falls back to `solution.root` in that case.
+            "ALTER TABLE solution_sessions ADD COLUMN cwd TEXT",
         ] {
             if let Ok(mut run) = connection.exec(ddl) {
                 let _ = run();
@@ -195,24 +199,18 @@ fn insert_or_update_metadata(
     // doesn't have those fields populated yet (e.g. fresh-session insert at
     // create time) doesn't clobber values an event-driven update wrote
     // earlier in the same session.
+    // Nested tuple shape because `sqlez::Bind` only implements tuples up
+    // to size 10; we have 11 columns now that `cwd` is persisted.
     let mut insert = connection.exec_bound::<(
-        String,
-        String,
-        String,
-        Arc<str>,
-        String,
-        i64,
-        i64,
-        Option<String>,
-        Option<i64>,
-        i64,
+        (String, String, String, Arc<str>, String),
+        (i64, i64, Option<String>, Option<i64>, i64, Option<String>),
     )>(indoc! {"
         INSERT INTO solution_sessions (
             id, solution_id, agent_id, acp_session_id, title,
             created_at, last_activity_at, preview, total_tokens,
-            context_count
+            context_count, cwd
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
         ON CONFLICT(id) DO UPDATE SET
             solution_id      = excluded.solution_id,
             agent_id         = excluded.agent_id,
@@ -222,20 +220,31 @@ fn insert_or_update_metadata(
             last_activity_at = excluded.last_activity_at,
             preview          = COALESCE(excluded.preview, preview),
             total_tokens     = COALESCE(excluded.total_tokens, total_tokens),
-            context_count    = excluded.context_count
+            context_count    = excluded.context_count,
+            cwd              = COALESCE(excluded.cwd, cwd)
     "})?;
 
+    let cwd_str = if meta.cwd.as_os_str().is_empty() {
+        None
+    } else {
+        Some(meta.cwd.to_string_lossy().into_owned())
+    };
     insert((
-        meta.id.to_string(),
-        meta.solution_id.0.clone(),
-        meta.agent_id.to_string(),
-        meta.acp_session_id.0.clone(),
-        meta.title.to_string(),
-        meta.created_at.timestamp_millis(),
-        meta.last_activity_at.timestamp_millis(),
-        meta.preview.as_ref().map(|s| s.to_string()),
-        meta.total_tokens.map(|t| t as i64),
-        meta.context_count as i64,
+        (
+            meta.id.to_string(),
+            meta.solution_id.0.clone(),
+            meta.agent_id.to_string(),
+            meta.acp_session_id.0.clone(),
+            meta.title.to_string(),
+        ),
+        (
+            meta.created_at.timestamp_millis(),
+            meta.last_activity_at.timestamp_millis(),
+            meta.preview.as_ref().map(|s| s.to_string()),
+            meta.total_tokens.map(|t| t as i64),
+            meta.context_count as i64,
+            cwd_str,
+        ),
     ))?;
 
     Ok(())
@@ -265,10 +274,7 @@ fn mark_closed_by_id(
     let mut update = connection.exec_bound::<(Option<i64>, String)>(indoc! {"
         UPDATE solution_sessions SET closed_at = ?1 WHERE id = ?2
     "})?;
-    update((
-        closed_at.map(|ts| ts.timestamp_millis()),
-        id.to_string(),
-    ))?;
+    update((closed_at.map(|ts| ts.timestamp_millis()), id.to_string()))?;
     Ok(())
 }
 
@@ -307,24 +313,18 @@ fn select_metadata_for_solution(
     connection: &Connection,
     solution_id: &SolutionId,
 ) -> Result<Vec<SolutionSessionMetadata>> {
+    // Same nested-tuple shape as the INSERT side — `sqlez::Column` only
+    // implements tuples up to size 10.
     let mut select = connection.select_bound::<
         String,
         (
-            String,
-            String,
-            String,
-            Arc<str>,
-            String,
-            i64,
-            i64,
-            Option<String>,
-            Option<i64>,
-            i64,
+            (String, String, String, Arc<str>, String),
+            (i64, i64, Option<String>, Option<i64>, i64, Option<String>),
         ),
     >(indoc! {"
         SELECT id, solution_id, agent_id, acp_session_id, title,
                created_at, last_activity_at, preview, total_tokens,
-               context_count
+               context_count, cwd
         FROM solution_sessions
         WHERE solution_id = ?
         ORDER BY last_activity_at DESC
@@ -333,16 +333,8 @@ fn select_metadata_for_solution(
     let rows = select(solution_id.0.clone())?;
     let mut out = Vec::with_capacity(rows.len());
     for (
-        id,
-        solution_id,
-        agent_id,
-        acp_session_id,
-        title,
-        created_at,
-        last_activity_at,
-        preview,
-        total_tokens,
-        context_count,
+        (id, solution_id, agent_id, acp_session_id, title),
+        (created_at, last_activity_at, preview, total_tokens, context_count, cwd),
     ) in rows
     {
         let id = SolutionSessionId::parse(&id)
@@ -363,6 +355,7 @@ fn select_metadata_for_solution(
             preview: preview.map(SharedString::from),
             total_tokens: total_tokens.map(|t| t as u64),
             context_count: context_count.max(1) as u32,
+            cwd: cwd.map(std::path::PathBuf::from).unwrap_or_default(),
         });
     }
     Ok(out)
@@ -389,6 +382,7 @@ mod tests {
             preview: None,
             total_tokens: None,
             context_count: 1,
+            cwd: std::path::PathBuf::new(),
         }
     }
 
@@ -419,6 +413,27 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn cwd_roundtrips_through_save_and_list(cx: &mut gpui::TestAppContext) {
+        let executor = cx.executor();
+        let db = SolutionAgentDb::open(executor).unwrap();
+
+        let mut with_cwd = make_meta(1, "sol-a");
+        with_cwd.cwd = std::path::PathBuf::from("/tmp/sol-a/member-x");
+        let without_cwd = make_meta(2, "sol-a"); // empty PathBuf — legacy row
+
+        db.save_metadata(with_cwd.clone()).await.unwrap();
+        db.save_metadata(without_cwd.clone()).await.unwrap();
+
+        let listed = db
+            .list_for_solution(SolutionId("sol-a".into()))
+            .await
+            .unwrap();
+        let by_id = |id| listed.iter().find(|m| m.id == id).expect("row present");
+        assert_eq!(by_id(with_cwd.id).cwd, with_cwd.cwd);
+        assert_eq!(by_id(without_cwd.id).cwd, std::path::PathBuf::new());
+    }
+
+    #[gpui::test]
     async fn save_blob_then_load_roundtrips(cx: &mut gpui::TestAppContext) {
         let executor = cx.executor();
         let db = SolutionAgentDb::open(executor).unwrap();
@@ -441,7 +456,10 @@ mod tests {
 
         db.delete(meta.id).await.unwrap();
 
-        let listing = db.list_for_solution(meta.solution_id.clone()).await.unwrap();
+        let listing = db
+            .list_for_solution(meta.solution_id.clone())
+            .await
+            .unwrap();
         assert!(listing.is_empty());
     }
 
@@ -453,9 +471,22 @@ mod tests {
         db.save_metadata(make_meta(2, "sol-a")).await.unwrap();
         db.save_metadata(make_meta(3, "sol-b")).await.unwrap();
 
-        db.delete_for_solution(SolutionId("sol-a".into())).await.unwrap();
+        db.delete_for_solution(SolutionId("sol-a".into()))
+            .await
+            .unwrap();
 
-        assert!(db.list_for_solution(SolutionId("sol-a".into())).await.unwrap().is_empty());
-        assert_eq!(db.list_for_solution(SolutionId("sol-b".into())).await.unwrap().len(), 1);
+        assert!(
+            db.list_for_solution(SolutionId("sol-a".into()))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            db.list_for_solution(SolutionId("sol-b".into()))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

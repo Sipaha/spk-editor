@@ -24,7 +24,9 @@ See `.rules` § "What's disabled" for the table. Brief: `auto_update`, `telemetr
 | `crates/zed/src/main.rs` | `editor_mcp::init`, `solutions::init`, `solutions_ui::init`, `solution_agent::init` calls inserted in startup flow. Various subsystem inits commented out. | mixed |
 | `crates/zed/src/zed.rs` | `initialize_agent_panel` call commented out in `futures::join!` (fn kept under `#[allow(dead_code)]` for one-line re-enable). | `solution_agent` |
 | `crates/zed/Cargo.toml` | Workspace deps on the four fork crates. | mixed |
-| `crates/title_bar/src/title_bar.rs` | New segment for active Solution / project / branch. | `solutions_ui` |
+| `crates/title_bar/src/title_bar.rs` | New segment for active Solution / project / branch. `render_restricted_mode` call site disabled (function kept under `#[allow(dead_code)]`) — see decision 13. | `solutions_ui` / `solutions` |
+| `crates/agent_servers/src/acp.rs` | `mcp_servers_for_project` prepends a fork-local `acp::McpServer::Stdio` entry pointing at `<current_exe> --nc <editor_mcp.socket_path>` so spawned ACP subagents see the editor's embedded MCP tools. New helper `spk_editor_mcp_bridge_server`. See decision 14. | `editor_mcp` / `solution_agent` |
+| `crates/agent_servers/Cargo.toml` | New dep on `editor_mcp` for the socket path. | `editor_mcp` / `solution_agent` |
 | `crates/welcome/src/welcome.rs` | Recent Solutions section + buttons. | `solutions_ui` |
 | `crates/workspace/src/welcome.rs` | `render_agent_card` gated off via `false &&` — fork uses `solution_agent`, not upstream agent panel. | `solution_agent` |
 | `crates/paths/src/paths.rs` | `.zed` → `.spke` rename for per-worktree config dir. | rebrand |
@@ -113,6 +115,18 @@ Why: Claude (and other ACP agents that declare the `image` prompt capability) ac
 On submit, `pending_images` are converted to `acp::ContentBlock::Image(ImageContent::new(base64, mime))` and combined with the text block via `SolutionAgentStore::send_message_blocks(...)` (the new structured-content API alongside the legacy text-only `send_message`).
 
 How to apply: this is a deliberate parallel implementation of upstream's `paste_images_as_context`, NOT a reuse. The upstream version requires `MentionSet`, image-upload state, capability checks — all coupled to `agent_ui`. Our path stays self-contained inside `solution_agent`. If the agent doesn't support images (capability missing), the call still goes out — the agent rejects with an error that surfaces to the user as a normal `Errored` state. Adding capability negotiation pre-flight is a follow-up.
+
+### 14. Editor's embedded MCP socket is bridged into spawned ACP subagents via `<exe> --nc <socket>`
+
+Why: `editor_mcp` exposes 58+ tools (`solution_agent.*`, `solutions.*`, `editor.*`, `windows.*`, `workspace.*`, `project.*`, `diagnostics.*`) over a Unix socket at `~/.config/spk-editor/mcp.sock`. Upstream's `agent_servers::acp::mcp_servers_for_project` only feeds claude-acp / codex-acp / gemini the MCP servers configured in user settings — so the embedded server is invisible to those subagents. ACP's `McpServer` enum supports `Stdio` and `Http` transports, but not Unix sockets. The fork already ships an `--nc <socket>` mode in the editor binary (`crates/nc/src/nc.rs`) that proxies stdin/stdout to a Unix socket — same pattern upstream uses for the `--askpass` SSH flow. So the bridge is: a fork-local entry in `mcp_servers_for_project` that runs `<current_exe> --nc <socket_path>` as the stdio command. Spawned subagents speak JSON-RPC stdio to that subprocess, which forwards to the editor socket.
+
+How to apply: the entry is named `spk-editor`, gated on the socket file existing (so headless test runs that never started the server skip it cleanly) and on `current_exe()` resolving. Implementation in `crates/agent_servers/src/acp.rs::spk_editor_mcp_bridge_server`. **Security note:** any tool exposed via `editor_mcp` is now reachable from inside ACP subagents — including potentially destructive ones like `windows.close` or `editor.handle_cli_args`. Audit the tool surface before adding new tools that should NOT be subagent-accessible (or gate them behind a separate registry).
+
+### 13. Catalog membership IS the trust signal — Restricted Mode badge hidden
+
+Why: upstream Zed's worktree-trust UX prompts before starting a language server in any unfamiliar directory and surfaces a "Restricted Mode" badge in the title bar. The fork's mental model is different: a project is in a Solution because the user explicitly added its remote URL to the catalog AND chose to clone it. That decision IS the trust signal — re-prompting at LSP-start time and parking a yellow badge in the title bar is noise, not safety.
+
+How to apply: `crates/solutions/src/auto_trust.rs` observes new workspaces and trusts every `solution.root` whose path covers any worktree of the project (uses `PathTrust::AbsPath`, so all current and future member subdirs inherit trust via the path-hierarchy in `crates/project/src/trusted_worktrees.rs`). The title-bar render call in `crates/title_bar/src/title_bar.rs` is commented out; the function itself is kept under `#[allow(dead_code)]` for upstream-merge friendliness. Trust still works as upstream for ad-hoc opens (File → Open Folder of a non-Solution path) — they go through the original prompt path.
 
 ## Where specs and plans live
 

@@ -229,7 +229,15 @@ impl Render for TitleBar {
                                 title_bar.child(menu)
                             },
                         )
-                        .children(self.render_restricted_mode(cx))
+                        // SPK Editor fork: the "Restricted Mode" badge in
+                        // the title bar competes for attention with little
+                        // upside — trust is granted at the solution
+                        // catalog layer (see `solutions::auto_trust`), so
+                        // any project inside a Solution's root is trusted
+                        // automatically. The badge stayed surprising for
+                        // single-file ad-hoc opens. Render-site disabled,
+                        // function intact for upstream-merge friendliness.
+                        // .children(self.render_restricted_mode(cx))
                         .when(render_project_items, |title_bar| {
                             title_bar
                                 .when(title_bar_settings.show_project_items, |title_bar| {
@@ -630,6 +638,10 @@ impl TitleBar {
         )
     }
 
+    // SPK Editor fork: render site is disabled (see comment near the
+    // title-bar layout above). Function is kept for upstream-merge
+    // friendliness; allow-dead-code so the unused-warn doesn't fire.
+    #[allow(dead_code)]
     pub fn render_restricted_mode(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let has_restricted_worktrees = TrustedWorktrees::try_get_global(cx)
             .map(|trusted_worktrees| {

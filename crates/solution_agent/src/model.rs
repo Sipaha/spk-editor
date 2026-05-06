@@ -1,8 +1,9 @@
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::time::Instant;
 
-use agent_client_protocol::schema as acp;
 use acp_thread::AcpThread;
+use agent_client_protocol::schema as acp;
 use chrono::{DateTime, Utc};
 use gpui::{Entity, SharedString, Subscription};
 use rand::RngCore;
@@ -64,9 +65,7 @@ impl SolutionSessionId {
     ///      user's DB, and we'd rather migrate in-place than wipe the
     ///      session history.
     pub fn parse(s: &str) -> anyhow::Result<Self> {
-        if s.len() == SHORT_ID_LEN
-            && s.bytes().all(|b| SHORT_ID_ALPHABET.contains(&b))
-        {
+        if s.len() == SHORT_ID_LEN && s.bytes().all(|b| SHORT_ID_ALPHABET.contains(&b)) {
             let mut bytes = [0u8; SHORT_ID_LEN];
             bytes.copy_from_slice(s.as_bytes());
             return Ok(Self(bytes));
@@ -178,6 +177,14 @@ pub struct SolutionSession {
     pub created_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
     pub state: SessionState,
+    /// Working directory the session was originally created against.
+    /// claude-acp buckets sessions by encoded cwd under
+    /// `~/.claude/projects/<encoded-cwd>/<acp-session-id>.jsonl`, so
+    /// resume must replay the SAME cwd or the agent returns
+    /// `Resource not found`. Empty `PathBuf` means "fall back to
+    /// `solution.root`" — used for legacy DB rows that pre-date the
+    /// column.
+    pub cwd: PathBuf,
     /// 1-based count of how many context-windows this session has
     /// burned through. `1` for a fresh session, `2` after one
     /// compact, etc. The compact dump dir for the *current* context
@@ -199,6 +206,12 @@ pub struct SolutionSession {
     /// matches the Claude Code CLI experience where you can keep
     /// typing follow-ups while the agent is still working.
     pub pending_messages: VecDeque<Vec<acp::ContentBlock>>,
+    /// One-shot signal set by `interrupt_and_flush_pending`: tells the
+    /// next `Stopped(Cancelled)` handler to FLUSH `pending_messages`
+    /// instead of clearing them. Without it, `Cancelled` (the user
+    /// pressed Stop) drops the queue — which is the right default,
+    /// but the "Send now" button needs the inverse behaviour.
+    pub flush_after_cancel: bool,
 }
 
 /// Lightweight metadata row used for navigator listing without hydrating
@@ -224,4 +237,8 @@ pub struct SolutionSessionMetadata {
     /// re-hydrated from the DB on editor restart resumes its compact
     /// numbering instead of resetting to 1.
     pub context_count: SessionContextCount,
+    /// Persisted copy of [`SolutionSession::cwd`]. Empty for rows
+    /// written before the column existed; the resume path treats
+    /// empty as "use `solution.root`".
+    pub cwd: PathBuf,
 }

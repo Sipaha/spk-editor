@@ -41,8 +41,7 @@ pub struct SolutionAgentStore {
     /// `Fn(&Context<Self>) -> bool` because `Context` is parameterised on
     /// `Self`, which makes the trait object generic and unstorable. `&App`
     /// is the strict supertype the resolver actually needs.
-    pub focus_resolver:
-        Option<Arc<dyn Fn(SolutionSessionId, &gpui::App) -> bool + Send + Sync>>,
+    pub focus_resolver: Option<Arc<dyn Fn(SolutionSessionId, &gpui::App) -> bool + Send + Sync>>,
     _solution_subscription: Option<Subscription>,
 }
 
@@ -100,10 +99,7 @@ fn extract_preview(entries: &[acp_thread::AgentThreadEntry]) -> Option<gpui::Sha
             break;
         }
     }
-    let collapsed: String = text
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.is_empty() {
         return None;
     }
@@ -121,11 +117,68 @@ fn extract_preview(entries: &[acp_thread::AgentThreadEntry]) -> Option<gpui::Sha
 /// `TitleUpdated` describing the actual conversation. Keeps the tab
 /// readable: 5 hex chars of the UUID is enough to disambiguate adjacent
 /// tabs without smearing the entire UUID across the strip.
+#[allow(dead_code)]
 fn short_session_title(session_id: SolutionSessionId) -> SharedString {
     // SolutionSessionId is already 8 chars — no trimming needed; the
     // raw form is short enough to read at a glance and uniquely
     // identifies the session in `.agents/<id>/` paths.
     SharedString::from(session_id.to_string())
+}
+
+/// Resolve the catalog project name for `cwd` if `cwd` matches one of
+/// `solution.members`'s `local_path`s. Returns `None` for `solution.root`
+/// (the "Solution root" choice in the New Session popover) and for any
+/// path that doesn't map to a registered member — caller decides how to
+/// label those (status row says "ROOT", title default uses
+/// `solution.name`).
+pub(crate) fn project_name_for_cwd(
+    solution: &Solution,
+    cwd: &std::path::Path,
+    cx: &App,
+) -> Option<SharedString> {
+    if cwd.as_os_str().is_empty() || cwd == solution.root {
+        return None;
+    }
+    let member = solution.members.iter().find(|m| m.local_path == cwd)?;
+    let store = SolutionStore::try_global(cx)?;
+    store.read_with(cx, |s, _| {
+        s.catalog()
+            .iter()
+            .find(|c| c.id == member.catalog_id)
+            .map(|c| SharedString::from(c.name.clone()))
+    })
+}
+
+/// Pick a tab title that doesn't collide with any existing session in
+/// the same Solution. First call returns `base`; subsequent collisions
+/// get ` 2`, ` 3`, … appended (matching the "Untitled 2 / 3" convention
+/// the rest of the editor uses for duplicate names). Caps at 1000 just
+/// to avoid an infinite loop on a pathological state — practically
+/// nobody opens 1000 sessions of the same project in one Solution.
+fn unique_session_title(
+    base: &str,
+    store: &SolutionAgentStore,
+    solution_id: &SolutionId,
+    cx: &App,
+) -> SharedString {
+    let existing: std::collections::HashSet<String> = store
+        .by_solution
+        .get(solution_id)
+        .into_iter()
+        .flatten()
+        .filter_map(|sid| store.sessions.get(sid))
+        .map(|s| s.read(cx).title.to_string())
+        .collect();
+    if !existing.contains(base) {
+        return SharedString::from(base.to_string());
+    }
+    for n in 2..1000 {
+        let candidate = format!("{base} {n}");
+        if !existing.contains(&candidate) {
+            return SharedString::from(candidate);
+        }
+    }
+    SharedString::from(base.to_string())
 }
 
 fn serializable_snapshot(session: &SolutionSession, cx: &App) -> Vec<u8> {
@@ -270,11 +323,13 @@ impl SolutionAgentStore {
 
             // 3. Create an ACP session on that connection.
             let work_dir = cwd.unwrap_or_else(|| solution.root.clone());
-            let work_dirs = util::path_list::PathList::new(&[
-                work_dir.to_string_lossy().into_owned()
-            ]);
+            let work_dirs =
+                util::path_list::PathList::new(&[work_dir.to_string_lossy().into_owned()]);
+            let session_cwd = work_dir.clone();
             let acp_thread_task = cx.update(|cx| {
-                connection.clone().new_session(project.clone(), work_dirs, cx)
+                connection
+                    .clone()
+                    .new_session(project.clone(), work_dirs, cx)
             });
             let acp_thread = match acp_thread_task.await {
                 Ok(thread) => thread,
@@ -294,13 +349,22 @@ impl SolutionAgentStore {
             let session_id = this.update(cx, |store, cx| {
                 let acp_session_id = acp_thread.read(cx).session_id().clone();
                 let session_id = SolutionSessionId::new();
+                // Default tab title = name of the project that's the
+                // session's cwd: catalog name for a member, else the
+                // Solution name (covers the "Solution root" choice).
+                // Dedup'd against existing sessions in the same Solution
+                // so successive same-cwd opens land as `name`, `name 2`,
+                // `name 3`, …
+                let title_base: SharedString = project_name_for_cwd(&solution, &session_cwd, cx)
+                    .unwrap_or_else(|| SharedString::from(solution.name.clone()));
+                let title = unique_session_title(&title_base, store, &solution_id, cx);
                 let session = SolutionSession {
                     id: session_id,
                     solution_id: solution_id.clone(),
                     agent_id: agent_id.clone(),
                     acp_session_id,
                     acp_thread: Some(acp_thread.clone()),
-                    title: short_session_title(session_id),
+                    title,
                     created_at: Utc::now(),
                     last_activity_at: Utc::now(),
                     state: SessionState::Idle,
@@ -308,14 +372,15 @@ impl SolutionAgentStore {
                     project: Some(project.clone()),
                     _acp_subscription: None,
                     pending_messages: std::collections::VecDeque::new(),
+                    flush_after_cancel: false,
+                    cwd: session_cwd.clone(),
                 };
                 let entity = cx.new(|_| session);
                 store.sessions.insert(session_id, entity);
-                store
-                    .by_solution
-                    .entry(solution_id.clone())
-                    .or_default()
-                    .push(session_id);
+                let by_sol = store.by_solution.entry(solution_id.clone()).or_default();
+                if !by_sol.contains(&session_id) {
+                    by_sol.push(session_id);
+                }
                 let sub = store.subscribe_to_session(session_id, acp_thread, cx);
                 store
                     .sessions
@@ -377,6 +442,7 @@ impl SolutionAgentStore {
             preview,
             total_tokens,
             context_count: s.context_count,
+            cwd: s.cwd.clone(),
         };
         db.save_metadata(meta).detach_and_log_err(cx);
     }
@@ -434,9 +500,16 @@ impl SolutionAgentStore {
             })?;
             let connection = connection_task.await?;
 
-            let work_dirs = util::path_list::PathList::new(&[
-                solution.root.to_string_lossy().into_owned()
-            ]);
+            // Empty `cwd` = legacy row written before the column existed —
+            // fall back to `solution.root` (matches the pre-fix resume
+            // behaviour, so already-broken sessions don't get any worse).
+            let resume_cwd = if meta.cwd.as_os_str().is_empty() {
+                solution.root.clone()
+            } else {
+                meta.cwd.clone()
+            };
+            let work_dirs =
+                util::path_list::PathList::new(&[resume_cwd.to_string_lossy().into_owned()]);
             let acp_session_id = meta.acp_session_id.clone();
             let title_for_load = Some(meta.title.clone());
 
@@ -495,14 +568,20 @@ impl SolutionAgentStore {
                     project: Some(project.clone()),
                     _acp_subscription: None,
                     pending_messages: std::collections::VecDeque::new(),
+                    flush_after_cancel: false,
+                    // Persist the same cwd we resumed against so the next
+                    // restart finds the row aligned with the agent state.
+                    cwd: resume_cwd.clone(),
                 };
                 let entity = cx.new(|_| session);
                 store.sessions.insert(session_id, entity);
-                store
+                let by_sol = store
                     .by_solution
                     .entry(meta.solution_id.clone())
-                    .or_default()
-                    .push(session_id);
+                    .or_default();
+                if !by_sol.contains(&session_id) {
+                    by_sol.push(session_id);
+                }
                 // Re-seed token usage from the persisted metadata so the
                 // status-row meter doesn't claim "0 tokens" for a long
                 // resumed conversation. We only have a coarse aggregate
@@ -568,9 +647,9 @@ impl SolutionAgentStore {
                     }
                     SpawnState::Pending(shared) => {
                         let shared = shared.clone();
-                        return cx.foreground_executor().spawn(async move {
-                            shared.await.map_err(|e| anyhow!("{e}"))
-                        });
+                        return cx
+                            .foreground_executor()
+                            .spawn(async move { shared.await.map_err(|e| anyhow!("{e}")) });
                     }
                     SpawnState::Failed(_) => {
                         // Drop the failed entry and fall through to a fresh spawn.
@@ -612,9 +691,8 @@ impl SolutionAgentStore {
             Task<Result<Rc<dyn acp_thread::AgentConnection>, std::sync::Arc<anyhow::Error>>>,
         > = cx
             .spawn(async move |this, cx: &mut AsyncApp| {
-                let connect_task = cx.update(|cx| {
-                    server_for_connect.connect(delegate, project_for_connect, cx)
-                });
+                let connect_task =
+                    cx.update(|cx| server_for_connect.connect(delegate, project_for_connect, cx));
                 let result_for_pool: Result<
                     Rc<dyn acp_thread::AgentConnection>,
                     std::sync::Arc<anyhow::Error>,
@@ -647,9 +725,8 @@ impl SolutionAgentStore {
             );
         }
 
-        cx.foreground_executor().spawn(async move {
-            task.await.map_err(|e| anyhow!("{e}"))
-        })
+        cx.foreground_executor()
+            .spawn(async move { task.await.map_err(|e| anyhow!("{e}")) })
     }
 
     pub fn sessions_for(&self, solution_id: &SolutionId) -> Vec<Entity<SolutionSession>> {
@@ -690,11 +767,7 @@ impl SolutionAgentStore {
         id
     }
 
-    pub fn close_session(
-        &mut self,
-        id: SolutionSessionId,
-        cx: &mut Context<Self>,
-    ) -> Result<()> {
+    pub fn close_session(&mut self, id: SolutionSessionId, cx: &mut Context<Self>) -> Result<()> {
         let removed = self
             .sessions
             .remove(&id)
@@ -721,11 +794,7 @@ impl SolutionAgentStore {
     /// or has no live `AcpThread` yet — once the connection accepts the
     /// cancel request, downstream `AcpThreadEvent::Stopped` (or `Error`)
     /// drives the state transition through `handle_acp_event`.
-    pub fn cancel_turn(
-        &self,
-        session_id: SolutionSessionId,
-        cx: &mut Context<Self>,
-    ) -> Result<()> {
+    pub fn cancel_turn(&self, session_id: SolutionSessionId, cx: &mut Context<Self>) -> Result<()> {
         let session = self
             .sessions
             .get(&session_id)
@@ -744,6 +813,32 @@ impl SolutionAgentStore {
         };
         connection.cancel(&acp_session_id, cx);
         Ok(())
+    }
+
+    /// Cancel the in-flight turn AND, once the resulting `Stopped(Cancelled)`
+    /// arrives, flush `pending_messages` instead of clearing them. Wired to
+    /// the "Send now" button in the compose row — the user typed a follow-up
+    /// they want the agent to act on RIGHT NOW, not after the current turn
+    /// completes.
+    ///
+    /// Internally just sets a one-shot flag on the session and delegates to
+    /// `cancel_turn`. The handler in `handle_acp_event` (Stopped branch)
+    /// reads the flag and routes the queue to `send_message_blocks`.
+    pub fn interrupt_and_flush_pending(
+        &mut self,
+        session_id: SolutionSessionId,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let session = self
+            .sessions
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("unknown session {session_id}"))?;
+        if session.read(cx).pending_messages.is_empty() {
+            anyhow::bail!("interrupt_and_flush_pending: no queued messages to flush");
+        }
+        session.update(cx, |s, _| s.flush_after_cancel = true);
+        self.cancel_turn(session_id, cx)
     }
 
     /// Update the user-visible title of a session and persist the change
@@ -882,11 +977,12 @@ impl SolutionAgentStore {
                 store.get_or_spawn_connection(pair.clone(), &solution, project.clone(), cx)
             })?;
             let connection = connection_task.await?;
-            let work_dirs = util::path_list::PathList::new(&[
-                solution.root.to_string_lossy().into_owned(),
-            ]);
+            let work_dirs =
+                util::path_list::PathList::new(&[solution.root.to_string_lossy().into_owned()]);
             let new_thread_task = cx.update(|cx| {
-                connection.clone().new_session(project.clone(), work_dirs, cx)
+                connection
+                    .clone()
+                    .new_session(project.clone(), work_dirs, cx)
             });
             let new_thread = new_thread_task.await?;
 
@@ -958,17 +1054,12 @@ impl SolutionAgentStore {
         // blank line) so the user sees a single ghost bubble that
         // grows, not a stack of fragments. Flush is one big prompt to
         // the agent, sent once `Stopped` fires.
-        let already_running = matches!(
-            session_entity.read(cx).state,
-            SessionState::Running { .. }
-        );
+        let already_running = matches!(session_entity.read(cx).state, SessionState::Running { .. });
         if already_running {
             session_entity.update(cx, |s, _| {
                 if let Some(last) = s.pending_messages.back_mut() {
                     last.push(agent_client_protocol::schema::ContentBlock::Text(
-                        agent_client_protocol::schema::TextContent::new(
-                            "\n\n".to_string(),
-                        ),
+                        agent_client_protocol::schema::TextContent::new("\n\n".to_string()),
                     ));
                     last.extend(blocks);
                 } else {
@@ -994,9 +1085,7 @@ impl SolutionAgentStore {
         cx.notify();
 
         let Some(acp_thread) = session_entity.read(cx).acp_thread.clone() else {
-            return Task::ready(Err(anyhow!(
-                "session {session_id} has no ACP thread yet"
-            )));
+            return Task::ready(Err(anyhow!("session {session_id} has no ACP thread yet")));
         };
 
         // Route through `AcpThread::send` (not `connection.prompt` directly)
@@ -1053,11 +1142,7 @@ impl SolutionAgentStore {
     /// the foreground thread because it must read the `AcpThread` entity; the
     /// SQLite write itself is dispatched to the background executor by
     /// `SolutionAgentDb::save_blob`.
-    pub fn persist_session_blob(
-        &self,
-        session_id: SolutionSessionId,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn persist_session_blob(&self, session_id: SolutionSessionId, cx: &mut Context<Self>) {
         let Some(session) = self.sessions.get(&session_id).cloned() else {
             return;
         };
@@ -1162,7 +1247,26 @@ impl SolutionAgentStore {
                 // (user pressed Stop) is treated as "abandon what I
                 // queued too": the queue is cleared without sending.
                 if let acp_thread::AcpThreadEvent::Stopped(reason) = event {
-                    if matches!(reason, agent_client_protocol::schema::StopReason::Cancelled) {
+                    // `flush_after_cancel` (set by `interrupt_and_flush_pending`)
+                    // flips Cancelled's default semantics from "abandon the
+                    // queue too" to "cancel the current turn but immediately
+                    // start the next one with the queued follow-ups". One-
+                    // shot — clear the flag whether or not the queue had
+                    // anything left to send.
+                    let flush_after_cancel = self
+                        .sessions
+                        .get(&session_id)
+                        .map(|s| {
+                            s.update(cx, |s, _| {
+                                let was = s.flush_after_cancel;
+                                s.flush_after_cancel = false;
+                                was
+                            })
+                        })
+                        .unwrap_or(false);
+                    let cancelled =
+                        matches!(reason, agent_client_protocol::schema::StopReason::Cancelled);
+                    if cancelled && !flush_after_cancel {
                         if let Some(s) = self.sessions.get(&session_id).cloned() {
                             s.update(cx, |s, _| s.pending_messages.clear());
                         }
@@ -1181,11 +1285,9 @@ impl SolutionAgentStore {
                             // Flatten N queued messages into one Vec.
                             // Each was its own send-press, but we coalesce
                             // them so the agent gets a single prompt.
-                            let combined: Vec<_> =
-                                drained.into_iter().flatten().collect();
+                            let combined: Vec<_> = drained.into_iter().flatten().collect();
                             if !combined.is_empty() {
-                                self.send_message_blocks(session_id, combined, cx)
-                                    .detach();
+                                self.send_message_blocks(session_id, combined, cx).detach();
                             }
                         }
                     }
@@ -1200,8 +1302,7 @@ impl SolutionAgentStore {
                 // back to whatever the previous Stopped wrote.
                 self.persist_session_row(session_id, cx);
             }
-            acp_thread::AcpThreadEvent::Error
-            | acp_thread::AcpThreadEvent::LoadError(_) => {
+            acp_thread::AcpThreadEvent::Error | acp_thread::AcpThreadEvent::LoadError(_) => {
                 self.mutate_state(
                     session_id,
                     |state| *state = SessionState::Errored(SharedString::from("agent error")),
@@ -1209,11 +1310,7 @@ impl SolutionAgentStore {
                 );
             }
             acp_thread::AcpThreadEvent::ToolAuthorizationRequested(_) => {
-                self.mutate_state(
-                    session_id,
-                    |state| *state = SessionState::AwaitingInput,
-                    cx,
-                );
+                self.mutate_state(session_id, |state| *state = SessionState::AwaitingInput, cx);
             }
             acp_thread::AcpThreadEvent::ToolAuthorizationReceived(_) => {
                 self.mutate_state(
@@ -1275,9 +1372,15 @@ impl SolutionAgentStore {
             .as_ref()
             .map(|f| f(session_id, cx))
             .unwrap_or(false);
-        if let Some(decision) =
-            notifier::decide_notification(session_id, &previous, &next, now, is_focused)
-        {
+        let has_pending_messages = !session.read(cx).pending_messages.is_empty();
+        if let Some(decision) = notifier::decide_notification(
+            session_id,
+            &previous,
+            &next,
+            now,
+            is_focused,
+            has_pending_messages,
+        ) {
             let (title, body) = {
                 let s = session.read(cx);
                 let title = format!("SPK Editor — {} ({})", s.agent_id, s.title);
@@ -1434,6 +1537,8 @@ mod tests {
                     project: None,
                     _acp_subscription: None,
                     pending_messages: std::collections::VecDeque::new(),
+                    flush_after_cancel: false,
+                    cwd: PathBuf::new(),
                 });
                 store.sessions.insert(id, entity);
                 store
@@ -1456,7 +1561,11 @@ mod tests {
     /// lifetime of the test — `create_solution` writes to it.
     async fn setup_solution_and_project(
         cx: &mut TestAppContext,
-    ) -> (SolutionId, tempfile::TempDir, gpui::Entity<project::Project>) {
+    ) -> (
+        SolutionId,
+        tempfile::TempDir,
+        gpui::Entity<project::Project>,
+    ) {
         let dir = tempfile::tempdir().expect("tempdir");
         let cfg_path = dir.path().join("solutions.json");
         let solutions_root = dir.path().join("solutions");
@@ -1483,11 +1592,8 @@ mod tests {
         });
 
         let fs = fs::FakeFs::new(cx.background_executor.clone());
-        fs.insert_tree(
-            solution_root.clone(),
-            serde_json::json!({ ".keep": "" }),
-        )
-        .await;
+        fs.insert_tree(solution_root.clone(), serde_json::json!({ ".keep": "" }))
+            .await;
         let project = project::Project::test(fs, [solution_root.as_path()], cx).await;
 
         (solution_id, dir, project)
@@ -1588,12 +1694,7 @@ mod tests {
             .update(|cx| {
                 let store = SolutionAgentStore::global(cx);
                 store.update(cx, |store, cx| {
-                    store.create_session(
-                        solution_id.clone(),
-                        agent_id.clone(),
-                        project.clone(),
-                        cx,
-                    )
+                    store.create_session(solution_id.clone(), agent_id.clone(), project.clone(), cx)
                 })
             })
             .await
@@ -1610,9 +1711,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn parallel_create_session_for_same_pair_spawns_only_once(
-        cx: &mut TestAppContext,
-    ) {
+    async fn parallel_create_session_for_same_pair_spawns_only_once(cx: &mut TestAppContext) {
         let (solution_id, _tmp, project) = setup_solution_and_project(cx).await;
         let agent_id = SharedString::from("mock-agent");
 
@@ -1636,23 +1735,13 @@ mod tests {
         let task1 = cx.update(|cx| {
             let store = SolutionAgentStore::global(cx);
             store.update(cx, |store, cx| {
-                store.create_session(
-                    solution_id.clone(),
-                    agent_id.clone(),
-                    project.clone(),
-                    cx,
-                )
+                store.create_session(solution_id.clone(), agent_id.clone(), project.clone(), cx)
             })
         });
         let task2 = cx.update(|cx| {
             let store = SolutionAgentStore::global(cx);
             store.update(cx, |store, cx| {
-                store.create_session(
-                    solution_id.clone(),
-                    agent_id.clone(),
-                    project.clone(),
-                    cx,
-                )
+                store.create_session(solution_id.clone(), agent_id.clone(), project.clone(), cx)
             })
         });
 
@@ -1707,12 +1796,7 @@ mod tests {
             .update(|cx| {
                 let store = SolutionAgentStore::global(cx);
                 store.update(cx, |store, cx| {
-                    store.create_session(
-                        solution_id.clone(),
-                        agent_id.clone(),
-                        project.clone(),
-                        cx,
-                    )
+                    store.create_session(solution_id.clone(), agent_id.clone(), project.clone(), cx)
                 })
             })
             .await
@@ -1799,9 +1883,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn tool_authorization_request_transitions_to_awaiting_input(
-        cx: &mut TestAppContext,
-    ) {
+    async fn tool_authorization_request_transitions_to_awaiting_input(cx: &mut TestAppContext) {
         let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
 
         cx.update(|cx| {
@@ -1856,12 +1938,7 @@ mod tests {
             .update(|cx| {
                 let store = SolutionAgentStore::global(cx);
                 store.update(cx, |store, cx| {
-                    store.create_session(
-                        solution_id.clone(),
-                        agent_id.clone(),
-                        project.clone(),
-                        cx,
-                    )
+                    store.create_session(solution_id.clone(), agent_id.clone(), project.clone(), cx)
                 })
             })
             .await

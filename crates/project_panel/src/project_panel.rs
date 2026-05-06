@@ -5732,12 +5732,21 @@ impl ProjectPanel {
                             cx.notify();
                         }
                     } else {
-                        let preview_tabs_enabled =
-                            PreviewTabsSettings::get_global(cx).enable_preview_from_project_panel;
+                        // SPK Editor fork: files open on double-click only
+                        // (IDEA convention). Upstream opened on every
+                        // single click — that meant an arrow-key/click
+                        // walk through the panel would spawn a
+                        // preview tab per row. Single-click here only
+                        // updates the selection; double-click invokes
+                        // `open_entry` with focus.
                         let click_count = event.click_count();
-                        let focus_opened_item = click_count > 1;
-                        let allow_preview = preview_tabs_enabled && click_count == 1;
-                        project_panel.open_entry(entry_id, focus_opened_item, allow_preview, cx);
+                        if click_count > 1 {
+                            project_panel.open_entry(entry_id, true, false, cx);
+                        } else {
+                            project_panel.marked_entries.clear();
+                            project_panel.selection = Some(selection);
+                            cx.notify();
+                        }
                     }
                 }),
             )
