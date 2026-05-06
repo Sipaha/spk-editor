@@ -64,6 +64,41 @@ pub fn open_solution(
         return;
     }
 
+    // SameWindow + the target Solution isn't already up in another
+    // window: short-circuit through the in-place switch path. The
+    // user keeps the same `Workspace`/`Project`/dock entities; we
+    // just swap worktrees inside the existing `Project` and
+    // snapshot/replay open tabs through `SolutionStore::tab_snapshots`.
+    // The previous behaviour built a fresh `Workspace` for every
+    // switch, retained the old one, and let `MultiWorkspace::activate`
+    // flip — that visibly tore down panels, lost scroll positions in
+    // ProjectPanel/OutlinePanel, and reset every panel-specific UI
+    // state on each switch. The retained-workspace mechanism still
+    // exists for `OpenIntent::NewWindow` and for the
+    // `find_window_for_solution`-already-handled focus case above.
+    if intent == OpenIntent::SameWindow
+        && let Some(src) = source_window
+    {
+        let active_workspace = src
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .ok();
+        if let Some(active_workspace) = active_workspace {
+            if let Some(store) = SolutionStore::try_global(cx) {
+                store
+                    .update(cx, |s, cx| s.touch_last_opened(&sol_id, cx))
+                    .log_err();
+            }
+            let weak = active_workspace.downgrade();
+            let target_for_switch = sol_id.clone();
+            src.update(cx, |_, window, cx| {
+                crate::switch::switch_active_solution_in_place(weak, target_for_switch, window, cx)
+                    .detach_and_log_err(cx);
+            })
+            .log_err();
+            return;
+        }
+    }
+
     let Some(store) = SolutionStore::try_global(cx) else {
         return;
     };

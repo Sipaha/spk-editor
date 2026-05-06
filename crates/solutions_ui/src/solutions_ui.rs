@@ -9,11 +9,13 @@ mod modals;
 mod open;
 mod picker;
 mod status_bar;
+mod switch;
 mod welcome;
 
 pub use empty_solution_page::EmptySolutionPage;
 pub use open::{OpenIntent, open_solution};
 pub use status_bar::SolutionsStatusItem;
+pub use switch::switch_active_solution_in_place;
 
 pub use actions::{
     DeleteSolution, NewSolution, OpenSolution, RefreshCacheForCurrent, ToggleSolutionsPanel,
