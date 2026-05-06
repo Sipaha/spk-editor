@@ -24,10 +24,32 @@ impl SolutionSessionsNavigator {
         let Some(session_entity) = store.read_with(cx, |s, _| s.session(session_id)) else {
             return;
         };
-        let s = session_entity.read(cx);
-        if !matches!(s.state, SessionState::Idle) {
+        if !matches!(session_entity.read(cx).state, SessionState::Idle) {
             return;
         }
+        let Some(rendered) = self.render_compact_prompt(session_id, cx) else {
+            return;
+        };
+        store.update(cx, |store, cx| {
+            store
+                .send_message(session_id, rendered, cx)
+                .detach_and_log_err(cx);
+        });
+    }
+
+    /// Render the compact-instruction template for `session_id` and create
+    /// the `<root>/.agents/<sid>/c<NN>/` dump directory. Returns the rendered
+    /// prompt body. Surfaces a workspace toast and returns `None` on the
+    /// same failure modes the inline path used to handle (unknown solution,
+    /// mkdir failure).
+    pub(crate) fn render_compact_prompt(
+        &self,
+        session_id: crate::model::SolutionSessionId,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let store = SolutionAgentStore::global(cx);
+        let session_entity = store.read_with(cx, |s, _| s.session(session_id))?;
+        let s = session_entity.read(cx);
         let solution_id = s.solution_id.clone();
         let agent_id = s.agent_id.clone();
         let started_at = s.created_at;
@@ -37,11 +59,19 @@ impl SolutionSessionsNavigator {
         // and `compact_session` runs, the session's context_count
         // increments to count + 1 for the next round.
         let context_count = s.context_count;
+        // Live `token_usage` when hot, else fall back to `cached_total_tokens`
+        // so a cold caller still gets a meaningful prompt header. No live
+        // `max_tokens` from cold — fall back to `DEFAULT_CONTEXT_WINDOW`,
+        // matching `render_status_row`'s meter logic.
         let usage = s
             .acp_thread
             .as_ref()
             .and_then(|thread| thread.read(cx).token_usage().cloned());
-        let used = usage.as_ref().map(|u| u.used_tokens).unwrap_or(0);
+        let used = usage
+            .as_ref()
+            .map(|u| u.used_tokens)
+            .or(s.cached_total_tokens)
+            .unwrap_or(0);
         let max = usage
             .as_ref()
             .map(|u| u.max_tokens)
@@ -66,7 +96,7 @@ impl SolutionSessionsNavigator {
                     )),
                     cx,
                 );
-                return;
+                return None;
             }
         };
 
@@ -87,7 +117,7 @@ impl SolutionSessionsNavigator {
                 )),
                 cx,
             );
-            return;
+            return None;
         }
 
         let mut compact_dir_str = compact_dir.to_string_lossy().to_string();
@@ -103,12 +133,7 @@ impl SolutionSessionsNavigator {
             .replace("{{started_at_iso}}", &started_at.to_rfc3339())
             .replace("{{tokens_used}}", &used.to_string())
             .replace("{{tokens_max}}", &max.to_string());
-
-        store.update(cx, |store, cx| {
-            store
-                .send_message(session_id, rendered, cx)
-                .detach_and_log_err(cx);
-        });
+        Some(rendered)
     }
 
     fn toast_error(&self, message: SharedString, cx: &mut Context<Self>) {
