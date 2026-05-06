@@ -250,6 +250,15 @@ pub struct SolutionSession {
     /// from this list when `acp_thread.is_none()` and switches to the
     /// live thread once `resume_session` populates `acp_thread`.
     pub cold_entries: Vec<PersistedEntry>,
+    /// Wall-clock duration of the most recently completed turn (set on
+    /// `Running → Idle`). The status row reads this to render
+    /// "Done in 2m15s" instead of a bare "Idle" so the user has an
+    /// explicit signal that the agent finished — the desktop-notification
+    /// path only fires when the panel is unfocused, leaving an
+    /// in-foreground user with only "Thinking…" disappearing as the cue.
+    /// Cleared the moment a new turn starts (state flips back to Running).
+    /// Not persisted across restarts — purely a foreground-UX hint.
+    pub last_turn_duration: Option<std::time::Duration>,
 }
 
 impl SolutionSession {

@@ -407,6 +407,7 @@ impl SolutionAgentStore {
                     flush_after_cancel: false,
                     cwd: session_cwd.clone(),
                     cold_entries: Vec::new(),
+                    last_turn_duration: None,
                 };
                 let entity = cx.new(|_| session);
                 store.sessions.insert(session_id, entity);
@@ -602,8 +603,15 @@ impl SolutionAgentStore {
                     // `Entity` in place instead of replacing it — the
                     // navigator's `SolutionSessionView` already holds
                     // this handle, so a swap would leave the UI bound
-                    // to a stale entity.
-                    existing.update(cx, |session, _| {
+                    // to a stale entity. The `cx.notify()` is what
+                    // wakes the view's `cx.observe(&session)` callback
+                    // — without it, `sync_thread_subscription` never
+                    // attaches to the new `AcpThread` (view sees no
+                    // streaming) and `flush_pending_send_if_ready`
+                    // never dispatches the message the user typed
+                    // while the tab was cold (Send button gets stuck
+                    // because `resuming` stays `true`).
+                    existing.update(cx, |session, cx| {
                         session.acp_session_id = new_thread_session_id;
                         session.acp_thread = Some(acp_thread.clone());
                         session.last_activity_at = Utc::now();
@@ -614,6 +622,7 @@ impl SolutionAgentStore {
                         session.flush_after_cancel = false;
                         session.cwd = resume_cwd.clone();
                         session.cold_entries.clear();
+                        cx.notify();
                     });
                 } else {
                     let session = SolutionSession {
@@ -635,6 +644,7 @@ impl SolutionAgentStore {
                         // restart finds the row aligned with the agent state.
                         cwd: resume_cwd.clone(),
                         cold_entries: Vec::new(),
+                        last_turn_duration: None,
                     };
                     let entity = cx.new(|_| session);
                     store.sessions.insert(session_id, entity);
@@ -840,6 +850,7 @@ impl SolutionAgentStore {
                         flush_after_cancel: false,
                         cwd: meta.cwd.clone(),
                         cold_entries,
+                        last_turn_duration: None,
                     };
                     let entity = cx.new(|_| cold_session);
                     this.sessions.insert(meta.id, entity);
@@ -1237,9 +1248,26 @@ impl SolutionAgentStore {
                 cx.emit(SolutionAgentStoreEvent::SessionMessageAppended(session_id));
             }
             acp_thread::AcpThreadEvent::Stopped(_) => {
+                // Snapshot the Running turn's elapsed time BEFORE the
+                // state flip — `mutate_state` overwrites `started_at`
+                // with `SessionState::Idle` so we can't recover it
+                // after. Stamped onto the session for the status row's
+                // "Done in Xs" indicator (cleared on the next Running).
+                let elapsed = self.sessions.get(&session_id).and_then(|entity| {
+                    if let SessionState::Running { started_at, .. } = &entity.read(cx).state {
+                        Some(started_at.elapsed())
+                    } else {
+                        None
+                    }
+                });
                 self.mutate_state(session_id, |state| *state = SessionState::Idle, cx);
                 if let Some(s) = self.sessions.get(&session_id).cloned() {
-                    s.update(cx, |s, _| s.last_activity_at = Utc::now());
+                    s.update(cx, |s, _| {
+                        s.last_activity_at = Utc::now();
+                        if let Some(d) = elapsed {
+                            s.last_turn_duration = Some(d);
+                        }
+                    });
                 }
                 // Token usage is finalised on turn completion — refresh DB
                 // so the History popover token column reflects the latest.

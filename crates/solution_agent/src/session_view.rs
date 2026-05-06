@@ -1825,12 +1825,33 @@ impl Render for SolutionSessionView {
                                     .px_2()
                                     .py_1()
                                     .child(conversation_body)
-                                    .custom_scrollbars(
-                                        Scrollbars::always_visible(ScrollAxes::Vertical)
-                                            .tracked_scroll_handle(&self.list_state),
-                                        window,
-                                        cx,
-                                    ),
+                                    // Live mode: the virtualized `list(...)`
+                                    // is the scroll source, so the always-
+                                    // visible bar is bound to its
+                                    // `list_state`. Cold mode has no live
+                                    // list (just markdown blocks for the
+                                    // persisted transcript) — `list_state`
+                                    // is empty, so a `tracked_scroll_handle`
+                                    // bar would paint a track that scrolls
+                                    // nothing. Fall back to a plain
+                                    // `overflow_y_scroll` wrapper so the
+                                    // user can read a long restored
+                                    // conversation before the agent
+                                    // subprocess attaches.
+                                    .map(|this| {
+                                        if has_thread {
+                                            this.custom_scrollbars(
+                                                Scrollbars::always_visible(
+                                                    ScrollAxes::Vertical,
+                                                )
+                                                .tracked_scroll_handle(&self.list_state),
+                                                window,
+                                                cx,
+                                            )
+                                        } else {
+                                            this.overflow_y_scroll()
+                                        }
+                                    }),
                             )
                             .when(!is_following, |this| {
                                 this.child(self.render_jump_to_latest(cx))

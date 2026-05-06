@@ -314,9 +314,27 @@ impl SolutionSessionsNavigator {
             SessionState::Running { started_at, .. } => {
                 let elapsed = started_at.elapsed().as_secs();
                 let label = if elapsed >= 1 {
-                    format!("Thinking… {elapsed}s")
+                    format!("Thinking… {}", format_elapsed(elapsed))
                 } else {
                     "Thinking…".to_string()
+                };
+                (SharedString::from(label), None)
+            }
+            // "Done in Xs" replaces a bare "Idle" right after a turn
+            // completes so a foreground user gets an explicit "the
+            // agent finished" cue (the desktop notification path is
+            // gated to unfocused panels and ≥5min turns, so without
+            // this an in-foreground watcher only sees "Thinking…"
+            // disappear). Cleared on the next Running transition.
+            SessionState::Idle if s.last_turn_duration.is_some() => {
+                let secs = s
+                    .last_turn_duration
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let label = if secs >= 1 {
+                    format!("Done in {}", format_elapsed(secs))
+                } else {
+                    "Done".to_string()
                 };
                 (SharedString::from(label), None)
             }
@@ -568,6 +586,22 @@ fn truncate_history_label(text: &str, max_chars: usize) -> String {
         head
     } else {
         format!("{head}…")
+    }
+}
+
+/// "Thinking… 7s" / "Thinking… 1m32s" / "Thinking… 1h05m" — granularity
+/// shifts up as the turn drags on so a 40-minute thought doesn't render
+/// as "Thinking… 2412s" (mentally divide-by-60 every render). Hours +
+/// minutes only past the hour mark; seconds drop off there because
+/// minute-precision is enough at that scale and the extra digits just
+/// added jitter without information.
+fn format_elapsed(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
     }
 }
 

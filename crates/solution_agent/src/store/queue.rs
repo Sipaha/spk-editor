@@ -175,13 +175,16 @@ impl SolutionAgentStore {
         }
 
         // Flip state immediately, before the spawn, so callers observing the
-        // session right after this call returns see `Running`.
+        // session right after this call returns see `Running`. Clear the
+        // last-turn duration too — the "Done in Xs" indicator from the
+        // previous turn is stale the moment a new turn begins.
         session_entity.update(cx, |s, _| {
             s.state = SessionState::Running {
                 started_at: std::time::Instant::now(),
                 notified: false,
             };
             s.last_activity_at = Utc::now();
+            s.last_turn_duration = None;
         });
         cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
         cx.notify();
