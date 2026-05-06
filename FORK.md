@@ -33,6 +33,7 @@ Within these files, refactor / rename / cleanup is fine — diff-minimality buys
 | `crates/agent_servers/src/acp.rs` | (1) `mcp_servers_for_project` prepends a fork-local `acp::McpServer::Stdio` entry pointing at `<current_exe> --nc <editor_mcp.socket_path>` so spawned ACP subagents see the editor's embedded MCP tools (helper: `spk_editor_mcp_bridge_server`) — see decision 14. (2) `AcpConnection::new_session_with_meta` impl splices `extra_meta` into `NewSessionRequest::meta`. | `editor_mcp` / `solution_agent` |
 | `crates/agent_servers/Cargo.toml` | New dep on `editor_mcp` for the socket path. | `editor_mcp` / `solution_agent` |
 | `crates/gpui/src/elements/list.rs` | `ListState::measure_last(N)` chunked tail prefetch (plus `MEASURE_LAST_DEFAULT_BATCH` / `LOOKAHEAD` / `EAGER_THRESHOLD` knobs) so virtualized lists can pre-warm their most-recent items on the first layout pass without paying the full-list measurement cost. Used by `solution_agent`'s conversation list to keep scroll-up off long resumed conversations from triggering a height-discovery cascade. | `solution_agent` |
+| `crates/workspace/src/workspace.rs` | `Workspace::swap_worktrees_to(target_paths)` delta worktree reconciliation used by the in-place Solution switch (decision 16). Drops worktrees not in the set, adds missing ones, preserves overlapping `WorktreeId`s so LSP / panels / caches don't churn. | `solutions_ui` / `solutions` |
 | `crates/welcome/src/welcome.rs` | Recent Solutions section + buttons. | `solutions_ui` |
 | `crates/workspace/src/welcome.rs` | `render_agent_card` gated off via `false &&` — fork uses `solution_agent`, not upstream agent panel. | `solution_agent` |
 | `crates/paths/src/paths.rs` | `.zed` → `.spke` rename for per-worktree config dir. | rebrand |
@@ -134,6 +135,42 @@ How to apply: the entry is named `spk-editor`, gated on the socket file existing
 Why: upstream Zed's worktree-trust UX prompts before starting a language server in any unfamiliar directory and surfaces a "Restricted Mode" badge in the title bar. The fork's mental model is different: a project is in a Solution because the user explicitly added its remote URL to the catalog AND chose to clone it. That decision IS the trust signal — re-prompting at LSP-start time and parking a yellow badge in the title bar is noise, not safety.
 
 How to apply: `crates/solutions/src/auto_trust.rs` observes new workspaces and trusts every `solution.root` whose path covers any worktree of the project (uses `PathTrust::AbsPath`, so all current and future member subdirs inherit trust via the path-hierarchy in `crates/project/src/trusted_worktrees.rs`). The title-bar render call in `crates/title_bar/src/title_bar.rs` is commented out; the function itself is kept under `#[allow(dead_code)]` for upstream-merge friendliness. Trust still works as upstream for ad-hoc opens (File → Open Folder of a non-Solution path) — they go through the original prompt path.
+
+### 16. Solution switch is in-place — same `Workspace`, swap worktrees, replay tabs
+
+Why: switching the active Solution used to allocate a fresh `Workspace`
+via `OpenMode::Add` + `MultiWorkspace::activate`, which retained the
+old workspace but visibly tore down all panels in the active one and
+re-created them from defaults — losing dock widths, scroll positions
+in `ProjectPanel`/`OutlinePanel`, expanded items, panel-specific UI
+state — every single switch. The retained-workspace mechanism kept
+the *previous* Solution's state alive in memory but didn't help the
+in-flight switch UX, which is what the user actually feels several
+times an hour. Recreate-on-switch was a holdover from upstream's
+`git_ui::worktree_service` flow; for Solutions the cost was paid an
+order of magnitude more often.
+
+How to apply: use `solutions_ui::switch_active_solution_in_place`
+(orchestrator) when the user wants to swap solution scope without
+window churn. The orchestrator (1) snapshots the current Solution's
+open editor tabs into `SolutionStore::tab_snapshots`, (2) bumps
+`touch_last_opened` (which fires `SolutionStoreEvent::ActiveSolutionChanged(target)`),
+(3) reconciles worktrees inside the existing `Project` via
+`Workspace::swap_worktrees_to`, and (4) replays the target Solution's
+saved tab snapshot. Upstream panels react to `WorktreeAdded`/`Removed`
+automatically; fork panels (`SolutionsPanel`,
+`SolutionSessionsNavigator`) listen to `ActiveSolutionChanged` —
+*don't* assume your panel will be re-`new`'d on switch. The
+`OpenIntent::SameWindow` path in `solutions_ui::open::open_solution`
+goes through this orchestrator; `OpenIntent::NewWindow` and
+already-open-in-other-window focus paths still use the
+`MultiWorkspace::activate` machinery (they're inherently per-window).
+
+Tab restoration is best-effort: snapshot-save failures don't abort the
+switch (the user wants to *get to* the new Solution; one lost tab
+list is recoverable). Snapshots are runtime-only — losing them across
+an editor restart is acceptable, persistence would mean keeping the
+map in sync with potentially-stale paths.
 
 ### 15. mold mandatory for x86_64-linux builds
 
