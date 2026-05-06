@@ -424,6 +424,7 @@ impl SolutionAgentStore {
                     cwd: session_cwd.clone(),
                     cold_entries: Vec::new(),
                     last_turn_duration: None,
+                    cached_total_tokens: None,
                 };
                 let entity = cx.new(|_| session);
                 store.sessions.insert(session_id, entity);
@@ -678,6 +679,7 @@ impl SolutionAgentStore {
                         cwd: resume_cwd.clone(),
                         cold_entries: Vec::new(),
                         last_turn_duration: None,
+                        cached_total_tokens: meta.total_tokens,
                     };
                     let entity = cx.new(|_| session);
                     store.sessions.insert(session_id, entity);
@@ -910,6 +912,12 @@ impl SolutionAgentStore {
                         cwd: meta.cwd.clone(),
                         cold_entries,
                         last_turn_duration: None,
+                        // Seed from the persisted metadata so the
+                        // status-row meter shows the last-known total
+                        // for cold tabs (no live thread → no
+                        // `TokenUsage`). The live path refreshes this
+                        // on every `TokenUsageUpdated` event.
+                        cached_total_tokens: meta.total_tokens,
                     };
                     let entity = cx.new(|_| cold_session);
                     this.sessions.insert(meta.id, entity);
@@ -1464,6 +1472,18 @@ impl SolutionAgentStore {
                 // resumes with the correct meter — without this the DB
                 // value lags behind the live meter and a resume drops
                 // back to whatever the previous Stopped wrote.
+                // Also mirror the new total onto `cached_total_tokens`
+                // so the next cold-restore (or any read of the session
+                // entity bypassing the live thread) sees the latest
+                // figure without the meter regressing to zero.
+                if let Some(s) = self.sessions.get(&session_id).cloned() {
+                    let total = s
+                        .read(cx)
+                        .acp_thread
+                        .as_ref()
+                        .and_then(|t| t.read(cx).token_usage().map(|u| u.used_tokens));
+                    s.update(cx, |s, _| s.cached_total_tokens = total);
+                }
                 self.persist_session_row(session_id, cx);
             }
             acp_thread::AcpThreadEvent::Error | acp_thread::AcpThreadEvent::LoadError(_) => {

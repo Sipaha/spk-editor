@@ -263,6 +263,14 @@ pub struct SolutionSession {
     /// Cleared the moment a new turn starts (state flips back to Running).
     /// Not persisted across restarts — purely a foreground-UX hint.
     pub last_turn_duration: Option<std::time::Duration>,
+    /// Last-known total token count for the conversation, used by the
+    /// status-row meter to keep showing "X / Y · Z%" on a cold tab
+    /// (no live `AcpThread` → no `TokenUsage` to read). Populated on
+    /// `restore_open_tabs` from the persisted metadata, refreshed
+    /// whenever the live thread emits a `TokenUsageUpdated` event so
+    /// the cached value stays in sync until the next cold restore.
+    /// `None` for fresh sessions whose first turn hasn't shipped yet.
+    pub cached_total_tokens: Option<u64>,
 }
 
 impl SolutionSession {

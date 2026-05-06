@@ -35,6 +35,7 @@ fn close_session_removes_from_indices(cx: &mut TestAppContext) {
                 cwd: PathBuf::new(),
                 cold_entries: Vec::new(),
                 last_turn_duration: None,
+                cached_total_tokens: None,
             });
             store.sessions.insert(id, entity);
             store

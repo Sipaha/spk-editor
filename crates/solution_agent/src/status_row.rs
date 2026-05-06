@@ -6,7 +6,7 @@ use gpui::{
     StatefulInteractiveElement, Styled, div, px,
 };
 use ui::prelude::*;
-use ui::{ContextMenu, Icon, IconName, Label, LabelSize, PopoverMenu};
+use ui::{CommonAnimationExt, ContextMenu, Icon, IconName, Label, LabelSize, PopoverMenu};
 use util::ResultExt as _;
 
 use crate::compact::{
@@ -306,46 +306,78 @@ impl SolutionSessionsNavigator {
         // of just seeing "Error" with no follow-up. The tooltip carries
         // the same text so very long errors that get truncated by
         // flexbox can still be read in full on hover.
-        let (state_text, error_text): (SharedString, Option<SharedString>) = match &s.state {
-            SessionState::Errored(msg) => (
-                SharedString::from(format!("Error: {msg}")),
-                Some(msg.clone()),
-            ),
-            SessionState::Running { started_at, .. } => {
-                let elapsed = started_at.elapsed().as_secs();
-                let label = if elapsed >= 1 {
-                    format!("Thinking… {}", format_elapsed(elapsed))
-                } else {
-                    "Thinking…".to_string()
-                };
-                (SharedString::from(label), None)
+        // Cold (no live `AcpThread`) and resuming (cold-tab Send
+        // handshake in flight) are session-level conditions that
+        // don't fit into `SessionState`'s "agent activity" axis —
+        // surface them as override states for the badge so the user
+        // doesn't see a misleading bare "Idle" while the subprocess
+        // is dead-asleep or mid-handshake.
+        let is_cold = s.is_cold();
+        let is_resuming = active_view
+            .map(|view| view.read(cx).is_resuming())
+            .unwrap_or(false);
+        let (state_text, error_text): (SharedString, Option<SharedString>) = if is_resuming {
+            (SharedString::from("Resuming…"), None)
+        } else if is_cold {
+            // The session was restored from disk and the subprocess
+            // hasn't been spawned yet. Tooltip-less label is fine —
+            // the meaning is glanceable (Sleeping = inactive, send
+            // a message to wake it up).
+            (SharedString::from("Sleeping"), None)
+        } else {
+            match &s.state {
+                SessionState::Errored(msg) => (
+                    SharedString::from(format!("Error: {msg}")),
+                    Some(msg.clone()),
+                ),
+                SessionState::Running { started_at, .. } => {
+                    let elapsed = started_at.elapsed().as_secs();
+                    let label = if elapsed >= 1 {
+                        format!("Thinking… {}", format_elapsed(elapsed))
+                    } else {
+                        "Thinking…".to_string()
+                    };
+                    (SharedString::from(label), None)
+                }
+                // "Done in Xs" replaces a bare "Idle" right after a turn
+                // completes so a foreground user gets an explicit "the
+                // agent finished" cue (the desktop notification path is
+                // gated to unfocused panels and ≥5min turns, so without
+                // this an in-foreground watcher only sees "Thinking…"
+                // disappear). Cleared on the next Running transition.
+                SessionState::Idle if s.last_turn_duration.is_some() => {
+                    let secs = s
+                        .last_turn_duration
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let label = if secs >= 1 {
+                        format!("Done in {}", format_elapsed(secs))
+                    } else {
+                        "Done".to_string()
+                    };
+                    (SharedString::from(label), None)
+                }
+                other => (SharedString::from(other.short_label()), None),
             }
-            // "Done in Xs" replaces a bare "Idle" right after a turn
-            // completes so a foreground user gets an explicit "the
-            // agent finished" cue (the desktop notification path is
-            // gated to unfocused panels and ≥5min turns, so without
-            // this an in-foreground watcher only sees "Thinking…"
-            // disappear). Cleared on the next Running transition.
-            SessionState::Idle if s.last_turn_duration.is_some() => {
-                let secs = s
-                    .last_turn_duration
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let label = if secs >= 1 {
-                    format!("Done in {}", format_elapsed(secs))
-                } else {
-                    "Done".to_string()
-                };
-                (SharedString::from(label), None)
-            }
-            other => (SharedString::from(other.short_label()), None),
         };
-        let is_idle = matches!(s.state, SessionState::Idle);
-        let is_running = matches!(s.state, SessionState::Running { .. });
+        let is_idle = matches!(s.state, SessionState::Idle) && !is_cold && !is_resuming;
+        let is_running = matches!(s.state, SessionState::Running { .. }) && !is_resuming;
+        // Live thread → live `TokenUsage`; cold / sleeping → fall
+        // back to the `cached_total_tokens` mirrored from metadata
+        // at restore time + refreshed on every live
+        // `TokenUsageUpdated`. Without this fallback the meter showed
+        // "0 / 1.0M · 0.0%" for any restored conversation, which
+        // looked like the editor lost the agent's context.
         let usage = s
             .acp_thread
             .as_ref()
-            .and_then(|thread| thread.read(cx).token_usage().cloned());
+            .and_then(|thread| thread.read(cx).token_usage().cloned())
+            .or_else(|| {
+                s.cached_total_tokens.map(|used| acp_thread::TokenUsage {
+                    used_tokens: used,
+                    ..Default::default()
+                })
+            });
         // Synchronous read of the agent's current session mode
         // ("default", "plan", …). Claude exposes this via ACP — when
         // the connection doesn't implement modes (e.g. mock test
@@ -470,14 +502,16 @@ impl SolutionSessionsNavigator {
             let mut label = Label::new(state_text).size(LabelSize::Small);
             if error_text.is_some() {
                 label = label.color(Color::Error);
-            } else if is_running {
+            } else if is_running || is_resuming {
                 label = label.color(Color::Accent);
+            } else if is_cold {
+                label = label.color(Color::Muted);
             }
             let inner: gpui::AnyElement = if is_running {
                 let icon = div()
                     .flex_none()
                     .child(
-                        Icon::new(IconName::Sparkle)
+                        ui::Icon::new(IconName::Sparkle)
                             .size(IconSize::Small)
                             .color(Color::Accent),
                     )
@@ -488,6 +522,22 @@ impl SolutionSessionsNavigator {
                             .with_easing(pulsating_between(0.4, 1.0)),
                         |element: gpui::Div, delta| element.opacity(delta),
                     );
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(icon)
+                    .child(label)
+                    .into_any_element()
+            } else if is_resuming {
+                // Rotating ⟳ next to "Resuming…" — same visual
+                // vocabulary the in-flight session-creation tabs use,
+                // so the user reads it instantly as "agent is
+                // attaching, hold on".
+                let icon = ui::Icon::new(IconName::ArrowCircle)
+                    .size(IconSize::Small)
+                    .color(Color::Accent)
+                    .with_rotate_animation(2);
                 div()
                     .flex()
                     .items_center()

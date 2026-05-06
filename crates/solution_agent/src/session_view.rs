@@ -409,6 +409,16 @@ impl SolutionSessionView {
         view
     }
 
+    /// `true` while a cold-tab `resume_session` task is in flight
+    /// after the user clicked Send — the status row uses this to
+    /// paint a "Resuming…" badge in place of the regular state label
+    /// (the cold tab's `SessionState` is still `Idle` during the
+    /// 3-4 s ACP handshake, so the bare label would lie about
+    /// activity).
+    pub(crate) fn is_resuming(&self) -> bool {
+        self.resuming
+    }
+
     /// Flip the expanded/collapsed state of the queued-prefix chip on
     /// the user message at `entry_idx`. Caller is responsible for
     /// `cx.notify()` — kept out of here so the click-handler closure

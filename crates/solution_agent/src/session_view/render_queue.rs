@@ -17,7 +17,7 @@ use gpui::{
 };
 use markdown::MarkdownElement;
 use ui::prelude::*;
-use ui::{Color, CommonAnimationExt, Icon, IconName, IconSize, Label, LabelSize, Tooltip};
+use ui::{Color, Icon, IconName, IconSize, Label, LabelSize, Tooltip};
 
 use super::SolutionSessionView;
 use crate::conversation_render::{decode_image_local, open_image_preview};
@@ -238,6 +238,11 @@ impl SolutionSessionView {
             _ => return None,
         };
 
+        // Just the bubble — the rotating "Resuming…" indicator was
+        // moved to the status-row state badge so the chat doesn't
+        // duplicate the same "agent attaching" cue twice. The bubble
+        // alone confirms "I received your text"; the status row
+        // confirms "I'm working on attaching the subprocess".
         let bubble = h_flex().w_full().child(
             div()
                 .relative()
@@ -251,23 +256,6 @@ impl SolutionSessionView {
                 .rounded_md()
                 .child(body),
         );
-        let spinner = h_flex()
-            .gap_1()
-            .px_2()
-            .py_1()
-            .items_center()
-            .child(
-                Icon::new(IconName::ArrowCircle)
-                    .size(IconSize::XSmall)
-                    .color(Color::Accent)
-                    .with_rotate_animation(2),
-            )
-            .child(
-                Label::new(SharedString::from("Starting agent…"))
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted)
-                    .italic(),
-            );
-        Some(v_flex().w_full().px_1().child(bubble).child(spinner))
+        Some(v_flex().w_full().px_1().child(bubble))
     }
 }
