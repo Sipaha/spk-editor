@@ -567,15 +567,39 @@ impl SolutionSessionsNavigator {
                             .disabled(!clear_enabled)
                             .handler({
                                 let weak_nav = weak_nav.clone();
-                                move |_window, cx| {
-                                    let Some(nav) = weak_nav.upgrade() else { return };
-                                    nav.update(cx, |_, cx| {
-                                        SolutionAgentStore::global(cx).update(cx, |store, cx| {
-                                            store
-                                                .reset_context(session_id, cx)
-                                                .detach_and_log_err(cx);
-                                        });
-                                    });
+                                move |window, cx| {
+                                    let prompt = window.prompt(
+                                        gpui::PromptLevel::Warning,
+                                        "Clear conversation?",
+                                        Some(
+                                            "The current conversation will be removed from the \
+                                             session. The agent's history is preserved on disk \
+                                             but cannot be restored through History.",
+                                        ),
+                                        &["Cancel", "Clear"],
+                                        cx,
+                                    );
+                                    let weak_nav = weak_nav.clone();
+                                    window
+                                        .spawn(cx, async move |cx| {
+                                            // Button index 1 = Clear; 0 / Esc cancels.
+                                            if prompt.await.ok() != Some(1) {
+                                                return;
+                                            }
+                                            let _ = cx.update(|_, cx| {
+                                                if let Some(nav) = weak_nav.upgrade() {
+                                                    nav.update(cx, |_, cx| {
+                                                        SolutionAgentStore::global(cx)
+                                                            .update(cx, |store, cx| {
+                                                                store
+                                                                    .reset_context(session_id, cx)
+                                                                    .detach_and_log_err(cx);
+                                                            });
+                                                    });
+                                                }
+                                            });
+                                        })
+                                        .detach();
                                 }
                             });
                         menu = menu.item(clear_entry);
