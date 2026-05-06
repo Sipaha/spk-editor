@@ -33,6 +33,7 @@ See `.rules` § "What's disabled" for the table. Brief: `auto_update`, `telemetr
 | `assets/keymaps/default-*.json` | Default shortcuts for Solutions / sessions. | `solutions_ui` |
 | `assets/settings/default.json` | Default `solutions.root`; default `icon_theme: "Material Icon Theme"` + auto-install of the matching extension (colored project tree, IDEA-like, vs upstream's monochrome `Zed (Default)`). | `solutions` / rebrand |
 | `crates/zed/Cargo.toml` `[[bin]]` | Binary name overridden to `spk-editor` (cargo crate `zed` unchanged). | rebrand |
+| `.cargo/config.toml` | `[target.x86_64-unknown-linux-gnu]` block forcing `-fuse-ld=mold`. See decision 15. | build |
 
 Locked rebrand identifiers (display name, bundle ids, URL scheme, config dirs, etc.) — see `.rules` § "Locked rebrand identifiers". Changing any requires explicit approval — they're cross-referenced in spec docs.
 
@@ -127,6 +128,12 @@ How to apply: the entry is named `spk-editor`, gated on the socket file existing
 Why: upstream Zed's worktree-trust UX prompts before starting a language server in any unfamiliar directory and surfaces a "Restricted Mode" badge in the title bar. The fork's mental model is different: a project is in a Solution because the user explicitly added its remote URL to the catalog AND chose to clone it. That decision IS the trust signal — re-prompting at LSP-start time and parking a yellow badge in the title bar is noise, not safety.
 
 How to apply: `crates/solutions/src/auto_trust.rs` observes new workspaces and trusts every `solution.root` whose path covers any worktree of the project (uses `PathTrust::AbsPath`, so all current and future member subdirs inherit trust via the path-hierarchy in `crates/project/src/trusted_worktrees.rs`). The title-bar render call in `crates/title_bar/src/title_bar.rs` is commented out; the function itself is kept under `#[allow(dead_code)]` for upstream-merge friendliness. Trust still works as upstream for ad-hoc opens (File → Open Folder of a non-Solution path) — they go through the original prompt path.
+
+### 15. mold mandatory for x86_64-linux builds
+
+Why: system `ld` is the wall-clock bottleneck of `release-fast` incremental rebuilds (multi-GB peak RAM, several seconds per re-link on Zed's link graph). mold is ~5-10× faster and uses a fraction of the RAM. The existing aarch64 entry pins `lld` out of *necessity* (libwebrtc.a fails to link otherwise); the x86_64 entry pins `mold` for *perf* but elevated to required because silent fallback to `ld` is a worse failure mode than a one-line apt install. Mirrors the same "you must install a fast linker before first build" contract.
+
+How to apply: contributors install `mold` (`apt install mold` on Debian/Ubuntu, `brew install mold` on macOS-with-Linux-cross, prebuilt binaries on the [mold releases page](https://github.com/rui314/mold/releases) elsewhere). The pinned block lives in `.cargo/config.toml` — never delete it during an upstream merge (Zed upstream may add their own `[target.x86_64-unknown-linux-gnu]` entry for some unrelated rustflag; merge by combining flags, don't drop ours). To verify mold is active on a build: `cargo build --profile release-fast -v 2>&1 | grep -m1 fuse-ld` should show `-fuse-ld=mold`.
 
 ## Where specs and plans live
 

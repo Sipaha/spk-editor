@@ -22,7 +22,17 @@ For the full list of fork-local crates and architectural decisions, see [`FORK.m
 
 ## Building from source
 
-Same toolchain requirements as upstream Zed (recent stable Rust, OS-specific dependencies — see upstream's README for the current list). After cloning:
+Same toolchain requirements as upstream Zed (recent stable Rust, OS-specific dependencies — see upstream's README for the current list).
+
+**Linker requirement (fork-local):** this fork pins [`mold`](https://github.com/rui314/mold) for `x86_64-unknown-linux-gnu` and `lld` for `aarch64-unknown-linux-gnu` in `.cargo/config.toml` — install before first build:
+
+```sh
+# Debian / Ubuntu
+sudo apt install mold      # or `lld` on aarch64
+# Other distros: prebuilt binaries at https://github.com/rui314/mold/releases
+```
+
+See [`FORK.md`](./FORK.md) decision #15 for rationale (~5-10× faster link, lower peak RAM vs system `ld`). After cloning:
 
 ```sh
 cargo build --release
