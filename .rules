@@ -4,11 +4,64 @@ SPK Editor is a personal fork of [Zed](https://github.com/zed-industries/zed) ma
 
 ## Fork philosophy — read this before suggesting changes
 
-- **Internal identifiers stay verbatim from upstream.** Cargo crate `zed`, `pub mod zed`, `enum ReleaseChannel { Stable, Preview, Nightly, Dev }`, type names, module paths, action namespaces — never rename. Renaming them creates merge conflicts on every upstream sync. Only user-visible identity is rebranded.
-- **Stay diff-minimal vs upstream.** Periodic `git merge upstream/main` is a recurring cost; "nice refactor" PRs that touch upstream-owned files are net negative. When fixing a bug, prefer upstreaming it first and merging back. Cleanup-only commits to upstream code are usually wrong.
-- **Disable, don't delete.** Disabled subsystems (collab, auto_update, telemetry, Zeta, native cloud LLM, Sentry uploads) keep their crates in the workspace and their code in tree — only init / dispatch / UI registration sites are commented out (`if false { … }` is fine), so upstream changes to those crates merge cleanly.
-- **Locked rebrand identifiers** (spec §3, change requires user approval): display name `SPK Editor` (Dock/About/title bar); CLI binary `spk-editor`; macOS bundle ids `ru.sipaha.spk-editor[-{preview,nightly,dev,debug}]`; URL scheme `spk-editor://`; config dir `~/.config/spk-editor/` (Linux), `~/Library/Application Support/SpkEditor/` (macOS — no space in path, display name keeps space), `%APPDATA%\SpkEditor\` (Windows — no space in path); GitHub `Sipaha/spk-editor`; attribution string `Fork of Zed by Zed Industries, Inc., modified by Simonov Pavel`; per-project config dir `.spke/` (replacing upstream `.zed/`; `.zed_server` / `.zed_wsl_server` remain unchanged as preserved upstream identifiers).
-- **License compliance**: never modify `LICENSE-{GPL,AGPL,APACHE}` or remove `Copyright Zed Industries, Inc.` lines. Fork contents under same SPDX as upstream (`GPL-3.0-or-later` editor, `AGPL-3.0` collab, `Apache-2.0` libraries). Inherited Zed legal docs live in `legal/upstream-zed/` and don't apply to this fork's binaries (no service infrastructure).
+There is **no scheduled `git merge upstream/main`** for this fork. Bug fixes
+and features land here directly; we don't wait for upstream and we don't try
+to "upstream first then merge back." That said, we may occasionally
+**cherry-pick** specific upstream commits / crates for genuinely new core
+capabilities (LSP, language support, editor primitives, etc.) — and that's
+the only reason any "be careful with upstream-shaped code" rule still
+matters at all.
+
+The codebase splits into two zones with different rules:
+
+- **Fork-owned zones — refactor freely.** The fork crates
+  (`solution_agent`, `solutions`, `solutions_ui`, `editor_mcp`) and any
+  upstream files we've already modified (see `FORK.md` § *Touched upstream
+  files*). Bug fixes, refactors, renames, cleanup commits — all fair game.
+  We're not getting upstream patches into these files anyway, so
+  diff-minimality buys nothing.
+
+- **Untouched core crates — stay upstream-shaped.** `editor`, `language`,
+  `lsp`, `multi_buffer`, `project`, `terminal`, `dap`, `vim`, `theme`, the
+  bulk of `gpui`, etc. We don't touch these for refactors / renames /
+  cleanup, because that breaks future cherry-picks: a stylistic rename
+  upstream of a function we also renamed locally produces a textual
+  conflict on the cherry-pick that has to be resolved by hand each time. If
+  a bug or missing feature in one of these crates blocks us, fix it
+  in-tree (the rule is *"don't refactor for style"*, not *"never touch"*),
+  but keep the patch tight and additive. If there's an upstream PR that
+  fixes the same thing, prefer cherry-picking that PR over rolling our
+  own.
+
+Rules that apply across both zones:
+
+- **Disable, don't delete** for explicitly-disabled upstream subsystems
+  (collab, auto_update, telemetry, Zeta, native cloud LLM, Sentry uploads,
+  upstream agent panel). Keep the crates in the workspace and the code in
+  tree — only init / dispatch / UI registration sites are commented out
+  (`if false { … }` is fine). Re-enabling is a one-line change, and we
+  haven't audited what other crates implicitly depend on these
+  subsystems' types, traits, or globals.
+
+- **Locked rebrand identifiers** (spec §3, change requires user approval):
+  display name `SPK Editor` (Dock/About/title bar); CLI binary
+  `spk-editor`; macOS bundle ids `ru.sipaha.spk-editor[-{preview,nightly,dev,debug}]`;
+  URL scheme `spk-editor://`; config dir `~/.config/spk-editor/` (Linux),
+  `~/Library/Application Support/SpkEditor/` (macOS — no space in path,
+  display name keeps space), `%APPDATA%\SpkEditor\` (Windows — no space in
+  path); GitHub `Sipaha/spk-editor`; attribution string `Fork of Zed by
+  Zed Industries, Inc., modified by Simonov Pavel`; per-project config
+  dir `.spke/` (replacing upstream `.zed/`; `.zed_server` /
+  `.zed_wsl_server` remain unchanged as preserved upstream identifiers).
+  These are user-visible identity, not merge-friendliness — they don't
+  change just because the merge cost went away.
+
+- **License compliance**: never modify `LICENSE-{GPL,AGPL,APACHE}` or
+  remove `Copyright Zed Industries, Inc.` lines. Fork contents under same
+  SPDX as upstream (`GPL-3.0-or-later` editor, `AGPL-3.0` collab,
+  `Apache-2.0` libraries). Inherited Zed legal docs live in
+  `legal/upstream-zed/` and don't apply to this fork's binaries (no
+  service infrastructure).
 
 ## What's disabled (do NOT try to "fix" these without explicit instruction)
 
@@ -35,7 +88,7 @@ SPK Editor is a personal fork of [Zed](https://github.com/zed-industries/zed) ma
 ## Build + test conventions
 
 - Bundling produces `bin/spk-editor` + `libexec/spk-editor-bin` (Linux), `SpkEditor.app/Contents/MacOS/spk-editor` (macOS — display name stays `SPK Editor` via plutil override in `script/bundle-mac`), `SpkEditorSetup-*.exe` (Windows).
-- Cargo target binary is `target/release/spk-editor` (crate name `zed` is unchanged for upstream-merge friendliness; only the `[[bin]] name` is overridden).
+- Cargo target binary is `target/release/spk-editor`. The cargo crate name `zed` itself is unchanged: the rename would touch hundreds of files for ~zero functional gain, and any future cherry-pick from upstream into the editor crate would textually conflict on every renamed identifier. Only the `[[bin]] name` is overridden.
 - Codesign / notarize gated behind `SPK_EDITOR_SIGN` env var; default produces unsigned bundles.
 - Specs and plans for the rebrand work live in `docs/superpowers/{specs,plans}/`.
 - **Agent-driven builds: debug only.** When an agent needs to compile or launch the editor for verification, always use the dev profile (`script/run-mcp --debug`, `cargo build` without `--release`, `cargo test` without `--release` is fine if the test suite tolerates it — but never `cargo build --release` / `script/bundle-*` / `script/run-mcp` without `--debug`). Release / bundled builds are produced by the maintainer manually; an agent kicking off a 3-9 min release compile burns user time and machine resources for no benefit. If a verification *requires* release-profile behavior (e.g. reproducing a release-only optimisation bug), pause and ask the user to run the build instead of doing it yourself.
@@ -243,7 +296,7 @@ Release Notes:
 **Every fork-local addition or architectural decision on top of upstream MUST be recorded in `FORK.md`** at the repo root. That file is the single index for "what's different here" and the *why* behind non-obvious choices. Update it when:
 
 - A new fork-local crate is added (one row in the crates table + a one-line purpose).
-- An upstream file is touched additively (one row in the touched-files table + the owning fork crate).
+- An upstream file gets its **first** local modification (one row in the touched-files table). The point of the table is no longer "merge cost" but: "list of files where a future cherry-pick from upstream won't apply cleanly — reconcile by hand." Subsequent edits to an already-listed file don't need a new row.
 - A non-obvious architectural decision is made — record it as a numbered entry under "Key architectural decisions" with **why** (the constraint that ruled out the obvious approach) and **how to apply** (concrete guidance for future sessions).
 - A locked rebrand identifier changes (cross-reference the spec; keep `.rules` § "Locked rebrand identifiers" in sync).
 

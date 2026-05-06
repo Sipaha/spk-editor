@@ -15,9 +15,13 @@ For fork **philosophy** (rebrand identifiers, what's disabled, build conventions
 
 ## Disabled upstream subsystems
 
-See `.rules` § "What's disabled" for the table. Brief: `auto_update`, `telemetry`, `collab` / `collab_ui`, sign-in, native cloud LLM (`CloudLanguageModelProvider`), `zeta` edit prediction, Sentry uploads, 41 CI workflows, **`agent_ui::AgentPanel` dock panel + Welcome `render_agent_card`** (the fork's AI is `solution_agent`; upstream's panel is a parallel unconfigured surface). Code stays in tree, init/dispatch/UI sites are commented out (`if false { … }` is fine) — keeps upstream-merge-friendliness.
+See `.rules` § "What's disabled" for the table. Brief: `auto_update`, `telemetry`, `collab` / `collab_ui`, sign-in, native cloud LLM (`CloudLanguageModelProvider`), `zeta` edit prediction, Sentry uploads, 41 CI workflows, **`agent_ui::AgentPanel` dock panel + Welcome `render_agent_card`** (the fork's AI is `solution_agent`; upstream's panel is a parallel unconfigured surface). Code stays in tree, init/dispatch/UI sites are commented out (`if false { … }` is fine) — re-enabling stays a one-line change and we haven't audited what other crates implicitly depend on these subsystems' types or globals.
 
-## Touched upstream files (additive only — NEVER refactor for style)
+## Touched upstream files
+
+The fork no longer plans periodic `git merge upstream/main`, so this table is **not** a "minimize merge cost" scoreboard. It exists for a narrower purpose: it's the list of files where a future cherry-pick from upstream will *not* apply cleanly and has to be reconciled by hand. Once a file appears here, further edits inside it don't need a new row — the cherry-pick was already going to be manual. New rows only when an upstream file gets its **first** local touch.
+
+Within these files, refactor / rename / cleanup is fine — diff-minimality buys nothing once the file is on the manual-reconcile list. Files **not** listed here are still untouched core; the "don't refactor for style" rule applies there to keep cherry-picks cheap.
 
 | File | Change | Owning fork crate |
 |---|---|---|
@@ -25,8 +29,10 @@ See `.rules` § "What's disabled" for the table. Brief: `auto_update`, `telemetr
 | `crates/zed/src/zed.rs` | `initialize_agent_panel` call commented out in `futures::join!` (fn kept under `#[allow(dead_code)]` for one-line re-enable). | `solution_agent` |
 | `crates/zed/Cargo.toml` | Workspace deps on the four fork crates. | mixed |
 | `crates/title_bar/src/title_bar.rs` | New segment for active Solution / project / branch. `render_restricted_mode` call site disabled (function kept under `#[allow(dead_code)]`) — see decision 13. | `solutions_ui` / `solutions` |
-| `crates/agent_servers/src/acp.rs` | `mcp_servers_for_project` prepends a fork-local `acp::McpServer::Stdio` entry pointing at `<current_exe> --nc <editor_mcp.socket_path>` so spawned ACP subagents see the editor's embedded MCP tools. New helper `spk_editor_mcp_bridge_server`. See decision 14. | `editor_mcp` / `solution_agent` |
+| `crates/acp_thread/src/connection.rs` | Adds `AgentConnection::new_session_with_meta` extension point (default impl drops the meta + falls back to `new_session`) so adapters can act on protocol-level `_meta` keys (e.g. `claude-agent-acp` reads `_meta.systemPrompt` to seed the session prompt). | `solution_agent` |
+| `crates/agent_servers/src/acp.rs` | (1) `mcp_servers_for_project` prepends a fork-local `acp::McpServer::Stdio` entry pointing at `<current_exe> --nc <editor_mcp.socket_path>` so spawned ACP subagents see the editor's embedded MCP tools (helper: `spk_editor_mcp_bridge_server`) — see decision 14. (2) `AcpConnection::new_session_with_meta` impl splices `extra_meta` into `NewSessionRequest::meta`. | `editor_mcp` / `solution_agent` |
 | `crates/agent_servers/Cargo.toml` | New dep on `editor_mcp` for the socket path. | `editor_mcp` / `solution_agent` |
+| `crates/gpui/src/elements/list.rs` | `ListState::measure_last(N)` chunked tail prefetch (plus `MEASURE_LAST_DEFAULT_BATCH` / `LOOKAHEAD` / `EAGER_THRESHOLD` knobs) so virtualized lists can pre-warm their most-recent items on the first layout pass without paying the full-list measurement cost. Used by `solution_agent`'s conversation list to keep scroll-up off long resumed conversations from triggering a height-discovery cascade. | `solution_agent` |
 | `crates/welcome/src/welcome.rs` | Recent Solutions section + buttons. | `solutions_ui` |
 | `crates/workspace/src/welcome.rs` | `render_agent_card` gated off via `false &&` — fork uses `solution_agent`, not upstream agent panel. | `solution_agent` |
 | `crates/paths/src/paths.rs` | `.zed` → `.spke` rename for per-worktree config dir. | rebrand |
