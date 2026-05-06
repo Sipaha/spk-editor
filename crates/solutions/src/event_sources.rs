@@ -72,6 +72,13 @@ pub fn install(cx: &mut App) {
                     SolutionStoreEvent::Changed => {
                         editor_mcp::emit_notification(cx, "solution_changed", json!({}));
                     }
+                    SolutionStoreEvent::ActiveSolutionChanged(id) => {
+                        editor_mcp::emit_notification(
+                            cx,
+                            "solution_active_changed",
+                            json!({ "solution_id": id.0 }),
+                        );
+                    }
                     SolutionStoreEvent::MemberAddProgress {
                         solution,
                         catalog,

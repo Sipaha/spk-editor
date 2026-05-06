@@ -20,6 +20,15 @@ pub struct SolutionStore {
 #[derive(Clone, Debug)]
 pub enum SolutionStoreEvent {
     Changed,
+    /// Emitted by `touch_last_opened` whenever a Solution is opened
+    /// (or switched to). Subscribers that only need to react to "the
+    /// active Solution flipped" — e.g. fork panels refreshing their
+    /// content for a new Solution scope — should listen to this
+    /// instead of `Changed`, which fires on every store mutation
+    /// including non-active edits (catalog adds, member moves, …).
+    /// The id IS always Some — `None` would mean "no Solution is
+    /// active", which we model as "no event fired".
+    ActiveSolutionChanged(SolutionId),
     MemberAddProgress {
         solution: SolutionId,
         catalog: CatalogId,
@@ -334,7 +343,12 @@ impl SolutionStore {
         let sol = self.find_solution_mut(id)?;
         sol.last_opened_at = Some(Utc::now());
         self.persist()?;
+        // `Changed` first so listeners that watch the broad signal
+        // see the broadcast in chronological order; the more specific
+        // `ActiveSolutionChanged` follows so subscribers that only
+        // care about the active-id-flipped case can ignore `Changed`.
         cx.emit(SolutionStoreEvent::Changed);
+        cx.emit(SolutionStoreEvent::ActiveSolutionChanged(id.clone()));
         cx.notify();
         Ok(())
     }
@@ -742,5 +756,42 @@ mod tests {
         assert_eq!(paths.len(), 2);
         assert!(paths[0].ends_with("a"));
         assert!(paths[1].ends_with("b"));
+    }
+
+    #[gpui::test]
+    async fn touch_last_opened_emits_active_solution_changed(cx: &mut TestAppContext) {
+        let dir = tempdir().expect("tempdir");
+        let store = cx.update(|cx| SolutionStore::for_test(dir.path().join("s.json"), cx));
+        let sol_id = store
+            .update(cx, |s, cx| {
+                s.create_solution("S", dir.path().to_path_buf(), cx)
+            })
+            .expect("create solution");
+        let events: std::sync::Arc<std::sync::Mutex<Vec<SolutionStoreEvent>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _sub = cx.update(|cx| {
+            let events = events.clone();
+            cx.subscribe(&store, move |_store, ev: &SolutionStoreEvent, _cx| {
+                events.lock().expect("events lock").push(ev.clone());
+            })
+        });
+        store
+            .update(cx, |s, cx| s.touch_last_opened(&sol_id, cx))
+            .expect("touch");
+        cx.run_until_parked();
+        let events = events.lock().expect("events lock");
+        let active_changes: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                SolutionStoreEvent::ActiveSolutionChanged(id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            active_changes,
+            vec![sol_id],
+            "expected exactly one ActiveSolutionChanged for the touched id; got events: {:?}",
+            events
+        );
     }
 }
