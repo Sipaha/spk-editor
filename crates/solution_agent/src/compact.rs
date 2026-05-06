@@ -136,6 +136,34 @@ impl SolutionSessionsNavigator {
         Some(rendered)
     }
 
+    /// Cold-state compact: render the prompt now, queue it on the
+    /// active `SolutionSessionView` as `pending_send`, and kick off
+    /// `start_resume`. The view's existing wake-flush hook
+    /// (`flush_pending_send_if_ready`) dispatches the queued prompt
+    /// the moment `acp_thread` becomes `Some`. Status badge sequence
+    /// the user sees: `Sleeping → Resuming… → Thinking… → Idle`.
+    ///
+    /// No-ops if there's no rendered prompt (template render +
+    /// mkdir already toasted the failure) or if the view is gone.
+    ///
+    /// Called from the status-row compact button (Task 5). The
+    /// `#[allow(dead_code)]` is temporary — Task 5 wires the call site.
+    #[allow(dead_code)]
+    pub(crate) fn start_compact_from_cold(
+        &self,
+        session_id: crate::model::SolutionSessionId,
+        view: gpui::Entity<crate::session_view::SolutionSessionView>,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(rendered) = self.render_compact_prompt(session_id, cx) else {
+            return;
+        };
+        view.update(cx, |view, cx| {
+            view.enqueue_text_pending_send_and_resume(rendered, window, cx);
+        });
+    }
+
     fn toast_error(&self, message: SharedString, cx: &mut Context<Self>) {
         let Some(workspace) = self.workspace.upgrade() else {
             log::warn!("solution_agent toast (no workspace): {message}");
@@ -171,3 +199,128 @@ pub(crate) const COMPACT_HEADROOM_MIN_TOKENS: u64 = 30_000;
 /// the resources file so the prose can be reviewed without recompiling.
 const COMPACT_INSTRUCTIONS_TEMPLATE: &str =
     include_str!("../resources/compact_context_instructions.md");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapter::AdapterRegistry;
+    use crate::model::SolutionSessionId;
+    use gpui::{TestAppContext, VisualTestContext};
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+
+    /// Cold-compact orchestrator must:
+    ///   1. Render the compact instructions prompt (template variables
+    ///      replaced with cached cold-state values).
+    ///   2. Queue it as a single-block `pending_send` on the view.
+    ///   3. Set `resuming = true` so the badge flips to `Resuming…`.
+    ///
+    /// Assertions are checked synchronously — before `run_until_parked()` —
+    /// so the spawned `resume_session` task never fires and we don't have
+    /// to mock the full ACP handshake. The workspace entity is kept alive
+    /// for the duration of the test so `start_resume`'s synchronous
+    /// `workspace.upgrade()` check returns `Some` and does not clear
+    /// `pending_send` / `resuming` before we can read them.
+    #[gpui::test]
+    async fn cold_compact_queues_prompt_and_kicks_resume(cx: &mut TestAppContext) {
+        let (solution_id, _tmp, project) =
+            crate::store::tests::setup_solution_and_project(cx).await;
+        let agent_id = gpui::SharedString::from("mock-agent");
+
+        cx.update(|cx| {
+            // `Workspace::new` calls `theme_settings::track_window_appearance`
+            // which requires `GlobalSystemAppearance` to be initialized.
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+
+            let registry = Arc::new(AdapterRegistry::new());
+            SolutionAgentStore::init_global(cx, registry);
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, _| {
+                store.register_agent_server(
+                    agent_id.clone(),
+                    Rc::new(crate::test_support::MockAgentServer::new(Arc::new(
+                        AtomicUsize::new(0),
+                    ))),
+                );
+            });
+        });
+
+        let session_id = SolutionSessionId::new();
+
+        // Open a Workspace window so `start_resume` can synchronously
+        // upgrade `self.workspace` — without a valid workspace entity,
+        // `start_resume` immediately clears `pending_send` + `resuming`.
+        let workspace_window =
+            cx.add_window(|window, cx| workspace::Workspace::test_new(project.clone(), window, cx));
+
+        // Obtain a weak handle to the workspace entity BEFORE creating
+        // the `VisualTestContext` so we can call `workspace_window.root`
+        // without a re-entrant `update_window` (which would deadlock
+        // because `vcx.update` already holds the window lock).
+        let workspace_weak = cx
+            .update(|cx| workspace_window.root(cx).expect("workspace window is alive").downgrade());
+
+        let mut vcx = VisualTestContext::from_window(*workspace_window, cx);
+
+        // Insert the cold session into the store and build the navigator
+        // + view entities inside the window context.
+        let (navigator_entity, view_entity) = vcx.update(|window, cx| {
+            let store = SolutionAgentStore::global(cx);
+            let session = store.update(cx, |store, cx| {
+                crate::store::tests::insert_cold_session(
+                    session_id,
+                    solution_id.clone(),
+                    agent_id.clone(),
+                    Some(120_000),
+                    Some(project.clone()),
+                    store,
+                    cx,
+                )
+            });
+
+            let navigator = cx.new(|cx| crate::navigator::SolutionSessionsNavigator::for_test(cx));
+            let view = cx.new(|cx| {
+                crate::session_view::SolutionSessionView::for_test(
+                    session_id,
+                    session,
+                    workspace_weak.clone(),
+                    navigator.downgrade(),
+                    window,
+                    cx,
+                )
+            });
+            (navigator, view)
+        });
+
+        // Drive the cold-compact orchestrator.
+        vcx.update(|window, cx| {
+            navigator_entity.update(cx, |nav, cx| {
+                nav.start_compact_from_cold(session_id, view_entity.clone(), window, cx);
+            });
+        });
+
+        // Assert synchronously — before the spawned resume task runs.
+        vcx.update(|_window, cx| {
+            view_entity.read_with(cx, |view, _| {
+                let pending = view
+                    .pending_send_for_test()
+                    .expect("pending_send populated after start_compact_from_cold");
+                assert_eq!(pending.len(), 1, "exactly one content block");
+                let agent_client_protocol::schema::ContentBlock::Text(text) = &pending[0] else {
+                    panic!("expected text block, got {:?}", pending[0]);
+                };
+                assert!(
+                    !text.text.contains("{{compact_dir}}"),
+                    "template variable {{{{compact_dir}}}} must be resolved; got: {:?}",
+                    &text.text[..text.text.len().min(200)]
+                );
+                assert!(
+                    text.text.contains(session_id.as_str()),
+                    "rendered prompt must contain session_id={session_id}",
+                );
+                assert!(view.is_resuming(), "resuming flag set after enqueue");
+            });
+        });
+    }
+}

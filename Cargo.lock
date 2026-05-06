@@ -16685,6 +16685,8 @@ dependencies = [
  "sqlez",
  "tempfile",
  "terminal",
+ "theme",
+ "theme_settings",
  "ui",
  "util",
  "uuid",

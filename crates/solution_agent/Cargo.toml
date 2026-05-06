@@ -79,5 +79,7 @@ project = { workspace = true, features = ["test-support"] }
 settings.workspace = true
 solutions = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+theme.workspace = true
+theme_settings.workspace = true
 watch.workspace = true
 workspace = { workspace = true, features = ["test-support"] }

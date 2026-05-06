@@ -24,7 +24,7 @@ use crate::pool::SubprocessPool;
 mod connection_pool;
 mod queue;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub(crate) use queue::{QUEUE_MARKER_BODY_SEP, QUEUE_MARKER_PREFIX};
 

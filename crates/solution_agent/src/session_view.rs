@@ -1266,6 +1266,40 @@ impl SolutionSessionView {
         });
     }
 
+    /// Drop a single text block into `pending_send` and start the
+    /// cold-resume handshake. Used by callers outside the compose path
+    /// (status-row Compact-from-cold) that need to drive the same
+    /// "wake the agent, then send" flow without going through the
+    /// editor. No images supported — the only known caller (compact
+    /// instructions) is text-only.
+    pub(crate) fn enqueue_text_pending_send_and_resume(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        if self.resuming {
+            // Already mid-resume from an earlier Send — refuse to
+            // double-fire. The compose-side suppression in
+            // `submit_compose_now` does the same and logs; mirror that
+            // here so a missing resume has a breadcrumb.
+            let session_id = self.session_id;
+            log::info!(
+                target: "solution_agent::queue",
+                "session={session_id} enqueue_text_pending_send_and_resume suppressed (resuming=true)",
+            );
+            return;
+        }
+        let blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
+        self.pending_send = Some(blocks);
+        self.resuming = true;
+        self.start_resume(window, cx);
+        cx.notify();
+    }
+
     /// Kick off `SolutionAgentStore::resume_session` for a cold tab the
     /// user just hit Send on. The captured ACP blocks live in
     /// `pending_send` and get dispatched by `flush_pending_send_if_ready`
@@ -1660,6 +1694,30 @@ impl SolutionSessionView {
         });
         let focus = self.compose_editor.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
+    }
+}
+
+#[cfg(test)]
+impl SolutionSessionView {
+    /// Minimal test constructor: delegates to `SolutionSessionView::new`
+    /// with the supplied workspace handle so `start_resume` can upgrade it
+    /// without hitting the early-return that clears `pending_send` /
+    /// `resuming`. Callers must keep the workspace entity alive for the
+    /// duration of the test.
+    pub(crate) fn for_test(
+        session_id: crate::model::SolutionSessionId,
+        session: gpui::Entity<crate::model::SolutionSession>,
+        workspace: gpui::WeakEntity<workspace::Workspace>,
+        navigator: gpui::WeakEntity<crate::navigator::SolutionSessionsNavigator>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new(session_id, session, workspace, navigator, window, cx)
+    }
+
+    /// Returns a reference to `pending_send` for test assertions.
+    pub(crate) fn pending_send_for_test(&self) -> Option<&Vec<acp::ContentBlock>> {
+        self.pending_send.as_ref()
     }
 }
 

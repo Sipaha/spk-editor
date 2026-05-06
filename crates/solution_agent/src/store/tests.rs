@@ -3,10 +3,52 @@ use crate::adapter::AdapterRegistry;
 use crate::model::SessionState;
 use crate::test_support::{MockAgentServer, MockConnection};
 use chrono::Utc;
-use gpui::{SharedString, TestAppContext};
+use gpui::{Entity, SharedString, TestAppContext};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Insert a minimal cold session (no `acp_thread`) directly into the store
+/// for tests that need a pre-existing session without going through the full
+/// `create_session` → ACP-handshake flow. Only callable from within this
+/// module's submodule tree (same privacy rules as the private store fields).
+pub(crate) fn insert_cold_session(
+    session_id: crate::model::SolutionSessionId,
+    solution_id: solutions::SolutionId,
+    agent_id: gpui::SharedString,
+    cached_total_tokens: Option<u64>,
+    project: Option<Entity<project::Project>>,
+    store: &mut SolutionAgentStore,
+    cx: &mut gpui::Context<SolutionAgentStore>,
+) -> Entity<crate::model::SolutionSession> {
+    let session = cx.new(|_| crate::model::SolutionSession {
+        id: session_id,
+        solution_id: solution_id.clone(),
+        agent_id,
+        acp_session_id: agent_client_protocol::schema::SessionId::new("acp-cold"),
+        acp_thread: None,
+        title: SharedString::from("Cold"),
+        created_at: Utc::now(),
+        last_activity_at: Utc::now(),
+        state: SessionState::Idle,
+        context_count: 1,
+        project,
+        _acp_subscription: None,
+        pending_messages: std::collections::VecDeque::new(),
+        flush_after_cancel: false,
+        cwd: PathBuf::new(),
+        cold_entries: Vec::new(),
+        last_turn_duration: None,
+        cached_total_tokens,
+    });
+    store.sessions.insert(session_id, session.clone());
+    store
+        .by_solution
+        .entry(solution_id)
+        .or_default()
+        .push(session_id);
+    session
+}
 
 #[gpui::test]
 fn close_session_removes_from_indices(cx: &mut TestAppContext) {
@@ -56,7 +98,7 @@ fn close_session_removes_from_indices(cx: &mut TestAppContext) {
 /// a `Project::test` whose worktree is that root. Returns
 /// (`SolutionId`, `tempdir`, `Project`). Hold the tempdir for the
 /// lifetime of the test — `create_solution` writes to it.
-async fn setup_solution_and_project(
+pub(crate) async fn setup_solution_and_project(
     cx: &mut TestAppContext,
 ) -> (
     SolutionId,

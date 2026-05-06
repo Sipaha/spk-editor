@@ -1343,6 +1343,43 @@ fn apply_reorder(
 }
 
 #[cfg(test)]
+impl SolutionSessionsNavigator {
+    /// Minimal navigator for unit tests — all fields zero-filled; no
+    /// subscriptions that need `window`. Callers that need `workspace`
+    /// to resolve (e.g. `toast_error`) must upgrade it separately, but
+    /// `start_compact_from_cold` only needs `workspace` on failure paths
+    /// (when `render_compact_prompt` returns `None`). The test drives the
+    /// success path, so `WeakEntity::new_invalid()` is safe here.
+    pub(crate) fn for_test(cx: &mut Context<Self>) -> Self {
+        let store = crate::store::SolutionAgentStore::global(cx);
+        let store_subscription = cx.subscribe(
+            &store,
+            |_this, _store, _event: &crate::store::SolutionAgentStoreEvent, _cx| {},
+        );
+        Self {
+            workspace: gpui::WeakEntity::new_invalid(),
+            project: gpui::WeakEntity::new_invalid(),
+            focus_handle: cx.focus_handle(),
+            width: gpui::px(380.0),
+            active_solution: None,
+            open_sessions: Vec::new(),
+            selected_index: None,
+            views: HashMap::default(),
+            pending: Vec::new(),
+            next_pending_id: 0,
+            historic_sessions: Vec::new(),
+            tab_context_menu: None,
+            cached_models: HashMap::default(),
+            pending_model_fetches: HashSet::default(),
+            thinking_tick: None,
+            pending_restore: None,
+            _store_subscription: store_subscription,
+            _solutions_subscription: None,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::SolutionSessionId;
