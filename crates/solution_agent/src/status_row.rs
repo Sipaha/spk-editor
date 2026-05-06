@@ -457,7 +457,7 @@ impl SolutionSessionsNavigator {
         let remaining = max.saturating_sub(used);
         let too_full = remaining < COMPACT_HEADROOM_MIN_TOKENS;
         let pct_ok = pct >= COMPACT_BUTTON_MIN_PCT;
-        let compact_enabled = (is_idle || is_cold) && pct_ok && !too_full;
+        let compact_enabled = (is_idle || is_cold) && !is_errored && pct_ok && !too_full;
         let clear_enabled = !is_running && !is_resuming;
         let trigger_enabled = compact_enabled || clear_enabled;
 
