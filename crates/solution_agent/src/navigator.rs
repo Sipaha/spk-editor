@@ -18,7 +18,10 @@ use gpui::{
 };
 use solutions::{SolutionId, SolutionStore, SolutionStoreEvent};
 use ui::prelude::*;
-use ui::{CommonAnimationExt, ContextMenu, Icon, IconName, Label, LabelSize, PopoverMenu};
+use ui::{
+    CommonAnimationExt, ContextMenu, Icon, IconButtonShape, IconName, Label, LabelSize,
+    PopoverMenu,
+};
 use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
@@ -130,13 +133,19 @@ fn render_status_dot(status: SessionStatusIndicator, cx: &App) -> gpui::AnyEleme
     } else {
         dot.into_any_element()
     };
+    // No `pr_1()` here — `gap_1p5` on the parent tab body already
+    // separates the dot from the label. Stacking `pr_1` on top
+    // produced an asymmetric 10px gap (4 + 6) that read as
+    // "the label is misaligned" against the symmetrical
+    // 6px gap the other tab elements use.
     div()
         .id(SharedString::from(format!(
             "solution-tab-status-{:?}",
             status
         )))
         .flex_none()
-        .pr_1()
+        .flex()
+        .items_center()
         .tooltip(ui::Tooltip::text(tooltip))
         .child(dot)
         .into_any_element()
@@ -855,8 +864,17 @@ impl SolutionSessionsNavigator {
         // different shape; an icon-only button reads as the natural
         // extension of the tab strip ("add tab"). Tooltip + popover
         // menu still surface the full create-session UX.
+        //
+        // `Square` shape + `Medium` (16px) icon: the previous default
+        // (`Wide` + `Small`) had a 14px glyph inside a content-sized
+        // button — the visible icon was small and the hit area
+        // wandered with the icon's metrics, so the user kept missing
+        // the click. A 16px icon inside a deterministic
+        // `Square(28px)` hit area scales the visual + click target
+        // up together while still reading as a tab-strip extension.
         let trigger = ui::IconButton::new("solution-sessions-new", IconName::Plus)
-            .icon_size(IconSize::Small)
+            .shape(IconButtonShape::Square)
+            .icon_size(IconSize::Medium)
             .icon_color(Color::Muted)
             .tooltip(ui::Tooltip::text("New session"));
 
@@ -1055,31 +1073,27 @@ impl SolutionSessionsNavigator {
                     ),
             );
         }
-        // Right-side controls (`+` new-session, history popover) sit
-        // inside their own `h_full` wrappers so they share the strip's
-        // 36 px height and feel like extensions of the tab row rather
-        // than separate floating buttons. `flex_none` keeps them from
-        // stretching when the strip overflows horizontally.
-        if let Some(new_btn) = self.render_new_session_button(cx) {
+        // Right-side controls (`+` new-session, history popover)
+        // share a single `h_flex` row with `items_center` + `gap_1`
+        // so they sit on the same baseline as a unit and the gap
+        // between them is symmetric. Earlier shape had each button
+        // in its own `h_full` wrapper with separate `px_2`/`pr_2`
+        // padding — that produced a visually uneven step between
+        // the last tab, the `+`, and the history clock and made
+        // the icons look like they were drifting vertically against
+        // the tab labels.
+        let new_btn = self.render_new_session_button(cx);
+        let history_btn = self.render_history_button(cx);
+        if new_btn.is_some() || history_btn.is_some() {
             strip = strip.child(
-                div()
-                    .flex()
-                    .items_center()
+                h_flex()
+                    .flex_none()
                     .h_full()
+                    .items_center()
+                    .gap_1()
                     .px_2()
-                    .flex_none()
-                    .child(new_btn),
-            );
-        }
-        if let Some(history_btn) = self.render_history_button(cx) {
-            strip = strip.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .h_full()
-                    .pr_2()
-                    .flex_none()
-                    .child(history_btn),
+                    .when_some(new_btn, |this, btn| this.child(btn))
+                    .when_some(history_btn, |this, btn| this.child(btn)),
             );
         }
         strip

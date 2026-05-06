@@ -30,8 +30,14 @@ impl SolutionSessionsNavigator {
         }
         let metas: Vec<SolutionSessionMetadata> =
             self.historic_sessions.iter().take(12).cloned().collect();
+        // Match the `+` new-session trigger's sizing — `Square` shape
+        // + `Medium` (16px) icon — so the two end-of-strip buttons
+        // share a deterministic hit area. The `Wide` + `Small` default
+        // gave a wandering content-sized hit target that visually
+        // shrank between them, so the user kept missing the click.
         let trigger = ui::IconButton::new("solution-sessions-history", IconName::HistoryRerun)
-            .icon_size(IconSize::Small)
+            .shape(ui::IconButtonShape::Square)
+            .icon_size(IconSize::Medium)
             .icon_color(Color::Muted)
             .tooltip(ui::Tooltip::text("Recent sessions"));
         let weak = cx.entity().downgrade();
