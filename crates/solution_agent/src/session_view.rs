@@ -171,6 +171,14 @@ pub struct SolutionSessionView {
     /// and cancelled (dropped) when the badge render observes the
     /// session is no longer running. `None` when not ticking.
     thinking_tick: Option<gpui::Task<()>>,
+    /// Monotonic counter for `[image #N]` placeholder labels in pasted
+    /// images. Increments on every paste and never resets — without it
+    /// the third image pasted into a session showed `[image #1]` again
+    /// because `pending_images` is drained on submit, defeating the
+    /// natural "1, 2, 3" mental model the user has across the
+    /// conversation. Not persisted across editor restarts (overkill for
+    /// what is effectively a UX hint label).
+    image_count_so_far: usize,
 }
 
 impl SolutionSessionView {
@@ -292,6 +300,7 @@ impl SolutionSessionView {
             _thread_subscription: None,
             last_thread_entity_id: None,
             thinking_tick: None,
+            image_count_so_far: 0,
         };
         // Detect any thread that is already attached at construction
         // (e.g. after `resume_session`) and wire its lifecycle hooks.
@@ -1070,14 +1079,18 @@ impl SolutionSessionView {
         }
 
         let mut new_images: Vec<PendingImage> = Vec::new();
+        let mut next_idx = self.image_count_so_far;
         for entry in clipboard.into_entries() {
             if let ClipboardEntry::Image(image) = entry {
+                next_idx += 1;
                 let mime_type = image.format().mime_type().to_string();
                 let data = base64::engine::general_purpose::STANDARD.encode(image.bytes());
-                let label = SharedString::from(format!(
-                    "image #{}",
-                    self.pending_images.len() + new_images.len() + 1
-                ));
+                // Session-wide counter (`image_count_so_far`) instead of
+                // pending-list length — the latter resets to 0 on submit
+                // and made every fresh-compose paste show "image #1"
+                // again. Now images carry a stable monotonic label
+                // matching the user's "1, 2, 3 across the chat" model.
+                let label = SharedString::from(format!("image #{next_idx}"));
                 new_images.push(PendingImage {
                     mime_type,
                     data_base64: data,
@@ -1097,6 +1110,7 @@ impl SolutionSessionView {
             .map(|img| format!("[{}]", img.label))
             .collect::<Vec<_>>()
             .join(" ");
+        self.image_count_so_far = next_idx;
         self.pending_images.extend(new_images);
         self.compose_editor.update(cx, |editor, cx| {
             editor.insert(&placeholder_text, window, cx);

@@ -417,21 +417,36 @@ pub(crate) fn clean_user_message_text(text: &str) -> String {
         let idx = n.saturating_sub(1);
         format!("[image #{n}](spk-image://{idx})")
     });
-    let mut out = String::with_capacity(with_links.len());
-    let mut blanks = 0;
+    // Reconstruct with explicit markdown line-break semantics:
+    //   * single `\n` between non-empty lines → `  \n` (CommonMark
+    //     hard break — two trailing spaces + newline). Without this the
+    //     parser folds them into soft breaks and the whole pasted block
+    //     renders as one squished paragraph.
+    //   * blank lines (≥1 in a row) → `\n\n` (paragraph break). Multiple
+    //     consecutive blanks collapse to ONE paragraph break — pasted
+    //     code with extra blank lines stays readable instead of
+    //     stretching the bubble vertically.
+    // Both rules preserve inline markdown the user might have typed
+    // (bold, code spans, links). Wrapping the whole message in a code
+    // fence would lose that.
+    let mut out = String::with_capacity(with_links.len() + 16);
+    let mut prev_blank = false;
+    let mut first = true;
     for line in with_links.lines() {
         let trimmed = line.trim_end();
         if trimmed.is_empty() {
-            blanks += 1;
-            if blanks <= 1 && !out.is_empty() {
-                out.push('\n');
+            if !first && !prev_blank {
+                out.push_str("\n\n");
+                prev_blank = true;
             }
+            // Subsequent blanks within the same run: skip.
         } else {
-            blanks = 0;
-            if !out.is_empty() && !out.ends_with('\n') {
-                out.push('\n');
+            if !first && !prev_blank {
+                out.push_str("  \n");
             }
             out.push_str(trimmed);
+            first = false;
+            prev_blank = false;
         }
     }
     out.trim_end().to_string()
@@ -921,6 +936,30 @@ mod tests {
         // generates a fresh UUID).
         serde_json::from_value(serde_json::Value::String(label.into()))
             .expect("UserMessageId deserializes from any string")
+    }
+
+    #[test]
+    fn user_message_single_newline_becomes_hard_break() {
+        let out = clean_user_message_text("first line\nsecond line");
+        assert_eq!(out, "first line  \nsecond line");
+    }
+
+    #[test]
+    fn user_message_blank_line_becomes_paragraph_break() {
+        let out = clean_user_message_text("para 1\n\npara 2");
+        assert_eq!(out, "para 1\n\npara 2");
+    }
+
+    #[test]
+    fn user_message_multiple_blank_lines_collapse_to_one_paragraph_break() {
+        let out = clean_user_message_text("para 1\n\n\n\npara 2");
+        assert_eq!(out, "para 1\n\npara 2");
+    }
+
+    #[test]
+    fn user_message_mixed_blocks_preserve_structure() {
+        let out = clean_user_message_text("intro\nline 2\n\nnext para\nstill next");
+        assert_eq!(out, "intro  \nline 2\n\nnext para  \nstill next");
     }
 
     #[test]
