@@ -51,6 +51,16 @@ impl SolutionAgentAdapter for ClaudeAcpAdapter {
             "Build / test / git commands must be run from within a member subdirectory \
              (the solution root has no .git, no Cargo.toml, etc.).\n",
         );
+        buf.push_str(
+            "Stay inside the solution. All file edits, git operations, and shell \
+             commands targeting source code must be confined to the solution root \
+             and its member subdirectories. Paths outside it — including other \
+             clones of the same repository elsewhere on disk (~/IdeaProjects, \
+             ~/projects, etc.), system directories, and unrelated home folders — \
+             are read-only references: read them when context demands, but do \
+             not write, commit, or delete anything there unless the user \
+             explicitly asks for it.\n",
+        );
         buf
     }
 }
@@ -86,6 +96,7 @@ mod tests {
         assert!(prompt.contains("- ecos-records"));
         assert!(prompt.contains("- ecos-app"));
         assert!(prompt.contains("CLAUDE.md"));
+        assert!(prompt.contains("Stay inside the solution"));
     }
 
     #[test]
