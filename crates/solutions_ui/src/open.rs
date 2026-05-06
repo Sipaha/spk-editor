@@ -79,24 +79,34 @@ pub fn open_solution(
     if intent == OpenIntent::SameWindow
         && let Some(src) = source_window
     {
-        let active_workspace = src
-            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
-            .ok();
-        if let Some(active_workspace) = active_workspace {
+        // `cx.defer` so we run AFTER the click handler frame that
+        // reached us. Reading the window or mutating it inline here
+        // hits "attempted to read a window that is already on the
+        // stack" — the click event lives inside a `Window::dispatch_event`
+        // frame, and `read_with` / `update` on the same handle from
+        // within that frame double-lease the window.
+        let target = sol_id.clone();
+        cx.defer(move |cx| {
+            let Some(active_workspace) = src
+                .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+                .log_err()
+            else {
+                return;
+            };
             if let Some(store) = SolutionStore::try_global(cx) {
                 store
-                    .update(cx, |s, cx| s.touch_last_opened(&sol_id, cx))
+                    .update(cx, |s, cx| s.touch_last_opened(&target, cx))
                     .log_err();
             }
             let weak = active_workspace.downgrade();
-            let target_for_switch = sol_id.clone();
+            let target_for_switch = target.clone();
             src.update(cx, |_, window, cx| {
                 crate::switch::switch_active_solution_in_place(weak, target_for_switch, window, cx)
                     .detach_and_log_err(cx);
             })
             .log_err();
-            return;
-        }
+        });
+        return;
     }
 
     let Some(store) = SolutionStore::try_global(cx) else {
