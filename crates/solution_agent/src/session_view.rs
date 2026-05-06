@@ -14,17 +14,14 @@ use gpui::{
 };
 use markdown::{Markdown, MarkdownFont, MarkdownStyle};
 use ui::prelude::*;
-use ui::{Icon, IconButton, IconName, Label, Tooltip, WithScrollbar};
+use ui::{Icon, IconButton, IconName, Label, ScrollAxes, Scrollbars, Tooltip, WithScrollbar};
 use workspace::{
     Workspace,
     notifications::{NotificationId, simple_message_notification::MessageNotification},
 };
 
 use crate::actions::{FindClose, FindInSession, FindNextMatch, FindPreviousMatch, StopResponse};
-use crate::conversation_render::{
-    FindMatch, entry_text_spans, find_all, matches_for_span, pending_blocks_preview, render_entry,
-    render_pending_message,
-};
+use crate::conversation_render::{FindMatch, entry_text_spans, find_all, matches_for_span, render_entry};
 use crate::expanded_compose::{
     EXPANDED_COMPOSE_DEFAULT_H, EXPANDED_COMPOSE_DEFAULT_W, EXPANDED_COMPOSE_HEIGHT_RATIO,
     ExpandedComposeWindowView,
@@ -32,6 +29,11 @@ use crate::expanded_compose::{
 use crate::model::{SessionState, SolutionSession, SolutionSessionId};
 use crate::slash_commands::SlashCommandsProvider;
 use crate::store::SolutionAgentStore;
+
+mod recall;
+mod render_queue;
+#[cfg(test)]
+mod tests;
 
 struct PendingImage {
     mime_type: String,
@@ -179,6 +181,16 @@ pub struct SolutionSessionView {
     /// conversation. Not persisted across editor restarts (overkill for
     /// what is effectively a UX hint label).
     image_count_so_far: usize,
+    /// `true` when the queued-message ghost-bubble is shown in its
+    /// one-line collapsed form ("▸ Queued message — click to expand")
+    /// rather than the full preview. Default `true` because a queued
+    /// follow-up sitting under the conversation is visual noise most of
+    /// the time — the user knows what they typed; the chevron is just
+    /// a "yes, your draft is still there" affordance. Click on the
+    /// header expands; submit / recall flushes the queue and the row
+    /// disappears either way, so this state is purely transient and
+    /// not worth persisting.
+    queue_collapsed: bool,
 }
 
 impl SolutionSessionView {
@@ -190,6 +202,15 @@ impl SolutionSessionView {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&session, |this, _, cx| {
+            // The underlying `acp_thread` field can swap out from under us
+            // (rotate_context for compact, reset_context for /clear). The
+            // thread subscription set up in `new` is bound to the
+            // entity-id captured at construction time, so without a
+            // re-sync here the new thread's `EntriesRemoved` / `NewEntry`
+            // events would never reach `on_thread_event` and `list_state`
+            // would keep the stale row count. Idempotent — only does work
+            // when the entity id flips.
+            this.sync_thread_subscription(cx);
             // Thread mutated (new chunk streamed in, tool call appended, etc.).
             // Match indices stored in `find` reference (entry_idx, span_idx,
             // byte range) so a streaming append before/inside an existing
@@ -301,6 +322,7 @@ impl SolutionSessionView {
             last_thread_entity_id: None,
             thinking_tick: None,
             image_count_so_far: 0,
+            queue_collapsed: true,
         };
         // Detect any thread that is already attached at construction
         // (e.g. after `resume_session`) and wire its lifecycle hooks.
@@ -319,6 +341,17 @@ impl SolutionSessionView {
         let new_id = thread_opt.as_ref().map(Entity::entity_id);
         if new_id == self.last_thread_entity_id {
             return;
+        }
+        // Per-entry caches were keyed against the old thread's `(entry_idx,
+        // sub_idx)` coordinates; the new thread reuses those same indices for
+        // unrelated entries, so without clearing the cache we'd paint stale
+        // markdown from the old conversation. find/rewind state is also
+        // entry-index-scoped.
+        self.markdown_cache.clear();
+        self.markdown_for_render.clear();
+        self.rewind_table.clear();
+        if let Some(find) = self.find.as_mut() {
+            find.matches.clear();
         }
         match thread_opt {
             None => {
@@ -569,15 +602,26 @@ impl SolutionSessionView {
         find.matches = matches;
     }
 
-    /// Floating "Jump to latest" affordance shown in the bottom-right of the
-    /// conversation body when the user has scrolled away from the tail. The
-    /// virtualized `ListState` exposes `is_following_tail()` which goes
-    /// false the moment the user scrolls upward, so this button shows up
-    /// exactly when the conversation has drifted off-tail.
+    /// Floating "Jump to latest" affordance shown in the bottom-right of
+    /// the conversation list when the user has scrolled away from the
+    /// tail. The virtualized `ListState` exposes `is_following_tail()`
+    /// which goes false the moment the user scrolls upward, so this
+    /// button shows up exactly when the conversation has drifted
+    /// off-tail. Anchored to its parent's `.relative()` box, so callers
+    /// must wrap the conversation list in its own positioning context —
+    /// otherwise the button anchors to whatever ancestor happens to be
+    /// `position: relative` and lands somewhere unexpected (it used to
+    /// land in the gap between conversation and compose, where the
+    /// pending/thinking badges live).
     fn render_jump_to_latest(&self, cx: &mut Context<Self>) -> AnyElement {
         let btn = ui::IconButton::new("solution-session-jump-to-latest", IconName::ArrowDown)
             .shape(ui::IconButtonShape::Square)
-            .icon_size(IconSize::Small)
+            // `Medium` ≈ 28 px; the wrapping `p_1()` adds 4 px on every
+            // side, giving a ~36 px circular button — easy to hit and
+            // visually distinct from the surrounding scrollbar (~14 px
+            // wide), but small enough that it doesn't dominate a long
+            // conversation.
+            .icon_size(IconSize::Medium)
             .icon_color(Color::Default)
             .tooltip(ui::Tooltip::text("Jump to latest"))
             .on_click(cx.listener(|this, _, _window, cx| {
@@ -592,7 +636,13 @@ impl SolutionSessionView {
         div()
             .absolute()
             .bottom_3()
-            .right_3()
+            // `right_5` (20 px) instead of `right_3` (12 px): the
+            // always-visible scrollbar reserves ~14 px on the right
+            // edge of the conversation list, so a 12 px offset would
+            // clip the button under the scrollbar track. 20 px keeps
+            // a small visual gutter past the scrollbar.
+            .right_5()
+            .p_1()
             .rounded_full()
             .shadow_md()
             .bg(cx.theme().colors().elevated_surface_background)
@@ -824,10 +874,8 @@ impl SolutionSessionView {
                         .await;
                     let still_running = this
                         .update(cx, |this, cx| {
-                            let running = matches!(
-                                this.session.read(cx).state,
-                                SessionState::Running { .. }
-                            );
+                            let running =
+                                matches!(this.session.read(cx).state, SessionState::Running { .. });
                             if running {
                                 cx.notify();
                             }
@@ -918,6 +966,22 @@ impl SolutionSessionView {
             self.show_toast(rejection, cx);
             return;
         }
+        // `/clear` is intercepted client-side and translated into a fresh
+        // ACP session under the same SolutionSessionId. Forwarding it to
+        // the agent would clear the SDK's internal context but leave our
+        // local `AcpThread.entries` (and the rendered conversation) as-is;
+        // rotating is agent-agnostic and gives a guaranteed-clean slate
+        // including a reset usage meter. Pending images are dropped — the
+        // user explicitly asked to wipe the conversation.
+        if content.trim() == "/clear" {
+            self.compose_editor.update(cx, |e, cx| e.clear(window, cx));
+            self.pending_images.clear();
+            let session_id = self.session_id;
+            SolutionAgentStore::global(cx).update(cx, |store, cx| {
+                store.reset_context(session_id, cx).detach_and_log_err(cx);
+            });
+            return;
+        }
         self.compose_editor.update(cx, |e, cx| e.clear(window, cx));
         // Sending implies "I want to follow what happens next." Re-stick to
         // the bottom even if the user had scrolled up to read older context.
@@ -961,10 +1025,7 @@ impl SolutionSessionView {
     /// button stays useful if the agent flips to Idle between render
     /// and click.
     fn submit_compose_and_interrupt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let was_running = matches!(
-            self.session.read(cx).state,
-            SessionState::Running { .. }
-        );
+        let was_running = matches!(self.session.read(cx).state, SessionState::Running { .. });
         let had_compose_input = !self.compose_editor.read(cx).is_empty(cx);
         if had_compose_input {
             self.submit_compose_now(window, cx);
@@ -1346,6 +1407,11 @@ impl Render for SolutionSessionView {
             .key_context("SolutionSessionView")
             .track_focus(&self.focus_handle)
             .capture_action(cx.listener(Self::paste_intercept))
+            // `capture_action` (top-down dispatch) so this runs BEFORE
+            // the editor's own `MoveUp` handler. If the recall handler
+            // doesn't `cx.stop_propagation()`, the editor sees the
+            // action next and moves the cursor as usual.
+            .capture_action(cx.listener(Self::recall_queued_message))
             .on_action(cx.listener(Self::submit_compose_action))
             .on_drag_move(
                 cx.listener(|this, e: &DragMoveEvent<DraggedComposeHandle>, _, cx| {
@@ -1465,22 +1531,10 @@ impl Render for SolutionSessionView {
 
                 // Pending follow-up messages (typed while the agent is
                 // still working) sit in their own non-scrolling row
-                // beneath the virtualized list. Putting them inside the
-                // `list_state` would mean splicing virtual rows on every
-                // pending change; the typical pending count is 0–3 so
-                // a fixed-height ghost section below the list is plenty.
-                let pending = session.pending_messages.clone();
-                let mut pending_section = div().flex().flex_col().w_full();
-                let mut pending_has_any = false;
-                for (q_idx, blocks) in pending.iter().enumerate() {
-                    let preview = pending_blocks_preview(blocks, cx);
-                    if preview.is_empty() {
-                        continue;
-                    }
-                    pending_section =
-                        pending_section.child(render_pending_message(q_idx, &preview, cx));
-                    pending_has_any = true;
-                }
+                // beneath the virtualized list. The render-queue helper
+                // returns `None` when the queue is empty so the
+                // `.when_some(...)` site below skips the row entirely.
+                let pending_section = self.render_pending_section(cx);
 
                 // "Thinking…" badge — visible while the session is in
                 // `Running` state. Sits below the conversation list so it
@@ -1492,8 +1546,7 @@ impl Render for SolutionSessionView {
                 // otherwise the immutable `session` borrow conflicts
                 // with `&mut cx` inside `render_thinking_badge`.
                 let session_state_for_badge = session.state.clone();
-                let thinking_badge =
-                    self.render_thinking_badge(&session_state_for_badge, cx);
+                let thinking_badge = self.render_thinking_badge(&session_state_for_badge, cx);
 
                 // No body-wide `right_click_menu` here. Wrapping the
                 // virtualized `list(...)` in a non-flex element (which
@@ -1506,36 +1559,63 @@ impl Render for SolutionSessionView {
                 // which always includes the same Copy actions.
                 let is_following = self.list_state.is_following_tail();
                 div()
-                    .relative()
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_h_0()
                     .child(
+                        // Inner `.relative()` wrapper isolates the "jump to
+                        // latest" overlay's positioning context to the
+                        // conversation list itself, so the button anchors
+                        // to the bottom-right of the message area — not to
+                        // the bottom of the outer container, which would
+                        // place it below the thinking-badge / pending
+                        // sections (right where the user expects the
+                        // compose box to be).
+                        //
                         // `v_flex` (display:flex + column) is required:
                         // without `display:flex` on this wrapper, the
                         // list element's `.flex_grow()` is a no-op,
                         // leaving the list at its `Auto`-sized 0 height.
-                        // `vertical_scrollbar_for(&self.list_state, …)`
-                        // bolts the editor's standard auto-hide scrollbar
-                        // onto the right edge — `ListState` already
-                        // implements `ScrollableHandle`, so the bar
-                        // tracks the same offset/viewport the
-                        // virtualized list scrolls.
-                        v_flex()
-                            .id("solution-session-conversation")
+                        //
+                        // `Scrollbars::always_visible(...)` instead of the
+                        // default auto-hiding `vertical_scrollbar_for(...)`:
+                        // during streaming the auto-hide timer flapped
+                        // (each chunk re-armed the show timer, which
+                        // expired between chunks during quiet stretches),
+                        // and the bar's width is added/removed via
+                        // `pr(space)` on this very div — so flapping
+                        // visibility triggered a horizontal content
+                        // reflow on every streaming pause. Pinning the
+                        // bar visible costs ~6 px of width but kills the
+                        // jitter dead.
+                        div()
+                            .relative()
+                            .flex()
+                            .flex_col()
                             .flex_1()
                             .min_h_0()
-                            .px_2()
-                            .py_1()
-                            .child(conversation_body)
-                            .vertical_scrollbar_for(&self.list_state, window, cx),
+                            .child(
+                                v_flex()
+                                    .id("solution-session-conversation")
+                                    .flex_1()
+                                    .min_h_0()
+                                    .px_2()
+                                    .py_1()
+                                    .child(conversation_body)
+                                    .custom_scrollbars(
+                                        Scrollbars::always_visible(ScrollAxes::Vertical)
+                                            .tracked_scroll_handle(&self.list_state),
+                                        window,
+                                        cx,
+                                    ),
+                            )
+                            .when(!is_following, |this| {
+                                this.child(self.render_jump_to_latest(cx))
+                            }),
                     )
                     .when_some(thinking_badge, |this, badge| this.child(badge))
-                    .when(pending_has_any, |this| this.child(pending_section))
-                    .when(!is_following, |this| {
-                        this.child(self.render_jump_to_latest(cx))
-                    })
+                    .when_some(pending_section, |this, section| this.child(section))
             })
             .child({
                 // Compose row + resize handle in a single flex_col:
@@ -1677,8 +1757,7 @@ impl Render for SolutionSessionView {
                                 } else {
                                     "Send message".into()
                                 };
-                                let compose_has_text =
-                                    !self.compose_editor.read(cx).is_empty(cx);
+                                let compose_has_text = !self.compose_editor.read(cx).is_empty(cx);
                                 let can_interrupt_and_flush = is_working
                                     && (pending_count > 0
                                         || compose_has_text
@@ -1706,9 +1785,11 @@ impl Render for SolutionSessionView {
                                             "Send now — interrupts the current \
                                              turn and runs your queued follow-ups",
                                         ))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.submit_compose_and_interrupt(window, cx);
-                                        })),
+                                        .on_click(
+                                            cx.listener(|this, _, window, cx| {
+                                                this.submit_compose_and_interrupt(window, cx);
+                                            }),
+                                        ),
                                     )
                                 })
                                 .when(is_working, |this| {
@@ -1736,91 +1817,5 @@ impl Render for SolutionSessionView {
                 }
                 compose_row.child(compose_inner)
             })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::ops::Range;
-
-    fn collect(text: &str, query: &str) -> Vec<Range<usize>> {
-        let mut out = Vec::new();
-        find_all(text, &query.to_lowercase(), |r| out.push(r));
-        out
-    }
-
-    #[test]
-    fn find_all_basic() {
-        assert_eq!(collect("hello world", "hello"), vec![0..5]);
-        assert_eq!(
-            collect("hello hello hello", "hello"),
-            vec![0..5, 6..11, 12..17]
-        );
-    }
-
-    #[test]
-    fn find_all_case_insensitive() {
-        assert_eq!(collect("Hello World", "hello"), vec![0..5]);
-        assert_eq!(
-            collect("HELLO HeLLo hello", "Hello"),
-            vec![0..5, 6..11, 12..17]
-        );
-    }
-
-    #[test]
-    fn find_all_no_match() {
-        assert_eq!(collect("abc", "xyz"), Vec::<Range<usize>>::new());
-    }
-
-    #[test]
-    fn find_all_empty_query() {
-        assert_eq!(collect("anything", ""), Vec::<Range<usize>>::new());
-    }
-
-    #[test]
-    fn find_all_overlapping_advances_by_query_len() {
-        // Advances past the match — does NOT find overlapping matches. This
-        // mirrors common find-bar behavior (Cursor / VS Code) where typing
-        // "aa" in "aaaa" highlights two non-overlapping pairs at 0..2 and
-        // 2..4 rather than three at 0..2, 1..3, 2..4.
-        assert_eq!(collect("aaaa", "aa"), vec![0..2, 2..4]);
-    }
-
-    #[test]
-    fn matches_for_span_filters_and_finds_selected() {
-        let matches = vec![
-            FindMatch {
-                entry_idx: 0,
-                span_idx: 0,
-                range: 0..5,
-            },
-            FindMatch {
-                entry_idx: 0,
-                span_idx: 1,
-                range: 0..3,
-            },
-            FindMatch {
-                entry_idx: 1,
-                span_idx: 0,
-                range: 5..8,
-            },
-            FindMatch {
-                entry_idx: 0,
-                span_idx: 0,
-                range: 10..15,
-            },
-        ];
-        let (ranges, sel) = matches_for_span(&matches, Some(3), 0, 0);
-        assert_eq!(ranges, vec![0..5, 10..15]);
-        assert_eq!(sel, Some(1));
-
-        let (ranges, sel) = matches_for_span(&matches, Some(3), 1, 0);
-        assert_eq!(ranges, vec![5..8]);
-        assert_eq!(sel, None);
-
-        let (ranges, sel) = matches_for_span(&matches, Some(2), 1, 0);
-        assert_eq!(ranges, vec![5..8]);
-        assert_eq!(sel, Some(0));
     }
 }

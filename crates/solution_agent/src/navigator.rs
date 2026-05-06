@@ -175,12 +175,11 @@ impl SolutionSessionsNavigator {
         // create / etc. without going through this panel's own create-tab
         // path, and the dock-panel badge would drift out of sync with the
         // visible tabs.
-        let store_subscription =
-            cx.subscribe_in(&store, window, |this, _, _, window, cx| {
-                this.refresh_historic_sessions(cx);
-                this.reconcile_open_sessions_with_store(window, cx);
-                cx.notify();
-            });
+        let store_subscription = cx.subscribe_in(&store, window, |this, _, _, window, cx| {
+            this.refresh_historic_sessions(cx);
+            this.reconcile_open_sessions_with_store(window, cx);
+            cx.notify();
+        });
         let solutions_subscription = SolutionStore::try_global(cx).map(|sol_store| {
             cx.subscribe_in(
                 &sol_store,
@@ -248,11 +247,7 @@ impl SolutionSessionsNavigator {
     /// sessions created via MCP, opened in another window, or carried
     /// over from a previous tab-strip clear (solution-switch round-trip)
     /// inflate the badge silently.
-    fn reconcile_open_sessions_with_store(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn reconcile_open_sessions_with_store(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(solution_id) = self.active_solution.clone() else {
             return;
         };

@@ -63,6 +63,7 @@ util.workspace = true
 uuid = { workspace = true, features = ["serde", "v4"] }
 watch = { workspace = true, optional = true }
 workspace.workspace = true
+zed_actions.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 ashpd.workspace = true

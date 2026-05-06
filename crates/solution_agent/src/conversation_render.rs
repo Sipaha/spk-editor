@@ -263,16 +263,30 @@ pub(crate) fn render_entry(
 
 /// Plain-text preview of a queued follow-up, used by the "ghost"
 /// bubble we draw while the message is sitting in `pending_messages`.
-/// Concatenates text blocks AS-IS (preserving the `\n\n` separators
-/// that `send_message_blocks` injects when merging queued submits)
-/// and substitutes `[image #N]` placeholders for image blocks.
+/// Concatenates text blocks (preserving the `\n\n` separators that
+/// `send_message_blocks` injects when merging queued submits) and
+/// substitutes `[image #N]` placeholders for image blocks.
+///
+/// Strips the leading queue marker that `send_message_blocks` prepends
+/// on first enqueue (`[The user typed the following at HH:MM:SS …]`) —
+/// the marker is for the agent, not the user, and showing it in the
+/// ghost just clutters the preview without telling the user anything
+/// the "Queued — sends when agent finishes" caption doesn't already
+/// convey.
 pub(crate) fn pending_blocks_preview(blocks: &[acp::ContentBlock], _cx: &App) -> String {
     let mut out = String::new();
     let mut image_idx = 1usize;
+    let mut first_text = true;
     for block in blocks {
         match block {
             acp::ContentBlock::Text(t) => {
-                out.push_str(&t.text);
+                let text = if first_text {
+                    strip_queue_marker(&t.text)
+                } else {
+                    t.text.as_str()
+                };
+                first_text = false;
+                out.push_str(text);
             }
             acp::ContentBlock::Image(_) => {
                 out.push_str(&format!("[image #{image_idx}]"));
@@ -284,17 +298,44 @@ pub(crate) fn pending_blocks_preview(blocks: &[acp::ContentBlock], _cx: &App) ->
     out.trim().to_string()
 }
 
+/// If `text` starts with the timestamp marker emitted by
+/// `store::build_queue_marker`, return everything after the closing
+/// `]` plus the trailing blank-line separator. Otherwise return
+/// `text` unchanged.
+///
+/// Reads the prefix / body-separator from `store::QUEUE_MARKER_*` so the
+/// writer and reader stay in sync — a wording change there propagates
+/// here for free.
+pub(crate) fn strip_queue_marker(text: &str) -> &str {
+    if !text.starts_with(crate::store::QUEUE_MARKER_PREFIX) {
+        return text;
+    }
+    let Some(close_idx) = text.find(crate::store::QUEUE_MARKER_BODY_SEP) else {
+        return text;
+    };
+    &text[close_idx + crate::store::QUEUE_MARKER_BODY_SEP.len()..]
+}
+
 /// Ghost bubble for a queued follow-up. Same shape as a user message
 /// but slightly muted so it reads as "this hasn't been sent yet" while
 /// still using the user-message visual vocabulary.
+///
+/// `h_flex().w_full()` on the outer row + `w_full()` on the inner text
+/// wrapper is load-bearing: without `w_full`, the bubble's
+/// `max_w(relative(0.85))` resolves against an unsized parent and the
+/// Label collapses to a narrow column even for short messages (the
+/// "horizontally compressed bubble" bug). With it, percent resolves to
+/// 85 % of the available column width, the Label fills naturally, and
+/// long content wraps at the cap.
 pub(crate) fn render_pending_message(idx: usize, preview: &str, cx: &App) -> AnyElement {
     let bubble_bg = cx.theme().colors().text_accent.opacity(0.06);
     let border_color = cx.theme().colors().text_accent.opacity(0.4);
     v_flex()
         .px_1()
         .mb_3()
+        .w_full()
         .child(
-            h_flex().child(
+            h_flex().w_full().child(
                 div()
                     .relative()
                     .max_w(relative(0.85))
@@ -305,7 +346,11 @@ pub(crate) fn render_pending_message(idx: usize, preview: &str, cx: &App) -> Any
                     .border_dashed()
                     .border_color(border_color)
                     .rounded_md()
-                    .child(Label::new(preview.to_string()).color(Color::Muted))
+                    .child(
+                        div()
+                            .w_full()
+                            .child(Label::new(preview.to_string()).color(Color::Muted)),
+                    )
                     .child(
                         div()
                             .id(SharedString::from(format!("pending-msg-{idx}")))
@@ -412,9 +457,21 @@ pub(crate) fn render_user_message(
 ///      grow an empty paragraph where `Image` used to live.
 pub(crate) fn clean_user_message_text(text: &str) -> String {
     let stripped = text.replace("`Image`", "");
+    // The `[image #N]` label is session-monotonic (counter on
+    // `SolutionSessionView::image_count_so_far`), so `N` is NOT the
+    // image's position inside this message — message #2's only image
+    // can perfectly well be labelled "image #5". The on-click handler
+    // looks up `message.chunks` filtered to images by *ordinal*, so the
+    // URL idx must be the placeholder's ordinal position within the
+    // current message text, not `N - 1`. Earlier code used `N - 1` and
+    // sent everything past the first message's image-zero into
+    // `cx.open_url`, which dropped users into the OS "Open With…" dialog
+    // for the unhandled `spk-image://` scheme.
+    let mut ordinal: usize = 0;
     let with_links = IMAGE_PLACEHOLDER_RE.replace_all(&stripped, |caps: &regex::Captures| {
         let n: usize = caps[1].parse().unwrap_or(1);
-        let idx = n.saturating_sub(1);
+        let idx = ordinal;
+        ordinal += 1;
         format!("[image #{n}](spk-image://{idx})")
     });
     // Reconstruct with explicit markdown line-break semantics:
@@ -963,6 +1020,30 @@ mod tests {
     }
 
     #[test]
+    fn image_placeholder_links_use_per_message_ordinal_not_label() {
+        // Earlier code used `N - 1` as the URL idx, but `image #N` labels
+        // are session-monotonic — message #2 might own only "image #5",
+        // and `images.get(4)` against that message's chunks is `None`,
+        // dumping the user into the OS "Open With…" dialog. Ordinal-
+        // counted URLs (`spk-image://0`, `spk-image://1`, …) align with
+        // the order images appear in `message.chunks`.
+        let out = clean_user_message_text("look at [image #5] and then [image #7]");
+        assert_eq!(
+            out,
+            "look at [image #5](spk-image://0) and then [image #7](spk-image://1)"
+        );
+    }
+
+    #[test]
+    fn image_placeholder_link_starts_at_ordinal_zero_in_each_message() {
+        // Even if the only image is labelled `image #99`, the URL is
+        // `spk-image://0` because there's exactly one image in this
+        // message and it's the first.
+        let out = clean_user_message_text("only [image #99]");
+        assert_eq!(out, "only [image #99](spk-image://0)");
+    }
+
+    #[test]
     fn empty_entries_produce_empty_table() {
         assert_eq!(
             compute_rewind_table(&[]),
@@ -1015,5 +1096,105 @@ mod tests {
         let table =
             compute_rewind_table(&[Some(id("A")), None, Some(id("B")), None, Some(id("C"))]);
         assert_eq!(table, vec![None, Some(id("B")), None, Some(id("C")), None]);
+    }
+
+    #[test]
+    fn strip_queue_marker_drops_prefix_when_present() {
+        let with_marker = "[The user typed the following at 14:23:01 (local time) while you were \
+                           still on the previous turn — this is NOT a direct reply to your last \
+                           question or tool result, it was queued in advance.]\n\nactual user text";
+        assert_eq!(super::strip_queue_marker(with_marker), "actual user text");
+    }
+
+    #[test]
+    fn strip_queue_marker_passes_through_unmarked_text() {
+        // Plain user content (no leading marker) is returned untouched.
+        assert_eq!(super::strip_queue_marker("hi there"), "hi there");
+        // Looks like a marker but missing the closing `]\n\n` → leave it alone
+        // rather than risk eating real content.
+        assert_eq!(
+            super::strip_queue_marker("[The user typed the following at "),
+            "[The user typed the following at "
+        );
+    }
+
+    fn collect(text: &str, query: &str) -> Vec<Range<usize>> {
+        let mut out = Vec::new();
+        find_all(text, &query.to_lowercase(), |r| out.push(r));
+        out
+    }
+
+    #[test]
+    fn find_all_basic() {
+        assert_eq!(collect("hello world", "hello"), vec![0..5]);
+        assert_eq!(
+            collect("hello hello hello", "hello"),
+            vec![0..5, 6..11, 12..17]
+        );
+    }
+
+    #[test]
+    fn find_all_case_insensitive() {
+        assert_eq!(collect("Hello World", "hello"), vec![0..5]);
+        assert_eq!(
+            collect("HELLO HeLLo hello", "Hello"),
+            vec![0..5, 6..11, 12..17]
+        );
+    }
+
+    #[test]
+    fn find_all_no_match() {
+        assert_eq!(collect("abc", "xyz"), Vec::<Range<usize>>::new());
+    }
+
+    #[test]
+    fn find_all_empty_query() {
+        assert_eq!(collect("anything", ""), Vec::<Range<usize>>::new());
+    }
+
+    #[test]
+    fn find_all_overlapping_advances_by_query_len() {
+        // Advances past the match — does NOT find overlapping matches. This
+        // mirrors common find-bar behavior (Cursor / VS Code) where typing
+        // "aa" in "aaaa" highlights two non-overlapping pairs at 0..2 and
+        // 2..4 rather than three at 0..2, 1..3, 2..4.
+        assert_eq!(collect("aaaa", "aa"), vec![0..2, 2..4]);
+    }
+
+    #[test]
+    fn matches_for_span_filters_and_finds_selected() {
+        let matches = vec![
+            FindMatch {
+                entry_idx: 0,
+                span_idx: 0,
+                range: 0..5,
+            },
+            FindMatch {
+                entry_idx: 0,
+                span_idx: 1,
+                range: 0..3,
+            },
+            FindMatch {
+                entry_idx: 1,
+                span_idx: 0,
+                range: 5..8,
+            },
+            FindMatch {
+                entry_idx: 0,
+                span_idx: 0,
+                range: 10..15,
+            },
+        ];
+        let (ranges, sel) = matches_for_span(&matches, Some(3), 0, 0);
+        assert_eq!(ranges, vec![0..5, 10..15]);
+        assert_eq!(sel, Some(1));
+
+        let (ranges, sel) = matches_for_span(&matches, Some(3), 1, 0);
+        assert_eq!(ranges, vec![5..8]);
+        assert_eq!(sel, None);
+
+        let (ranges, sel) = matches_for_span(&matches, Some(2), 1, 0);
+        assert_eq!(ranges, vec![5..8]);
+        assert_eq!(sel, Some(0));
     }
 }

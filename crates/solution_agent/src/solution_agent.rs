@@ -92,9 +92,8 @@ pub fn init(cx: &mut App) {
 
         let weak = workspace.weak_handle();
         let weak_project = workspace.project().downgrade();
-        let navigator = cx.new(|cx| {
-            navigator::SolutionSessionsNavigator::new(weak, weak_project, window, cx)
-        });
+        let navigator =
+            cx.new(|cx| navigator::SolutionSessionsNavigator::new(weak, weak_project, window, cx));
 
         // Initial active-solution derivation is deferred to the next App tick
         // so it runs *after* the surrounding `observe_new<Workspace>` update

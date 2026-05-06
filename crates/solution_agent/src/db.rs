@@ -315,13 +315,10 @@ fn select_metadata_for_solution(
 ) -> Result<Vec<SolutionSessionMetadata>> {
     // Same nested-tuple shape as the INSERT side — `sqlez::Column` only
     // implements tuples up to size 10.
-    let mut select = connection.select_bound::<
-        String,
-        (
-            (String, String, String, Arc<str>, String),
-            (i64, i64, Option<String>, Option<i64>, i64, Option<String>),
-        ),
-    >(indoc! {"
+    let mut select = connection.select_bound::<String, (
+        (String, String, String, Arc<str>, String),
+        (i64, i64, Option<String>, Option<i64>, i64, Option<String>),
+    )>(indoc! {"
         SELECT id, solution_id, agent_id, acp_session_id, title,
                created_at, last_activity_at, preview, total_tokens,
                context_count, cwd

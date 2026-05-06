@@ -16690,6 +16690,7 @@ dependencies = [
  "uuid",
  "watch",
  "workspace",
+ "zed_actions",
 ]
 
 [[package]]

@@ -6,8 +6,6 @@ use std::sync::Arc;
 use agent_client_protocol::schema as acp;
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use futures::FutureExt;
-use futures::future::Shared;
 use gpui::{
     App, AppContext, AsyncApp, Context, Entity, EventEmitter, Global, SharedString, Subscription,
     Task,
@@ -21,7 +19,14 @@ use crate::model::{
     AgentServerId, SessionState, SolutionSession, SolutionSessionId, SolutionSessionMetadata,
 };
 use crate::notifier;
-use crate::pool::{PooledConnection, SHUTDOWN_DEBOUNCE, SpawnState, SubprocessPool};
+use crate::pool::SubprocessPool;
+
+mod connection_pool;
+mod queue;
+#[cfg(test)]
+mod tests;
+
+pub(crate) use queue::{QUEUE_MARKER_BODY_SEP, QUEUE_MARKER_PREFIX};
 
 pub struct SolutionAgentStore {
     sessions: HashMap<SolutionSessionId, Entity<SolutionSession>>,
@@ -622,112 +627,6 @@ impl SolutionAgentStore {
         })
     }
 
-    /// Pool-aware lookup: returns the existing connection, awaits an
-    /// in-flight spawn, drops a previously failed entry and retries, or
-    /// kicks off a new spawn. Always increments `live_session_count` so
-    /// callers must pair this with `pool_release_session` on session close.
-    fn get_or_spawn_connection(
-        &mut self,
-        pair: (SolutionId, AgentServerId),
-        _solution: &Solution,
-        project: Entity<project::Project>,
-        cx: &mut Context<Self>,
-    ) -> Task<Result<Rc<dyn acp_thread::AgentConnection>>> {
-        // Phase 1: short critical section over the pool. Either we observe
-        // an existing entry (Ready / Pending / Failed) or we hold no entry
-        // and proceed to spawn.
-        {
-            let mut pool = self.pool.lock();
-            if let Some(entry) = pool.entry_mut(&pair) {
-                entry.shutdown_task = None;
-                entry.live_session_count += 1;
-                match &entry.state {
-                    SpawnState::Ready(connection) => {
-                        return Task::ready(Ok(connection.clone()));
-                    }
-                    SpawnState::Pending(shared) => {
-                        let shared = shared.clone();
-                        return cx
-                            .foreground_executor()
-                            .spawn(async move { shared.await.map_err(|e| anyhow!("{e}")) });
-                    }
-                    SpawnState::Failed(_) => {
-                        // Drop the failed entry and fall through to a fresh spawn.
-                        // We've already bumped live_session_count; reset it so
-                        // remove() leaves a clean slate.
-                        entry.live_session_count = 0;
-                        pool.remove(&pair);
-                    }
-                }
-            }
-        }
-
-        // Phase 2: look up the registered AgentServer. If absent, return
-        // an error without inserting a Failed pool entry — callers should be
-        // able to retry once the server is registered.
-        let server = match self.server_registry.get(&pair.1).cloned() {
-            Some(server) => server,
-            None => {
-                return Task::ready(Err(anyhow!(
-                    "no AgentServer registered for id {:?}",
-                    pair.1
-                )));
-            }
-        };
-
-        // Phase 3: kick off connect() on the foreground executor (AgentServer
-        // is `!Send` and so are its returned `Rc<dyn AgentConnection>`s; the
-        // pool lives on the foreground thread).
-        let pair_for_task = pair.clone();
-        // AgentServerDelegate requires an `Entity<AgentServerStore>` — we
-        // get one from the project. This is the same coupling documented on
-        // `create_session`.
-        let agent_server_store = project.read(cx).agent_server_store().clone();
-        let delegate = agent_servers::AgentServerDelegate::new(agent_server_store, None);
-        let project_for_connect = project;
-        let server_for_connect = server;
-
-        let task: Shared<
-            Task<Result<Rc<dyn acp_thread::AgentConnection>, std::sync::Arc<anyhow::Error>>>,
-        > = cx
-            .spawn(async move |this, cx: &mut AsyncApp| {
-                let connect_task =
-                    cx.update(|cx| server_for_connect.connect(delegate, project_for_connect, cx));
-                let result_for_pool: Result<
-                    Rc<dyn acp_thread::AgentConnection>,
-                    std::sync::Arc<anyhow::Error>,
-                > = connect_task.await.map_err(std::sync::Arc::new);
-
-                // Promote pool state to Ready/Failed once the spawn resolves.
-                let _ = this.update(cx, |store, _| {
-                    let mut pool = store.pool.lock();
-                    if let Some(entry) = pool.entry_mut(&pair_for_task) {
-                        entry.state = match &result_for_pool {
-                            Ok(connection) => SpawnState::Ready(connection.clone()),
-                            Err(err) => SpawnState::Failed(err.clone()),
-                        };
-                    }
-                });
-                result_for_pool
-            })
-            .shared();
-
-        // Phase 4: insert a Pending entry holding the shared task.
-        {
-            let mut pool = self.pool.lock();
-            pool.insert(
-                pair.clone(),
-                PooledConnection {
-                    state: SpawnState::Pending(task.clone()),
-                    live_session_count: 1,
-                    shutdown_task: None,
-                },
-            );
-        }
-
-        cx.foreground_executor()
-            .spawn(async move { task.await.map_err(|e| anyhow!("{e}")) })
-    }
 
     pub fn sessions_for(&self, solution_id: &SolutionId) -> Vec<Entity<SolutionSession>> {
         self.by_solution
@@ -789,57 +688,6 @@ impl SolutionAgentStore {
         Ok(())
     }
 
-    /// Best-effort cancel of an in-flight turn. Forwards to the underlying
-    /// `AgentConnection::cancel`. Errors only when the session is unknown
-    /// or has no live `AcpThread` yet — once the connection accepts the
-    /// cancel request, downstream `AcpThreadEvent::Stopped` (or `Error`)
-    /// drives the state transition through `handle_acp_event`.
-    pub fn cancel_turn(&self, session_id: SolutionSessionId, cx: &mut Context<Self>) -> Result<()> {
-        let session = self
-            .sessions
-            .get(&session_id)
-            .cloned()
-            .ok_or_else(|| anyhow!("unknown session {session_id}"))?;
-        let (connection, acp_session_id) = {
-            let s = session.read(cx);
-            let thread = s
-                .acp_thread
-                .as_ref()
-                .ok_or_else(|| anyhow!("session {session_id} has no ACP thread yet"))?;
-            (
-                thread.read(cx).connection().clone(),
-                s.acp_session_id.clone(),
-            )
-        };
-        connection.cancel(&acp_session_id, cx);
-        Ok(())
-    }
-
-    /// Cancel the in-flight turn AND, once the resulting `Stopped(Cancelled)`
-    /// arrives, flush `pending_messages` instead of clearing them. Wired to
-    /// the "Send now" button in the compose row — the user typed a follow-up
-    /// they want the agent to act on RIGHT NOW, not after the current turn
-    /// completes.
-    ///
-    /// Internally just sets a one-shot flag on the session and delegates to
-    /// `cancel_turn`. The handler in `handle_acp_event` (Stopped branch)
-    /// reads the flag and routes the queue to `send_message_blocks`.
-    pub fn interrupt_and_flush_pending(
-        &mut self,
-        session_id: SolutionSessionId,
-        cx: &mut Context<Self>,
-    ) -> Result<()> {
-        let session = self
-            .sessions
-            .get(&session_id)
-            .cloned()
-            .ok_or_else(|| anyhow!("unknown session {session_id}"))?;
-        if session.read(cx).pending_messages.is_empty() {
-            anyhow::bail!("interrupt_and_flush_pending: no queued messages to flush");
-        }
-        session.update(cx, |s, _| s.flush_after_cancel = true);
-        self.cancel_turn(session_id, cx)
-    }
 
     /// Update the user-visible title of a session and persist the change
     /// (best-effort). Emits `SessionTitleChanged` so the navigator
@@ -1011,123 +859,92 @@ impl SolutionAgentStore {
         })
     }
 
-    /// Send a plain-text user message. Convenience wrapper around
-    /// `send_message_blocks` for the common single-text-block case.
-    pub fn send_message(
+    /// Reset the session's conversation context: drop the current
+    /// `AcpThread` and spawn a fresh ACP-level session under the same
+    /// `SolutionSessionId` and pooled subprocess.
+    ///
+    /// Different from [`rotate_context`](Self::rotate_context) in that
+    /// `context_count` is left untouched (no `c<N>` directory bump) —
+    /// this is the path wired to the user-facing `/clear` slash command,
+    /// where the intent is "wipe this conversation, keep the tab"
+    /// rather than "archive a long-running conversation as a numbered
+    /// rotation". Agent-agnostic: nothing is forwarded to the agent
+    /// subprocess; the new ACP session has zero history by construction.
+    ///
+    /// Returns the same `SolutionSessionId` for caller convenience (so
+    /// the call site can chain "reset then dispatch follow-up" without
+    /// re-plumbing the id).
+    pub fn reset_context(
         &mut self,
         session_id: SolutionSessionId,
-        content: String,
         cx: &mut Context<Self>,
-    ) -> Task<Result<()>> {
-        let blocks = vec![agent_client_protocol::schema::ContentBlock::Text(
-            agent_client_protocol::schema::TextContent::new(content),
-        )];
-        self.send_message_blocks(session_id, blocks, cx)
-    }
-
-    /// Send a structured user message composed of one or more `ContentBlock`s
-    /// (text + images, etc). Flips `SessionState` to `Running` synchronously
-    /// (before the returned `Task` is awaited) so the UI shows activity
-    /// immediately, then forwards the prompt to the underlying ACP connection.
-    /// On success, schedules a persistence write of the session snapshot. On
-    /// failure, transitions the session to `Errored`.
-    pub fn send_message_blocks(
-        &mut self,
-        session_id: SolutionSessionId,
-        blocks: Vec<agent_client_protocol::schema::ContentBlock>,
-        cx: &mut Context<Self>,
-    ) -> Task<Result<()>> {
+    ) -> Task<Result<SolutionSessionId>> {
         let Some(session_entity) = self.sessions.get(&session_id).cloned() else {
             return Task::ready(Err(anyhow!("unknown session {session_id}")));
         };
-
-        if blocks.is_empty() {
-            return Task::ready(Err(anyhow!(
-                "send_message_blocks: at least one ContentBlock required"
-            )));
-        }
-
-        // Already running? Queue the message instead of restarting the
-        // turn — matches Claude Code CLI's "type follow-ups while the
-        // agent is still working" behaviour. Subsequent queued sends
-        // are *merged* into the existing pending entry (separated by a
-        // blank line) so the user sees a single ghost bubble that
-        // grows, not a stack of fragments. Flush is one big prompt to
-        // the agent, sent once `Stopped` fires.
-        let already_running = matches!(session_entity.read(cx).state, SessionState::Running { .. });
-        if already_running {
-            session_entity.update(cx, |s, _| {
-                if let Some(last) = s.pending_messages.back_mut() {
-                    last.push(agent_client_protocol::schema::ContentBlock::Text(
-                        agent_client_protocol::schema::TextContent::new("\n\n".to_string()),
-                    ));
-                    last.extend(blocks);
-                } else {
-                    s.pending_messages.push_back(blocks);
+        let (solution_id, agent_id, project) = {
+            let s = session_entity.read(cx);
+            let project = match s.project.clone() {
+                Some(project) => project,
+                None => {
+                    return Task::ready(Err(anyhow!(
+                        "session {session_id} has no cached project — reset_context not supported \
+                         for prebuilt test sessions"
+                    )));
                 }
-                s.last_activity_at = Utc::now();
-            });
-            cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
-            cx.notify();
-            return Task::ready(Ok(()));
-        }
-
-        // Flip state immediately, before the spawn, so callers observing the
-        // session right after this call returns see `Running`.
-        session_entity.update(cx, |s, _| {
-            s.state = SessionState::Running {
-                started_at: std::time::Instant::now(),
-                notified: false,
             };
-            s.last_activity_at = Utc::now();
-        });
-        cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
-        cx.notify();
-
-        let Some(acp_thread) = session_entity.read(cx).acp_thread.clone() else {
-            return Task::ready(Err(anyhow!("session {session_id} has no ACP thread yet")));
+            (s.solution_id.clone(), s.agent_id.clone(), project)
         };
-
-        // Route through `AcpThread::send` (not `connection.prompt` directly)
-        // so the turn runs inside `run_turn`. That wrapper appends the
-        // user message, drives streaming-text flushing, and — crucially —
-        // emits `AcpThreadEvent::Stopped` on success / `Error` on failure.
-        // Without those events the store-side subscription never sees the
-        // turn end, so `SessionState` stays stuck on `Running` after the
-        // assistant has already replied.
-        let send_task = acp_thread.update(cx, |thread, cx| thread.send(blocks, cx));
+        let pair = (solution_id.clone(), agent_id);
 
         cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let result = send_task.await;
-            match &result {
-                Err(err) => {
-                    // run_turn already emitted `AcpThreadEvent::Error`,
-                    // which the store subscription translated into
-                    // `Errored("agent error")`. Overwrite that with the
-                    // specific error string so the user sees the actual
-                    // cause instead of a generic placeholder.
-                    let err_message = SharedString::from(err.to_string());
-                    this.update(cx, |store, cx| {
-                        if let Some(s) = store.sessions.get(&session_id).cloned() {
-                            s.update(cx, |s, _| {
-                                s.state = SessionState::Errored(err_message.clone());
-                            });
-                            cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
-                            cx.notify();
-                        }
-                    })?;
-                }
-                Ok(_) => {
-                    // Stopped event already transitioned state to Idle
-                    // via the store subscription; just persist the snapshot.
-                    this.update(cx, |store, cx| {
-                        store.persist_session_blob(session_id, cx);
-                    })?;
-                }
-            }
-            result.map(|_| ()).map_err(|err| anyhow!(err))
+            let solution = cx.update(|cx| {
+                SolutionStore::try_global(cx)
+                    .ok_or_else(|| anyhow!("SolutionStore global is not initialised"))
+                    .and_then(|store| {
+                        store
+                            .read(cx)
+                            .solutions()
+                            .iter()
+                            .find(|s| s.id == solution_id)
+                            .cloned()
+                            .ok_or_else(|| anyhow!("solution {:?} not found", solution_id))
+                    })
+            })?;
+            let connection_task = this.update(cx, |store, cx| {
+                store.get_or_spawn_connection(pair.clone(), &solution, project.clone(), cx)
+            })?;
+            let connection = connection_task.await?;
+            let work_dirs =
+                util::path_list::PathList::new(&[solution.root.to_string_lossy().into_owned()]);
+            let new_thread_task = cx.update(|cx| {
+                connection
+                    .clone()
+                    .new_session(project.clone(), work_dirs, cx)
+            });
+            let new_thread = new_thread_task.await?;
+
+            this.update(cx, |store, cx| {
+                let new_acp_session_id = new_thread.read(cx).session_id().clone();
+                session_entity.update(cx, |s, _| {
+                    s.acp_thread = Some(new_thread.clone());
+                    s.acp_session_id = new_acp_session_id;
+                    s.state = SessionState::Idle;
+                    s.last_activity_at = Utc::now();
+                    s.pending_messages.clear();
+                    s.flush_after_cancel = false;
+                });
+                let new_sub = store.subscribe_to_session(session_id, new_thread, cx);
+                session_entity.update(cx, |s, _| s._acp_subscription = Some(new_sub));
+                store.persist_session_row(session_id, cx);
+                cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+                cx.notify();
+            })?;
+
+            Ok(session_id)
         })
     }
+
 
     /// Returns a clone of the persistence handle if one was configured
     /// (i.e. the editor is running with a real on-disk DB, not the test
@@ -1161,28 +978,6 @@ impl SolutionAgentStore {
         .detach();
     }
 
-    /// Test-only: pretend a session was added against an existing connection.
-    #[cfg(any(feature = "test-support", test))]
-    pub fn pool_pretend_session_added(
-        &mut self,
-        key: (SolutionId, AgentServerId),
-        connection: std::rc::Rc<dyn acp_thread::AgentConnection>,
-    ) {
-        let mut pool = self.pool.lock();
-        if let Some(entry) = pool.entry_mut(&key) {
-            entry.live_session_count += 1;
-            entry.shutdown_task = None;
-        } else {
-            pool.insert(
-                key,
-                PooledConnection {
-                    state: SpawnState::Ready(connection),
-                    live_session_count: 1,
-                    shutdown_task: None,
-                },
-            );
-        }
-    }
 
     /// Subscribe to a session's `AcpThread` event stream so that ACP-level
     /// state changes (turn completion, tool authorization, errors, etc.)
@@ -1412,50 +1207,6 @@ impl SolutionAgentStore {
         }
     }
 
-    pub fn pool_release_session(
-        &mut self,
-        key: (SolutionId, AgentServerId),
-        cx: &mut Context<Self>,
-    ) {
-        let needs_arm = {
-            let mut pool = self.pool.lock();
-            let Some(entry) = pool.entry_mut(&key) else {
-                return;
-            };
-            entry.live_session_count = entry.live_session_count.saturating_sub(1);
-            entry.live_session_count == 0
-        };
-        if needs_arm {
-            self.arm_shutdown(key, cx);
-        }
-    }
-
-    fn arm_shutdown(&mut self, key: (SolutionId, AgentServerId), cx: &mut Context<Self>) {
-        let task = cx.spawn({
-            let key = key.clone();
-            async move |this, cx: &mut AsyncApp| {
-                cx.background_executor().timer(SHUTDOWN_DEBOUNCE).await;
-                this.update(cx, |this, _cx| {
-                    let mut pool = this.pool.lock();
-                    if let Some(entry) = pool.entry_mut(&key) {
-                        if entry.live_session_count == 0 {
-                            pool.remove(&key);
-                        }
-                    }
-                })
-                .ok();
-            }
-        });
-        let mut pool = self.pool.lock();
-        if let Some(entry) = pool.entry_mut(&key) {
-            entry.shutdown_task = Some(task);
-        }
-    }
-
-    #[cfg(any(feature = "test-support", test))]
-    pub fn pool_size(&self) -> usize {
-        self.pool.lock().pair_count()
-    }
 
     fn on_solution_event(
         &mut self,
@@ -1499,487 +1250,5 @@ impl SolutionAgentStore {
             }
         }
         cx.notify();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::adapter::AdapterRegistry;
-    use crate::model::SessionState;
-    use crate::test_support::{MockAgentServer, MockConnection};
-    use chrono::Utc;
-    use gpui::{SharedString, TestAppContext};
-    use std::path::PathBuf;
-    use std::rc::Rc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[gpui::test]
-    fn close_session_removes_from_indices(cx: &mut TestAppContext) {
-        let registry = Arc::new(AdapterRegistry::new());
-        cx.update(|cx| SolutionAgentStore::init_global(cx, registry));
-
-        cx.update(|cx| {
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, cx| {
-                let id = SolutionSessionId::new();
-                let entity = cx.new(|_| SolutionSession {
-                    id,
-                    solution_id: SolutionId("sol-a".into()),
-                    agent_id: SharedString::from("claude-acp"),
-                    acp_session_id: agent_client_protocol::schema::SessionId::new("acp-1"),
-                    acp_thread: None,
-                    title: SharedString::from("test"),
-                    created_at: Utc::now(),
-                    last_activity_at: Utc::now(),
-                    state: SessionState::Idle,
-                    context_count: 1,
-                    project: None,
-                    _acp_subscription: None,
-                    pending_messages: std::collections::VecDeque::new(),
-                    flush_after_cancel: false,
-                    cwd: PathBuf::new(),
-                });
-                store.sessions.insert(id, entity);
-                store
-                    .by_solution
-                    .entry(SolutionId("sol-a".into()))
-                    .or_default()
-                    .push(id);
-
-                assert_eq!(store.sessions_for(&SolutionId("sol-a".into())).len(), 1);
-                store.close_session(id, cx).expect("close_session");
-                assert_eq!(store.sessions_for(&SolutionId("sol-a".into())).len(), 0);
-                assert!(store.session(id).is_none());
-            });
-        });
-    }
-
-    /// Set up SolutionStore with one Solution rooted at a tempdir, plus
-    /// a `Project::test` whose worktree is that root. Returns
-    /// (`SolutionId`, `tempdir`, `Project`). Hold the tempdir for the
-    /// lifetime of the test — `create_solution` writes to it.
-    async fn setup_solution_and_project(
-        cx: &mut TestAppContext,
-    ) -> (
-        SolutionId,
-        tempfile::TempDir,
-        gpui::Entity<project::Project>,
-    ) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let cfg_path = dir.path().join("solutions.json");
-        let solutions_root = dir.path().join("solutions");
-        std::fs::create_dir_all(&solutions_root).expect("solutions root");
-        let store = cx.update(|cx| {
-            let settings_store = settings::SettingsStore::test(cx);
-            cx.set_global(settings_store);
-            let store = solutions::SolutionStore::for_test(cfg_path, cx);
-            solutions::install_global_for_test(store.clone(), cx);
-            store
-        });
-        let solution_id = store
-            .update(cx, |store, cx| {
-                store.create_solution("Sol", solutions_root.clone(), cx)
-            })
-            .expect("create_solution");
-        let solution_root: PathBuf = store.read_with(cx, |store, _| {
-            store
-                .solutions()
-                .iter()
-                .find(|s| s.id == solution_id)
-                .map(|s| s.root.clone())
-                .expect("solution exists")
-        });
-
-        let fs = fs::FakeFs::new(cx.background_executor.clone());
-        fs.insert_tree(solution_root.clone(), serde_json::json!({ ".keep": "" }))
-            .await;
-        let project = project::Project::test(fs, [solution_root.as_path()], cx).await;
-
-        (solution_id, dir, project)
-    }
-
-    #[gpui::test]
-    async fn pool_release_arms_60s_shutdown_then_drops(cx: &mut TestAppContext) {
-        let registry = Arc::new(AdapterRegistry::new());
-        cx.update(|cx| SolutionAgentStore::init_global(cx, registry));
-
-        let key = (SolutionId("sol-a".into()), SharedString::from("mock-agent"));
-
-        cx.update(|cx| {
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, _| {
-                store.pool_pretend_session_added(key.clone(), Rc::new(MockConnection::new()));
-                assert_eq!(store.pool_size(), 1);
-            });
-        });
-
-        cx.update(|cx| {
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, cx| {
-                store.pool_release_session(key.clone(), cx);
-            });
-        });
-
-        cx.executor()
-            .advance_clock(std::time::Duration::from_secs(30));
-        cx.executor().run_until_parked();
-        cx.update(|cx| {
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, _| assert_eq!(store.pool_size(), 1));
-        });
-
-        cx.executor()
-            .advance_clock(std::time::Duration::from_secs(35));
-        cx.executor().run_until_parked();
-        cx.update(|cx| {
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, _| assert_eq!(store.pool_size(), 0));
-        });
-    }
-
-    #[gpui::test]
-    async fn shutdown_cancels_when_session_re_added(cx: &mut TestAppContext) {
-        let registry = Arc::new(AdapterRegistry::new());
-        cx.update(|cx| SolutionAgentStore::init_global(cx, registry));
-        let key = (SolutionId("sol-a".into()), SharedString::from("mock-agent"));
-
-        cx.update(|cx| {
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, cx| {
-                store.pool_pretend_session_added(key.clone(), Rc::new(MockConnection::new()));
-                store.pool_release_session(key.clone(), cx);
-            });
-        });
-
-        cx.executor()
-            .advance_clock(std::time::Duration::from_secs(30));
-        cx.executor().run_until_parked();
-
-        cx.update(|cx| {
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, _| {
-                store.pool_pretend_session_added(key.clone(), Rc::new(MockConnection::new()));
-            });
-        });
-
-        cx.executor()
-            .advance_clock(std::time::Duration::from_secs(60));
-        cx.executor().run_until_parked();
-        cx.update(|cx| {
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, _| assert_eq!(store.pool_size(), 1));
-        });
-    }
-
-    #[gpui::test]
-    async fn create_session_spawns_subprocess_once_per_pair(cx: &mut TestAppContext) {
-        let (solution_id, _tmp, project) = setup_solution_and_project(cx).await;
-        let agent_id = SharedString::from("mock-agent");
-
-        let connect_count = Arc::new(AtomicUsize::new(0));
-        cx.update(|cx| {
-            let registry = Arc::new(AdapterRegistry::new());
-            SolutionAgentStore::init_global(cx, registry);
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, _| {
-                store.register_agent_server(
-                    agent_id.clone(),
-                    Rc::new(MockAgentServer::new(connect_count.clone())),
-                );
-            });
-        });
-
-        let session_id = cx
-            .update(|cx| {
-                let store = SolutionAgentStore::global(cx);
-                store.update(cx, |store, cx| {
-                    store.create_session(solution_id.clone(), agent_id.clone(), project.clone(), cx)
-                })
-            })
-            .await
-            .expect("create_session");
-
-        cx.update(|cx| {
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, _| {
-                assert!(store.session(session_id).is_some());
-                assert_eq!(store.pool_size(), 1);
-            });
-        });
-        assert_eq!(connect_count.load(Ordering::SeqCst), 1);
-    }
-
-    #[gpui::test]
-    async fn parallel_create_session_for_same_pair_spawns_only_once(cx: &mut TestAppContext) {
-        let (solution_id, _tmp, project) = setup_solution_and_project(cx).await;
-        let agent_id = SharedString::from("mock-agent");
-
-        // Gate `connect()` until both create_session calls have observed the
-        // pool entry — this guarantees the second call sees `Pending` and
-        // doesn't race past into a fresh spawn before the first one inserts.
-        let (gate_tx, gate_rx) = async_channel::bounded(1);
-        let connect_count = Arc::new(AtomicUsize::new(0));
-        cx.update(|cx| {
-            let registry = Arc::new(AdapterRegistry::new());
-            SolutionAgentStore::init_global(cx, registry);
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, _| {
-                store.register_agent_server(
-                    agent_id.clone(),
-                    Rc::new(MockAgentServer::with_gate(connect_count.clone(), gate_rx)),
-                );
-            });
-        });
-
-        let task1 = cx.update(|cx| {
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, cx| {
-                store.create_session(solution_id.clone(), agent_id.clone(), project.clone(), cx)
-            })
-        });
-        let task2 = cx.update(|cx| {
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, cx| {
-                store.create_session(solution_id.clone(), agent_id.clone(), project.clone(), cx)
-            })
-        });
-
-        // Pump scheduler so both tasks reach the await on `connect_task`.
-        cx.executor().run_until_parked();
-        // Now release the gate, letting connect() resolve.
-        gate_tx.send(()).await.expect("gate send");
-        gate_tx.close();
-
-        let id1 = task1.await.expect("task1");
-        let id2 = task2.await.expect("task2");
-        assert_ne!(id1, id2);
-
-        cx.update(|cx| {
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, _| {
-                assert_eq!(store.pool_size(), 1);
-                assert!(store.session(id1).is_some());
-                assert!(store.session(id2).is_some());
-            });
-        });
-        assert_eq!(connect_count.load(Ordering::SeqCst), 1);
-    }
-
-    /// Create a real session (via `create_session`) backed by `MockAgentServer`/
-    /// `MockConnection`, then return both its id and a clone of the underlying
-    /// `Entity<AcpThread>` so tests can emit synthetic `AcpThreadEvent`s.
-    async fn create_session_with_thread(
-        cx: &mut TestAppContext,
-    ) -> (
-        SolutionSessionId,
-        gpui::Entity<acp_thread::AcpThread>,
-        tempfile::TempDir,
-    ) {
-        let (solution_id, tmp, project) = setup_solution_and_project(cx).await;
-        let agent_id = SharedString::from("mock-agent");
-
-        let connect_count = Arc::new(AtomicUsize::new(0));
-        cx.update(|cx| {
-            let registry = Arc::new(AdapterRegistry::new());
-            SolutionAgentStore::init_global(cx, registry);
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, _| {
-                store.register_agent_server(
-                    agent_id.clone(),
-                    Rc::new(MockAgentServer::new(connect_count.clone())),
-                );
-            });
-        });
-
-        let session_id = cx
-            .update(|cx| {
-                let store = SolutionAgentStore::global(cx);
-                store.update(cx, |store, cx| {
-                    store.create_session(solution_id.clone(), agent_id.clone(), project.clone(), cx)
-                })
-            })
-            .await
-            .expect("create_session");
-
-        let acp_thread = cx.update(|cx| {
-            let store = SolutionAgentStore::global(cx);
-            store
-                .read(cx)
-                .session(session_id)
-                .expect("session exists")
-                .read(cx)
-                .acp_thread
-                .clone()
-                .expect("acp_thread populated")
-        });
-
-        (session_id, acp_thread, tmp)
-    }
-
-    #[gpui::test]
-    async fn turn_complete_event_transitions_running_to_idle(cx: &mut TestAppContext) {
-        let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
-
-        cx.update(|cx| {
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, cx| {
-                let session = store.session(session_id).expect("session exists");
-                session.update(cx, |s, _| {
-                    s.state = SessionState::Running {
-                        started_at: std::time::Instant::now(),
-                        notified: false,
-                    };
-                });
-            });
-        });
-
-        cx.update(|cx| {
-            acp_thread.update(cx, |_thread, cx| {
-                cx.emit(acp_thread::AcpThreadEvent::Stopped(
-                    agent_client_protocol::schema::StopReason::EndTurn,
-                ));
-            });
-        });
-        cx.executor().run_until_parked();
-
-        cx.update(|cx| {
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, cx| {
-                let session = store.session(session_id).expect("session exists");
-                let state = session.read(cx).state.clone();
-                assert!(
-                    matches!(state, SessionState::Idle),
-                    "expected Idle, got {:?}",
-                    state
-                );
-            });
-        });
-    }
-
-    #[gpui::test]
-    async fn error_event_transitions_to_errored_state(cx: &mut TestAppContext) {
-        let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
-
-        cx.update(|cx| {
-            acp_thread.update(cx, |_thread, cx| {
-                cx.emit(acp_thread::AcpThreadEvent::Error);
-            });
-        });
-        cx.executor().run_until_parked();
-
-        cx.update(|cx| {
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, cx| {
-                let session = store.session(session_id).expect("session exists");
-                let state = session.read(cx).state.clone();
-                assert!(
-                    matches!(state, SessionState::Errored(_)),
-                    "expected Errored, got {:?}",
-                    state
-                );
-            });
-        });
-    }
-
-    #[gpui::test]
-    async fn tool_authorization_request_transitions_to_awaiting_input(cx: &mut TestAppContext) {
-        let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
-
-        cx.update(|cx| {
-            acp_thread.update(cx, |_thread, cx| {
-                cx.emit(acp_thread::AcpThreadEvent::ToolAuthorizationRequested(
-                    agent_client_protocol::schema::ToolCallId::new("test-tool"),
-                ));
-            });
-        });
-        cx.executor().run_until_parked();
-
-        cx.update(|cx| {
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, cx| {
-                let session = store.session(session_id).expect("session exists");
-                let state = session.read(cx).state.clone();
-                assert!(
-                    matches!(state, SessionState::AwaitingInput),
-                    "expected AwaitingInput, got {:?}",
-                    state
-                );
-            });
-        });
-    }
-
-    #[gpui::test]
-    async fn send_message_starts_running_state_immediately(cx: &mut TestAppContext) {
-        let (solution_id, _tmp, project) = setup_solution_and_project(cx).await;
-        let agent_id = SharedString::from("mock-agent");
-
-        // Use a prompt-gated MockConnection so prompt() stays pending until we
-        // release the gate — this lets us observe the synchronous Running flip
-        // before the underlying ACP turn completes.
-        let (prompt_gate_tx, prompt_gate_rx) = async_channel::bounded::<()>(1);
-        let connect_count = Arc::new(AtomicUsize::new(0));
-        cx.update(|cx| {
-            let registry = Arc::new(AdapterRegistry::new());
-            SolutionAgentStore::init_global(cx, registry);
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, _| {
-                store.register_agent_server(
-                    agent_id.clone(),
-                    Rc::new(MockAgentServer::with_prompt_gate(
-                        connect_count.clone(),
-                        prompt_gate_rx,
-                    )),
-                );
-            });
-        });
-
-        let session_id = cx
-            .update(|cx| {
-                let store = SolutionAgentStore::global(cx);
-                store.update(cx, |store, cx| {
-                    store.create_session(solution_id.clone(), agent_id.clone(), project.clone(), cx)
-                })
-            })
-            .await
-            .expect("create_session");
-
-        // Force `Idle` so we can prove `send_message` flips it to `Running`
-        // synchronously rather than just observing pre-existing `Running`.
-        cx.update(|cx| {
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, cx| {
-                let session = store.session(session_id).expect("session exists");
-                session.update(cx, |s, _| s.state = SessionState::Idle);
-            });
-        });
-
-        // Kick off the prompt. We deliberately don't await `task` here — we
-        // want to read the state BEFORE the prompt resolves.
-        let task = cx.update(|cx| {
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, cx| {
-                store.send_message(session_id, "hi".into(), cx)
-            })
-        });
-
-        // Synchronous post-condition: state is already Running.
-        cx.update(|cx| {
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, cx| {
-                let session = store.session(session_id).expect("session exists");
-                let state = session.read(cx).state.clone();
-                assert!(
-                    matches!(state, SessionState::Running { .. }),
-                    "expected Running synchronously after send_message, got {:?}",
-                    state
-                );
-            });
-        });
-
-        // Now release the prompt gate so the spawned future resolves.
-        prompt_gate_tx.send(()).await.expect("release prompt gate");
-        prompt_gate_tx.close();
-        task.await.expect("send_message task");
     }
 }

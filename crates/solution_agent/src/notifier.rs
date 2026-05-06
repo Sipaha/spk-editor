@@ -84,7 +84,21 @@ pub fn decide_notification(
 /// Other platforms log a warning placeholder until a per-platform backend
 /// is added. Errors from the portal are intentionally swallowed: a broken
 /// DBus session must not crash the editor.
+///
+/// **Tests are skipped entirely.** Without this gate, any test that
+/// transitions a session into `Errored` (notably the pre-existing
+/// `error_event_transitions_to_errored_state`) fires a real desktop
+/// notification — `Failed: agent error` from a `mock-agent` session id
+/// pops up on the user's tray every `cargo test` run. The condition
+/// mirrors the `test_support` module gate
+/// (`cfg(any(test, feature = "test-support"))` in `solution_agent.rs`)
+/// so any build that has access to the mock connection also has the
+/// notifier short-circuited.
 pub fn dispatch(decision: &NotificationDecision, title: &str, body: &str, _cx: &mut App) {
+    if cfg!(any(test, feature = "test-support")) {
+        let _ = (decision, title, body);
+        return;
+    }
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     {
         use ashpd::desktop::notification::{Notification, NotificationProxy, Priority};

@@ -98,11 +98,16 @@ impl acp_thread::AgentConnection for MockConnection {
         let gate = self.prompt_gate.lock().clone();
         match gate {
             None => Task::ready(Err(anyhow::anyhow!("not used in this test"))),
-            Some(gate) => cx.spawn(async move |_| {
-                gate.recv().await.ok();
-                Ok(agent_client_protocol::schema::PromptResponse::new(
+            // `gate.send(())` releases the prompt with `Ok(EndTurn)`;
+            // dropping the sender without sending releases it with `Err(...)`.
+            // The latter lets a test simulate "the in-flight turn errored
+            // mid-flight" (e.g. for the rotation-race regression in
+            // `send_message_blocks`).
+            Some(gate) => cx.spawn(async move |_| match gate.recv().await {
+                Ok(()) => Ok(agent_client_protocol::schema::PromptResponse::new(
                     agent_client_protocol::schema::StopReason::EndTurn,
-                ))
+                )),
+                Err(_) => Err(anyhow::anyhow!("mock prompt failed (gate closed)")),
             }),
         }
     }

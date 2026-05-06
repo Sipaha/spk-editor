@@ -253,9 +253,7 @@ impl SolutionSessionsNavigator {
                         .cloned()
                 })
             })
-            .and_then(|solution| {
-                crate::store::project_name_for_cwd(&solution, &s.cwd, cx)
-            })
+            .and_then(|solution| crate::store::project_name_for_cwd(&solution, &s.cwd, cx))
             .unwrap_or_else(|| SharedString::from("ROOT"));
         // For most states the short label ("Idle", "Running", …) is
         // the right thing to show. For `Errored(msg)` we surface the
