@@ -74,11 +74,11 @@ impl Global for GlobalSolutionAgentStore {}
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct PersistedSession {
     pub title: String,
-    /// Structured per-entry record used by the navigator's cold-tab
-    /// renderer to display the dialog without spawning the agent. New
-    /// builds always populate this; blobs written by older builds
-    /// decode with `entries: vec![]` and the cold-renderer falls back
-    /// to flat-rendering `entry_summaries`.
+    /// Legacy v1 per-entry record (role + flat markdown summary). Kept
+    /// for blobs written by builds before `entries_v2` landed — those
+    /// are rendered through the simplified Archived path. New blobs
+    /// populate `entries_v2` and leave this empty (`#[serde(default)]`
+    /// on read accepts both shapes).
     #[serde(default)]
     pub entries: Vec<PersistedEntry>,
     /// Legacy flat markdown summaries — one string per thread entry.
@@ -86,9 +86,19 @@ pub struct PersistedSession {
     /// `solution_agent.read_session_history` MCP tool, which slices
     /// this list directly.
     pub entry_summaries: Vec<String>,
+    /// Structured per-entry payload used to reconstruct the live
+    /// conversation visually 1:1 after an editor restart. Each variant
+    /// captures everything the render path reads (markdown sources,
+    /// raw chunks for image previews, tool-call statuses + per-content
+    /// markdown, plan entries, …). In-flight tool calls (`Pending` /
+    /// `WaitingForConfirmation` / `InProgress`) are dropped at save
+    /// time — see [`crate::cold_persistence::to_persisted`].
+    #[serde(default)]
+    pub entries_v2: Vec<crate::cold_persistence::PersistedEntryV2>,
 }
 
 pub use crate::model::{PersistedEntry, PersistedRole};
+pub(crate) use queue::summarize_blocks_for_log;
 
 /// First user prompt, normalised to a single line and truncated, for the
 /// History popover label. Returns `None` if the thread has no user message
@@ -200,26 +210,32 @@ fn unique_session_title(
 }
 
 fn serializable_snapshot(session: &SolutionSession, cx: &App) -> Vec<u8> {
-    let entries = session
+    // Live thread → write both v1 (legacy `entries` + flat
+    // `entry_summaries` for the MCP read tool) AND v2 structured
+    // payload that drives the rich cold-restore render. v2 filters
+    // in-progress tool calls (see `cold_persistence::to_persisted`).
+    let live_entries: Vec<&acp_thread::AgentThreadEntry> = session
         .acp_thread
         .as_ref()
-        .map(|thread| {
-            thread
-                .read(cx)
-                .entries()
-                .iter()
-                .map(|entry| PersistedEntry {
-                    role: persisted_role_for(entry),
-                    markdown: entry.to_markdown(cx),
-                })
-                .collect::<Vec<_>>()
-        })
+        .map(|thread| thread.read(cx).entries().iter().collect())
         .unwrap_or_default();
+    let entries: Vec<PersistedEntry> = live_entries
+        .iter()
+        .map(|entry| PersistedEntry {
+            role: persisted_role_for(entry),
+            markdown: entry.to_markdown(cx),
+        })
+        .collect();
     let entry_summaries = entries.iter().map(|e| e.markdown.clone()).collect();
+    let entries_v2 = live_entries
+        .iter()
+        .filter_map(|entry| crate::cold_persistence::to_persisted(entry, cx))
+        .collect();
     let snapshot = PersistedSession {
         title: session.title.to_string(),
         entries,
         entry_summaries,
+        entries_v2,
     };
     serde_json::to_vec(&snapshot).unwrap_or_default()
 }
@@ -612,6 +628,23 @@ impl SolutionAgentStore {
                     // while the tab was cold (Send button gets stuck
                     // because `resuming` stays `true`).
                     existing.update(cx, |session, cx| {
+                        if !session.pending_messages.is_empty() {
+                            // Cold→live transition with queued messages
+                            // shouldn't normally happen (cold sessions
+                            // can't queue), but log if it ever does so
+                            // we don't lose them silently.
+                            let previews: Vec<String> = session
+                                .pending_messages
+                                .iter()
+                                .map(|b| queue::summarize_blocks_for_log(b))
+                                .collect();
+                            log::warn!(
+                                target: "solution_agent::queue",
+                                "session={session_id} dropped {} queued bundle(s) on resume_session cold→live promotion — content: [{}]",
+                                session.pending_messages.len(),
+                                previews.join(" | "),
+                            );
+                        }
                         session.acp_session_id = new_thread_session_id;
                         session.acp_thread = Some(acp_thread.clone());
                         session.last_activity_at = Utc::now();
@@ -808,26 +841,52 @@ impl SolutionAgentStore {
                         log::warn!("restore_open_tabs: orphaned tab_order for {id}");
                         continue;
                     };
-                    let cold_entries = blobs
+                    // Reconstruct the persisted dialog as live-shape
+                    // `AgentThreadEntry`s so the cold-tab render goes
+                    // through the same virtualized list path as a real
+                    // session. Prefer the structured v2 payload when
+                    // present; legacy v1 / pre-v1 blobs degrade
+                    // gracefully to a single Assistant-shaped entry
+                    // per row containing the flat markdown summary
+                    // (no bubbles for User vs Assistant, but at least
+                    // the text shows up — not worth a full migration
+                    // round-trip just to recolour archived sessions).
+                    let cold_entries: Vec<acp_thread::AgentThreadEntry> = blobs
                         .remove(id)
                         .and_then(|bytes| serde_json::from_slice::<PersistedSession>(&bytes).ok())
                         .map(|persisted| {
-                            if !persisted.entries.is_empty() {
-                                persisted.entries
-                            } else {
-                                // Legacy blob: per-entry role wasn't
-                                // recorded, so we tag every entry as
-                                // `Archived`. Idx-based User/Assistant
-                                // synthesis mis-rolled tool calls in
-                                // mixed conversations — a neutral
-                                // label is less misleading than a
-                                // confidently-wrong one.
+                            if !persisted.entries_v2.is_empty() {
                                 persisted
-                                    .entry_summaries
+                                    .entries_v2
                                     .into_iter()
-                                    .map(|markdown| PersistedEntry {
-                                        role: PersistedRole::Archived,
-                                        markdown,
+                                    .map(|p| crate::cold_persistence::from_persisted(p, cx))
+                                    .collect()
+                            } else {
+                                let legacy_sources: Vec<String> =
+                                    if !persisted.entry_summaries.is_empty() {
+                                        persisted.entry_summaries
+                                    } else {
+                                        persisted
+                                            .entries
+                                            .into_iter()
+                                            .map(|e| e.markdown)
+                                            .collect()
+                                    };
+                                legacy_sources
+                                    .into_iter()
+                                    .map(|md| {
+                                        crate::cold_persistence::from_persisted(
+                                            crate::cold_persistence::PersistedEntryV2::Assistant(
+                                                crate::cold_persistence::PersistedAssistantMessage {
+                                                    chunks: vec![
+                                                        crate::cold_persistence::PersistedAssistantChunk::Message(
+                                                            md,
+                                                        ),
+                                                    ],
+                                                },
+                                            ),
+                                            cx,
+                                        )
                                     })
                                     .collect()
                             }
@@ -873,7 +932,25 @@ impl SolutionAgentStore {
             .sessions
             .remove(&id)
             .ok_or_else(|| anyhow!("unknown session {id}"))?;
-        let solution_id = removed.read(cx).solution_id.clone();
+        // If the session is being torn down with queued messages still
+        // unflushed, surface them in the log — closing a tab silently
+        // drops everything in `pending_messages` (no Stopped event ever
+        // fires for the torn-down thread).
+        let session_read = removed.read(cx);
+        if !session_read.pending_messages.is_empty() {
+            let previews: Vec<String> = session_read
+                .pending_messages
+                .iter()
+                .map(|b| queue::summarize_blocks_for_log(b))
+                .collect();
+            log::warn!(
+                target: "solution_agent::queue",
+                "session={id} dropped {} queued bundle(s) on close_session — content: [{}]",
+                session_read.pending_messages.len(),
+                previews.join(" | "),
+            );
+        }
+        let solution_id = session_read.solution_id.clone();
         if let Some(list) = self.by_solution.get_mut(&solution_id) {
             list.retain(|sid| *sid != id);
         }
@@ -1128,6 +1205,25 @@ impl SolutionAgentStore {
             this.update(cx, |store, cx| {
                 let new_acp_session_id = new_thread.read(cx).session_id().clone();
                 session_entity.update(cx, |s, _| {
+                    if !s.pending_messages.is_empty() {
+                        // `/clear` wipes the session's conversation —
+                        // queued follow-ups are tied to the OLD context
+                        // and don't apply to a freshly-empty thread, so
+                        // discard. WARN log so post-mortem of "I typed
+                        // a follow-up then hit /clear and lost it" is
+                        // recoverable from the log.
+                        let previews: Vec<String> = s
+                            .pending_messages
+                            .iter()
+                            .map(|b| queue::summarize_blocks_for_log(b))
+                            .collect();
+                        log::warn!(
+                            target: "solution_agent::queue",
+                            "session={session_id} dropped {} queued bundle(s) on /clear (reset_context) — content: [{}]",
+                            s.pending_messages.len(),
+                            previews.join(" | "),
+                        );
+                    }
                     s.acp_thread = Some(new_thread.clone());
                     s.acp_session_id = new_acp_session_id;
                     s.state = SessionState::Idle;
@@ -1300,8 +1396,35 @@ impl SolutionAgentStore {
                     let cancelled =
                         matches!(reason, agent_client_protocol::schema::StopReason::Cancelled);
                     if cancelled && !flush_after_cancel {
+                        // Silent-drop path: user pressed Stop, queue
+                        // gets discarded without surfacing what was in
+                        // it. Log the dropped bundles BEFORE the clear
+                        // so post-mortem of "where did my queued
+                        // message go?" can reconstruct it from the
+                        // log line. WARN level (not INFO) — this is
+                        // user-typed content vanishing without a
+                        // trace, which is exactly the failure mode we
+                        // want to be able to grep for.
                         if let Some(s) = self.sessions.get(&session_id).cloned() {
-                            s.update(cx, |s, _| s.pending_messages.clear());
+                            s.update(cx, |s, _| {
+                                let dropped = s.pending_messages.len();
+                                if dropped > 0 {
+                                    let previews: Vec<String> = s
+                                        .pending_messages
+                                        .iter()
+                                        .map(|bundle| {
+                                            queue::summarize_blocks_for_log(bundle)
+                                        })
+                                        .collect();
+                                    log::warn!(
+                                        target: "solution_agent::queue",
+                                        "session={session_id} dropped {dropped} queued bundle(s) on Cancelled stop \
+                                         (no flush_after_cancel) — content: [{}]",
+                                        previews.join(" | "),
+                                    );
+                                }
+                                s.pending_messages.clear();
+                            });
                         }
                     } else {
                         let drained: Vec<_> = self
@@ -1315,11 +1438,19 @@ impl SolutionAgentStore {
                             })
                             .unwrap_or_default();
                         if !drained.is_empty() {
+                            let bundle_count = drained.len();
                             // Flatten N queued messages into one Vec.
                             // Each was its own send-press, but we coalesce
                             // them so the agent gets a single prompt.
                             let combined: Vec<_> = drained.into_iter().flatten().collect();
                             if !combined.is_empty() {
+                                log::info!(
+                                    target: "solution_agent::queue",
+                                    "session={session_id} flushing {bundle_count} queued bundle(s) \
+                                     ({} blocks total, flush_after_cancel={flush_after_cancel}) preview={}",
+                                    combined.len(),
+                                    queue::summarize_blocks_for_log(&combined),
+                                );
                                 self.send_message_blocks(session_id, combined, cx).detach();
                             }
                         }

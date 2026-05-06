@@ -787,6 +787,7 @@ async fn restore_open_tabs_hydrates_cold_sessions(cx: &mut TestAppContext) {
             markdown: "first prompt".into(),
         }],
         entry_summaries: vec!["first prompt".into()],
+        entries_v2: vec![],
     })
     .unwrap();
     db.save_blob(id_a, blob_a).await.expect("blob a");
@@ -813,7 +814,13 @@ async fn restore_open_tabs_hydrates_cold_sessions(cx: &mut TestAppContext) {
             sa.read_with(cx, |s, _| {
                 assert!(s.is_cold(), "restored session should be cold");
                 assert_eq!(s.cold_entries.len(), 1);
-                assert!(matches!(s.cold_entries[0].role, PersistedRole::User));
+                // v1 blobs hydrate as Assistant-shaped legacy rows
+                // (the old `role` field is no longer round-tripped —
+                // structured v2 carries the real role per variant).
+                assert!(matches!(
+                    s.cold_entries[0],
+                    acp_thread::AgentThreadEntry::AssistantMessage(_)
+                ));
             });
             sb.read_with(cx, |s, _| {
                 assert!(s.is_cold());
@@ -853,6 +860,7 @@ fn persisted_session_roundtrips_with_structured_entries() {
             },
         ],
         entry_summaries: vec!["Hello".into(), "Hi there!".into(), "ran tool x".into()],
+        entries_v2: vec![],
     };
     let bytes = serde_json::to_vec(&original).unwrap();
     let decoded: PersistedSession = serde_json::from_slice(&bytes).unwrap();

@@ -10,8 +10,9 @@ use acp_thread::{
 use agent_client_protocol::schema as acp;
 use base64::Engine;
 use gpui::{
-    AnyElement, App, Context, Empty, Entity, IntoElement, ParentElement, Render, SharedString,
-    Styled, Window, div, px, relative,
+    AnyElement, App, Context, Empty, Entity, InteractiveElement as _, IntoElement, ParentElement,
+    Render, SharedString, StatefulInteractiveElement as _, Styled, WeakEntity, Window, div, px,
+    relative,
 };
 use markdown::{Markdown, MarkdownElement, MarkdownStyle};
 use ui::prelude::*;
@@ -196,12 +197,20 @@ pub(crate) fn render_entry(
     assistant_label: &SharedString,
     rewind_target: Option<UserMessageId>,
     thread: gpui::WeakEntity<AcpThread>,
+    view: WeakEntity<crate::session_view::SolutionSessionView>,
+    queue_marker_expanded: bool,
     cx: &App,
 ) -> AnyElement {
     let inner: AnyElement = match entry {
-        AgentThreadEntry::UserMessage(message) => {
-            render_user_message(entry_idx, message, markdown_for, style, cx)
-        }
+        AgentThreadEntry::UserMessage(message) => render_user_message(
+            entry_idx,
+            message,
+            markdown_for,
+            style,
+            view,
+            queue_marker_expanded,
+            cx,
+        ),
         AgentThreadEntry::AssistantMessage(message) => {
             render_assistant_message(entry_idx, message, markdown_for, style, assistant_label, cx)
         }
@@ -316,54 +325,33 @@ pub(crate) fn strip_queue_marker(text: &str) -> &str {
     &text[close_idx + crate::store::QUEUE_MARKER_BODY_SEP.len()..]
 }
 
-/// Ghost bubble for a queued follow-up. Same shape as a user message
-/// but slightly muted so it reads as "this hasn't been sent yet" while
-/// still using the user-message visual vocabulary.
+/// If `text` starts with the timestamp marker emitted by
+/// `store::build_queue_marker`, return the marker portion (the bracketed
+/// `[...]` block, no trailing `\n\n`). Otherwise return `None`.
 ///
-/// `h_flex().w_full()` on the outer row + `w_full()` on the inner text
-/// wrapper is load-bearing: without `w_full`, the bubble's
-/// `max_w(relative(0.85))` resolves against an unsized parent and the
-/// Label collapses to a narrow column even for short messages (the
-/// "horizontally compressed bubble" bug). With it, percent resolves to
-/// 85 % of the available column width, the Label fills naturally, and
-/// long content wraps at the cap.
-pub(crate) fn render_pending_message(idx: usize, preview: &str, cx: &App) -> AnyElement {
-    let bubble_bg = cx.theme().colors().text_accent.opacity(0.06);
-    let border_color = cx.theme().colors().text_accent.opacity(0.4);
-    v_flex()
-        .px_1()
-        .mb_3()
-        .w_full()
-        .child(
-            h_flex().w_full().child(
-                div()
-                    .relative()
-                    .max_w(relative(0.85))
-                    .px_2p5()
-                    .py_1()
-                    .bg(bubble_bg)
-                    .border_1()
-                    .border_dashed()
-                    .border_color(border_color)
-                    .rounded_md()
-                    .child(
-                        div()
-                            .w_full()
-                            .child(Label::new(preview.to_string()).color(Color::Muted)),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("pending-msg-{idx}")))
-                            .child(
-                                Label::new("Queued — sends when agent finishes")
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted)
-                                    .italic(),
-                            ),
-                    ),
-            ),
-        )
-        .into_any_element()
+/// Used by the user-message renderer to surface the original marker
+/// behind a click affordance — hidden by default, expanded on demand.
+pub(crate) fn extract_queue_marker(text: &str) -> Option<&str> {
+    if !text.starts_with(crate::store::QUEUE_MARKER_PREFIX) {
+        return None;
+    }
+    let close_idx = text.find(crate::store::QUEUE_MARKER_BODY_SEP)?;
+    Some(&text[..close_idx + 1])
+}
+
+/// Pull just the `HH:MM:SS` substring out of a queue marker — the
+/// marker's only user-meaningful payload. Returns `None` if the input
+/// isn't a marker or the timestamp shape is off (defensive against
+/// future wording tweaks). Used as the collapsed-chip label so the
+/// glanceable cue is the time, not the boilerplate sentence around it.
+pub(crate) fn queue_marker_timestamp(marker: &str) -> Option<&str> {
+    let prefix = crate::store::QUEUE_MARKER_PREFIX;
+    if !marker.starts_with(prefix) {
+        return None;
+    }
+    let after = &marker[prefix.len()..];
+    let space_idx = after.find(' ')?;
+    Some(&after[..space_idx])
 }
 
 pub(crate) fn render_user_message(
@@ -371,6 +359,8 @@ pub(crate) fn render_user_message(
     message: &UserMessage,
     markdown_for: &HashMap<(usize, usize), Entity<Markdown>>,
     style: &MarkdownStyle,
+    view: WeakEntity<crate::session_view::SolutionSessionView>,
+    queue_marker_expanded: bool,
     cx: &App,
 ) -> AnyElement {
     // `clean_user_message_text` strips the literal "`Image`"
@@ -378,7 +368,12 @@ pub(crate) fn render_user_message(
     // user-typed `[image #N]` placeholders into markdown links so the
     // Markdown widget paints them as clickable spans. The actual
     // image preview opens through the `on_url_click` hook below.
-    let text = clean_user_message_text(&content_block_text(&message.content, cx));
+    let raw_text = content_block_text(&message.content, cx);
+    let text = clean_user_message_text(&raw_text);
+    let queue_marker = extract_queue_marker(&raw_text).map(str::to_owned);
+    let queue_marker_timestamp = queue_marker
+        .as_deref()
+        .and_then(|m| crate::conversation_render::queue_marker_timestamp(m).map(str::to_owned));
     let bubble_bg = cx.theme().colors().text_accent.opacity(0.12);
     let group_name = SharedString::from(format!("user-msg-{entry_idx}"));
 
@@ -417,10 +412,66 @@ pub(crate) fn render_user_message(
             .into_any_element()
     };
 
+    // Queue-marker chip: tiny pill above the bubble that the user can
+    // click to reveal the original "[The user typed the following at
+    // HH:MM:SS …]" boilerplate. Hidden by default because the marker
+    // is just a system bracket around the user's own text and adds
+    // nothing they didn't already see when typing — but the timestamp
+    // is occasionally useful ("when did I queue this follow-up?"), so
+    // a one-click reveal is worth a small affordance.
+    let queue_chip: Option<AnyElement> = queue_marker.as_deref().map(|marker| {
+        let chip_id = SharedString::from(format!("queue-marker-toggle-{entry_idx}"));
+        let view_for_click = view.clone();
+        let label_text: SharedString = if let Some(ts) = queue_marker_timestamp.as_deref() {
+            format!("queued · {ts}").into()
+        } else {
+            "queued".into()
+        };
+        let mut chip = h_flex()
+            .id(chip_id)
+            .gap_1()
+            .px_1p5()
+            .py_0p5()
+            .rounded_sm()
+            .cursor_pointer()
+            .bg(cx.theme().colors().element_background)
+            .hover(|s| s.bg(cx.theme().colors().element_hover))
+            .child(
+                ui::Icon::new(IconName::HistoryRerun)
+                    .size(ui::IconSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .child(
+                Label::new(label_text)
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .on_click(move |_, _, cx| {
+                if let Some(view) = view_for_click.upgrade() {
+                    view.update(cx, |view, cx| {
+                        view.toggle_queue_marker(entry_idx);
+                        cx.notify();
+                    });
+                }
+            });
+        if queue_marker_expanded {
+            chip = chip.child(
+                Label::new(SharedString::from(marker.to_string()))
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted)
+                    .italic(),
+            );
+        }
+        chip.into_any_element()
+    });
+
     v_flex()
         .group(group_name.clone())
         .px_1()
         .mb_3()
+        .when_some(queue_chip, |this, chip| {
+            this.child(h_flex().mb_1().child(chip))
+        })
         .child(
             // h_flex wrap so the bubble shrinks to content (no full-
             // panel-width slab). max_w(85%) caps long messages.
@@ -444,19 +495,29 @@ pub(crate) fn render_user_message(
 }
 
 /// Cleans a user message's merged-markdown source for display:
-///   1. Strips the literal "`Image`" placeholder that
+///   1. Strips the leading queue marker (`[The user typed the
+///      following at HH:MM:SS …]\n\n`) that `send_message_blocks`
+///      prepends to every queued follow-up. The marker is meaningful
+///      for the agent (telling Claude "this was typed pre-emptively,
+///      not in response to your last turn") but pure noise for the
+///      user — they typed the message and don't need to see their own
+///      submission re-narrated by a system bracket. Same helper as
+///      `pending_blocks_preview` so the queued ghost bubble and the
+///      sent message render identically.
+///   2. Strips the literal "`Image`" placeholder that
 ///      `acp_thread::ContentBlock::append` emits when merging image
 ///      chunks (we render images via clickable text spans, not as
 ///      inline thumbnails, so the placeholder is pure noise).
-///   2. Rewrites the user-typed `[image #N]` placeholders into
+///   3. Rewrites the user-typed `[image #N]` placeholders into
 ///      markdown links of the form `[image #N](spk-image://<N-1>)`.
 ///      The Markdown widget paints them as clickable spans; our
 ///      `on_url_click` handler intercepts the `spk-image://` scheme
 ///      and opens an image-preview window for the matching chunk.
-///   3. Collapses leftover double-blank lines so the bubble doesn't
+///   4. Collapses leftover double-blank lines so the bubble doesn't
 ///      grow an empty paragraph where `Image` used to live.
 pub(crate) fn clean_user_message_text(text: &str) -> String {
-    let stripped = text.replace("`Image`", "");
+    let unmarked = strip_queue_marker(text);
+    let stripped = unmarked.replace("`Image`", "");
     // The `[image #N]` label is session-monotonic (counter on
     // `SolutionSessionView::image_count_so_far`), so `N` is NOT the
     // image's position inside this message — message #2's only image

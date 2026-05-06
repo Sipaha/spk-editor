@@ -458,13 +458,63 @@ impl SolutionSessionsNavigator {
             btn.into_any_element()
         };
 
-        // Token meter sits on the LEFT so the user's eye doesn't have
-        // to chase across the whole status row to read it. Width is
-        // pinned (`flex_none` on each piece) so a state transition
-        // ("Idle" → "Awaiting input" — different chars) re-flows the
-        // *right-hand* tail of the row but never nudges the meter
-        // sideways. The visual "% used" anchor stays put as the
-        // conversation breathes.
+        // State badge ("Thinking… 3m05s" / "Done in 12s" / "Error: …")
+        // anchors the LEFT of the row — that's where the user's eye
+        // lands first, and the row sits directly above the compose
+        // box, so the active-state cue is glanceable while typing the
+        // next message. The meter / agent / model / cwd / mode group
+        // on the right is reference info for the current session, not
+        // status — putting them after the badge gives a clean
+        // "what's happening" → "where it's running" reading order.
+        let state_badge: gpui::AnyElement = {
+            let mut label = Label::new(state_text).size(LabelSize::Small);
+            if error_text.is_some() {
+                label = label.color(Color::Error);
+            } else if is_running {
+                label = label.color(Color::Accent);
+            }
+            let inner: gpui::AnyElement = if is_running {
+                let icon = div()
+                    .flex_none()
+                    .child(
+                        Icon::new(IconName::Sparkle)
+                            .size(IconSize::Small)
+                            .color(Color::Accent),
+                    )
+                    .with_animation(
+                        ElementId::Name("solution-status-thinking-pulse".into()),
+                        Animation::new(std::time::Duration::from_secs(1))
+                            .repeat()
+                            .with_easing(pulsating_between(0.4, 1.0)),
+                        |element: gpui::Div, delta| element.opacity(delta),
+                    );
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(icon)
+                    .child(label)
+                    .into_any_element()
+            } else {
+                label.into_any_element()
+            };
+            match error_text {
+                Some(full) => div()
+                    .id("solution-status-error-text")
+                    .tooltip(ui::Tooltip::text(full))
+                    .child(inner)
+                    .into_any_element(),
+                None => inner,
+            }
+        };
+
+        // `border_t_1()` (top border): the row now sits between the
+        // conversation list and the compose box, so the separator we
+        // want is at the TOP — without it the row blends into the
+        // conversation. The previous `border_b_1()` made sense when
+        // the row lived directly under the tab strip, but in the new
+        // position a bottom border lands inside the editor_background
+        // strip of the compose wrapper and is invisible.
         Some(
             div()
                 .flex()
@@ -472,8 +522,10 @@ impl SolutionSessionsNavigator {
                 .gap_2()
                 .px_3()
                 .h_7()
-                .border_b_1()
+                .border_t_1()
                 .border_color(cx.theme().colors().border_variant)
+                .child(div().flex_none().child(state_badge))
+                .child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
                 .child(
                     div().flex_none().child(
                         Label::new(meter_text)
@@ -515,55 +567,6 @@ impl SolutionSessionsNavigator {
                 .when_some(mode_text, |this, mode| {
                     this.child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
                         .child(Label::new(mode).color(Color::Muted).size(LabelSize::Small))
-                })
-                .child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
-                .child({
-                    // When the session is errored, paint the label red
-                    // and attach a tooltip with the full message so the
-                    // user can read past any truncation that flexbox
-                    // forces on a narrow status row. For Running we
-                    // prefix a pulsing Sparkle so the active "Thinking…
-                    // Ns" segment is glanceable from a busy strip.
-                    let mut label = Label::new(state_text).size(LabelSize::Small);
-                    if error_text.is_some() {
-                        label = label.color(Color::Error);
-                    } else if is_running {
-                        label = label.color(Color::Accent);
-                    }
-                    let inner: gpui::AnyElement = if is_running {
-                        let icon = div()
-                            .flex_none()
-                            .child(
-                                Icon::new(IconName::Sparkle)
-                                    .size(IconSize::Small)
-                                    .color(Color::Accent),
-                            )
-                            .with_animation(
-                                ElementId::Name("solution-status-thinking-pulse".into()),
-                                Animation::new(std::time::Duration::from_secs(1))
-                                    .repeat()
-                                    .with_easing(pulsating_between(0.4, 1.0)),
-                                |element: gpui::Div, delta| element.opacity(delta),
-                            );
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(icon)
-                            .child(label)
-                            .into_any_element()
-                    } else {
-                        label.into_any_element()
-                    };
-                    let label_el: gpui::AnyElement = match error_text {
-                        Some(full) => div()
-                            .id("solution-status-error-text")
-                            .tooltip(ui::Tooltip::text(full))
-                            .child(inner)
-                            .into_any_element(),
-                        None => inner,
-                    };
-                    label_el
                 })
                 .into_any_element(),
         )

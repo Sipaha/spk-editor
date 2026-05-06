@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use acp_thread::{AgentThreadEntry, ToolCallContent, UserMessageId};
@@ -19,6 +19,7 @@ use workspace::{
     notifications::{NotificationId, simple_message_notification::MessageNotification},
 };
 
+use crate::navigator::SolutionSessionsNavigator;
 use crate::actions::{
     FindClose, FindInSession, FindNextMatch, FindPreviousMatch, PasteWithoutFormatting,
     StopResponse,
@@ -94,6 +95,15 @@ pub struct SolutionSessionView {
     session: Entity<SolutionSession>,
     focus_handle: FocusHandle,
     workspace: WeakEntity<Workspace>,
+    /// Weak handle back to the hosting navigator so the view can render
+    /// the status row inline (between conversation and compose) instead
+    /// of letting the navigator paint it as part of the panel chrome.
+    /// The status row's buttons (compact, history popover) need
+    /// `cx.listener` bindings against the navigator's `Self`, so the
+    /// element is built inside `navigator.update(...)` and embedded into
+    /// the view's element tree. Weak so closing the panel doesn't keep
+    /// the navigator alive through the active view.
+    navigator: WeakEntity<SolutionSessionsNavigator>,
     compose_editor: Entity<editor::Editor>,
     pending_images: Vec<PendingImage>,
     find: Option<FindState>,
@@ -189,27 +199,41 @@ pub struct SolutionSessionView {
     /// disappears either way, so this state is purely transient and
     /// not worth persisting.
     queue_collapsed: bool,
-    /// Markdown widgets for cold-mode rendering, indexed by
-    /// `cold_entries` position. Lazily filled on first cold-render so
-    /// each `Markdown` entity persists across frames (otherwise a
-    /// fresh entity per frame would never finish parsing on a static
-    /// transcript). Cleared once the session goes live (cold_entries
-    /// is emptied by `resume_session`).
-    cold_markdown: Vec<Entity<Markdown>>,
-    /// Last-seen length of `session.cold_entries`, used to detect
-    /// cache invalidation: if the persisted entry list changes (rare —
-    /// the only writer is `restore_open_tabs` at panel-open time) we
-    /// rebuild the markdown widgets from scratch.
-    cold_markdown_len: usize,
     /// While `Some`, the user clicked Send while the session was cold;
     /// these are the ACP content blocks waiting for `resume_session`
     /// to populate `acp_thread`, at which point the observe callback
     /// dispatches them and clears this slot.
     pending_send: Option<Vec<acp::ContentBlock>>,
+    /// Original bundle that was popped out of `pending_messages` by the
+    /// Up-arrow recall. Held here so an `Esc` press in the compose
+    /// editor can put it back into the queue ("cancel edit, restore
+    /// the queued bubble"). Cleared the moment the user submits the
+    /// modified draft (Send/Queue) — the original is lost intentionally;
+    /// the new submission supersedes it.
+    recalled_bundle: Option<Vec<acp::ContentBlock>>,
+    /// Cached `Markdown` widget for the pending-message ghost bubble.
+    /// Pending bundles render as live markdown (selectable text +
+    /// clickable `[image #N]` links) — but `Markdown::new` parses the
+    /// source asynchronously, so a fresh entity per frame would never
+    /// finish parsing on a static draft. Keyed against
+    /// `pending_markdown_source` so we rebuild only when the bundle
+    /// changes (typically: enqueue / merge / recall).
+    pending_markdown: Option<Entity<Markdown>>,
+    pending_markdown_source: SharedString,
     /// `true` while a `resume_session` task is in flight following a
     /// Send on a cold tab. Drives the inline "Starting agent…"
     /// indicator on the compose row and disables further Send actions.
     resuming: bool,
+    /// Per-entry-index set of user messages whose queued-prefix marker
+    /// the user has clicked open. By default the marker (`[The user
+    /// typed the following at HH:MM:SS … queued in advance.]`) is
+    /// hidden — it's noise to a human reading their own message back —
+    /// but a tiny clickable chip above the bubble lets curious users
+    /// reveal the timestamp + full marker text on demand. State lives
+    /// here (not on the `SolutionSession`) because it's purely a
+    /// transient UI affordance: switching tabs / restarting the editor
+    /// resets it; nothing about the conversation changes.
+    expanded_queue_markers: HashSet<usize>,
 }
 
 impl SolutionSessionView {
@@ -217,6 +241,7 @@ impl SolutionSessionView {
         session_id: SolutionSessionId,
         session: Entity<SolutionSession>,
         workspace: WeakEntity<Workspace>,
+        navigator: WeakEntity<SolutionSessionsNavigator>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -315,6 +340,7 @@ impl SolutionSessionView {
             session,
             focus_handle: cx.focus_handle(),
             workspace,
+            navigator,
             compose_editor,
             pending_images: Vec::new(),
             find: None,
@@ -346,15 +372,27 @@ impl SolutionSessionView {
             last_thread_entity_id: None,
             image_count_so_far: 0,
             queue_collapsed: true,
-            cold_markdown: Vec::new(),
-            cold_markdown_len: 0,
             pending_send: None,
             resuming: false,
+            recalled_bundle: None,
+            pending_markdown: None,
+            pending_markdown_source: SharedString::default(),
+            expanded_queue_markers: HashSet::new(),
         };
         // Detect any thread that is already attached at construction
         // (e.g. after `resume_session`) and wire its lifecycle hooks.
         view.sync_thread_subscription(cx);
         view
+    }
+
+    /// Flip the expanded/collapsed state of the queued-prefix chip on
+    /// the user message at `entry_idx`. Caller is responsible for
+    /// `cx.notify()` — kept out of here so the click-handler closure
+    /// stays in control of when the entity actually re-renders.
+    pub(crate) fn toggle_queue_marker(&mut self, entry_idx: usize) {
+        if !self.expanded_queue_markers.remove(&entry_idx) {
+            self.expanded_queue_markers.insert(entry_idx);
+        }
     }
 
     /// Reattach the AcpThreadEvent subscription if the underlying
@@ -383,7 +421,17 @@ impl SolutionSessionView {
         match thread_opt {
             None => {
                 self._thread_subscription = None;
-                self.list_state.reset(0);
+                // Cold tab path: `list_state` drives the same
+                // virtualized list the live mode uses, so size it to
+                // `cold_entries.len()` here. Without this the list
+                // renders 0 rows even though `cold_entries` may have
+                // a full conversation. Tail-anchor + scroll_to_end so
+                // the user lands on the latest message — same as the
+                // live-resume case below.
+                let cold_count = self.session.read(cx).cold_entries.len();
+                self.list_state.reset(cold_count);
+                self.list_state.set_follow_mode(FollowMode::Tail);
+                self.list_state.scroll_to_end();
             }
             Some(thread) => {
                 let count = thread.read(cx).entries().len();
@@ -483,6 +531,58 @@ impl SolutionSessionView {
             })
             .collect();
         self.rewind_table = crate::conversation_render::compute_rewind_table(&user_ids);
+    }
+
+    /// Refresh `pending_markdown` so the queued-ghost bubble can paint
+    /// its bundle as live markdown (selectable + clickable image links)
+    /// instead of a flat `Label`. No-op on cache hit (source unchanged
+    /// since the previous render); `cx.new`s a fresh widget when the
+    /// bundle's preview text changes (enqueue / merge / recall);
+    /// clears the cache when the queue becomes empty.
+    fn ensure_pending_markdown(&mut self, cx: &mut Context<Self>) {
+        let bundles = self
+            .session
+            .read(cx)
+            .pending_messages
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        if bundles.is_empty() {
+            self.pending_markdown = None;
+            self.pending_markdown_source = SharedString::default();
+            return;
+        }
+        // At most one bundle per the queue's merge invariant — but
+        // join with a paragraph break if multiple ever appear.
+        let mut combined = String::new();
+        for blocks in &bundles {
+            let raw = crate::conversation_render::pending_blocks_preview(blocks, cx);
+            if raw.is_empty() {
+                continue;
+            }
+            // `clean_user_message_text` rewrites `[image #N]` placeholders
+            // into `[image #N](spk-image://idx)` markdown links so the
+            // markdown widget paints them as clickable spans.
+            let prepared = crate::conversation_render::clean_user_message_text(&raw);
+            if !combined.is_empty() {
+                combined.push_str("\n\n");
+            }
+            combined.push_str(&prepared);
+        }
+        let source = SharedString::from(combined);
+        if self.pending_markdown_source == source && self.pending_markdown.is_some() {
+            return;
+        }
+        let language_registry = self
+            .session
+            .read(cx)
+            .acp_thread
+            .as_ref()
+            .map(|thread| thread.read(cx).project().read(cx).languages().clone());
+        let entity =
+            cx.new(|cx| Markdown::new(source.clone(), language_registry, None, cx));
+        self.pending_markdown = Some(entity);
+        self.pending_markdown_source = source;
     }
 
     fn ensure_markdown(
@@ -629,115 +729,6 @@ impl SolutionSessionView {
         find.matches = matches;
     }
 
-    /// Renders the dialog from the persisted DB blob — used for tabs
-    /// the navigator restored at panel-open time without spawning the
-    /// agent subprocess. Each entry is a markdown widget tagged with a
-    /// role-coloured label; the user/assistant/tool styling is a
-    /// degraded subset of the live renderer (no avatars, no inline
-    /// truncation rewind affordance) — the live renderer takes over
-    /// once `resume_session` attaches the `AcpThread`.
-    fn render_cold_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        // Pull everything we need out of cx up front so we don't fight
-        // the borrow checker while building the element tree.
-        let entries: Vec<crate::model::PersistedEntry> = self.session.read(cx).cold_entries.clone();
-        let entries_len = entries.len();
-        // Rebuild the per-entry Markdown cache if the length changed —
-        // `restore_open_tabs` is the only writer in production, so
-        // this is essentially a one-shot population on first render.
-        // Invariant: cold_entries is set once at hydration and only
-        // ever cleared (length → 0) by `resume_session`'s in-place
-        // update. If both pre- and post- lengths are non-zero they
-        // must match — otherwise we'd silently render stale Markdown
-        // widgets against new content.
-        debug_assert!(
-            self.cold_markdown_len == 0
-                || entries_len == 0
-                || entries_len == self.cold_markdown_len,
-            "cold_entries changed without going through length=0",
-        );
-        if entries_len != self.cold_markdown_len {
-            self.cold_markdown.clear();
-            for entry in &entries {
-                let source = SharedString::from(entry.markdown.clone());
-                let md = cx.new(|cx| Markdown::new(source, None, None, cx));
-                self.cold_markdown.push(md);
-            }
-            self.cold_markdown_len = entries_len;
-        }
-        if entries_len == 0 {
-            return div()
-                .px_2()
-                .py_1()
-                .child(
-                    Label::new("(no messages yet — type below to start)")
-                        .size(LabelSize::Default)
-                        .color(Color::Muted),
-                )
-                .into_any_element();
-        }
-        let border_color = cx.theme().colors().border_variant;
-        // Cold mode uses whatever `markdown_style_for_render` was set
-        // up earlier in Render — it's been populated by the live-mode
-        // pre-pass before we get here. If it's somehow None (defensive),
-        // fall back to a fresh default.
-        let style = self.markdown_style_for_render.clone();
-        // No `overflow_y_scroll` here: the parent wrapper already
-        // attaches `Scrollbars::always_visible(...)` against
-        // `self.list_state`. A second scroll layer paints an extra
-        // gutter on cold tabs while the parent's bar is the one that
-        // actually scrolls — drop the inner scroll, let the parent
-        // own the axis.
-        let mut list_div = div()
-            .id("solution-cold-conversation")
-            .flex()
-            .flex_col()
-            .gap_2()
-            .px_2()
-            .py_1();
-        for (idx, entry) in entries.iter().enumerate() {
-            let role_label: &'static str = match entry.role {
-                crate::model::PersistedRole::User => "You",
-                crate::model::PersistedRole::Assistant => "Assistant",
-                crate::model::PersistedRole::Tool => "Tool",
-                crate::model::PersistedRole::Plan => "Plan",
-                crate::model::PersistedRole::Archived => "Archived",
-            };
-            let role_color = match entry.role {
-                crate::model::PersistedRole::User => Color::Accent,
-                crate::model::PersistedRole::Assistant => Color::Default,
-                crate::model::PersistedRole::Tool => Color::Muted,
-                crate::model::PersistedRole::Plan => Color::Muted,
-                crate::model::PersistedRole::Archived => Color::Muted,
-            };
-            let Some(md) = self.cold_markdown.get(idx).cloned() else {
-                continue;
-            };
-            let body_element: AnyElement = if let Some(s) = style.as_ref() {
-                markdown::MarkdownElement::new(md, s.clone()).into_any_element()
-            } else {
-                Empty.into_any_element()
-            };
-            let block = div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    Label::new(role_label)
-                        .size(LabelSize::Small)
-                        .color(role_color),
-                )
-                .child(
-                    div()
-                        .child(body_element)
-                        .px_2()
-                        .py_1()
-                        .border_l_2()
-                        .border_color(border_color),
-                );
-            list_div = list_div.child(block);
-        }
-        list_div.into_any_element()
-    }
 
     /// Floating "Jump to latest" affordance shown in the bottom-right of
     /// the conversation list when the user has scrolled away from the
@@ -999,13 +990,62 @@ impl SolutionSessionView {
     fn handle_stop_response(
         &mut self,
         _: &StopResponse,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Esc priority order:
+        //   1. Cancel a recalled-bundle edit — push the original
+        //      bundle back into `pending_messages`, clear compose,
+        //      restore the ghost bubble. Highest priority because
+        //      the user explicitly opened a bubble for editing and
+        //      Esc is the cancel affordance for that flow.
+        //   2. Cancel the agent's in-flight turn (existing behaviour).
+        //   3. Otherwise let the action propagate.
+        if self.restore_recalled_bundle(window, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if matches!(self.session.read(cx).state, SessionState::Running { .. }) {
             self.cancel_turn(cx);
             cx.stop_propagation();
         }
+    }
+
+    /// If a queued bundle was previously pulled into the compose editor
+    /// via `recall_queued_message`, push it back into
+    /// `pending_messages`, clear the compose box, and drop any pending
+    /// images. Returns `true` when a restore happened so the caller can
+    /// stop further Esc handling. No-op + `false` when there's nothing
+    /// to restore.
+    fn restore_recalled_bundle(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(bundle) = self.recalled_bundle.take() else {
+            return false;
+        };
+        let session_id = self.session_id;
+        log::info!(
+            target: "solution_agent::queue",
+            "session={session_id} restored recalled bundle into pending_messages (Esc cancel-edit)",
+        );
+        self.session.update(cx, |session, _| {
+            // Push to back — the queue conceptually has at most one
+            // bundle (per `send_message_blocks` merge logic) and the
+            // recalled bundle was the back element when popped.
+            session.pending_messages.push_back(bundle);
+        });
+        self.compose_editor.update(cx, |e, cx| e.clear(window, cx));
+        self.pending_images.clear();
+        SolutionAgentStore::global(cx).update(cx, |store, cx| {
+            store.persist_session_blob(session_id, cx);
+            cx.emit(crate::store::SolutionAgentStoreEvent::SessionStateChanged(
+                session_id,
+            ));
+        });
+        cx.notify();
+        true
     }
 
     fn submit_compose_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1016,8 +1056,42 @@ impl SolutionSessionView {
         if self.resuming {
             // Already waiting for `resume_session` to attach the agent
             // — ignore extra Send presses so we don't fire multiple
-            // resume tasks for the same cold session.
+            // resume tasks for the same cold session. Log so a "Send
+            // looks broken / nothing happens" report has a breadcrumb
+            // showing the press WAS received, just suppressed.
+            let session_id = self.session_id;
+            let images = self.pending_images.len();
+            let chars = content.chars().count();
+            log::info!(
+                target: "solution_agent::queue",
+                "session={session_id} submit_compose_now suppressed (resuming=true) — would-have-sent text_chars={chars} images={images}",
+            );
             return;
+        }
+        // Submitting supersedes any recalled-edit draft — the modified
+        // text is the new authoritative version, drop the original
+        // bundle stash so a follow-up Esc doesn't push it back as a
+        // duplicate.
+        self.recalled_bundle = None;
+        // Audit log: every Send/Queue press lands here. Followed by
+        // a downstream `enqueued` / `flushing` / `dropped` line from
+        // `queue.rs` / `handle_acp_event`, so a missing pair pinpoints
+        // exactly where a message vanished.
+        {
+            let session_id = self.session_id;
+            let state_label = match self.session.read(cx).state {
+                SessionState::Running { .. } => "Running",
+                SessionState::Idle => "Idle",
+                SessionState::AwaitingInput => "AwaitingInput",
+                SessionState::Errored(_) => "Errored",
+            };
+            let is_cold = self.session.read(cx).is_cold();
+            log::info!(
+                target: "solution_agent::queue",
+                "session={session_id} submit_compose_now state={state_label} cold={is_cold} text_chars={} images={}",
+                content.chars().count(),
+                self.pending_images.len(),
+            );
         }
         if self.session.read(cx).is_cold() {
             // Cold tab: defer the actual send until the agent
@@ -1163,6 +1237,13 @@ impl SolutionSessionView {
             }
             if let Err(err) = resume_result {
                 let _ = this.update(cx, |this, cx| {
+                    if let Some(blocks) = this.pending_send.as_ref() {
+                        log::warn!(
+                            target: "solution_agent::queue",
+                            "session={session_id} dropped pending cold-send on resume failure (err={err:#}) — content: {}",
+                            crate::store::summarize_blocks_for_log(blocks),
+                        );
+                    }
                     this.resuming = false;
                     this.pending_send = None;
                     this.show_toast(
@@ -1463,15 +1544,24 @@ impl SolutionSessionView {
     /// cache). Empty if there's no thread yet.
     fn collect_entry_texts(&self, cx: &App) -> Vec<Vec<String>> {
         let session = self.session.read(cx);
-        let Some(thread) = session.acp_thread.as_ref() else {
-            return Vec::new();
-        };
-        let thread = thread.read(cx);
-        thread
-            .entries()
-            .iter()
-            .map(|entry| entry_text_spans(entry, cx))
-            .collect()
+        // Cold tabs source from `cold_entries` (reconstructed via
+        // `cold_persistence::from_persisted` at restore time); live
+        // tabs from the live `AcpThread`. Both branches yield
+        // `&AgentThreadEntry` so the markdown-cache pre-pass and the
+        // virtualized list's processor closure stay symmetric.
+        match session.acp_thread.as_ref() {
+            Some(thread) => thread
+                .read(cx)
+                .entries()
+                .iter()
+                .map(|entry| entry_text_spans(entry, cx))
+                .collect(),
+            None => session
+                .cold_entries
+                .iter()
+                .map(|entry| entry_text_spans(entry, cx))
+                .collect(),
+        }
     }
 
     /// Walks every tool-call terminal currently in the conversation and
@@ -1569,6 +1659,15 @@ impl Render for SolutionSessionView {
         let entry_count = texts_per_entry.len();
         self.markdown_cache.retain(|(idx, _), _| *idx < entry_count);
 
+        // Refresh the cached `Markdown` widget for the queued ghost
+        // bubble — pending bundles render as live markdown (selectable
+        // text + clickable `[image #N]` links via the spk-image://
+        // URL scheme), but `Markdown::new` parses asynchronously, so
+        // a fresh entity per frame would never finish parsing on a
+        // static draft. The helper short-circuits when the source
+        // hasn't changed since the previous render.
+        self.ensure_pending_markdown(cx);
+
         // Override inline-code color to a muted text-accent. Pure
         // text_accent is too saturated for prose — it stings on long
         // turns where every other word is `identifier`-y. 0.75 alpha +
@@ -1618,16 +1717,6 @@ impl Render for SolutionSessionView {
         // Parked on self so the list processor closure (which must be
         // `'static`) can reach it via `&mut Self`.
         self.assistant_label_for_render = assistant_label;
-        // Pre-build the cold-body element before taking the long-lived
-        // immutable `session` borrow below — `render_cold_body` mutates
-        // `self.cold_markdown` cache, so it needs `&mut Context` and
-        // can't share the read-borrow window.
-        let is_cold_for_body = self.session.read(cx).acp_thread.is_none();
-        let cold_body_prebuilt: Option<AnyElement> = if is_cold_for_body {
-            Some(self.render_cold_body(cx))
-        } else {
-            None
-        };
         let session = self.session.read(cx);
         let pending_image_count = self.pending_images.len();
         div()
@@ -1681,16 +1770,22 @@ impl Render for SolutionSessionView {
                 // Empty / no-thread states render plain text; no point
                 // spinning up a `list(...)` widget when there's nothing
                 // to scroll through.
+                // `entries_count` covers BOTH live (thread.entries) and
+                // cold (cold_entries) modes — they feed the same
+                // virtualized list so the conversation paints
+                // identically before vs after a restart. Live thread is
+                // the source of truth when present; cold tabs (restored
+                // by `restore_open_tabs`) source from `cold_entries`,
+                // which `cold_persistence::from_persisted` has already
+                // reconstructed into `AgentThreadEntry` shape with
+                // fresh `Markdown` widgets.
                 let entries_count = session
                     .acp_thread
                     .as_ref()
                     .map(|t| t.read(cx).entries().len())
-                    .unwrap_or(0);
-                let has_thread = session.acp_thread.is_some();
+                    .unwrap_or_else(|| session.cold_entries.len());
 
-                let conversation_body: AnyElement = if !has_thread {
-                    cold_body_prebuilt.unwrap_or_else(|| Empty.into_any_element())
-                } else if entries_count == 0 {
+                let conversation_body: AnyElement = if entries_count == 0 {
                     div()
                         .px_2()
                         .py_1()
@@ -1711,16 +1806,34 @@ impl Render for SolutionSessionView {
                                 // Render call before the list element gets
                                 // painted.
                                 let session = this.session.read(cx);
-                                let Some(thread_entity) = session.acp_thread.as_ref() else {
+                                // Cold mode: no live thread, so feed the
+                                // pre-reconstructed `cold_entries` into
+                                // the same `render_entry` path. Pass an
+                                // invalid `WeakEntity<AcpThread>` — the
+                                // rewind menu (which is the only thread-
+                                // dependent branch in `render_entry`) is
+                                // gated on `rewind_target.is_some()`,
+                                // and we set that to `None` for cold.
+                                let (entry_ref, thread_weak, supports_rewind): (
+                                    Option<&AgentThreadEntry>,
+                                    gpui::WeakEntity<acp_thread::AcpThread>,
+                                    bool,
+                                ) = match session.acp_thread.as_ref() {
+                                    Some(thread_entity) => {
+                                        let thread = thread_entity.read(cx);
+                                        let supports = thread.supports_truncate(cx);
+                                        let entry = thread.entries().get(idx);
+                                        (entry, thread_entity.downgrade(), supports)
+                                    }
+                                    None => (
+                                        session.cold_entries.get(idx),
+                                        gpui::WeakEntity::<acp_thread::AcpThread>::new_invalid(),
+                                        false,
+                                    ),
+                                };
+                                let Some(entry) = entry_ref else {
                                     return Empty.into_any_element();
                                 };
-                                let thread_weak = thread_entity.downgrade();
-                                let thread = thread_entity.read(cx);
-                                let entries = thread.entries();
-                                let Some(entry) = entries.get(idx) else {
-                                    return Empty.into_any_element();
-                                };
-                                let supports_rewind = thread.supports_truncate(cx);
                                 let rewind_target = if supports_rewind
                                     && matches!(
                                         entry,
@@ -1734,11 +1847,9 @@ impl Render for SolutionSessionView {
                                 let Some(style) = this.markdown_style_for_render.as_ref() else {
                                     return Empty.into_any_element();
                                 };
-                                // `render_entry` only needs `&App`, so the
-                                // immutable reads above (session/thread/entry)
-                                // can stay live across the call — no need for
-                                // a clone of `entry` (AgentThreadEntry isn't
-                                // Clone) or a manual drop of the borrows.
+                                let view_weak = cx.entity().downgrade();
+                                let queue_expanded =
+                                    this.expanded_queue_markers.contains(&idx);
                                 render_entry(
                                     idx,
                                     entry,
@@ -1747,6 +1858,8 @@ impl Render for SolutionSessionView {
                                     &this.assistant_label_for_render,
                                     rewind_target,
                                     thread_weak,
+                                    view_weak,
+                                    queue_expanded,
                                     cx,
                                 )
                             },
@@ -1762,7 +1875,7 @@ impl Render for SolutionSessionView {
                 // beneath the virtualized list. The render-queue helper
                 // returns `None` when the queue is empty so the
                 // `.when_some(...)` site below skips the row entirely.
-                let pending_section = self.render_pending_section(cx);
+                let pending_section = self.render_pending_section(window, cx);
 
                 // The "Thinking… Ns" indicator now lives in the status
                 // row (see `status_row::render_status_row`) so it
@@ -1825,39 +1938,44 @@ impl Render for SolutionSessionView {
                                     .px_2()
                                     .py_1()
                                     .child(conversation_body)
-                                    // Live mode: the virtualized `list(...)`
-                                    // is the scroll source, so the always-
-                                    // visible bar is bound to its
-                                    // `list_state`. Cold mode has no live
-                                    // list (just markdown blocks for the
-                                    // persisted transcript) — `list_state`
-                                    // is empty, so a `tracked_scroll_handle`
-                                    // bar would paint a track that scrolls
-                                    // nothing. Fall back to a plain
-                                    // `overflow_y_scroll` wrapper so the
-                                    // user can read a long restored
-                                    // conversation before the agent
-                                    // subprocess attaches.
-                                    .map(|this| {
-                                        if has_thread {
-                                            this.custom_scrollbars(
-                                                Scrollbars::always_visible(
-                                                    ScrollAxes::Vertical,
-                                                )
-                                                .tracked_scroll_handle(&self.list_state),
-                                                window,
-                                                cx,
-                                            )
-                                        } else {
-                                            this.overflow_y_scroll()
-                                        }
-                                    }),
+                                    // Single scroll wiring covers both live
+                                    // and cold modes — the virtualized
+                                    // `list(...)` is the scroll source in
+                                    // both cases (cold tabs feed
+                                    // `cold_entries` through the same
+                                    // `list_state`), so the always-visible
+                                    // bar tracks `list_state` either way.
+                                    // Pinning the bar visible costs ~6 px
+                                    // of width but kills the streaming-
+                                    // pause flicker the auto-hide variant
+                                    // had during live turns.
+                                    .custom_scrollbars(
+                                        Scrollbars::always_visible(ScrollAxes::Vertical)
+                                            .tracked_scroll_handle(&self.list_state),
+                                        window,
+                                        cx,
+                                    ),
                             )
                             .when(!is_following, |this| {
                                 this.child(self.render_jump_to_latest(cx))
                             }),
                     )
                     .when_some(pending_section, |this, section| this.child(section))
+            })
+            .children({
+                // Status row sits directly above the compose box: token
+                // meter / agent / model / "Thinking… 3m12s" / "Done in
+                // 2m15s" all read from the bottom-right cluster the
+                // user already looks at when sending. Built through the
+                // navigator's `render_status_row` because its buttons
+                // (compact, history popover) need `cx.listener`
+                // bindings against `SolutionSessionsNavigator::Self`.
+                let active_view = cx.entity();
+                self.navigator.upgrade().and_then(|nav| {
+                    nav.update(cx, |nav, ncx| {
+                        nav.render_status_row(Some(&active_view), ncx)
+                    })
+                })
             })
             .child({
                 // Compose row + resize handle in a single flex_col:

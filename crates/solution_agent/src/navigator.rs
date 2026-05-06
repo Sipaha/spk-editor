@@ -18,10 +18,7 @@ use gpui::{
 };
 use solutions::{SolutionId, SolutionStore, SolutionStoreEvent};
 use ui::prelude::*;
-use ui::{
-    Button, ButtonStyle, CommonAnimationExt, ContextMenu, Icon, IconName, Label, LabelSize,
-    PopoverMenu,
-};
+use ui::{CommonAnimationExt, ContextMenu, Icon, IconName, Label, LabelSize, PopoverMenu};
 use workspace::{
     Workspace,
     dock::{DockPosition, Panel, PanelEvent},
@@ -467,8 +464,16 @@ impl SolutionSessionsNavigator {
             cx.notify();
             return;
         }
+        let navigator = cx.entity().downgrade();
         let view = cx.new(|cx| {
-            SolutionSessionView::new(session_id, session, self.workspace.clone(), window, cx)
+            SolutionSessionView::new(
+                session_id,
+                session,
+                self.workspace.clone(),
+                navigator,
+                window,
+                cx,
+            )
         });
         self.open_sessions.push(session_id);
         self.selected_index = Some(self.open_sessions.len() - 1);
@@ -843,17 +848,17 @@ impl SolutionSessionsNavigator {
                 }]
             });
 
-        // The label stays adapter-agnostic on purpose — never hardcode a
-        // specific neural network ("Claude", "Gemini", …) into the chrome.
-        let label = SharedString::from("New Session");
-        let trigger = Button::new("solution-sessions-new", label)
-            .style(ButtonStyle::Subtle)
-            .label_size(LabelSize::Default)
-            .start_icon(
-                Icon::new(IconName::Plus)
-                    .size(IconSize::Small)
-                    .color(Color::Muted),
-            );
+        // Slim `+` IconButton — matches the upstream pane "new tab"
+        // affordance (a single Plus icon with a tooltip) instead of
+        // a wide labelled button. The previous "+ New Session" button
+        // visually disconnected from the tabs because of its
+        // different shape; an icon-only button reads as the natural
+        // extension of the tab strip ("add tab"). Tooltip + popover
+        // menu still surface the full create-session UX.
+        let trigger = ui::IconButton::new("solution-sessions-new", IconName::Plus)
+            .icon_size(IconSize::Small)
+            .icon_color(Color::Muted)
+            .tooltip(ui::Tooltip::text("New session"));
 
         // When there's only one project root choice AND a single
         // adapter, skip the popover — one click creates the session.
@@ -924,12 +929,18 @@ impl SolutionSessionsNavigator {
         // button appears right after the last tab (Chrome-style) so it is
         // always visible and discoverable, instead of being pinned to the
         // far right where it visually blended into the dock background.
+        // Strip height bumped from `h_8` (32 px) to `h_9` (36 px) and
+        // each tab below sets `h_full()` so the entire strip-height
+        // column is clickable (without `h_full` the tab body sized
+        // itself to its label and `items_center` left dead vertical
+        // strips above + below). Net effect: bigger hit-target that
+        // matches the upstream editor tab strip's perceived size.
         let mut strip = div()
             .id("solution-sessions-tab-strip")
             .flex()
             .flex_none()
-            .items_center()
-            .h_8()
+            .items_stretch()
+            .h_9()
             .bg(cx.theme().colors().tab_bar_background)
             .border_b_1()
             .border_color(cx.theme().colors().border_variant)
@@ -973,9 +984,10 @@ impl SolutionSessionsNavigator {
                 .flex()
                 .flex_none()
                 .items_center()
-                .gap_1()
-                .px_2()
-                .min_w(px(120.0))
+                .h_full()
+                .gap_1p5()
+                .px_3()
+                .min_w(px(140.0))
                 .max_w(px(220.0))
                 .bg(bg)
                 .border_r_1()
@@ -1019,8 +1031,9 @@ impl SolutionSessionsNavigator {
                     .id(SharedString::from(format!("pending-tab-{}", pending.id)))
                     .flex()
                     .items_center()
-                    .gap_1()
-                    .px_2()
+                    .h_full()
+                    .gap_1p5()
+                    .px_3()
                     .bg(cx.theme().colors().tab_inactive_background)
                     .border_r_1()
                     .border_color(cx.theme().colors().border_variant)
@@ -1042,13 +1055,32 @@ impl SolutionSessionsNavigator {
                     ),
             );
         }
+        // Right-side controls (`+` new-session, history popover) sit
+        // inside their own `h_full` wrappers so they share the strip's
+        // 36 px height and feel like extensions of the tab row rather
+        // than separate floating buttons. `flex_none` keeps them from
+        // stretching when the strip overflows horizontally.
         if let Some(new_btn) = self.render_new_session_button(cx) {
-            // px_2 = breathing room around the button so it doesn't bump
-            // straight against the right edge of the last tab.
-            strip = strip.child(div().px_2().flex_none().child(new_btn));
+            strip = strip.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .h_full()
+                    .px_2()
+                    .flex_none()
+                    .child(new_btn),
+            );
         }
         if let Some(history_btn) = self.render_history_button(cx) {
-            strip = strip.child(div().pr_2().flex_none().child(history_btn));
+            strip = strip.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .h_full()
+                    .pr_2()
+                    .flex_none()
+                    .child(history_btn),
+            );
         }
         strip
     }
@@ -1180,9 +1212,16 @@ impl Render for SolutionSessionsNavigator {
         // session controls (matches Cursor / VS Code chat UX).
         if has_active_solution {
             root = root.child(self.render_tab_strip(cx));
-            if let Some(status) = self.render_status_row(active_view.as_ref(), cx) {
-                root = root.child(status);
-            }
+            // Status row used to live here, directly under the tab strip
+            // — but the meter / state / model labels are most useful
+            // near the compose box where the user's eye already is when
+            // sending a message. Rendered inside `SolutionSessionView`
+            // now (between the conversation list and the compose row)
+            // via `nav.render_status_row` invoked through the view's
+            // `WeakEntity<SolutionSessionsNavigator>` handle. The
+            // method itself stays on the navigator because its buttons
+            // (compact, history popover) need `cx.listener` bindings
+            // against the navigator's `Self`.
         }
         // Tab right-click menu floats above the body, anchored at the
         // click position. `with_priority(1)` keeps it above other

@@ -101,10 +101,13 @@ impl SolutionSessionView {
         let Some(bundle) = peeked else {
             return;
         };
-        let (text, images) = unpack_recalled_bundle(bundle);
+        let (text, images) = unpack_recalled_bundle(bundle.clone());
         if text.is_empty() && images.is_empty() {
             return;
         }
+        // Stash the original bundle so an `Esc` press in the compose
+        // editor can put it back into the queue (cancel-edit).
+        self.recalled_bundle = Some(bundle);
         self.session.update(cx, |session, _| {
             session.pending_messages.pop_back();
         });

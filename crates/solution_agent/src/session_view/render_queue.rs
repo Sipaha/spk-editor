@@ -2,18 +2,23 @@
 //!
 //! When the user types a follow-up while the agent is still working, the
 //! message is parked in `SolutionSession::pending_messages`. This module
-//! paints the "▸ N queued messages" header (collapsed by default) and the
-//! optional bubble bodies underneath. Click on the header toggles
-//! `queue_collapsed`. The section returns `None` when the queue is
-//! empty so the caller can `when_some(...)` it into the layout without
+//! paints the optional bubble (selectable text + clickable image links)
+//! and the always-present footer strip with chevron + "queued message"
+//! label + Bolt-button (interrupt-and-flush). Click on the strip toggles
+//! `queue_collapsed`. The section returns `None` when the queue is empty
+//! so the caller can `when_some(...)` it into the layout without
 //! reserving spacing.
 
+use std::sync::Arc;
+
 use gpui::{Context, Div, ParentElement, SharedString, StatefulInteractiveElement, Styled};
+use markdown::MarkdownElement;
 use ui::prelude::*;
 use ui::{Color, Icon, IconName, IconSize, Label, LabelSize, Tooltip};
 
 use super::SolutionSessionView;
-use crate::conversation_render::{pending_blocks_preview, render_pending_message};
+use crate::conversation_render::{decode_image_local, open_image_preview};
+use crate::model::SessionState;
 
 impl SolutionSessionView {
     /// Build the pending-message ghost section. Reads `pending_messages`
@@ -22,75 +27,153 @@ impl SolutionSessionView {
     /// `self.session.read(cx)`, so passing the snapshot back in would
     /// double-borrow when `cx.listener` (mutable) constructs the click
     /// handler.
-    pub(super) fn render_pending_section(&self, cx: &Context<Self>) -> Option<Div> {
-        let pending_blocks = self
+    pub(super) fn render_pending_section(
+        &self,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let bundles = self
             .session
             .read(cx)
             .pending_messages
             .iter()
             .cloned()
             .collect::<Vec<_>>();
-        let mut pending_previews: Vec<String> = Vec::new();
-        for blocks in pending_blocks.iter() {
-            let preview = pending_blocks_preview(blocks, cx);
-            if !preview.is_empty() {
-                pending_previews.push(preview);
-            }
-        }
-        if pending_previews.is_empty() {
+        if bundles.is_empty() {
             return None;
         }
-
         let queue_collapsed = self.queue_collapsed;
-        let pending_count = pending_previews.len();
-        let header_label = if pending_count == 1 {
-            SharedString::from("1 queued message")
-        } else {
-            SharedString::from(format!("{pending_count} queued messages"))
-        };
         let chevron = if queue_collapsed {
             IconName::ChevronRight
         } else {
             IconName::ChevronDown
         };
+        let is_running = matches!(self.session.read(cx).state, SessionState::Running { .. });
 
-        let mut section = v_flex().w_full().px_1().child(
-            h_flex()
-                .id("solution-session-queue-header")
-                .gap_2()
-                .px_2()
-                .py_1()
-                .rounded_sm()
-                .cursor_pointer()
-                .hover(|this| this.bg(cx.theme().colors().element_hover))
-                .child(
-                    Icon::new(chevron)
-                        .size(IconSize::Small)
-                        .color(Color::Default),
+        // Bubble (expanded only): selectable markdown text + clickable
+        // `[image #N]` links wired through `spk-image://` to
+        // `open_image_preview`. Reuses the cached `pending_markdown`
+        // entity refreshed by `ensure_pending_markdown` in the render
+        // pre-pass — building a fresh `Markdown::new` per frame would
+        // never finish parsing.
+        let bubble = (!queue_collapsed)
+            .then(|| {
+                let entity = self.pending_markdown.as_ref()?.clone();
+                let style = self.markdown_style_for_render.as_ref()?.clone();
+                let bubble_bg = cx.theme().colors().text_accent.opacity(0.06);
+                let border_color = cx.theme().colors().text_accent.opacity(0.4);
+                // Decode any image blocks in the bundle so the
+                // `spk-image://idx` URL handler can pop them up. Mirrors
+                // the live-user-message path in
+                // `render_user_message`.
+                let mut images: Vec<Arc<gpui::Image>> = Vec::new();
+                for blocks in &bundles {
+                    for block in blocks {
+                        if let agent_client_protocol::schema::ContentBlock::Image(img) = block
+                            && let Some(decoded) = decode_image_local(img)
+                        {
+                            images.push(decoded);
+                        }
+                    }
+                }
+                let images_for_handler = images;
+                let body = MarkdownElement::new(entity, style).on_url_click(
+                    move |url, window, cx| {
+                        if let Some(idx_str) = url.strip_prefix("spk-image://")
+                            && let Ok(idx) = idx_str.parse::<usize>()
+                            && let Some(image) = images_for_handler.get(idx).cloned()
+                        {
+                            open_image_preview(image, window, cx);
+                            return;
+                        }
+                        cx.open_url(url.as_ref());
+                    },
+                );
+                Some(
+                    h_flex().w_full().child(
+                        div()
+                            .relative()
+                            .w_full()
+                            .px_2p5()
+                            .py_1()
+                            .bg(bubble_bg)
+                            .border_1()
+                            .border_dashed()
+                            .border_color(border_color)
+                            .rounded_md()
+                            .child(body),
+                    ),
                 )
-                .child(
-                    Icon::new(IconName::CountdownTimer)
-                        .size(IconSize::Small)
-                        .color(Color::Accent),
+            })
+            .flatten();
+
+        // Footer strip — always rendered. Hosts the chevron + label +
+        // Bolt button. Tooltip carries the "Queued — sends when agent
+        // finishes" copy that used to live as a footer label inside
+        // the bubble (the user's request: keep the bubble clean,
+        // surface the explanation only on intent-to-learn-more).
+        let strip = h_flex()
+            .id("solution-session-queue-header")
+            .gap_2()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .cursor_pointer()
+            .items_center()
+            .hover(|this| this.bg(cx.theme().colors().element_hover))
+            .child(
+                Icon::new(chevron)
+                    .size(IconSize::Small)
+                    .color(Color::Default),
+            )
+            .child(
+                Icon::new(IconName::CountdownTimer)
+                    .size(IconSize::Small)
+                    .color(Color::Accent),
+            )
+            .child(
+                Label::new(SharedString::from("queued message"))
+                    .size(LabelSize::Default)
+                    .color(Color::Default),
+            )
+            .child(div().flex_1())
+            .when(is_running, |this| {
+                // Send-now bolt: cancels the current turn and
+                // immediately flushes the queue. Same affordance as
+                // the Bolt button next to Stop in the compose row,
+                // duplicated here so the user can interrupt straight
+                // from the queue UI without leaving the bubble.
+                this.child(
+                    ui::IconButton::new("solution-queue-send-now", IconName::BoltFilled)
+                        .icon_size(IconSize::Small)
+                        .icon_color(Color::Accent)
+                        .tooltip(Tooltip::text(
+                            "Send now — interrupts the current turn and runs your queued follow-up",
+                        ))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.submit_compose_and_interrupt(window, cx);
+                        })),
                 )
-                .child(
-                    Label::new(header_label)
-                        .size(LabelSize::Default)
-                        .color(Color::Default),
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.queue_collapsed = !this.queue_collapsed;
-                    cx.notify();
-                }))
-                .tooltip(Tooltip::text(
-                    "Click to expand. Up arrow in an empty compose recalls.",
-                )),
-        );
-        if !queue_collapsed {
-            for (q_idx, preview) in pending_previews.iter().enumerate() {
-                section = section.child(render_pending_message(q_idx, preview, cx));
-            }
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.queue_collapsed = !this.queue_collapsed;
+                cx.notify();
+            }))
+            .tooltip(Tooltip::text(
+                "Queued — sends when agent finishes. Click to expand/collapse. \
+                 Up arrow in an empty compose recalls; Esc cancels recall.",
+            ));
+
+        // Compose: bubble (when expanded) FIRST, then the always-
+        // visible strip — matches the user's request to anchor the
+        // collapse control at the BOTTOM of the queue UI, right above
+        // the status row.
+        let _ = window;
+        let mut section = v_flex().w_full().px_1();
+        if let Some(bubble) = bubble {
+            section = section.child(bubble);
         }
+        section = section.child(strip);
         Some(section)
     }
 }

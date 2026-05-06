@@ -242,14 +242,18 @@ pub struct SolutionSession {
     /// pressed Stop) drops the queue — which is the right default,
     /// but the "Send now" button needs the inverse behaviour.
     pub flush_after_cancel: bool,
-    /// Persisted dialog entries loaded from `solution_sessions.acp_thread_blob`
-    /// at panel-open time. Populated only for sessions restored by
+    /// Reconstructed `AgentThreadEntry` list loaded from
+    /// `solution_sessions.acp_thread_blob` at panel-open time.
+    /// Populated only for sessions restored by
     /// `SolutionAgentStore::restore_open_tabs` — i.e. tabs whose
     /// `acp_thread` is `None` because we deferred the agent subprocess
-    /// until the user actually sends a message. The session view renders
-    /// from this list when `acp_thread.is_none()` and switches to the
-    /// live thread once `resume_session` populates `acp_thread`.
-    pub cold_entries: Vec<PersistedEntry>,
+    /// until the user actually sends a message. The session view feeds
+    /// these directly into the same virtualized list path as live mode
+    /// (each carries fresh `Markdown` widgets recreated by
+    /// `cold_persistence::from_persisted`), so the cold conversation
+    /// paints identically to its live form. Cleared once
+    /// `resume_session` attaches a real `AcpThread`.
+    pub cold_entries: Vec<acp_thread::AgentThreadEntry>,
     /// Wall-clock duration of the most recently completed turn (set on
     /// `Running → Idle`). The status row reads this to render
     /// "Done in 2m15s" instead of a bare "Idle" so the user has an

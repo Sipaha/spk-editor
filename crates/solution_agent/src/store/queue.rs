@@ -52,6 +52,69 @@ fn build_queue_marker(at: chrono::DateTime<Utc>) -> String {
     )
 }
 
+/// Compact one-line summary of a content-block bundle for the audit log
+/// — enough to reconstruct what was queued / dropped from log lines
+/// alone, without dumping multi-MB image blobs. Text is truncated to
+/// `MAX_PREVIEW`; images / resources collapse to a typed marker. Kept
+/// in this file (vs `conversation_render`) because the queue codepath
+/// is the only consumer.
+pub(crate) fn summarize_blocks_for_log(
+    blocks: &[agent_client_protocol::schema::ContentBlock],
+) -> String {
+    use agent_client_protocol::schema as acp;
+    const MAX_PREVIEW: usize = 200;
+    let mut out = String::new();
+    let mut text_total = 0usize;
+    let mut images = 0usize;
+    let mut other = 0usize;
+    for block in blocks {
+        match block {
+            acp::ContentBlock::Text(t) => {
+                let snippet: String = t.text.chars().take(MAX_PREVIEW).collect();
+                let truncated = t.text.chars().count() > MAX_PREVIEW;
+                if !out.is_empty() {
+                    out.push_str(" + ");
+                }
+                out.push('"');
+                // Keep the log a single line: replace newlines with `\n`.
+                for ch in snippet.chars() {
+                    if ch == '\n' {
+                        out.push_str("\\n");
+                    } else if ch == '"' {
+                        out.push_str("\\\"");
+                    } else {
+                        out.push(ch);
+                    }
+                }
+                if truncated {
+                    out.push('…');
+                }
+                out.push('"');
+                text_total += t.text.chars().count();
+            }
+            acp::ContentBlock::Image(_) => images += 1,
+            _ => other += 1,
+        }
+    }
+    if images > 0 || other > 0 || text_total > MAX_PREVIEW {
+        let mut suffix = String::new();
+        if images > 0 {
+            suffix.push_str(&format!(" +{images}img"));
+        }
+        if other > 0 {
+            suffix.push_str(&format!(" +{other}other"));
+        }
+        if text_total > MAX_PREVIEW {
+            suffix.push_str(&format!(" total_chars={text_total}"));
+        }
+        out.push_str(&suffix);
+    }
+    if out.is_empty() {
+        out.push_str("(empty)");
+    }
+    out
+}
+
 impl SolutionAgentStore {
     /// Best-effort cancel of an in-flight turn. Forwards to the underlying
     /// `AgentConnection::cancel`. Errors only when the session is unknown
@@ -146,7 +209,15 @@ impl SolutionAgentStore {
         // the agent, sent once `Stopped` fires.
         let already_running = matches!(session_entity.read(cx).state, SessionState::Running { .. });
         if already_running {
-            session_entity.update(cx, |s, _| {
+            // Audit log: queueing is a frequent source of "where did
+            // my message go?" bug reports — having every enqueue +
+            // queue size in the log lets us reconstruct what reached
+            // pending_messages even when the message later got dropped
+            // silently (e.g. by a `/clear` or a Cancelled stop).
+            // `target: "solution_agent::queue"` makes these greppable.
+            let blocks_text_summary = summarize_blocks_for_log(&blocks);
+            let merged = session_entity.update(cx, |s, _| {
+                let merged = s.pending_messages.back().is_some();
                 if let Some(last) = s.pending_messages.back_mut() {
                     last.push(agent_client_protocol::schema::ContentBlock::Text(
                         agent_client_protocol::schema::TextContent::new("\n\n".to_string()),
@@ -160,7 +231,7 @@ impl SolutionAgentStore {
                     // (above) WITHOUT a second marker — per UX, queued
                     // follow-ups are continuations of the same thought.
                     let marker = build_queue_marker(Utc::now());
-                    let mut bundle = Vec::with_capacity(blocks.len() + 1);
+                    let mut bundle = Vec::with_capacity(2);
                     bundle.push(agent_client_protocol::schema::ContentBlock::Text(
                         agent_client_protocol::schema::TextContent::new(marker),
                     ));
@@ -168,7 +239,13 @@ impl SolutionAgentStore {
                     s.pending_messages.push_back(bundle);
                 }
                 s.last_activity_at = Utc::now();
+                merged
             });
+            let queue_len = session_entity.read(cx).pending_messages.len();
+            log::info!(
+                target: "solution_agent::queue",
+                "session={session_id} enqueued (merged={merged}, queue_len={queue_len}) preview={blocks_text_summary}",
+            );
             cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
             cx.notify();
             return Task::ready(Ok(()));
