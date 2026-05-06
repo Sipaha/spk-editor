@@ -3,6 +3,7 @@ use crate::git;
 use crate::model::{CatalogId, CatalogProject, Solution, SolutionId, SolutionMember};
 use crate::persistence::{CURRENT_VERSION, SolutionsConfig, load_or_default, save_atomic};
 use crate::slug::unique_slug;
+use crate::tabs_snapshot::{SolutionTabsSnapshot, TabSnapshots};
 use anyhow::{Context as _, Result, bail};
 use chrono::Utc;
 use collections::HashMap;
@@ -15,6 +16,13 @@ pub struct SolutionStore {
     pub(crate) config: SolutionsConfig,
     pub(crate) fs_lock: Arc<smol::lock::Mutex<()>>,
     pub(crate) in_flight_adds: HashMap<(SolutionId, CatalogId), InFlightAdd>,
+    /// Per-Solution open-tab snapshots, populated by the in-place
+    /// switch orchestrator on switch-out and replayed on switch-in.
+    /// Runtime-only; not persisted to disk — losing the snapshot
+    /// after an editor restart is acceptable (user can re-open the
+    /// tabs themselves), and persistence would mean keeping
+    /// `solutions.json` in sync with potentially-stale path lists.
+    pub(crate) tab_snapshots: TabSnapshots,
 }
 
 #[derive(Clone, Debug)]
@@ -63,6 +71,7 @@ impl SolutionStore {
             config,
             fs_lock: Arc::new(smol::lock::Mutex::new(())),
             in_flight_adds: HashMap::default(),
+            tab_snapshots: TabSnapshots::default(),
         });
         cx.set_global(GlobalSolutionStore(store));
     }
@@ -84,7 +93,38 @@ impl SolutionStore {
             },
             fs_lock: Arc::new(smol::lock::Mutex::new(())),
             in_flight_adds: HashMap::default(),
+            tab_snapshots: TabSnapshots::default(),
         })
+    }
+
+    /// Read the open-tab snapshot (if any) for a given Solution.
+    /// Empty / missing entries return `None`. Used by the in-place
+    /// switch orchestrator after worktrees have been swapped to find
+    /// out which buffers to re-open.
+    pub fn tab_snapshot(&self, id: &SolutionId) -> Option<&SolutionTabsSnapshot> {
+        self.tab_snapshots.get(id)
+    }
+
+    /// Write the open-tab snapshot for a given Solution. An empty
+    /// `snapshot` (no paths and no active path) **evicts** the entry
+    /// instead of storing an empty record — keeps the in-memory map
+    /// trim and matches the contract that `tab_snapshot` only ever
+    /// returns `Some` when there's something worth restoring.
+    /// Emits `Changed` (not `ActiveSolutionChanged` — the active id
+    /// itself didn't move, only the saved shape).
+    pub fn store_tab_snapshot(
+        &mut self,
+        id: SolutionId,
+        snapshot: SolutionTabsSnapshot,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        if snapshot.is_empty() {
+            self.tab_snapshots.remove(&id);
+        } else {
+            self.tab_snapshots.insert(id, snapshot);
+        }
+        cx.emit(SolutionStoreEvent::Changed);
+        cx.notify();
     }
 
     pub fn catalog(&self) -> &[CatalogProject] {
@@ -756,6 +796,53 @@ mod tests {
         assert_eq!(paths.len(), 2);
         assert!(paths[0].ends_with("a"));
         assert!(paths[1].ends_with("b"));
+    }
+
+    #[gpui::test]
+    async fn store_tab_snapshot_round_trips(cx: &mut TestAppContext) {
+        let dir = tempdir().expect("tempdir");
+        let store = cx.update(|cx| SolutionStore::for_test(dir.path().join("s.json"), cx));
+        let sol_id = store
+            .update(cx, |s, cx| {
+                s.create_solution("S", dir.path().to_path_buf(), cx)
+            })
+            .expect("create solution");
+        let snapshot = SolutionTabsSnapshot {
+            open_paths: vec![PathBuf::from("/x"), PathBuf::from("/y")],
+            active_path: Some(PathBuf::from("/y")),
+        };
+        store.update(cx, |s, cx| {
+            s.store_tab_snapshot(sol_id.clone(), snapshot.clone(), cx);
+        });
+        let recovered = store.read_with(cx, |s, _| s.tab_snapshot(&sol_id).cloned());
+        assert_eq!(recovered, Some(snapshot));
+    }
+
+    #[gpui::test]
+    async fn store_tab_snapshot_empty_evicts(cx: &mut TestAppContext) {
+        let dir = tempdir().expect("tempdir");
+        let store = cx.update(|cx| SolutionStore::for_test(dir.path().join("s.json"), cx));
+        let sol_id = store
+            .update(cx, |s, cx| {
+                s.create_solution("S", dir.path().to_path_buf(), cx)
+            })
+            .expect("create solution");
+        store.update(cx, |s, cx| {
+            s.store_tab_snapshot(
+                sol_id.clone(),
+                SolutionTabsSnapshot {
+                    open_paths: vec![PathBuf::from("/x")],
+                    active_path: None,
+                },
+                cx,
+            );
+            s.store_tab_snapshot(sol_id.clone(), SolutionTabsSnapshot::default(), cx);
+        });
+        let still = store.read_with(cx, |s, _| s.tab_snapshot(&sol_id).cloned());
+        assert!(
+            still.is_none(),
+            "default (empty) snapshot must evict the entry; got {still:?}"
+        );
     }
 
     #[gpui::test]

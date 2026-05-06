@@ -12,6 +12,7 @@ mod persistence;
 mod settings;
 mod slug;
 mod store;
+mod tabs_snapshot;
 
 pub use add_member::{AddProgressCallback, PendingAddView};
 pub use cache::default_cache_root;
@@ -19,6 +20,7 @@ pub use event_sources::install as install_event_sources_for_test;
 pub use model::{CatalogId, CatalogProject, Solution, SolutionId, SolutionMember};
 pub use settings::SolutionsSettings;
 pub use store::{SolutionStore, SolutionStoreEvent, install_global_for_test};
+pub use tabs_snapshot::{SolutionTabsSnapshot, TabSnapshots};
 
 use ::settings::Settings;
 use gpui::App;
