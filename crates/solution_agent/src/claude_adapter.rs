@@ -53,13 +53,16 @@ impl SolutionAgentAdapter for ClaudeAcpAdapter {
         );
         buf.push_str(
             "Stay inside the solution. All file edits, git operations, and shell \
-             commands targeting source code must be confined to the solution root \
-             and its member subdirectories. Paths outside it — including other \
-             clones of the same repository elsewhere on disk (~/IdeaProjects, \
-             ~/projects, etc.), system directories, and unrelated home folders — \
-             are read-only references: read them when context demands, but do \
-             not write, commit, or delete anything there unless the user \
-             explicitly asks for it.\n",
+             commands that mutate source code must be confined to the solution \
+             root and its member subdirectories. Paths outside it — including \
+             other clones of the same repository on disk (~/IdeaProjects, \
+             ~/projects, etc.), system directories, and unrelated home folders \
+             — are read-only by default; read them when context demands. \
+             Editing, committing, or deleting anything out there is allowed \
+             only after you name the exact path and the exact change and the \
+             user gives an explicit per-action go-ahead. A generic \"do \
+             whatever you need\" or blanket up-front permission does not \
+             count — confirm each out-of-scope action.\n",
         );
         buf
     }
