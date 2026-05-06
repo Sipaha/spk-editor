@@ -2310,6 +2310,76 @@ impl Workspace {
             .collect()
     }
 
+    /// Reconcile the project's visible worktrees so that exactly
+    /// `target_paths` are mounted: drop anything not in the set,
+    /// add anything missing. Used by the in-place Solution-switch
+    /// path so panels (which subscribe to the existing
+    /// `Project`/`Workspace` rather than being recreated per Solution)
+    /// keep their dock-state, scroll, expanded items, etc.
+    ///
+    /// Worktrees whose `abs_path` is already in `target_paths`
+    /// are left in place — their `WorktreeId` is preserved across
+    /// the swap, which matters because LSP / panels / cached caches
+    /// hold ids and we don't want gratuitous invalidations.
+    ///
+    /// Each `create_worktree` is awaited; failure on a single new
+    /// member doesn't roll back already-applied removals. On partial
+    /// failure the caller sees a `Project` whose worktrees are a
+    /// subset of the requested list. We don't auto-undo (a re-add
+    /// of a removed worktree is just as likely to fail again, and
+    /// the right user-facing handling — toast + retry — lives at the
+    /// orchestrator layer above).
+    pub fn swap_worktrees_to(
+        &mut self,
+        target_paths: Vec<PathBuf>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let project = self.project.clone();
+        let target_set: std::collections::HashSet<PathBuf> =
+            target_paths.iter().cloned().collect();
+        cx.spawn(async move |_, cx| {
+            // `Entity::update` on `AsyncApp` returns `R` directly
+            // (not `Result<R>`), so no `?` on the wrapping update
+            // calls — only on the inner `Task<Result<…>>` future
+            // we get back from `create_worktree`.
+            let to_remove: Vec<WorktreeId> = project.update(cx, |project, cx| {
+                project
+                    .visible_worktrees(cx)
+                    .filter(|wt| {
+                        let abs: PathBuf = wt.read(cx).abs_path().to_path_buf();
+                        !target_set.contains(&abs)
+                    })
+                    .map(|wt| wt.read(cx).id())
+                    .collect()
+            });
+            for id in to_remove {
+                project.update(cx, |project, cx| project.remove_worktree(id, cx));
+            }
+            // Recompute `existing_paths` after removal — items in
+            // `target_paths` that were already mounted before the
+            // swap should be skipped (`create_worktree` is idempotent
+            // on already-mounted paths but burns time in the
+            // task-await loop).
+            let existing_paths: std::collections::HashSet<PathBuf> =
+                project.update(cx, |project, cx| {
+                    project
+                        .visible_worktrees(cx)
+                        .map(|wt| wt.read(cx).abs_path().to_path_buf())
+                        .collect()
+                });
+            for path in target_paths {
+                if existing_paths.contains(&path) {
+                    continue;
+                }
+                let task =
+                    project.update(cx, |project, cx| project.create_worktree(&path, true, cx));
+                task.await?;
+            }
+            Ok(())
+        })
+    }
+
     pub fn dock_at_position(&self, position: DockPosition) -> &Entity<Dock> {
         match position {
             DockPosition::Left => &self.left_dock,
@@ -15703,5 +15773,83 @@ mod tests {
         });
         let path = workspace.read_with(cx, |workspace, cx| workspace.most_recent_active_path(cx));
         assert_eq!(path, None);
+    }
+
+    #[gpui::test]
+    async fn swap_worktrees_to_replaces_old_with_new(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/old"), json!({ "a.txt": "" })).await;
+        fs.insert_tree(path!("/new1"), json!({ "b.txt": "" })).await;
+        fs.insert_tree(path!("/new2"), json!({ "c.txt": "" })).await;
+        let project = Project::test(fs.clone(), [path!("/old").as_ref()], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let task = workspace.update_in(cx, |w, window, cx| {
+            w.swap_worktrees_to(
+                vec![PathBuf::from(path!("/new1")), PathBuf::from(path!("/new2"))],
+                window,
+                cx,
+            )
+        });
+        task.await.expect("swap_worktrees_to");
+        cx.run_until_parked();
+        let mounted: Vec<PathBuf> = project.read_with(cx, |p, cx| {
+            p.visible_worktrees(cx)
+                .map(|w| w.read(cx).abs_path().to_path_buf())
+                .collect()
+        });
+        let mounted_strs: Vec<String> = mounted
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !mounted_strs.iter().any(|p| p.ends_with("old")),
+            "/old should have been removed: {mounted_strs:?}"
+        );
+        assert!(
+            mounted_strs.iter().any(|p| p.ends_with("new1"))
+                && mounted_strs.iter().any(|p| p.ends_with("new2")),
+            "both /new1 and /new2 should be mounted: {mounted_strs:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn swap_worktrees_to_preserves_overlap(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/keep"), json!({ "k.txt": "" })).await;
+        fs.insert_tree(path!("/drop"), json!({ "d.txt": "" })).await;
+        fs.insert_tree(path!("/new"), json!({ "n.txt": "" })).await;
+        let project = Project::test(
+            fs.clone(),
+            [path!("/keep").as_ref(), path!("/drop").as_ref()],
+            cx,
+        )
+        .await;
+        let kept_id: WorktreeId = project.read_with(cx, |p, cx| {
+            p.visible_worktrees(cx)
+                .find(|w| w.read(cx).abs_path().ends_with("keep"))
+                .map(|w| w.read(cx).id())
+                .expect("/keep mounted")
+        });
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let task = workspace.update_in(cx, |w, window, cx| {
+            w.swap_worktrees_to(
+                vec![PathBuf::from(path!("/keep")), PathBuf::from(path!("/new"))],
+                window,
+                cx,
+            )
+        });
+        task.await.expect("swap_worktrees_to");
+        cx.run_until_parked();
+        let still_kept = project.read_with(cx, |p, cx| {
+            p.visible_worktrees(cx).any(|w| w.read(cx).id() == kept_id)
+        });
+        assert!(
+            still_kept,
+            "/keep WorktreeId must be preserved across the swap so panels don't invalidate"
+        );
     }
 }
