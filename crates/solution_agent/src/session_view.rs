@@ -1715,7 +1715,6 @@ impl SolutionSessionView {
         Self::new(session_id, session, workspace, navigator, window, cx)
     }
 
-    /// Returns a reference to `pending_send` for test assertions.
     pub(crate) fn pending_send_for_test(&self) -> Option<&Vec<acp::ContentBlock>> {
         self.pending_send.as_ref()
     }

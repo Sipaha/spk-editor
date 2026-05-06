@@ -10,8 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Insert a minimal cold session (no `acp_thread`) directly into the store
 /// for tests that need a pre-existing session without going through the full
-/// `create_session` → ACP-handshake flow. Only callable from within this
-/// module's submodule tree (same privacy rules as the private store fields).
+/// `create_session` → ACP-handshake flow.
 pub(crate) fn insert_cold_session(
     session_id: crate::model::SolutionSessionId,
     solution_id: solutions::SolutionId,

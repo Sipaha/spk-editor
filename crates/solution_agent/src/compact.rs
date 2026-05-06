@@ -293,14 +293,12 @@ mod tests {
             (navigator, view)
         });
 
-        // Drive the cold-compact orchestrator.
         vcx.update(|window, cx| {
             navigator_entity.update(cx, |nav, cx| {
                 nav.start_compact_from_cold(session_id, view_entity.clone(), window, cx);
             });
         });
 
-        // Assert synchronously — before the spawned resume task runs.
         vcx.update(|_window, cx| {
             view_entity.read_with(cx, |view, _| {
                 let pending = view
