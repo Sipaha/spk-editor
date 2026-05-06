@@ -586,7 +586,7 @@ impl SolutionSessionsNavigator {
                                             if prompt.await.ok() != Some(1) {
                                                 return;
                                             }
-                                            let _ = cx.update(|_, cx| {
+                                            cx.update(|_, cx| {
                                                 if let Some(nav) = weak_nav.upgrade() {
                                                     nav.update(cx, |_, cx| {
                                                         SolutionAgentStore::global(cx)
@@ -597,7 +597,8 @@ impl SolutionSessionsNavigator {
                                                             });
                                                     });
                                                 }
-                                            });
+                                            })
+                                            .log_err();
                                         })
                                         .detach();
                                 }
