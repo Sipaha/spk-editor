@@ -368,6 +368,7 @@ impl SolutionSessionsNavigator {
         };
         let is_idle = matches!(s.state, SessionState::Idle) && !is_cold && !is_resuming;
         let is_running = matches!(s.state, SessionState::Running { .. }) && !is_resuming;
+        let is_errored = matches!(s.state, SessionState::Errored(_));
         // Live thread → live `TokenUsage`; cold / sleeping → fall
         // back to the `cached_total_tokens` mirrored from metadata
         // at restore time + refreshed on every live
@@ -455,45 +456,135 @@ impl SolutionSessionsNavigator {
         // models even past 90 %.
         let remaining = max.saturating_sub(used);
         let too_full = remaining < COMPACT_HEADROOM_MIN_TOKENS;
-        let compact_enabled = is_idle && pct >= COMPACT_BUTTON_MIN_PCT && !too_full;
+        let pct_ok = pct >= COMPACT_BUTTON_MIN_PCT;
+        let compact_enabled = (is_idle || is_cold) && pct_ok && !too_full;
+        let clear_enabled = !is_running && !is_resuming;
+        let trigger_enabled = compact_enabled || clear_enabled;
+
         let compact_warning = pct >= COMPACT_BUTTON_WARN_PCT && !too_full;
-        let compact_tooltip: SharedString = if !is_idle {
+        let compact_tooltip: SharedString = if is_running || is_resuming {
             "Wait for the current turn to finish before compacting".into()
+        } else if is_errored {
+            "Compact unavailable while the session is in error".into()
         } else if too_full {
             format!(
                 "Only {} of headroom left — start a fresh session manually",
                 format_tokens(remaining)
             )
             .into()
-        } else if !compact_enabled {
+        } else if pct < COMPACT_BUTTON_MIN_PCT {
             "Conversation is short — compact later".into()
         } else if compact_warning {
             "Context is filling up — compact recommended".into()
+        } else if is_cold {
+            "Compact context: wake the session, dump a summary, then continue in a fresh context"
+                .into()
         } else {
             "Compact context: agent dumps a summary, then a fresh session continues".into()
         };
 
-        let compact_button = {
-            // `Archive` reads as "stash the current conversation away
-            // and start a fresh context" — a much closer fit for the
-            // compact action than `Sparkle`, which carries an
-            // AI/magic connotation we don't want here.
-            let mut btn = IconButton::new("solution-status-compact", IconName::Archive)
+        let clear_tooltip: SharedString = if !clear_enabled {
+            "Wait for the current turn to finish before clearing".into()
+        } else {
+            "Clear context: wipe the conversation, keep the tab".into()
+        };
+
+        let trigger_tooltip: SharedString = if !trigger_enabled {
+            "Wait for the current turn to finish before cleaning up context".into()
+        } else {
+            "Compact or clear the session's context".into()
+        };
+
+        let trigger_color = if compact_warning {
+            Color::Warning
+        } else {
+            Color::Muted
+        };
+
+        let cleanup_button: gpui::AnyElement = if !trigger_enabled {
+            ui::IconButton::new("solution-status-cleanup", IconName::Eraser)
                 .icon_size(IconSize::Small)
-                .icon_color(if compact_warning {
-                    Color::Warning
-                } else {
-                    Color::Muted
+                .icon_color(trigger_color)
+                .disabled(true)
+                .tooltip(ui::Tooltip::text(trigger_tooltip))
+                .into_any_element()
+        } else {
+            let trigger = ui::IconButton::new("solution-status-cleanup", IconName::Eraser)
+                .icon_size(IconSize::Small)
+                .icon_color(trigger_color)
+                .tooltip(ui::Tooltip::text(trigger_tooltip));
+            let weak_nav = cx.entity().downgrade();
+            let weak_view = active_view.map(|v| v.downgrade());
+            PopoverMenu::new("solution-status-cleanup-menu")
+                .trigger(trigger)
+                .menu(move |window, cx| {
+                    let weak_nav = weak_nav.clone();
+                    let weak_view = weak_view.clone();
+                    let compact_tooltip = compact_tooltip.clone();
+                    let clear_tooltip = clear_tooltip.clone();
+                    Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
+                        let compact_label: SharedString = if compact_enabled {
+                            "Compact context".into()
+                        } else {
+                            format!("Compact context — {compact_tooltip}").into()
+                        };
+                        let compact_entry = ui::ContextMenuEntry::new(compact_label)
+                            .icon(IconName::Archive)
+                            .icon_color(Color::Muted)
+                            .disabled(!compact_enabled)
+                            .handler({
+                                let weak_nav = weak_nav.clone();
+                                let weak_view = weak_view.clone();
+                                move |window, cx| {
+                                    let Some(nav) = weak_nav.upgrade() else { return };
+                                    nav.update(cx, |nav, cx| {
+                                        if is_cold {
+                                            let Some(view) = weak_view
+                                                .as_ref()
+                                                .and_then(|w| w.upgrade())
+                                            else {
+                                                return;
+                                            };
+                                            nav.start_compact_from_cold(
+                                                session_id, view, window, cx,
+                                            );
+                                        } else {
+                                            nav.start_compact(session_id, cx);
+                                        }
+                                    });
+                                }
+                            });
+                        menu = menu.item(compact_entry);
+
+                        let clear_label: SharedString = if clear_enabled {
+                            "Clear context".into()
+                        } else {
+                            format!("Clear context — {clear_tooltip}").into()
+                        };
+                        let clear_entry = ui::ContextMenuEntry::new(clear_label)
+                            .icon(IconName::Eraser)
+                            .icon_color(Color::Muted)
+                            .disabled(!clear_enabled)
+                            .handler({
+                                let weak_nav = weak_nav.clone();
+                                move |_window, cx| {
+                                    let Some(nav) = weak_nav.upgrade() else { return };
+                                    nav.update(cx, |_, cx| {
+                                        SolutionAgentStore::global(cx).update(cx, |store, cx| {
+                                            store
+                                                .reset_context(session_id, cx)
+                                                .detach_and_log_err(cx);
+                                        });
+                                    });
+                                }
+                            });
+                        menu = menu.item(clear_entry);
+
+                        menu
+                    }))
                 })
-                .tooltip(ui::Tooltip::text(compact_tooltip));
-            if compact_enabled {
-                btn = btn.on_click(cx.listener(move |this, _, _, cx| {
-                    this.start_compact(session_id, cx);
-                }));
-            } else {
-                btn = btn.disabled(true);
-            }
-            btn.into_any_element()
+                .anchor(gpui::Anchor::TopRight)
+                .into_any_element()
         };
 
         // State badge ("Thinking… 3m05s" / "Done in 12s" / "Error: …")
@@ -604,7 +695,7 @@ impl SolutionSessionsNavigator {
                                 .bg(bar_color),
                         ),
                 )
-                .child(div().flex_none().child(compact_button))
+                .child(div().flex_none().child(cleanup_button))
                 .child(
                     Label::new(agent_id)
                         .color(Color::Muted)

@@ -145,7 +145,6 @@ impl SolutionSessionsNavigator {
     ///
     /// No-ops if there's no rendered prompt (template render +
     /// mkdir already toasted the failure) or if the view is gone.
-    #[allow(dead_code)]
     pub(crate) fn start_compact_from_cold(
         &self,
         session_id: crate::model::SolutionSessionId,
