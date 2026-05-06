@@ -220,6 +220,14 @@ pub struct SolutionSessionView {
     /// changes (typically: enqueue / merge / recall).
     pending_markdown: Option<Entity<Markdown>>,
     pending_markdown_source: SharedString,
+    /// Same idea as `pending_markdown` but for the cold-resume ghost
+    /// bubble (the optimistic preview painted while the agent is
+    /// handshaking after Send on a cold tab). Cached separately
+    /// because the source comes from a different field
+    /// (`pending_send`, not `pending_messages`) and the lifetimes
+    /// don't overlap meaningfully.
+    resuming_markdown: Option<Entity<Markdown>>,
+    resuming_markdown_source: SharedString,
     /// `true` while a `resume_session` task is in flight following a
     /// Send on a cold tab. Drives the inline "Starting agent…"
     /// indicator on the compose row and disables further Send actions.
@@ -377,6 +385,8 @@ impl SolutionSessionView {
             recalled_bundle: None,
             pending_markdown: None,
             pending_markdown_source: SharedString::default(),
+            resuming_markdown: None,
+            resuming_markdown_source: SharedString::default(),
             expanded_queue_markers: HashSet::new(),
         };
         // Detect any thread that is already attached at construction
@@ -597,6 +607,48 @@ impl SolutionSessionView {
             cx.new(|cx| Markdown::new(source.clone(), language_registry, None, cx));
         self.pending_markdown = Some(entity);
         self.pending_markdown_source = source;
+    }
+
+    /// Mirror of `ensure_pending_markdown` for the cold-resume optimistic
+    /// bubble. Source comes from `pending_send` (not `pending_messages`),
+    /// rendered through `pending_blocks_preview` + `clean_user_message_text`
+    /// so `[image #N]` placeholders get rewritten to clickable
+    /// `spk-image://` markdown links during the 3-4 s handshake window.
+    /// Cleared when the queue is empty / not resuming so a stale entity
+    /// doesn't survive a cold→live transition (the live thread takes
+    /// over rendering at that point).
+    fn ensure_resuming_markdown(&mut self, cx: &mut Context<Self>) {
+        if !self.resuming {
+            self.resuming_markdown = None;
+            self.resuming_markdown_source = SharedString::default();
+            return;
+        }
+        let Some(blocks) = self.pending_send.as_ref() else {
+            self.resuming_markdown = None;
+            self.resuming_markdown_source = SharedString::default();
+            return;
+        };
+        let raw = crate::conversation_render::pending_blocks_preview(blocks, cx);
+        let prepared = crate::conversation_render::clean_user_message_text(&raw);
+        let source = SharedString::from(prepared);
+        if source.is_empty() {
+            self.resuming_markdown = None;
+            self.resuming_markdown_source = SharedString::default();
+            return;
+        }
+        if self.resuming_markdown_source == source && self.resuming_markdown.is_some() {
+            return;
+        }
+        let language_registry = self
+            .session
+            .read(cx)
+            .acp_thread
+            .as_ref()
+            .map(|thread| thread.read(cx).project().read(cx).languages().clone());
+        let entity =
+            cx.new(|cx| Markdown::new(source.clone(), language_registry, None, cx));
+        self.resuming_markdown = Some(entity);
+        self.resuming_markdown_source = source;
     }
 
     fn ensure_markdown(
@@ -1681,6 +1733,11 @@ impl Render for SolutionSessionView {
         // static draft. The helper short-circuits when the source
         // hasn't changed since the previous render.
         self.ensure_pending_markdown(cx);
+        // Same caching for the optimistic resume bubble — without
+        // it the bubble paints empty because each frame mints a
+        // fresh `Markdown::new` whose async parser never resolves
+        // before the next render replaces it.
+        self.ensure_resuming_markdown(cx);
 
         // Override inline-code color to a muted text-accent. Pure
         // text_accent is too saturated for prose — it stings on long
