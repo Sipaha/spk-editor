@@ -5345,8 +5345,21 @@ impl ProjectPanel {
             None
         };
 
+        // Fork-local tweak: upstream gates the focused border on
+        // `!self.mouse_down` to avoid a brief border-flash on the
+        // newly-clicked entry when preview tabs are disabled (PR
+        // #20417 — opening the file moves focus to the editor and
+        // the border was showing for one frame on the new entry
+        // before vanishing). With preview tabs enabled (the default
+        // here), the panel keeps focus through the click, so the
+        // suppression instead removes the active entry's border for
+        // the duration the LMB is held — visible flicker on every
+        // click and a particularly jarring on/off/on/off on
+        // double-click. Drop the `!self.mouse_down` guard; the
+        // remaining `contains_focused` check still hides the border
+        // automatically when the click does steal focus.
         let border_color =
-            if !self.mouse_down && is_active && self.focus_handle.contains_focused(window, cx) {
+            if is_active && self.focus_handle.contains_focused(window, cx) {
                 match validation_color_and_message {
                     Some((color, _)) => color,
                     None => item_colors.focused,
@@ -5356,7 +5369,7 @@ impl ProjectPanel {
             };
 
         let border_hover_color =
-            if !self.mouse_down && is_active && self.focus_handle.contains_focused(window, cx) {
+            if is_active && self.focus_handle.contains_focused(window, cx) {
                 match validation_color_and_message {
                     Some((color, _)) => color,
                     None => item_colors.focused,
