@@ -74,8 +74,21 @@ impl Global for GlobalSolutionAgentStore {}
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct PersistedSession {
     pub title: String,
+    /// Structured per-entry record used by the navigator's cold-tab
+    /// renderer to display the dialog without spawning the agent. New
+    /// builds always populate this; blobs written by older builds
+    /// decode with `entries: vec![]` and the cold-renderer falls back
+    /// to flat-rendering `entry_summaries`.
+    #[serde(default)]
+    pub entries: Vec<PersistedEntry>,
+    /// Legacy flat markdown summaries — one string per thread entry.
+    /// Kept populated alongside `entries` for backwards compat with the
+    /// `solution_agent.read_session_history` MCP tool, which slices
+    /// this list directly.
     pub entry_summaries: Vec<String>,
 }
+
+pub use crate::model::{PersistedEntry, PersistedRole};
 
 /// First user prompt, normalised to a single line and truncated, for the
 /// History popover label. Returns `None` if the thread has no user message
@@ -187,7 +200,7 @@ fn unique_session_title(
 }
 
 fn serializable_snapshot(session: &SolutionSession, cx: &App) -> Vec<u8> {
-    let entry_summaries = session
+    let entries = session
         .acp_thread
         .as_ref()
         .map(|thread| {
@@ -195,15 +208,29 @@ fn serializable_snapshot(session: &SolutionSession, cx: &App) -> Vec<u8> {
                 .read(cx)
                 .entries()
                 .iter()
-                .map(|entry| entry.to_markdown(cx))
+                .map(|entry| PersistedEntry {
+                    role: persisted_role_for(entry),
+                    markdown: entry.to_markdown(cx),
+                })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let entry_summaries = entries.iter().map(|e| e.markdown.clone()).collect();
     let snapshot = PersistedSession {
         title: session.title.to_string(),
+        entries,
         entry_summaries,
     };
     serde_json::to_vec(&snapshot).unwrap_or_default()
+}
+
+fn persisted_role_for(entry: &acp_thread::AgentThreadEntry) -> PersistedRole {
+    match entry {
+        acp_thread::AgentThreadEntry::UserMessage(_) => PersistedRole::User,
+        acp_thread::AgentThreadEntry::AssistantMessage(_) => PersistedRole::Assistant,
+        acp_thread::AgentThreadEntry::ToolCall(_) => PersistedRole::Tool,
+        acp_thread::AgentThreadEntry::CompletedPlan(_) => PersistedRole::Plan,
+    }
 }
 
 impl SolutionAgentStore {
@@ -379,6 +406,7 @@ impl SolutionAgentStore {
                     pending_messages: std::collections::VecDeque::new(),
                     flush_after_cancel: false,
                     cwd: session_cwd.clone(),
+                    cold_entries: Vec::new(),
                 };
                 let entity = cx.new(|_| session);
                 store.sessions.insert(session_id, entity);
@@ -466,7 +494,11 @@ impl SolutionAgentStore {
         project: Entity<project::Project>,
         cx: &mut Context<Self>,
     ) -> Task<Result<SolutionSessionId>> {
-        // Already hot? Return the existing session id directly.
+        // Already hot (`acp_thread` attached)? Return the existing
+        // session id directly. A cold session — registered by
+        // `restore_open_tabs` with `acp_thread: None` — falls through
+        // and triggers the real spawn path so the user's pending Send
+        // makes it to a live agent.
         if let Some(existing) = self
             .by_solution
             .get(&meta.solution_id)
@@ -475,7 +507,10 @@ impl SolutionAgentStore {
             .find(|sid| {
                 self.sessions
                     .get(sid)
-                    .map(|s| s.read(cx).acp_session_id == meta.acp_session_id)
+                    .map(|s| {
+                        let s = s.read(cx);
+                        s.acp_session_id == meta.acp_session_id && s.acp_thread.is_some()
+                    })
                     .unwrap_or(false)
             })
             .cloned()
@@ -559,27 +594,51 @@ impl SolutionAgentStore {
                 // History popover (each restart added another "Session
                 // <new-uuid>" pointing at the same `acp_session_id`).
                 let session_id = meta.id;
-                let session = SolutionSession {
-                    id: session_id,
-                    solution_id: meta.solution_id.clone(),
-                    agent_id: meta.agent_id.clone(),
-                    acp_session_id: acp_thread.read(cx).session_id().clone(),
-                    acp_thread: Some(acp_thread.clone()),
-                    title: meta.title.clone(),
-                    created_at: meta.created_at,
-                    last_activity_at: Utc::now(),
-                    state: SessionState::Idle,
-                    context_count: meta.context_count,
-                    project: Some(project.clone()),
-                    _acp_subscription: None,
-                    pending_messages: std::collections::VecDeque::new(),
-                    flush_after_cancel: false,
-                    // Persist the same cwd we resumed against so the next
-                    // restart finds the row aligned with the agent state.
-                    cwd: resume_cwd.clone(),
-                };
-                let entity = cx.new(|_| session);
-                store.sessions.insert(session_id, entity);
+                let new_thread_session_id = acp_thread.read(cx).session_id().clone();
+                if let Some(existing) = store.sessions.get(&session_id).cloned() {
+                    // Cold-session path: this id was hydrated by
+                    // `restore_open_tabs` with `acp_thread: None` and
+                    // populated `cold_entries`. Update the existing
+                    // `Entity` in place instead of replacing it — the
+                    // navigator's `SolutionSessionView` already holds
+                    // this handle, so a swap would leave the UI bound
+                    // to a stale entity.
+                    existing.update(cx, |session, _| {
+                        session.acp_session_id = new_thread_session_id;
+                        session.acp_thread = Some(acp_thread.clone());
+                        session.last_activity_at = Utc::now();
+                        session.state = SessionState::Idle;
+                        session.context_count = meta.context_count;
+                        session.project = Some(project.clone());
+                        session.pending_messages.clear();
+                        session.flush_after_cancel = false;
+                        session.cwd = resume_cwd.clone();
+                        session.cold_entries.clear();
+                    });
+                } else {
+                    let session = SolutionSession {
+                        id: session_id,
+                        solution_id: meta.solution_id.clone(),
+                        agent_id: meta.agent_id.clone(),
+                        acp_session_id: new_thread_session_id,
+                        acp_thread: Some(acp_thread.clone()),
+                        title: meta.title.clone(),
+                        created_at: meta.created_at,
+                        last_activity_at: Utc::now(),
+                        state: SessionState::Idle,
+                        context_count: meta.context_count,
+                        project: Some(project.clone()),
+                        _acp_subscription: None,
+                        pending_messages: std::collections::VecDeque::new(),
+                        flush_after_cancel: false,
+                        // Persist the same cwd we resumed against so the next
+                        // restart finds the row aligned with the agent state.
+                        cwd: resume_cwd.clone(),
+                        cold_entries: Vec::new(),
+                    };
+                    let entity = cx.new(|_| session);
+                    store.sessions.insert(session_id, entity);
+                }
                 let by_sol = store
                     .by_solution
                     .entry(meta.solution_id.clone())
@@ -627,7 +686,6 @@ impl SolutionAgentStore {
         })
     }
 
-
     pub fn sessions_for(&self, solution_id: &SolutionId) -> Vec<Entity<SolutionSession>> {
         self.by_solution
             .get(solution_id)
@@ -666,6 +724,139 @@ impl SolutionAgentStore {
         id
     }
 
+    /// Restore tabs the user had open the last time they closed this
+    /// Solution, **without spawning the agent subprocess**. For each
+    /// session id where `tab_order IS NOT NULL`, hydrate a
+    /// `SolutionSession` with `acp_thread: None` and `cold_entries`
+    /// populated from the persisted JSON blob. The session view will
+    /// render those entries as a read-only conversation; the live
+    /// `AcpThread` is only attached if/when the user submits a new
+    /// message via `resume_session`.
+    ///
+    /// Sessions that already exist in `self.sessions` (created earlier
+    /// in this process — e.g. via MCP from another window) are left
+    /// untouched: they keep their live `acp_thread` and the navigator
+    /// will pick them up via the normal reconcile path.
+    ///
+    /// Returns the ordered ids matching `tab_order ASC`. Caller (the
+    /// navigator) uses that order directly to populate the strip,
+    /// instead of relying on `created_at` sort.
+    pub fn restore_open_tabs(
+        &self,
+        solution_id: SolutionId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Vec<SolutionSessionId>>> {
+        let Some(db) = self.persistence.clone() else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let already_open: std::collections::HashSet<SolutionSessionId> =
+            self.sessions.keys().copied().collect();
+        cx.spawn(async move |this, cx| {
+            let ordered_ids = db.list_open_tabs(solution_id.clone()).await?;
+            if ordered_ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            // Pull metadata for the whole solution once (single query) and
+            // index by id. Cheaper than N round-trips when the user had
+            // five-plus tabs open.
+            let metas = db.list_for_solution(solution_id.clone()).await?;
+            let by_id: std::collections::HashMap<SolutionSessionId, SolutionSessionMetadata> =
+                metas.into_iter().map(|m| (m.id, m)).collect();
+            // Load blobs for all rows we'll hydrate (skip ones already in
+            // the in-memory store — they're already live or being
+            // resumed).
+            let mut blobs: std::collections::HashMap<SolutionSessionId, Vec<u8>> =
+                std::collections::HashMap::new();
+            for id in &ordered_ids {
+                if already_open.contains(id) {
+                    continue;
+                }
+                let blob = db.load_blob(*id).await?;
+                if let Some(bytes) = blob {
+                    blobs.insert(*id, bytes);
+                }
+            }
+            // Apply on the foreground thread so the cx.new + emit
+            // observe-callbacks all happen in the GPUI scheduler.
+            // Collect the ids that survive into a result vec — orphans
+            // (tab_order pointing at deleted metadata) and
+            // hydration failures must NOT appear in the navigator's
+            // restored strip, so the returned Vec only contains ids
+            // that are now backed by a live `Entity<SolutionSession>`.
+            let result_ids: Vec<SolutionSessionId> = this.update(cx, |this, cx| {
+                let mut hydrated: Vec<SolutionSessionId> = Vec::with_capacity(ordered_ids.len());
+                for id in &ordered_ids {
+                    if this.sessions.contains_key(id) {
+                        hydrated.push(*id);
+                        continue;
+                    }
+                    let Some(meta) = by_id.get(id) else {
+                        // tab_order pointed at a session whose metadata
+                        // was deleted out from under it. Skip — the
+                        // navigator never sees this id in the
+                        // returned slice.
+                        log::warn!("restore_open_tabs: orphaned tab_order for {id}");
+                        continue;
+                    };
+                    let cold_entries = blobs
+                        .remove(id)
+                        .and_then(|bytes| serde_json::from_slice::<PersistedSession>(&bytes).ok())
+                        .map(|persisted| {
+                            if !persisted.entries.is_empty() {
+                                persisted.entries
+                            } else {
+                                // Legacy blob: per-entry role wasn't
+                                // recorded, so we tag every entry as
+                                // `Archived`. Idx-based User/Assistant
+                                // synthesis mis-rolled tool calls in
+                                // mixed conversations — a neutral
+                                // label is less misleading than a
+                                // confidently-wrong one.
+                                persisted
+                                    .entry_summaries
+                                    .into_iter()
+                                    .map(|markdown| PersistedEntry {
+                                        role: PersistedRole::Archived,
+                                        markdown,
+                                    })
+                                    .collect()
+                            }
+                        })
+                        .unwrap_or_default();
+                    let cold_session = SolutionSession {
+                        id: meta.id,
+                        solution_id: meta.solution_id.clone(),
+                        agent_id: meta.agent_id.clone(),
+                        acp_session_id: meta.acp_session_id.clone(),
+                        acp_thread: None,
+                        title: meta.title.clone(),
+                        created_at: meta.created_at,
+                        last_activity_at: meta.last_activity_at,
+                        state: SessionState::Idle,
+                        context_count: meta.context_count,
+                        project: None,
+                        _acp_subscription: None,
+                        pending_messages: std::collections::VecDeque::new(),
+                        flush_after_cancel: false,
+                        cwd: meta.cwd.clone(),
+                        cold_entries,
+                    };
+                    let entity = cx.new(|_| cold_session);
+                    this.sessions.insert(meta.id, entity);
+                    this.by_solution
+                        .entry(solution_id.clone())
+                        .or_default()
+                        .push(meta.id);
+                    cx.emit(SolutionAgentStoreEvent::SessionCreated(meta.id));
+                    hydrated.push(meta.id);
+                }
+                cx.notify();
+                hydrated
+            })?;
+            Ok(result_ids)
+        })
+    }
+
     pub fn close_session(&mut self, id: SolutionSessionId, cx: &mut Context<Self>) -> Result<()> {
         let removed = self
             .sessions
@@ -687,7 +878,6 @@ impl SolutionAgentStore {
         cx.notify();
         Ok(())
     }
-
 
     /// Update the user-visible title of a session and persist the change
     /// (best-effort). Emits `SessionTitleChanged` so the navigator
@@ -945,13 +1135,34 @@ impl SolutionAgentStore {
         })
     }
 
-
     /// Returns a clone of the persistence handle if one was configured
     /// (i.e. the editor is running with a real on-disk DB, not the test
     /// in-memory mode). Used by MCP tools that need to read archived
     /// session blobs without re-hydrating the full session.
     pub fn persistence(&self) -> Option<Arc<crate::db::SolutionAgentDb>> {
         self.persistence.clone()
+    }
+
+    /// Persists the tab strip's open-session order for `solution_id`.
+    /// Sessions in `ordered_ids` get `tab_order = 0..N`; everything else
+    /// for the solution is set to `tab_order = NULL`. Called from the
+    /// navigator on reorder, open, and close so the strip survives an
+    /// editor restart.
+    pub fn persist_tab_order(
+        &self,
+        solution_id: SolutionId,
+        ordered_ids: Vec<SolutionSessionId>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(db) = self.persistence.clone() else {
+            return;
+        };
+        cx.background_spawn(async move {
+            db.update_tab_orders(solution_id, ordered_ids)
+                .await
+                .log_err();
+        })
+        .detach();
     }
 
     /// Schedule a debounce-friendly write of the session's serialised snapshot
@@ -977,7 +1188,6 @@ impl SolutionAgentStore {
         })
         .detach();
     }
-
 
     /// Subscribe to a session's `AcpThread` event stream so that ACP-level
     /// state changes (turn completion, tool authorization, errors, etc.)
@@ -1206,7 +1416,6 @@ impl SolutionAgentStore {
             });
         }
     }
-
 
     fn on_solution_event(
         &mut self,

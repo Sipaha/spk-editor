@@ -44,6 +44,38 @@ struct PendingCreation {
     icon: IconName,
 }
 
+/// Drag-source payload for tab reordering inside the strip. Carries the
+/// origin index so the drop handler can call `apply_reorder` directly,
+/// and the title for the ghost preview that follows the cursor.
+#[derive(Clone)]
+struct DraggedSolutionTab {
+    from_index: usize,
+    title: SharedString,
+}
+
+impl Render for DraggedSolutionTab {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Compact ghost preview matching the inactive tab visuals so the
+        // dragged thing reads as "this tab being moved" — same recipe
+        // upstream uses for `impl Render for DraggedTab`.
+        div()
+            .flex()
+            .items_center()
+            .px_2()
+            .h_8()
+            .min_w(px(120.0))
+            .max_w(px(220.0))
+            .bg(cx.theme().colors().tab_inactive_background)
+            .border_1()
+            .border_color(cx.theme().colors().border_variant)
+            .child(
+                Label::new(self.title.clone())
+                    .size(LabelSize::Default)
+                    .truncate(),
+            )
+    }
+}
+
 /// Visual state shown next to a session tab title. Drives both the colour
 /// of the dot and whether it pulses, so glance-reading the tab strip
 /// answers "which sessions need me / are still working / are stuck."
@@ -156,6 +188,23 @@ pub struct SolutionSessionsNavigator {
     /// the spawn so the status row doesn't fire a fresh request every
     /// time the agent emits a token-update event.
     pub(crate) pending_model_fetches: HashSet<crate::model::SolutionSessionId>,
+    /// 1-second tick that re-renders the status row so the
+    /// "Thinking… Ns" elapsed counter advances even when no
+    /// AcpThreadEvents fire (long pauses between tool calls etc.).
+    /// Kicked off by `render_status_row` when it observes the active
+    /// session in `Running` state; dropped (and so cancelled) when the
+    /// next render observes the session is no longer running.
+    pub(crate) thinking_tick: Option<gpui::Task<()>>,
+    /// In-flight `restore_open_tabs` task for the current solution. Held
+    /// so we can ignore reconcile-from-store while restoration is mid-
+    /// flight (otherwise the cold-session inserts the restore task
+    /// performs would reach `reconcile_open_sessions_with_store`
+    /// out-of-order — the cold sessions get a `created_at` from their
+    /// DB metadata, which doesn't necessarily match `tab_order` so the
+    /// strip would land in `created_at` order instead of the user's
+    /// preserved drag-drop order). Cleared by the task itself when it
+    /// finishes applying the ordered ids.
+    pending_restore: Option<gpui::Task<()>>,
     _store_subscription: Subscription,
     _solutions_subscription: Option<Subscription>,
 }
@@ -208,6 +257,8 @@ impl SolutionSessionsNavigator {
             tab_context_menu: None,
             cached_models: HashMap::default(),
             pending_model_fetches: HashSet::default(),
+            thinking_tick: None,
+            pending_restore: None,
             _store_subscription: store_subscription,
             _solutions_subscription: solutions_subscription,
         };
@@ -218,7 +269,7 @@ impl SolutionSessionsNavigator {
     pub fn refresh_active_solution(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let new_id = self.derive_active_solution(cx);
         if new_id != self.active_solution {
-            self.active_solution = new_id;
+            self.active_solution = new_id.clone();
             // Different solution → wipe panel-local tabs. Sessions themselves
             // stay alive in the store so they reappear when the user comes
             // back to that solution. Drop any in-flight pending creations
@@ -228,6 +279,13 @@ impl SolutionSessionsNavigator {
             self.views.clear();
             self.pending.clear();
             self.historic_sessions.clear();
+            // Cancel any restore that was running for the previous
+            // solution — its update closure would no-op via the
+            // active_solution guard, but dropping the task is cheaper.
+            self.pending_restore = None;
+            if let Some(sid) = new_id {
+                self.kick_off_restore(sid, window, cx);
+            }
             cx.notify();
         }
         // Always refresh DB metadata when called — sessions get persisted
@@ -237,8 +295,82 @@ impl SolutionSessionsNavigator {
         // Repopulate panel tabs from the store so the dock-panel "✨N"
         // badge stays in sync with the visible tab strip across solution
         // switches and after sessions land in the store via other code
-        // paths (MCP, cross-window create).
-        self.reconcile_open_sessions_with_store(window, cx);
+        // paths (MCP, cross-window create). Skipped while a restore is
+        // mid-flight: the restore task is the source of truth for the
+        // initial strip ordering, and reconcile would otherwise insert
+        // the cold sessions in `created_at` order.
+        if self.pending_restore.is_none() {
+            self.reconcile_open_sessions_with_store(window, cx);
+        }
+    }
+
+    fn kick_off_restore(
+        &mut self,
+        solution_id: SolutionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let store = SolutionAgentStore::global(cx);
+        let task = store.update(cx, |store, cx| {
+            store.restore_open_tabs(solution_id.clone(), cx)
+        });
+        let restore_task = cx.spawn_in(window, async move |this, cx| {
+            let ordered_ids = match task.await {
+                Ok(ids) => ids,
+                Err(err) => {
+                    log::warn!("restore_open_tabs failed for {solution_id:?}: {err:?}");
+                    let _ = this.update(cx, |this, _| this.pending_restore = None);
+                    return;
+                }
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.active_solution.as_ref() != Some(&solution_id) {
+                    this.pending_restore = None;
+                    return;
+                }
+                let store = SolutionAgentStore::global(cx);
+                for id in &ordered_ids {
+                    if this.open_sessions.contains(id) {
+                        continue;
+                    }
+                    let Some(session) = store.read(cx).session(*id) else {
+                        continue;
+                    };
+                    this.open_session(*id, session, window, cx);
+                }
+                // Pick the most recently active restored tab as
+                // selected — matches the user's mental model of
+                // "where was I." Falls through to whatever
+                // open_session set if there are no restored tabs.
+                if !ordered_ids.is_empty() {
+                    let restored: HashSet<crate::model::SolutionSessionId> =
+                        ordered_ids.iter().copied().collect();
+                    let mut best: Option<(usize, chrono::DateTime<chrono::Utc>)> = None;
+                    for (idx, id) in this.open_sessions.iter().enumerate() {
+                        if !restored.contains(id) {
+                            continue;
+                        }
+                        if let Some(session) = store.read(cx).session(*id) {
+                            let activity = session.read(cx).last_activity_at;
+                            if best.map(|(_, ts)| activity > ts).unwrap_or(true) {
+                                best = Some((idx, activity));
+                            }
+                        }
+                    }
+                    if let Some((idx, _)) = best {
+                        this.selected_index = Some(idx);
+                    }
+                }
+                this.pending_restore = None;
+                // Now that the restore-supplied ordering is in place,
+                // pick up any extra sessions that landed in the store
+                // mid-restore (e.g. MCP create_session in another
+                // window). They append after the restored block.
+                this.reconcile_open_sessions_with_store(window, cx);
+                cx.notify();
+            });
+        });
+        self.pending_restore = Some(restore_task);
     }
 
     /// Walk the store's live sessions for `active_solution` and add any
@@ -341,7 +473,21 @@ impl SolutionSessionsNavigator {
         self.open_sessions.push(session_id);
         self.selected_index = Some(self.open_sessions.len() - 1);
         self.views.insert(session_id, view);
+        self.persist_open_sessions(cx);
         cx.notify();
+    }
+
+    /// Move tab `from` to position `to` in the strip. Used by the
+    /// drag-drop handler in `render_tab_strip`. Index arithmetic and
+    /// `selected_index` adjustment live in the pure `apply_reorder`
+    /// helper so the math is unit-testable without GPUI.
+    fn reorder_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        let before = self.open_sessions.clone();
+        apply_reorder(&mut self.open_sessions, &mut self.selected_index, from, to);
+        if self.open_sessions != before {
+            self.persist_open_sessions(cx);
+            cx.notify();
+        }
     }
 
     fn close_tab(&mut self, idx: usize, cx: &mut Context<Self>) {
@@ -371,7 +517,33 @@ impl SolutionSessionsNavigator {
                 log::warn!("close_tab: store.close_session({session_id}) failed: {err:?}");
             }
         });
+        self.persist_open_sessions(cx);
         cx.notify();
+    }
+
+    /// Push the current `open_sessions` order to the store so it's
+    /// written to `solution_sessions.tab_order`. No-op when no solution
+    /// is active. Sessions removed from the strip (closed) become
+    /// `tab_order = NULL` on the next call, since `update_tab_orders`
+    /// clears anything not in the slice.
+    ///
+    /// Suppressed while a restore is in flight: `kick_off_restore`
+    /// calls `open_session` once per restored id and we'd otherwise
+    /// fire N redundant `update_tab_orders` writes whose final state
+    /// is the order we just read FROM the DB. The single post-restore
+    /// `reconcile_open_sessions_with_store` is enough to capture any
+    /// ordering changes from sessions that landed mid-restore.
+    fn persist_open_sessions(&self, cx: &mut Context<Self>) {
+        if self.pending_restore.is_some() {
+            return;
+        }
+        let Some(solution_id) = self.active_solution.clone() else {
+            return;
+        };
+        let order = self.open_sessions.clone();
+        SolutionAgentStore::global(cx).update(cx, |store, cx| {
+            store.persist_tab_order(solution_id, order, cx);
+        });
     }
 
     /// Open the rename popup for `id`. Pre-fills the input with the
@@ -792,6 +964,10 @@ impl SolutionSessionsNavigator {
             // caps very long titles so they don't push the rest of the
             // strip off-screen; the label inside truncates with an
             // ellipsis past that point.
+            let drag_payload = DraggedSolutionTab {
+                from_index: idx,
+                title: title.clone(),
+            };
             let tab = div()
                 .id(SharedString::from(format!("tab-{}", session_id_for_select)))
                 .flex()
@@ -822,6 +998,17 @@ impl SolutionSessionsNavigator {
                     MouseButton::Right,
                     cx.listener(move |this, ev: &gpui::MouseDownEvent, window, cx| {
                         this.deploy_tab_context_menu(idx, ev.position, window, cx);
+                    }),
+                )
+                .on_drag(drag_payload, |payload, _, _, cx| {
+                    cx.new(|_| payload.clone())
+                })
+                .drag_over::<DraggedSolutionTab>(|tab, _, _, cx| {
+                    tab.bg(cx.theme().colors().drop_target_background)
+                })
+                .on_drop(
+                    cx.listener(move |this, dragged: &DraggedSolutionTab, _, cx| {
+                        this.reorder_tab(dragged.from_index, idx, cx);
                     }),
                 );
             strip = strip.child(tab);
@@ -1058,5 +1245,115 @@ impl Panel for SolutionSessionsNavigator {
 
     fn activation_priority(&self) -> u32 {
         30
+    }
+}
+
+/// Pure helper for `reorder_tab`. Moves `sessions[from]` to position `to`
+/// and adjusts `selected` so it keeps pointing at the same session. Both
+/// indices are interpreted against the original `sessions` (pre-removal)
+/// — see the design spec for the index-arithmetic derivation.
+fn apply_reorder(
+    sessions: &mut Vec<crate::model::SolutionSessionId>,
+    selected: &mut Option<usize>,
+    from: usize,
+    to: usize,
+) {
+    let len = sessions.len();
+    if from >= len || to >= len || from == to {
+        return;
+    }
+    let id = sessions.remove(from);
+    sessions.insert(to, id);
+    if let Some(idx) = selected.as_mut() {
+        if *idx == from {
+            *idx = to;
+        } else if from < *idx && *idx <= to {
+            *idx -= 1;
+        } else if to <= *idx && *idx < from {
+            *idx += 1;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::SolutionSessionId;
+
+    fn ids(n: usize) -> Vec<SolutionSessionId> {
+        (0..n).map(|_| SolutionSessionId::new()).collect()
+    }
+
+    #[test]
+    fn reorder_forward_moves_selection_with_dragged_tab() {
+        let mut sessions = ids(4);
+        let original = sessions.clone();
+        let mut selected = Some(0);
+        apply_reorder(&mut sessions, &mut selected, 0, 2);
+        assert_eq!(
+            sessions,
+            vec![original[1], original[2], original[0], original[3]]
+        );
+        assert_eq!(selected, Some(2));
+    }
+
+    #[test]
+    fn reorder_backward_moves_selection_with_dragged_tab() {
+        let mut sessions = ids(4);
+        let original = sessions.clone();
+        let mut selected = Some(3);
+        apply_reorder(&mut sessions, &mut selected, 3, 1);
+        assert_eq!(
+            sessions,
+            vec![original[0], original[3], original[1], original[2]]
+        );
+        assert_eq!(selected, Some(1));
+    }
+
+    #[test]
+    fn reorder_forward_across_selection_shifts_selected_left() {
+        let mut sessions = ids(4);
+        let original = sessions.clone();
+        let mut selected = Some(2);
+        apply_reorder(&mut sessions, &mut selected, 0, 3);
+        assert_eq!(
+            sessions,
+            vec![original[1], original[2], original[3], original[0]]
+        );
+        assert_eq!(selected, Some(1));
+    }
+
+    #[test]
+    fn reorder_backward_across_selection_shifts_selected_right() {
+        let mut sessions = ids(4);
+        let original = sessions.clone();
+        let mut selected = Some(1);
+        apply_reorder(&mut sessions, &mut selected, 3, 0);
+        assert_eq!(
+            sessions,
+            vec![original[3], original[0], original[1], original[2]]
+        );
+        assert_eq!(selected, Some(2));
+    }
+
+    #[test]
+    fn reorder_no_op_when_from_equals_to() {
+        let mut sessions = ids(3);
+        let original = sessions.clone();
+        let mut selected = Some(1);
+        apply_reorder(&mut sessions, &mut selected, 1, 1);
+        assert_eq!(sessions, original);
+        assert_eq!(selected, Some(1));
+    }
+
+    #[test]
+    fn reorder_out_of_bounds_is_no_op() {
+        let mut sessions = ids(2);
+        let original = sessions.clone();
+        let mut selected = Some(0);
+        apply_reorder(&mut sessions, &mut selected, 5, 0);
+        apply_reorder(&mut sessions, &mut selected, 0, 5);
+        assert_eq!(sessions, original);
+        assert_eq!(selected, Some(0));
     }
 }

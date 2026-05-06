@@ -57,20 +57,26 @@ impl SolutionSessionView {
         let mut section = v_flex().w_full().px_1().child(
             h_flex()
                 .id("solution-session-queue-header")
-                .gap_1()
-                .px_1()
-                .py_0p5()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .rounded_sm()
                 .cursor_pointer()
+                .hover(|this| this.bg(cx.theme().colors().element_hover))
                 .child(
                     Icon::new(chevron)
-                        .size(IconSize::XSmall)
-                        .color(Color::Muted),
+                        .size(IconSize::Small)
+                        .color(Color::Default),
+                )
+                .child(
+                    Icon::new(IconName::CountdownTimer)
+                        .size(IconSize::Small)
+                        .color(Color::Accent),
                 )
                 .child(
                     Label::new(header_label)
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted)
-                        .italic(),
+                        .size(LabelSize::Default)
+                        .color(Color::Default),
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.queue_collapsed = !this.queue_collapsed;

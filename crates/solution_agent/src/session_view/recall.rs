@@ -97,12 +97,7 @@ impl SolutionSessionView {
         // rejects empty submissions). Keeping the queue intact instead
         // of silently draining it is the safer default if that
         // invariant ever breaks.
-        let peeked = self
-            .session
-            .read(cx)
-            .pending_messages
-            .back()
-            .cloned();
+        let peeked = self.session.read(cx).pending_messages.back().cloned();
         let Some(bundle) = peeked else {
             return;
         };

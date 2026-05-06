@@ -5,23 +5,24 @@ use acp_thread::{AgentThreadEntry, ToolCallContent, UserMessageId};
 use agent_client_protocol::schema as acp;
 use base64::Engine;
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, ClipboardEntry, Context, DragMoveEvent, ElementId,
-    Empty, Entity, EntityId, EventEmitter, ExternalPaths, FocusHandle, Focusable, FollowMode,
-    InteractiveElement as _, IntoElement, ListAlignment, ListSizingBehavior, ListState,
-    MouseButton, MouseDownEvent, ParentElement, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Subscription, WeakEntity, Window, div, list,
-    pulsating_between, px,
+    AnyElement, App, ClipboardEntry, Context, DragMoveEvent, Empty, Entity, EntityId, EventEmitter,
+    ExternalPaths, FocusHandle, Focusable, FollowMode, InteractiveElement as _, IntoElement,
+    ListAlignment, ListSizingBehavior, ListState, MouseButton, MouseDownEvent, ParentElement,
+    Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
+    WeakEntity, Window, div, list, px,
 };
 use markdown::{Markdown, MarkdownFont, MarkdownStyle};
 use ui::prelude::*;
-use ui::{Icon, IconButton, IconName, Label, ScrollAxes, Scrollbars, Tooltip, WithScrollbar};
+use ui::{IconButton, IconName, Label, ScrollAxes, Scrollbars, Tooltip, WithScrollbar};
 use workspace::{
     Workspace,
     notifications::{NotificationId, simple_message_notification::MessageNotification},
 };
 
 use crate::actions::{FindClose, FindInSession, FindNextMatch, FindPreviousMatch, StopResponse};
-use crate::conversation_render::{FindMatch, entry_text_spans, find_all, matches_for_span, render_entry};
+use crate::conversation_render::{
+    FindMatch, entry_text_spans, find_all, matches_for_span, render_entry,
+};
 use crate::expanded_compose::{
     EXPANDED_COMPOSE_DEFAULT_H, EXPANDED_COMPOSE_DEFAULT_W, EXPANDED_COMPOSE_HEIGHT_RATIO,
     ExpandedComposeWindowView,
@@ -167,12 +168,6 @@ pub struct SolutionSessionView {
     /// `session.acp_thread`'s id to decide whether to reinstall the
     /// subscription.
     last_thread_entity_id: Option<EntityId>,
-    /// 1-second tick that re-renders the "Thinking… Ns" badge so the
-    /// elapsed counter advances even when no AcpThreadEvents fire (long
-    /// pauses between tool calls etc.). Spawned on entering `Running`
-    /// and cancelled (dropped) when the badge render observes the
-    /// session is no longer running. `None` when not ticking.
-    thinking_tick: Option<gpui::Task<()>>,
     /// Monotonic counter for `[image #N]` placeholder labels in pasted
     /// images. Increments on every paste and never resets — without it
     /// the third image pasted into a session showed `[image #1]` again
@@ -191,6 +186,27 @@ pub struct SolutionSessionView {
     /// disappears either way, so this state is purely transient and
     /// not worth persisting.
     queue_collapsed: bool,
+    /// Markdown widgets for cold-mode rendering, indexed by
+    /// `cold_entries` position. Lazily filled on first cold-render so
+    /// each `Markdown` entity persists across frames (otherwise a
+    /// fresh entity per frame would never finish parsing on a static
+    /// transcript). Cleared once the session goes live (cold_entries
+    /// is emptied by `resume_session`).
+    cold_markdown: Vec<Entity<Markdown>>,
+    /// Last-seen length of `session.cold_entries`, used to detect
+    /// cache invalidation: if the persisted entry list changes (rare —
+    /// the only writer is `restore_open_tabs` at panel-open time) we
+    /// rebuild the markdown widgets from scratch.
+    cold_markdown_len: usize,
+    /// While `Some`, the user clicked Send while the session was cold;
+    /// these are the ACP content blocks waiting for `resume_session`
+    /// to populate `acp_thread`, at which point the observe callback
+    /// dispatches them and clears this slot.
+    pending_send: Option<Vec<acp::ContentBlock>>,
+    /// `true` while a `resume_session` task is in flight following a
+    /// Send on a cold tab. Drives the inline "Starting agent…"
+    /// indicator on the compose row and disables further Send actions.
+    resuming: bool,
 }
 
 impl SolutionSessionView {
@@ -211,6 +227,11 @@ impl SolutionSessionView {
             // would keep the stale row count. Idempotent — only does work
             // when the entity id flips.
             this.sync_thread_subscription(cx);
+            // Cold-tab → live transition: if the user pressed Send
+            // while the session was cold and the resume task has now
+            // attached an `AcpThread`, dispatch the captured message
+            // and clear the resuming indicator.
+            this.flush_pending_send_if_ready(cx);
             // Thread mutated (new chunk streamed in, tool call appended, etc.).
             // Match indices stored in `find` reference (entry_idx, span_idx,
             // byte range) so a streaming append before/inside an existing
@@ -320,9 +341,12 @@ impl SolutionSessionView {
             assistant_label_for_render: SharedString::from("Assistant"),
             _thread_subscription: None,
             last_thread_entity_id: None,
-            thinking_tick: None,
             image_count_so_far: 0,
             queue_collapsed: true,
+            cold_markdown: Vec::new(),
+            cold_markdown_len: 0,
+            pending_send: None,
+            resuming: false,
         };
         // Detect any thread that is already attached at construction
         // (e.g. after `resume_session`) and wire its lifecycle hooks.
@@ -602,6 +626,116 @@ impl SolutionSessionView {
         find.matches = matches;
     }
 
+    /// Renders the dialog from the persisted DB blob — used for tabs
+    /// the navigator restored at panel-open time without spawning the
+    /// agent subprocess. Each entry is a markdown widget tagged with a
+    /// role-coloured label; the user/assistant/tool styling is a
+    /// degraded subset of the live renderer (no avatars, no inline
+    /// truncation rewind affordance) — the live renderer takes over
+    /// once `resume_session` attaches the `AcpThread`.
+    fn render_cold_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        // Pull everything we need out of cx up front so we don't fight
+        // the borrow checker while building the element tree.
+        let entries: Vec<crate::model::PersistedEntry> = self.session.read(cx).cold_entries.clone();
+        let entries_len = entries.len();
+        // Rebuild the per-entry Markdown cache if the length changed —
+        // `restore_open_tabs` is the only writer in production, so
+        // this is essentially a one-shot population on first render.
+        // Invariant: cold_entries is set once at hydration and only
+        // ever cleared (length → 0) by `resume_session`'s in-place
+        // update. If both pre- and post- lengths are non-zero they
+        // must match — otherwise we'd silently render stale Markdown
+        // widgets against new content.
+        debug_assert!(
+            self.cold_markdown_len == 0
+                || entries_len == 0
+                || entries_len == self.cold_markdown_len,
+            "cold_entries changed without going through length=0",
+        );
+        if entries_len != self.cold_markdown_len {
+            self.cold_markdown.clear();
+            for entry in &entries {
+                let source = SharedString::from(entry.markdown.clone());
+                let md = cx.new(|cx| Markdown::new(source, None, None, cx));
+                self.cold_markdown.push(md);
+            }
+            self.cold_markdown_len = entries_len;
+        }
+        if entries_len == 0 {
+            return div()
+                .px_2()
+                .py_1()
+                .child(
+                    Label::new("(no messages yet — type below to start)")
+                        .size(LabelSize::Default)
+                        .color(Color::Muted),
+                )
+                .into_any_element();
+        }
+        let border_color = cx.theme().colors().border_variant;
+        // Cold mode uses whatever `markdown_style_for_render` was set
+        // up earlier in Render — it's been populated by the live-mode
+        // pre-pass before we get here. If it's somehow None (defensive),
+        // fall back to a fresh default.
+        let style = self.markdown_style_for_render.clone();
+        // No `overflow_y_scroll` here: the parent wrapper already
+        // attaches `Scrollbars::always_visible(...)` against
+        // `self.list_state`. A second scroll layer paints an extra
+        // gutter on cold tabs while the parent's bar is the one that
+        // actually scrolls — drop the inner scroll, let the parent
+        // own the axis.
+        let mut list_div = div()
+            .id("solution-cold-conversation")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .px_2()
+            .py_1();
+        for (idx, entry) in entries.iter().enumerate() {
+            let role_label: &'static str = match entry.role {
+                crate::model::PersistedRole::User => "You",
+                crate::model::PersistedRole::Assistant => "Assistant",
+                crate::model::PersistedRole::Tool => "Tool",
+                crate::model::PersistedRole::Plan => "Plan",
+                crate::model::PersistedRole::Archived => "Archived",
+            };
+            let role_color = match entry.role {
+                crate::model::PersistedRole::User => Color::Accent,
+                crate::model::PersistedRole::Assistant => Color::Default,
+                crate::model::PersistedRole::Tool => Color::Muted,
+                crate::model::PersistedRole::Plan => Color::Muted,
+                crate::model::PersistedRole::Archived => Color::Muted,
+            };
+            let Some(md) = self.cold_markdown.get(idx).cloned() else {
+                continue;
+            };
+            let body_element: AnyElement = if let Some(s) = style.as_ref() {
+                markdown::MarkdownElement::new(md, s.clone()).into_any_element()
+            } else {
+                Empty.into_any_element()
+            };
+            let block = div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    Label::new(role_label)
+                        .size(LabelSize::Small)
+                        .color(role_color),
+                )
+                .child(
+                    div()
+                        .child(body_element)
+                        .px_2()
+                        .py_1()
+                        .border_l_2()
+                        .border_color(border_color),
+                );
+            list_div = list_div.child(block);
+        }
+        list_div.into_any_element()
+    }
+
     /// Floating "Jump to latest" affordance shown in the bottom-right of
     /// the conversation list when the user has scrolled away from the
     /// tail. The virtualized `ListState` exposes `is_following_tail()`
@@ -846,87 +980,6 @@ impl SolutionSessionView {
     /// Inline "Thinking… Ns" badge shown below the conversation list
     /// while the session is `Running`. Pulsing Sparkle icon + elapsed
     /// seconds counter, matching the Claude Code CLI's "Sketching… 6s"
-    /// idiom. Returns `None` for non-running states so the layout slot
-    /// vanishes cleanly.
-    ///
-    /// Side effect: spawns a 1-second tick task on entering `Running`
-    /// (and drops it on leaving) so the elapsed counter advances even
-    /// when the agent isn't streaming events. Without this the counter
-    /// freezes at whatever the last event-driven render captured.
-    fn render_thinking_badge(
-        &mut self,
-        state: &SessionState,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let started_at = match state {
-            SessionState::Running { started_at, .. } => *started_at,
-            _ => {
-                // Drop the tick — no-op if it was already None.
-                self.thinking_tick = None;
-                return None;
-            }
-        };
-        if self.thinking_tick.is_none() {
-            self.thinking_tick = Some(cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_secs(1))
-                        .await;
-                    let still_running = this
-                        .update(cx, |this, cx| {
-                            let running =
-                                matches!(this.session.read(cx).state, SessionState::Running { .. });
-                            if running {
-                                cx.notify();
-                            }
-                            running
-                        })
-                        .ok()
-                        .unwrap_or(false);
-                    if !still_running {
-                        break;
-                    }
-                }
-            }));
-        }
-        let elapsed = started_at.elapsed().as_secs();
-        let label_text = if elapsed >= 1 {
-            format!("Thinking… {elapsed}s")
-        } else {
-            "Thinking…".to_string()
-        };
-        let icon = div()
-            .flex_none()
-            .child(
-                Icon::new(IconName::Sparkle)
-                    .size(IconSize::Small)
-                    .color(Color::Accent),
-            )
-            .with_animation(
-                ElementId::Name("solution-thinking-icon-pulse".into()),
-                Animation::new(std::time::Duration::from_secs(1))
-                    .repeat()
-                    .with_easing(pulsating_between(0.4, 1.0)),
-                |element: gpui::Div, delta| element.opacity(delta),
-            )
-            .into_any_element();
-        Some(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .px_3()
-                .py_1p5()
-                .child(icon)
-                .child(
-                    Label::new(label_text)
-                        .color(Color::Muted)
-                        .size(LabelSize::Small),
-                )
-                .into_any_element(),
-        )
-    }
-
     /// Cancel the in-flight agent turn for this session. Wired to the
     /// Stop button that swaps in for "Send" while `state == Running`,
     /// and to Esc via the action handler in this view.
@@ -955,6 +1008,41 @@ impl SolutionSessionView {
     fn submit_compose_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let content = self.compose_editor.read(cx).text(cx);
         if content.trim().is_empty() && self.pending_images.is_empty() {
+            return;
+        }
+        if self.resuming {
+            // Already waiting for `resume_session` to attach the agent
+            // — ignore extra Send presses so we don't fire multiple
+            // resume tasks for the same cold session.
+            return;
+        }
+        if self.session.read(cx).is_cold() {
+            // Cold tab: defer the actual send until the agent
+            // subprocess is running. Pre-flight slash-command
+            // validation here too so a typo is caught before the
+            // 3-4s resume wait.
+            if let Some(rejection) = self.validate_slash_command(&content, cx) {
+                self.show_toast(rejection, cx);
+                return;
+            }
+            let mut blocks: Vec<acp::ContentBlock> = Vec::new();
+            if !content.trim().is_empty() {
+                blocks.push(acp::ContentBlock::Text(acp::TextContent::new(content)));
+            }
+            for image in std::mem::take(&mut self.pending_images) {
+                blocks.push(acp::ContentBlock::Image(acp::ImageContent::new(
+                    image.data_base64,
+                    image.mime_type,
+                )));
+            }
+            if blocks.is_empty() {
+                return;
+            }
+            self.compose_editor.update(cx, |e, cx| e.clear(window, cx));
+            self.pending_send = Some(blocks);
+            self.resuming = true;
+            self.start_resume(cx);
+            cx.notify();
             return;
         }
         // Pre-flight slash-command validation so a typo'd `/clearr` doesn't
@@ -1014,6 +1102,102 @@ impl SolutionSessionView {
                 .send_message_blocks(session_id, blocks, cx)
                 .detach_and_log_err(cx);
         });
+    }
+
+    /// Kick off `SolutionAgentStore::resume_session` for a cold tab the
+    /// user just hit Send on. The captured ACP blocks live in
+    /// `pending_send` and get dispatched by `flush_pending_send_if_ready`
+    /// when the session entity gains an `acp_thread`. On resume failure
+    /// this clears `resuming` and surfaces a toast — the message is
+    /// dropped (the user can retype; a more elaborate "restore draft"
+    /// flow is out of scope for v1).
+    fn start_resume(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            self.resuming = false;
+            self.pending_send = None;
+            return;
+        };
+        let project = workspace.read(cx).project().clone();
+        let session = self.session.read(cx);
+        let meta = crate::model::SolutionSessionMetadata {
+            id: session.id,
+            solution_id: session.solution_id.clone(),
+            agent_id: session.agent_id.clone(),
+            acp_session_id: session.acp_session_id.clone(),
+            title: session.title.clone(),
+            created_at: session.created_at,
+            last_activity_at: session.last_activity_at,
+            preview: None,
+            total_tokens: None,
+            context_count: session.context_count,
+            cwd: session.cwd.clone(),
+        };
+        let store = SolutionAgentStore::global(cx);
+        let task = store.update(cx, |store, cx| store.resume_session(meta, project, cx));
+        let session_id = self.session_id;
+        cx.spawn(async move |this, cx| {
+            let resume_result = task.await;
+            // Detect "view dropped while we were waiting for the
+            // ACP handshake" — i.e. the user clicked Close on the
+            // cold tab during the 3-4s resume. `resume_session` will
+            // have happily resurrected the session into the store
+            // (the cold-existence check passes by the time it ran),
+            // leaving a phantom subprocess with no UI driving it.
+            // Close it back out so we don't leak the agent.
+            if this.update(cx, |_, _| ()).is_err() {
+                let _ = cx.update(|cx| {
+                    if let Some(global) = SolutionAgentStore::try_global(cx) {
+                        global.update(cx, |store, cx| {
+                            if let Err(err) = store.close_session(session_id, cx) {
+                                log::debug!(
+                                    "post-resume cleanup of orphaned session {session_id} failed: {err:#}"
+                                );
+                            }
+                        });
+                    }
+                });
+                return;
+            }
+            if let Err(err) = resume_result {
+                let _ = this.update(cx, |this, cx| {
+                    this.resuming = false;
+                    this.pending_send = None;
+                    this.show_toast(
+                        SharedString::from(format!("Failed to resume session: {err:#}")),
+                        cx,
+                    );
+                    cx.notify();
+                });
+            }
+            // On success the `cx.observe(&session)` callback in the
+            // constructor will detect `acp_thread = Some` and call
+            // `flush_pending_send_if_ready`.
+        })
+        .detach();
+    }
+
+    /// Drain `pending_send` once the session has gone live (acp_thread
+    /// attached). Called from the session-observe callback so the
+    /// dispatch happens on the same tick the resume completes.
+    fn flush_pending_send_if_ready(&mut self, cx: &mut Context<Self>) {
+        let Some(blocks) = self.pending_send.take() else {
+            return;
+        };
+        if self.session.read(cx).acp_thread.is_none() {
+            // Resume hasn't attached the thread yet — keep waiting.
+            self.pending_send = Some(blocks);
+            return;
+        }
+        self.resuming = false;
+        let session_id = self.session_id;
+        SolutionAgentStore::global(cx).update(cx, |store, cx| {
+            store
+                .send_message_blocks(session_id, blocks, cx)
+                .detach_and_log_err(cx);
+        });
+        self.list_state.set_follow_mode(FollowMode::Tail);
+        self.list_state.scroll_to_end();
+        cx.notify();
     }
 
     /// Queue whatever is in the compose box (if anything) and then
@@ -1400,6 +1584,16 @@ impl Render for SolutionSessionView {
         // Parked on self so the list processor closure (which must be
         // `'static`) can reach it via `&mut Self`.
         self.assistant_label_for_render = assistant_label;
+        // Pre-build the cold-body element before taking the long-lived
+        // immutable `session` borrow below — `render_cold_body` mutates
+        // `self.cold_markdown` cache, so it needs `&mut Context` and
+        // can't share the read-borrow window.
+        let is_cold_for_body = self.session.read(cx).acp_thread.is_none();
+        let cold_body_prebuilt: Option<AnyElement> = if is_cold_for_body {
+            Some(self.render_cold_body(cx))
+        } else {
+            None
+        };
         let session = self.session.read(cx);
         let pending_image_count = self.pending_images.len();
         div()
@@ -1457,11 +1651,7 @@ impl Render for SolutionSessionView {
                 let has_thread = session.acp_thread.is_some();
 
                 let conversation_body: AnyElement = if !has_thread {
-                    div()
-                        .px_2()
-                        .py_1()
-                        .child(Label::new("(no thread yet)").size(LabelSize::Default))
-                        .into_any_element()
+                    cold_body_prebuilt.unwrap_or_else(|| Empty.into_any_element())
                 } else if entries_count == 0 {
                     div()
                         .px_2()
@@ -1536,17 +1726,11 @@ impl Render for SolutionSessionView {
                 // `.when_some(...)` site below skips the row entirely.
                 let pending_section = self.render_pending_section(cx);
 
-                // "Thinking…" badge — visible while the session is in
-                // `Running` state. Sits below the conversation list so it
-                // appears right under the latest streaming chunk (or
-                // immediately under the user's last message before the
-                // first token arrives). Pulses + shows elapsed seconds
-                // like the Claude Code CLI's "Sketching… 6s" badge.
-                // Clone state out before calling the &mut self method —
-                // otherwise the immutable `session` borrow conflicts
-                // with `&mut cx` inside `render_thinking_badge`.
-                let session_state_for_badge = session.state.clone();
-                let thinking_badge = self.render_thinking_badge(&session_state_for_badge, cx);
+                // The "Thinking… Ns" indicator now lives in the status
+                // row (see `status_row::render_status_row`) so it
+                // doesn't eat vertical space inside the conversation
+                // — long chats with multi-minute turns lost a fat
+                // strip of body real-estate to the badge.
 
                 // No body-wide `right_click_menu` here. Wrapping the
                 // virtualized `list(...)` in a non-flex element (which
@@ -1614,7 +1798,6 @@ impl Render for SolutionSessionView {
                                 this.child(self.render_jump_to_latest(cx))
                             }),
                     )
-                    .when_some(thinking_badge, |this, badge| this.child(badge))
                     .when_some(pending_section, |this, section| this.child(section))
             })
             .child({
@@ -1742,12 +1925,19 @@ impl Render for SolutionSessionView {
                                     SessionState::Running { .. }
                                 );
                                 let pending_count = self.session.read(cx).pending_messages.len();
-                                let send_label: SharedString = if is_working {
+                                let resuming = self.resuming;
+                                let send_label: SharedString = if resuming {
+                                    "Starting…".into()
+                                } else if is_working {
                                     "Queue".into()
                                 } else {
                                     "Send".into()
                                 };
-                                let send_tooltip: SharedString = if is_working {
+                                let send_tooltip: SharedString = if resuming {
+                                    "Spawning the agent — your message will go out as soon as the \
+                                     subprocess finishes its handshake (3-4s)."
+                                        .into()
+                                } else if is_working {
                                     if pending_count > 0 {
                                         format!("Queue follow-up — {pending_count} already waiting")
                                             .into()

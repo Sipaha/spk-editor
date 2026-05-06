@@ -160,6 +160,36 @@ impl std::fmt::Display for SessionState {
 /// one logical conversation share a single `<sid>` directory.
 pub type SessionContextCount = u32;
 
+/// One conversation entry as persisted in the `solution_sessions.acp_thread_blob`
+/// payload. Used by the navigator's cold-tab renderer to display the
+/// dialog before the agent subprocess is spawned (and by MCP tools that
+/// archive transcripts). `markdown` is what `acp_thread::AgentThreadEntry::to_markdown`
+/// produced at save time; `role` is the only extra info the cold
+/// renderer needs to apply user/assistant/tool styling.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct PersistedEntry {
+    pub role: PersistedRole,
+    pub markdown: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PersistedRole {
+    User,
+    Assistant,
+    /// Tool call + result. Rendered as a collapsed block in cold mode.
+    Tool,
+    /// Agent-emitted plan (`AgentThreadEntry::CompletedPlan`). Rendered
+    /// like an assistant message but tagged so future styling tweaks
+    /// can distinguish.
+    Plan,
+    /// Legacy blob entry where the per-entry role wasn't recorded —
+    /// `entry_summaries` is the only data we have, and an idx-based
+    /// User/Assistant guess mis-roles every conversation that includes
+    /// tool calls. The cold renderer paints these as a neutral block
+    /// so a misleading role label doesn't smear across the dialog.
+    Archived,
+}
+
 /// Live, in-memory representation of one Solution-scoped AI session.
 ///
 /// `acp_thread` is `Option` because a `SolutionSession` may exist briefly
@@ -212,6 +242,23 @@ pub struct SolutionSession {
     /// pressed Stop) drops the queue — which is the right default,
     /// but the "Send now" button needs the inverse behaviour.
     pub flush_after_cancel: bool,
+    /// Persisted dialog entries loaded from `solution_sessions.acp_thread_blob`
+    /// at panel-open time. Populated only for sessions restored by
+    /// `SolutionAgentStore::restore_open_tabs` — i.e. tabs whose
+    /// `acp_thread` is `None` because we deferred the agent subprocess
+    /// until the user actually sends a message. The session view renders
+    /// from this list when `acp_thread.is_none()` and switches to the
+    /// live thread once `resume_session` populates `acp_thread`.
+    pub cold_entries: Vec<PersistedEntry>,
+}
+
+impl SolutionSession {
+    /// `true` when this session was restored from the DB but the agent
+    /// subprocess hasn't been spawned yet — so rendering must come
+    /// from `cold_entries` rather than `acp_thread.entries()`.
+    pub fn is_cold(&self) -> bool {
+        self.acp_thread.is_none()
+    }
 }
 
 /// Lightweight metadata row used for navigator listing without hydrating

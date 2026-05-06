@@ -33,6 +33,7 @@ fn close_session_removes_from_indices(cx: &mut TestAppContext) {
                 pending_messages: std::collections::VecDeque::new(),
                 flush_after_cancel: false,
                 cwd: PathBuf::new(),
+                cold_entries: Vec::new(),
             });
             store.sessions.insert(id, entity);
             store
@@ -523,9 +524,7 @@ async fn queued_message_gets_timestamp_marker_on_first_enqueue(cx: &mut TestAppC
             let payload: String = bundle[1..]
                 .iter()
                 .filter_map(|b| match b {
-                    agent_client_protocol::schema::ContentBlock::Text(t) => {
-                        Some(t.text.clone())
-                    }
+                    agent_client_protocol::schema::ContentBlock::Text(t) => Some(t.text.clone()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -572,9 +571,7 @@ async fn queued_message_gets_timestamp_marker_on_first_enqueue(cx: &mut TestAppC
             let payload: String = bundle
                 .iter()
                 .filter_map(|b| match b {
-                    agent_client_protocol::schema::ContentBlock::Text(t) => {
-                        Some(t.text.clone())
-                    }
+                    agent_client_protocol::schema::ContentBlock::Text(t) => Some(t.text.clone()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -739,4 +736,149 @@ async fn late_send_error_is_dropped_when_session_was_reset(cx: &mut TestAppConte
             );
         });
     });
+}
+
+#[gpui::test]
+async fn restore_open_tabs_hydrates_cold_sessions(cx: &mut TestAppContext) {
+    let (solution_id, _tmp, _project) = setup_solution_and_project(cx).await;
+    let registry = Arc::new(AdapterRegistry::new());
+    cx.update(|cx| SolutionAgentStore::init_global(cx, registry));
+
+    let executor = cx.executor();
+    let db = Arc::new(crate::db::SolutionAgentDb::open(executor).expect("open db"));
+    cx.update(|cx| {
+        SolutionAgentStore::global(cx).update(cx, |store, _| {
+            store.set_persistence(db.clone());
+        });
+    });
+
+    let id_a = crate::model::SolutionSessionId::new();
+    let id_b = crate::model::SolutionSessionId::new();
+    let agent_id = SharedString::from("claude-acp");
+    let now = Utc::now();
+
+    let meta_a = crate::model::SolutionSessionMetadata {
+        id: id_a,
+        solution_id: solution_id.clone(),
+        agent_id: agent_id.clone(),
+        acp_session_id: agent_client_protocol::schema::SessionId::new("acp-a"),
+        title: SharedString::from("session A"),
+        created_at: now,
+        last_activity_at: now,
+        preview: None,
+        total_tokens: None,
+        context_count: 1,
+        cwd: PathBuf::new(),
+    };
+    let meta_b = crate::model::SolutionSessionMetadata {
+        id: id_b,
+        acp_session_id: agent_client_protocol::schema::SessionId::new("acp-b"),
+        title: SharedString::from("session B"),
+        ..meta_a.clone()
+    };
+    db.save_metadata(meta_a).await.expect("meta a");
+    db.save_metadata(meta_b).await.expect("meta b");
+
+    let blob_a = serde_json::to_vec(&PersistedSession {
+        title: "session A".into(),
+        entries: vec![PersistedEntry {
+            role: PersistedRole::User,
+            markdown: "first prompt".into(),
+        }],
+        entry_summaries: vec!["first prompt".into()],
+    })
+    .unwrap();
+    db.save_blob(id_a, blob_a).await.expect("blob a");
+
+    db.update_tab_orders(solution_id.clone(), vec![id_b, id_a])
+        .await
+        .expect("tab order");
+
+    let ordered = cx
+        .update(|cx| {
+            SolutionAgentStore::global(cx).update(cx, |store, cx| {
+                store.restore_open_tabs(solution_id.clone(), cx)
+            })
+        })
+        .await
+        .expect("restore");
+    assert_eq!(ordered, vec![id_b, id_a]);
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let sa = store.session(id_a).expect("session A restored");
+            let sb = store.session(id_b).expect("session B restored");
+            sa.read_with(cx, |s, _| {
+                assert!(s.is_cold(), "restored session should be cold");
+                assert_eq!(s.cold_entries.len(), 1);
+                assert!(matches!(s.cold_entries[0].role, PersistedRole::User));
+            });
+            sb.read_with(cx, |s, _| {
+                assert!(s.is_cold());
+                // No blob saved for B → cold_entries empty.
+                assert!(s.cold_entries.is_empty());
+            });
+            // sessions_for is what the navigator's reconcile path
+            // reads; insertion order into `by_solution` must match
+            // the `tab_order ASC` returned by the DB so the strip
+            // ends up identical to what the user closed last time.
+            let listed: Vec<_> = store
+                .sessions_for(&solution_id)
+                .into_iter()
+                .map(|entity| entity.read(cx).id)
+                .collect();
+            assert_eq!(listed, vec![id_b, id_a]);
+        });
+    });
+}
+
+#[test]
+fn persisted_session_roundtrips_with_structured_entries() {
+    let original = PersistedSession {
+        title: "demo".into(),
+        entries: vec![
+            PersistedEntry {
+                role: PersistedRole::User,
+                markdown: "Hello".into(),
+            },
+            PersistedEntry {
+                role: PersistedRole::Assistant,
+                markdown: "Hi there!".into(),
+            },
+            PersistedEntry {
+                role: PersistedRole::Tool,
+                markdown: "ran tool x".into(),
+            },
+        ],
+        entry_summaries: vec!["Hello".into(), "Hi there!".into(), "ran tool x".into()],
+    };
+    let bytes = serde_json::to_vec(&original).unwrap();
+    let decoded: PersistedSession = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(decoded.title, original.title);
+    assert_eq!(decoded.entries.len(), 3);
+    assert!(matches!(decoded.entries[0].role, PersistedRole::User));
+    assert!(matches!(decoded.entries[1].role, PersistedRole::Assistant));
+    assert!(matches!(decoded.entries[2].role, PersistedRole::Tool));
+    assert_eq!(decoded.entries[0].markdown, "Hello");
+    assert_eq!(decoded.entry_summaries.len(), 3);
+}
+
+#[test]
+fn persisted_session_legacy_blob_decodes_with_empty_entries() {
+    let legacy_json = serde_json::json!({
+        "title": "old session",
+        "entry_summaries": ["one", "two"],
+    });
+    let bytes = serde_json::to_vec(&legacy_json).unwrap();
+    let decoded: PersistedSession = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(decoded.title, "old session");
+    assert!(
+        decoded.entries.is_empty(),
+        "legacy blobs have no entries field"
+    );
+    assert_eq!(
+        decoded.entry_summaries,
+        vec!["one".to_string(), "two".to_string()]
+    );
 }

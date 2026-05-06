@@ -1,5 +1,6 @@
 //! Status footer rendered below the session tab strip: token meter, model name, mode, state badge, history popover.
 
+use gpui::{Animation, AnimationExt, ElementId, pulsating_between};
 use gpui::{
     AppContext as _, Context, Entity, IntoElement, MouseButton, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, div, px,
@@ -225,6 +226,49 @@ impl SolutionSessionsNavigator {
         .detach();
     }
 
+    /// Spawn a background tick that wakes the navigator once a second
+    /// for as long as any open session sits in `Running`. Drives the
+    /// "Thinking… Ns" counter in the status row without depending on
+    /// AcpThreadEvent firing during quiet pauses. Idempotent: a second
+    /// call while `thinking_tick` is already `Some` is a no-op.
+    fn ensure_thinking_tick(&mut self, cx: &mut Context<Self>) {
+        if self.thinking_tick.is_some() {
+            return;
+        }
+        self.thinking_tick = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                let still_running = this
+                    .update(cx, |this, cx| {
+                        let store = SolutionAgentStore::global(cx);
+                        let active_session_running = this
+                            .selected_index
+                            .and_then(|idx| this.open_sessions.get(idx).copied())
+                            .and_then(|sid| store.read(cx).session(sid))
+                            .map(|s| matches!(s.read(cx).state, SessionState::Running { .. }))
+                            .unwrap_or(false);
+                        if active_session_running {
+                            cx.notify();
+                        }
+                        active_session_running
+                    })
+                    .ok()
+                    .unwrap_or(false);
+                if !still_running {
+                    break;
+                }
+            }
+            // Self-cleanup so the next Running flip starts a fresh
+            // tick instead of relying on the next render to reset the
+            // slot.
+            let _ = this.update(cx, |this, _| {
+                this.thinking_tick = None;
+            });
+        }));
+    }
+
     pub(crate) fn render_status_row(
         &mut self,
         active_view: Option<&Entity<SolutionSessionView>>,
@@ -267,9 +311,19 @@ impl SolutionSessionsNavigator {
                 SharedString::from(format!("Error: {msg}")),
                 Some(msg.clone()),
             ),
+            SessionState::Running { started_at, .. } => {
+                let elapsed = started_at.elapsed().as_secs();
+                let label = if elapsed >= 1 {
+                    format!("Thinking… {elapsed}s")
+                } else {
+                    "Thinking…".to_string()
+                };
+                (SharedString::from(label), None)
+            }
             other => (SharedString::from(other.short_label()), None),
         };
         let is_idle = matches!(s.state, SessionState::Idle);
+        let is_running = matches!(s.state, SessionState::Running { .. });
         let usage = s
             .acp_thread
             .as_ref()
@@ -290,6 +344,17 @@ impl SolutionSessionsNavigator {
                 .or_else(|| Some(SharedString::from(current.0.to_string())))
         });
         let _ = s;
+        // While the active session is in `Running`, drive a 1 Hz tick
+        // so the elapsed counter ("Thinking… Ns") in `state_text`
+        // advances even when no AcpThreadEvents fire (long pauses
+        // between tool calls, etc.). Idempotent — the spawn happens
+        // only on the first render that observes Running, and the
+        // task self-cancels by checking `still_running` each tick.
+        if is_running {
+            self.ensure_thinking_tick(cx);
+        } else if self.thinking_tick.is_some() {
+            self.thinking_tick = None;
+        }
         // Kick off a model lookup if we don't have one cached yet.
         // Stored in `cached_models` for synchronous reads on later
         // frames; the spawn de-dupes via `pending_model_fetches`.
@@ -438,19 +503,47 @@ impl SolutionSessionsNavigator {
                     // When the session is errored, paint the label red
                     // and attach a tooltip with the full message so the
                     // user can read past any truncation that flexbox
-                    // forces on a narrow status row. For every other
-                    // state we just render the short label.
+                    // forces on a narrow status row. For Running we
+                    // prefix a pulsing Sparkle so the active "Thinking…
+                    // Ns" segment is glanceable from a busy strip.
                     let mut label = Label::new(state_text).size(LabelSize::Small);
                     if error_text.is_some() {
                         label = label.color(Color::Error);
+                    } else if is_running {
+                        label = label.color(Color::Accent);
                     }
+                    let inner: gpui::AnyElement = if is_running {
+                        let icon = div()
+                            .flex_none()
+                            .child(
+                                Icon::new(IconName::Sparkle)
+                                    .size(IconSize::Small)
+                                    .color(Color::Accent),
+                            )
+                            .with_animation(
+                                ElementId::Name("solution-status-thinking-pulse".into()),
+                                Animation::new(std::time::Duration::from_secs(1))
+                                    .repeat()
+                                    .with_easing(pulsating_between(0.4, 1.0)),
+                                |element: gpui::Div, delta| element.opacity(delta),
+                            );
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(icon)
+                            .child(label)
+                            .into_any_element()
+                    } else {
+                        label.into_any_element()
+                    };
                     let label_el: gpui::AnyElement = match error_text {
                         Some(full) => div()
                             .id("solution-status-error-text")
                             .tooltip(ui::Tooltip::text(full))
-                            .child(label)
+                            .child(inner)
                             .into_any_element(),
-                        None => label.into_any_element(),
+                        None => inner,
                     };
                     label_el
                 })

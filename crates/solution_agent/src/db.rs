@@ -86,6 +86,13 @@ impl SolutionAgentDb {
             // for rows written before this column existed — the resume
             // path falls back to `solution.root` in that case.
             "ALTER TABLE solution_sessions ADD COLUMN cwd TEXT",
+            // Per-solution open-tab strip ordering for the
+            // `SolutionSessionsNavigator`. NULL = session is closed
+            // (visible only via History); INTEGER = session is open at
+            // that 0-indexed position. Updated as a batch under
+            // `update_tab_orders` whenever the user reorders, opens, or
+            // closes a tab.
+            "ALTER TABLE solution_sessions ADD COLUMN tab_order INTEGER",
         ] {
             if let Ok(mut run) = connection.exec(ddl) {
                 let _ = run();
@@ -187,6 +194,35 @@ impl SolutionAgentDb {
         self.executor.spawn(async move {
             let connection = connection.lock();
             delete_by_solution(&connection, &solution_id)
+        })
+    }
+
+    /// Sets `tab_order = 0..N` on the sessions in `ordered_ids` for
+    /// `solution_id` and clears `tab_order` (sets to NULL) on every
+    /// other session belonging to that solution. Run inside a single
+    /// transaction so the strip never sees an intermediate split state
+    /// (e.g. after a reorder, a History query won't briefly see an
+    /// open tab counted as both open and closed).
+    pub fn update_tab_orders(
+        &self,
+        solution_id: SolutionId,
+        ordered_ids: Vec<SolutionSessionId>,
+    ) -> Task<Result<()>> {
+        let connection = self.connection.clone();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            apply_tab_orders(&connection, &solution_id, &ordered_ids)
+        })
+    }
+
+    /// Returns session ids with `tab_order IS NOT NULL` for
+    /// `solution_id`, sorted by `tab_order ASC`. Used by the navigator
+    /// at panel-open time to restore the strip without spawning agents.
+    pub fn list_open_tabs(&self, solution_id: SolutionId) -> Task<Result<Vec<SolutionSessionId>>> {
+        let connection = self.connection.clone();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            select_open_tabs(&connection, &solution_id)
         })
     }
 }
@@ -307,6 +343,50 @@ fn delete_by_solution(connection: &Connection, solution_id: &SolutionId) -> Resu
     "})?;
     delete(solution_id.0.clone())?;
     Ok(())
+}
+
+fn apply_tab_orders(
+    connection: &Connection,
+    solution_id: &SolutionId,
+    ordered_ids: &[SolutionSessionId],
+) -> Result<()> {
+    // Single transaction: clear all tab_order for the solution, then
+    // set the new positions in order. Two-step (instead of one
+    // `CASE WHEN id IN (…) THEN …`) so the SQL stays trivial and we
+    // don't have to bind a variable-length IN list with sqlez.
+    let tx = connection.with_savepoint("apply_tab_orders", || {
+        let mut clear = connection.exec_bound::<String>(
+            "UPDATE solution_sessions SET tab_order = NULL WHERE solution_id = ?",
+        )?;
+        clear(solution_id.0.clone())?;
+        let mut set = connection.exec_bound::<(i64, String, String)>(
+            "UPDATE solution_sessions SET tab_order = ?1 WHERE id = ?2 AND solution_id = ?3",
+        )?;
+        for (idx, id) in ordered_ids.iter().enumerate() {
+            set((idx as i64, id.to_string(), solution_id.0.clone()))?;
+        }
+        Ok(())
+    });
+    tx.map_err(|e| anyhow!("apply_tab_orders failed: {e}"))
+}
+
+fn select_open_tabs(
+    connection: &Connection,
+    solution_id: &SolutionId,
+) -> Result<Vec<SolutionSessionId>> {
+    let mut select = connection.select_bound::<String, String>(indoc! {"
+        SELECT id FROM solution_sessions
+        WHERE solution_id = ? AND tab_order IS NOT NULL
+        ORDER BY tab_order ASC
+    "})?;
+    let rows = select(solution_id.0.clone())?;
+    let mut out = Vec::with_capacity(rows.len());
+    for id in rows {
+        let parsed = SolutionSessionId::parse(&id)
+            .map_err(|e| anyhow!("invalid SolutionSessionId in tab_order row: {e}"))?;
+        out.push(parsed);
+    }
+    Ok(out)
 }
 
 fn select_metadata_for_solution(
@@ -458,6 +538,61 @@ mod tests {
             .await
             .unwrap();
         assert!(listing.is_empty());
+    }
+
+    #[gpui::test]
+    async fn tab_order_roundtrips_per_solution(cx: &mut gpui::TestAppContext) {
+        let executor = cx.executor();
+        let db = SolutionAgentDb::open(executor).unwrap();
+
+        let m1 = make_meta(1, "sol-a");
+        let m2 = make_meta(2, "sol-a");
+        let m3 = make_meta(3, "sol-a");
+        let other = make_meta(4, "sol-b");
+        for m in [&m1, &m2, &m3, &other] {
+            db.save_metadata(m.clone()).await.unwrap();
+        }
+
+        db.update_tab_orders(SolutionId("sol-a".into()), vec![m2.id, m3.id, m1.id])
+            .await
+            .unwrap();
+        db.update_tab_orders(SolutionId("sol-b".into()), vec![other.id])
+            .await
+            .unwrap();
+
+        let in_a = db.list_open_tabs(SolutionId("sol-a".into())).await.unwrap();
+        assert_eq!(in_a, vec![m2.id, m3.id, m1.id]);
+        let in_b = db.list_open_tabs(SolutionId("sol-b".into())).await.unwrap();
+        assert_eq!(in_b, vec![other.id]);
+    }
+
+    #[gpui::test]
+    async fn update_tab_orders_clears_omitted_sessions(cx: &mut gpui::TestAppContext) {
+        let executor = cx.executor();
+        let db = SolutionAgentDb::open(executor).unwrap();
+
+        let m1 = make_meta(1, "sol-a");
+        let m2 = make_meta(2, "sol-a");
+        let m3 = make_meta(3, "sol-a");
+        for m in [&m1, &m2, &m3] {
+            db.save_metadata(m.clone()).await.unwrap();
+        }
+
+        db.update_tab_orders(SolutionId("sol-a".into()), vec![m1.id, m2.id, m3.id])
+            .await
+            .unwrap();
+        assert_eq!(
+            db.list_open_tabs(SolutionId("sol-a".into())).await.unwrap(),
+            vec![m1.id, m2.id, m3.id]
+        );
+
+        db.update_tab_orders(SolutionId("sol-a".into()), vec![m2.id])
+            .await
+            .unwrap();
+        assert_eq!(
+            db.list_open_tabs(SolutionId("sol-a".into())).await.unwrap(),
+            vec![m2.id]
+        );
     }
 
     #[gpui::test]
