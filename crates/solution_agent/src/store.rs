@@ -364,20 +364,34 @@ impl SolutionAgentStore {
             })?;
 
             // 2. Get-or-spawn the pooled connection for (solution, agent).
-            let connection_task = this.update(cx, |store, cx| {
-                store.get_or_spawn_connection(pair.clone(), &solution, project.clone(), cx)
+            //    Build the session-prompt `_meta` here too: needs the live
+            //    `adapters` registry on the store, and we already have the
+            //    store borrow open.
+            let (connection_task, acp_meta) = this.update(cx, |store, cx| {
+                let task =
+                    store.get_or_spawn_connection(pair.clone(), &solution, project.clone(), cx);
+                let meta = store.build_session_meta(&pair.1, &solution);
+                (task, meta)
             })?;
             let connection = connection_task.await?;
 
             // 3. Create an ACP session on that connection.
             let work_dir = cwd.unwrap_or_else(|| solution.root.clone());
+            log::info!(
+                target: "solution_agent::resume",
+                "creating session in solution={:?} agent={} cwd={} (solution_root={})",
+                solution_id,
+                agent_id,
+                work_dir.to_string_lossy(),
+                solution.root.to_string_lossy(),
+            );
             let work_dirs =
                 util::path_list::PathList::new(&[work_dir.to_string_lossy().into_owned()]);
             let session_cwd = work_dir.clone();
             let acp_thread_task = cx.update(|cx| {
                 connection
                     .clone()
-                    .new_session(project.clone(), work_dirs, cx)
+                    .new_session_with_meta(project.clone(), work_dirs, acp_meta, cx)
             });
             let acp_thread = match acp_thread_task.await {
                 Ok(thread) => thread,
@@ -446,6 +460,43 @@ impl SolutionAgentStore {
 
             Ok(session_id)
         })
+    }
+
+    /// Build the `_meta` payload for a `NewSessionRequest` so the agent
+    /// receives the solution-context system prompt. Wraps the adapter's
+    /// `build_initial_system_prompt` output in the shape claude-agent-acp
+    /// expects: `{ "systemPrompt": { "append": "<prompt>" } }`. The
+    /// `append` form preserves Claude's default `claude_code` preset and
+    /// concatenates our text after it (string-form would replace the
+    /// preset entirely — wrong for our needs since we want the standard
+    /// CLI behavior plus solution awareness).
+    ///
+    /// Returns `None` when no adapter is registered for `agent_id` or
+    /// the adapter produced an empty prompt; ACP agents that don't
+    /// understand `_meta.systemPrompt` ignore unknown keys per the
+    /// protocol contract, so emitting it is safe even for non-Claude
+    /// adapters.
+    ///
+    /// Called at every fresh-session site (`create_session`,
+    /// `rotate_context` for `/compact`, `reset_context` for `/clear`)
+    /// so the system prompt is re-asserted whenever the underlying ACP
+    /// session is recreated — that's how it survives `/clear`.
+    fn build_session_meta(
+        &self,
+        agent_id: &AgentServerId,
+        solution: &Solution,
+    ) -> Option<acp::Meta> {
+        let prompt = self
+            .adapters
+            .get(agent_id)?
+            .build_initial_system_prompt(solution);
+        if prompt.is_empty() {
+            return None;
+        }
+        Some(acp::Meta::from_iter([(
+            "systemPrompt".to_string(),
+            serde_json::json!({ "append": prompt }),
+        )]))
     }
 
     /// Persist the row for `session_id` to the DB so the History popover and
@@ -561,50 +612,117 @@ impl SolutionAgentStore {
             // Empty `cwd` = legacy row written before the column existed —
             // fall back to `solution.root` (matches the pre-fix resume
             // behaviour, so already-broken sessions don't get any worse).
-            let resume_cwd = if meta.cwd.as_os_str().is_empty() {
+            let primary_cwd = if meta.cwd.as_os_str().is_empty() {
                 solution.root.clone()
             } else {
                 meta.cwd.clone()
             };
-            let work_dirs =
-                util::path_list::PathList::new(&[resume_cwd.to_string_lossy().into_owned()]);
             let acp_session_id = meta.acp_session_id.clone();
             let title_for_load = Some(meta.title.clone());
 
-            let acp_thread_task: Task<Result<Entity<acp_thread::AcpThread>>> = cx.update(|cx| {
-                if connection.supports_load_session() {
-                    Ok(connection.clone().load_session(
-                        acp_session_id.clone(),
-                        project.clone(),
-                        work_dirs.clone(),
-                        title_for_load.clone(),
-                        cx,
-                    ))
-                } else if connection.supports_resume_session() {
-                    Ok(connection.clone().resume_session(
-                        acp_session_id.clone(),
-                        project.clone(),
-                        work_dirs.clone(),
-                        title_for_load.clone(),
-                        cx,
-                    ))
-                } else {
-                    Err(anyhow!(
-                        "agent {:?} does not support loading or resuming sessions",
-                        meta.agent_id,
-                    ))
+            // Resume cwd resolution + fallback. claude-acp keys session
+            // jsonl files by the cwd that was active when the session
+            // was *created* (`~/.claude/projects/<sanitized cwd>/<id>.jsonl`).
+            // Empirically that cwd doesn't always match the cwd we
+            // pass into `NewSessionRequest::work_dirs` — for a
+            // member-project session we may have asked for
+            // `<solution-root>/<member>` but claude wrote the jsonl
+            // under `<solution-root>` (its subprocess cwd at start).
+            // When the primary cwd lookup returns "Resource not
+            // found", retry once against `solution.root` before
+            // surfacing the error. On a successful fallback we also
+            // update `session.cwd` so the *next* resume hits straight
+            // away.
+            let attempts: Vec<PathBuf> = if primary_cwd != solution.root {
+                vec![primary_cwd.clone(), solution.root.clone()]
+            } else {
+                vec![primary_cwd.clone()]
+            };
+            log::info!(
+                target: "solution_agent::resume",
+                "session={} acp_session={} attempting resume with cwds={:?}",
+                meta.id,
+                acp_session_id.0,
+                attempts
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>(),
+            );
+            let mut last_err: Option<anyhow::Error> = None;
+            let mut attached: Option<(Entity<acp_thread::AcpThread>, PathBuf)> = None;
+            for attempt_cwd in attempts {
+                let work_dirs = util::path_list::PathList::new(&[attempt_cwd
+                    .to_string_lossy()
+                    .into_owned()]);
+                let acp_thread_task: Task<Result<Entity<acp_thread::AcpThread>>> = cx
+                    .update(|cx| {
+                        if connection.supports_load_session() {
+                            Ok(connection.clone().load_session(
+                                acp_session_id.clone(),
+                                project.clone(),
+                                work_dirs.clone(),
+                                title_for_load.clone(),
+                                cx,
+                            ))
+                        } else if connection.supports_resume_session() {
+                            Ok(connection.clone().resume_session(
+                                acp_session_id.clone(),
+                                project.clone(),
+                                work_dirs.clone(),
+                                title_for_load.clone(),
+                                cx,
+                            ))
+                        } else {
+                            Err(anyhow!(
+                                "agent {:?} does not support loading or resuming sessions",
+                                meta.agent_id,
+                            ))
+                        }
+                    })?;
+                match acp_thread_task.await {
+                    Ok(thread) => {
+                        attached = Some((thread, attempt_cwd));
+                        break;
+                    }
+                    Err(err) => {
+                        let err_str = format!("{err:#}");
+                        let resource_gone = err_str.contains("Resource not found")
+                            || err_str.contains("-32002");
+                        if !resource_gone {
+                            // Non-recoverable (auth, transport, …). Fall
+                            // through with this error — fallback would
+                            // just hit the same wall.
+                            last_err = Some(err);
+                            break;
+                        }
+                        log::warn!(
+                            target: "solution_agent::resume",
+                            "session={} cwd={} returned Resource not found ({}); will try next candidate",
+                            meta.id,
+                            attempt_cwd.to_string_lossy(),
+                            err_str,
+                        );
+                        last_err = Some(err);
+                    }
                 }
-            })?;
-            let acp_thread = match acp_thread_task.await {
-                Ok(thread) => thread,
-                Err(err) => {
+            }
+            let (acp_thread, applied_cwd) = match attached {
+                Some(pair) => pair,
+                None => {
                     this.update(cx, |store, cx| {
                         store.pool_release_session(pair.clone(), cx);
                     })
                     .ok();
-                    return Err(err);
+                    return Err(last_err.unwrap_or_else(|| {
+                        anyhow!("resume_session: no cwd candidates produced a thread")
+                    }));
                 }
             };
+            // Reflect the cwd the agent actually accepted in the rest
+            // of the resume — store update + persist below — so a
+            // future resume hits this cwd first instead of replaying
+            // the same primary→fallback search.
+            let resume_cwd = applied_cwd;
 
             let session_id = this.update(cx, |store, cx| {
                 // Reuse the metadata's existing internal id — minting a fresh
@@ -1107,8 +1225,11 @@ impl SolutionAgentStore {
                             .ok_or_else(|| anyhow!("solution {:?} not found", solution_id))
                     })
             })?;
-            let connection_task = this.update(cx, |store, cx| {
-                store.get_or_spawn_connection(pair.clone(), &solution, project.clone(), cx)
+            let (connection_task, acp_meta) = this.update(cx, |store, cx| {
+                let task =
+                    store.get_or_spawn_connection(pair.clone(), &solution, project.clone(), cx);
+                let meta = store.build_session_meta(&pair.1, &solution);
+                (task, meta)
             })?;
             let connection = connection_task.await?;
             let work_dirs =
@@ -1116,7 +1237,7 @@ impl SolutionAgentStore {
             let new_thread_task = cx.update(|cx| {
                 connection
                     .clone()
-                    .new_session(project.clone(), work_dirs, cx)
+                    .new_session_with_meta(project.clone(), work_dirs, acp_meta, cx)
             });
             let new_thread = new_thread_task.await?;
 
@@ -1129,6 +1250,16 @@ impl SolutionAgentStore {
                     s.context_count = new_count;
                     s.state = SessionState::Idle;
                     s.last_activity_at = Utc::now();
+                    // Status-row meter falls back to `cached_total_tokens`
+                    // when the live thread has no `token_usage` yet (the
+                    // freshly-spawned thread does not). Without a reset,
+                    // the meter would keep reading the pre-rotation count
+                    // until the agent emits its first `TokenUsageUpdated`
+                    // — confusing right after a context rotation. Same
+                    // story for `last_turn_duration` (the "Done in Xs"
+                    // hint should not survive past the rotation).
+                    s.cached_total_tokens = None;
+                    s.last_turn_duration = None;
                 });
                 // Re-subscribe to the new AcpThread's event stream.
                 // Dropping the old subscription unhooks us from the
@@ -1197,8 +1328,11 @@ impl SolutionAgentStore {
                             .ok_or_else(|| anyhow!("solution {:?} not found", solution_id))
                     })
             })?;
-            let connection_task = this.update(cx, |store, cx| {
-                store.get_or_spawn_connection(pair.clone(), &solution, project.clone(), cx)
+            let (connection_task, acp_meta) = this.update(cx, |store, cx| {
+                let task =
+                    store.get_or_spawn_connection(pair.clone(), &solution, project.clone(), cx);
+                let meta = store.build_session_meta(&pair.1, &solution);
+                (task, meta)
             })?;
             let connection = connection_task.await?;
             let work_dirs =
@@ -1206,7 +1340,7 @@ impl SolutionAgentStore {
             let new_thread_task = cx.update(|cx| {
                 connection
                     .clone()
-                    .new_session(project.clone(), work_dirs, cx)
+                    .new_session_with_meta(project.clone(), work_dirs, acp_meta, cx)
             });
             let new_thread = new_thread_task.await?;
 
@@ -1238,6 +1372,15 @@ impl SolutionAgentStore {
                     s.last_activity_at = Utc::now();
                     s.pending_messages.clear();
                     s.flush_after_cancel = false;
+                    // Status-row meter falls back to `cached_total_tokens`
+                    // when the live thread has no `token_usage` yet — the
+                    // freshly-spawned thread does not. Without a reset
+                    // here the meter would keep reading the pre-`/clear`
+                    // count (the bug this whole change exists to fix).
+                    // `last_turn_duration` is cleared for the same reason
+                    // — "Done in Xs" must not survive a context wipe.
+                    s.cached_total_tokens = None;
+                    s.last_turn_duration = None;
                 });
                 let new_sub = store.subscribe_to_session(session_id, new_thread, cx);
                 session_entity.update(cx, |s, _| s._acp_subscription = Some(new_sub));
@@ -1519,6 +1662,42 @@ impl SolutionAgentStore {
                     .unwrap_or_default();
                 session_entity.update(cx, |s, _| s.title = new_title);
                 cx.emit(SolutionAgentStoreEvent::SessionTitleChanged(session_id));
+            }
+            acp_thread::AcpThreadEvent::EntriesRemoved(_) => {
+                // The user-facing `/clear` does NOT reach this branch:
+                // it's intercepted client-side and routed through
+                // `reset_context` (which spawns a brand-new `AcpThread`
+                // and never emits `EntriesRemoved`); the corresponding
+                // token-meter reset lives at the swap site in
+                // `reset_context` / `rotate_context`.
+                //
+                // What this branch covers is a thread-local truncation
+                // that happens to remove every entry — today the only
+                // in-tree producer is `acp_thread::rewind` /
+                // refusal-truncate (`acp_thread.rs:2369`, `:2491`)
+                // when rewinding to before the very first user message.
+                // The post-event `entries().is_empty()` check
+                // discriminates this "rewind to zero" case from a
+                // partial rewind: the latter leaves a surviving
+                // prefix whose token usage is still meaningful, and
+                // the agent will emit a fresh `TokenUsageUpdated`
+                // against that prefix on the next turn — so we MUST
+                // NOT preemptively wipe state in the partial case.
+                let thread = session_entity.read(cx).acp_thread.clone();
+                let cleared = thread
+                    .as_ref()
+                    .map(|t| t.read(cx).entries().is_empty())
+                    .unwrap_or(false);
+                if cleared {
+                    if let Some(t) = thread {
+                        t.update(cx, |t, cx| t.update_token_usage(None, cx));
+                    }
+                    session_entity.update(cx, |s, _| {
+                        s.cached_total_tokens = None;
+                        s.last_turn_duration = None;
+                    });
+                    self.persist_session_row(session_id, cx);
+                }
             }
             _ => {}
         }

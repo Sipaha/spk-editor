@@ -80,8 +80,8 @@ impl SolutionSessionView {
                     }
                 }
                 let images_for_handler = images;
-                let body = MarkdownElement::new(entity, style).on_url_click(
-                    move |url, window, cx| {
+                let body =
+                    MarkdownElement::new(entity, style).on_url_click(move |url, window, cx| {
                         if let Some(idx_str) = url.strip_prefix("spk-image://")
                             && let Ok(idx) = idx_str.parse::<usize>()
                             && let Some(image) = images_for_handler.get(idx).cloned()
@@ -90,8 +90,7 @@ impl SolutionSessionView {
                             return;
                         }
                         cx.open_url(url.as_ref());
-                    },
-                );
+                    });
                 Some(
                     h_flex().w_full().child(
                         div()
@@ -190,10 +189,7 @@ impl SolutionSessionView {
     /// `flush_pending_send_if_ready` once the live thread attaches,
     /// at which point `acp_thread.send` re-emits the message as a
     /// real `UserMessage` entry and the ghost goes away.
-    pub(super) fn render_resuming_section(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> Option<Div> {
+    pub(super) fn render_resuming_section(&self, cx: &mut Context<Self>) -> Option<Div> {
         if !self.resuming {
             return None;
         }
@@ -250,8 +246,17 @@ impl SolutionSessionView {
                 .rounded_md()
                 .child(body),
         );
-        // `mb_3` mirrors `render_user_message`'s bottom margin so the
-        // optimistic bubble breathes the same as live user messages.
-        Some(v_flex().w_full().px_1().mb_3().child(bubble))
+        // `px_3` (12px) matches the *effective* horizontal inset live
+        // user messages get: the conversation list wrapper supplies
+        // `.px_2()` (8px) and `render_user_message`'s own `v_flex`
+        // adds `.px_1()` (4px) on top, totalling 12px. The resuming
+        // section sits as a sibling *outside* the conversation
+        // wrapper (so the bubble pins to the bottom and doesn't
+        // scroll with messages), so we recreate that inset directly
+        // here — otherwise the optimistic bubble paints flush against
+        // the panel's left edge while the live message above it is
+        // indented, which the user noticed immediately.
+        // `mb_3` mirrors `render_user_message`'s bottom margin.
+        Some(v_flex().w_full().px_3().mb_3().child(bubble))
     }
 }

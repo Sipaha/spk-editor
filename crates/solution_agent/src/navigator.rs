@@ -1124,7 +1124,7 @@ impl Render for SolutionSessionsNavigator {
                         .size(LabelSize::Small),
                 )
                 .into_any_element()
-        } else if let Some(view) = active_view.clone() {
+        } else if let Some(view) = active_view {
             div().flex_1().min_h_0().child(view).into_any_element()
         } else if let Some(pending) = self.pending.first() {
             // The strip already shows a spinner-tab for in-flight starts,

@@ -892,3 +892,342 @@ fn persisted_session_legacy_blob_decodes_with_empty_entries() {
         vec!["one".to_string(), "two".to_string()]
     );
 }
+
+/// `EntriesRemoved` covers thread-local truncation; the `cleared` arm
+/// fires when `entries()` is empty after the event (the only in-tree
+/// producer is rewind-to-zero from refusal-truncation). This test pins
+/// that the live thread's `token_usage` and the session's
+/// `cached_total_tokens`/`last_turn_duration` mirrors all reset on the
+/// rewind-to-zero path; the partial-rewind sibling
+/// (`entries_removed_partial_rewind_preserves_token_state`) pins the
+/// negative case. The user-facing `/clear` flow is covered by
+/// `reset_context_resets_token_meter`.
+#[gpui::test]
+async fn entries_removed_to_zero_resets_token_state(cx: &mut TestAppContext) {
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+
+    // Stamp pre-clear state on both the live thread (token_usage) and
+    // the session (cached_total_tokens, last_turn_duration). All three
+    // must be cleared on full /clear.
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.update_token_usage(
+                Some(acp_thread::TokenUsage {
+                    used_tokens: 12_345,
+                    max_tokens: 1_000_000,
+                    ..Default::default()
+                }),
+                cx,
+            );
+        });
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let session = store.session(session_id).expect("session exists");
+            session.update(cx, |s, _| {
+                s.cached_total_tokens = Some(12_345);
+                s.last_turn_duration = Some(std::time::Duration::from_secs(7));
+            });
+        });
+    });
+
+    // Emit EntriesRemoved. Range payload is informational; the handler
+    // discriminates full clear vs partial rewind by checking
+    // `entries().is_empty()` post-event. The mock thread starts empty
+    // and we never appended, so this exercises the cleared-arm.
+    cx.update(|cx| {
+        acp_thread.update(cx, |_t, cx| {
+            cx.emit(acp_thread::AcpThreadEvent::EntriesRemoved(0..0));
+        });
+    });
+    cx.executor().run_until_parked();
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let session = store.session(session_id).expect("session exists");
+            let s = session.read(cx);
+            assert!(
+                s.cached_total_tokens.is_none(),
+                "cached_total_tokens reset, got {:?}",
+                s.cached_total_tokens
+            );
+            assert!(
+                s.last_turn_duration.is_none(),
+                "last_turn_duration reset, got {:?}",
+                s.last_turn_duration
+            );
+        });
+        let usage = acp_thread.read(cx).token_usage().cloned();
+        assert!(
+            usage.is_none(),
+            "live thread token_usage reset, got {usage:?}"
+        );
+    });
+}
+
+/// Sibling of `entries_removed_full_clear_resets_token_state`: when
+/// `EntriesRemoved` fires but the live thread still has surviving
+/// entries (a `rewind` to a specific user message rather than a full
+/// `/clear`), the agent will emit a fresh `TokenUsageUpdated` reflecting
+/// the surviving prefix's usage — so we must NOT preemptively wipe
+/// token state. This pins the partial-rewind branch; the existence of
+/// this test plus the full-clear sibling means a future "always reset
+/// on EntriesRemoved" mutation breaks one of them.
+#[gpui::test]
+async fn entries_removed_partial_rewind_preserves_token_state(cx: &mut TestAppContext) {
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+
+    // Seed the live thread with a surviving user entry so the handler's
+    // `entries().is_empty()` discriminator returns false.
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.push_user_content_block(
+                Some(acp_thread::UserMessageId::new()),
+                "survivor".into(),
+                cx,
+            );
+            t.update_token_usage(
+                Some(acp_thread::TokenUsage {
+                    used_tokens: 9_999,
+                    max_tokens: 1_000_000,
+                    ..Default::default()
+                }),
+                cx,
+            );
+        });
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let session = store.session(session_id).expect("session exists");
+            session.update(cx, |s, _| {
+                s.cached_total_tokens = Some(9_999);
+                s.last_turn_duration = Some(std::time::Duration::from_secs(11));
+            });
+        });
+    });
+
+    // Emit EntriesRemoved over an arbitrary range — what discriminates
+    // partial-rewind from full-clear is `entries().is_empty()` on the
+    // live thread, not the event payload. With one surviving entry,
+    // the cleared arm must be skipped.
+    cx.update(|cx| {
+        acp_thread.update(cx, |_t, cx| {
+            cx.emit(acp_thread::AcpThreadEvent::EntriesRemoved(0..1));
+        });
+    });
+    cx.executor().run_until_parked();
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let session = store.session(session_id).expect("session exists");
+            let s = session.read(cx);
+            assert_eq!(
+                s.cached_total_tokens,
+                Some(9_999),
+                "cached_total_tokens preserved on partial rewind",
+            );
+            assert_eq!(
+                s.last_turn_duration,
+                Some(std::time::Duration::from_secs(11)),
+                "last_turn_duration preserved on partial rewind",
+            );
+        });
+        let usage = acp_thread.read(cx).token_usage().cloned();
+        assert!(
+            usage.is_some_and(|u| u.used_tokens == 9_999),
+            "live thread token_usage preserved on partial rewind",
+        );
+    });
+}
+
+/// User-facing `/clear` is intercepted client-side and routed through
+/// `reset_context`, which spawns a brand-new `AcpThread` (the old one
+/// is dropped without emitting any events). Without an explicit reset
+/// at the swap site, `cached_total_tokens` / `last_turn_duration` on
+/// the session entity persist across the swap and the status-row meter
+/// keeps reading the pre-clear count (because the meter falls back to
+/// `cached_total_tokens` when the live thread has no `token_usage`,
+/// which it doesn't on a fresh thread). This test pins the reset at
+/// the swap site — the actual user-visible bug.
+#[gpui::test]
+async fn reset_context_resets_token_meter(cx: &mut TestAppContext) {
+    let (session_id, _old_thread, _tmp) = create_session_with_thread(cx).await;
+
+    // Stamp pre-clear cached values on the session.
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let session = store.session(session_id).expect("session exists");
+            session.update(cx, |s, _| {
+                s.cached_total_tokens = Some(33_333);
+                s.last_turn_duration = Some(std::time::Duration::from_secs(13));
+            });
+        });
+    });
+
+    // Drive the actual `/clear` flow.
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| store.reset_context(session_id, cx))
+    })
+    .await
+    .expect("reset_context");
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let session = store.session(session_id).expect("session exists");
+            let s = session.read(cx);
+            assert!(
+                s.cached_total_tokens.is_none(),
+                "cached_total_tokens reset, got {:?}",
+                s.cached_total_tokens
+            );
+            assert!(
+                s.last_turn_duration.is_none(),
+                "last_turn_duration reset, got {:?}",
+                s.last_turn_duration
+            );
+            // Sanity: live thread is fresh and has no usage.
+            let new_thread = s.acp_thread.clone().expect("new thread populated");
+            assert!(
+                new_thread.read(cx).token_usage().is_none(),
+                "fresh thread has no token_usage"
+            );
+        });
+    });
+}
+
+/// Same invariant for `/compact` (rotate_context) — same swap pattern,
+/// same risk of stale meter.
+#[gpui::test]
+async fn rotate_context_resets_token_meter(cx: &mut TestAppContext) {
+    let (session_id, _old_thread, _tmp) = create_session_with_thread(cx).await;
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let session = store.session(session_id).expect("session exists");
+            session.update(cx, |s, _| {
+                s.cached_total_tokens = Some(44_444);
+                s.last_turn_duration = Some(std::time::Duration::from_secs(17));
+            });
+        });
+    });
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| store.rotate_context(session_id, cx))
+    })
+    .await
+    .expect("rotate_context");
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let session = store.session(session_id).expect("session exists");
+            let s = session.read(cx);
+            assert!(
+                s.cached_total_tokens.is_none(),
+                "cached_total_tokens reset on rotate, got {:?}",
+                s.cached_total_tokens
+            );
+            assert!(
+                s.last_turn_duration.is_none(),
+                "last_turn_duration reset on rotate, got {:?}",
+                s.last_turn_duration
+            );
+        });
+    });
+}
+
+/// `build_session_meta` shapes the system prompt into the exact JSON
+/// envelope claude-agent-acp expects: `{ "systemPrompt": { "append": "<text>" } }`.
+/// A wrong key name or nesting level silently drops the prompt — the
+/// agent ignores unknown `_meta` keys per the ACP spec, so a typo here
+/// would not surface as an error and the bug would only manifest as
+/// "agent has no idea it's in a Solution". Pin the shape AND the empty-
+/// prompt None path so future adapter changes can't regress either.
+#[gpui::test]
+fn build_session_meta_emits_correct_json_shape(cx: &mut TestAppContext) {
+    use crate::claude_adapter::{CLAUDE_ACP_AGENT_ID, ClaudeAcpAdapter};
+    use solutions::{CatalogId, Solution, SolutionMember};
+
+    let mut registry = AdapterRegistry::new();
+    registry.register(Arc::new(ClaudeAcpAdapter));
+    cx.update(|cx| SolutionAgentStore::init_global(cx, Arc::new(registry)));
+
+    let solution = Solution {
+        id: SolutionId("sol-meta".into()),
+        name: "test-meta".into(),
+        root: PathBuf::from("/tmp/sol-meta"),
+        members: vec![SolutionMember {
+            catalog_id: CatalogId("cat-foo".into()),
+            local_path: PathBuf::from("/tmp/sol-meta/foo"),
+        }],
+        last_opened_at: Some(Utc::now()),
+    };
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, _| {
+            let meta = store
+                .build_session_meta(&SharedString::from(CLAUDE_ACP_AGENT_ID), &solution)
+                .expect("registered ClaudeAcpAdapter produces a non-empty prompt");
+            let system_prompt = meta
+                .get("systemPrompt")
+                .expect("meta carries `systemPrompt` key (camelCase, not snake_case — claude-agent-acp matches exactly)")
+                .as_object()
+                .expect("`systemPrompt` is an object (not a bare string — agent reads `append` field)");
+            let append = system_prompt
+                .get("append")
+                .expect("`append` key present (vs. replacing the preset entirely)")
+                .as_str()
+                .expect("`append` value is a string");
+            assert!(
+                append.contains("/tmp/sol-meta"),
+                "prompt mentions solution root, got {append:?}"
+            );
+            assert!(
+                append.contains("foo"),
+                "prompt mentions member project, got {append:?}"
+            );
+
+            // Unknown agent → None (registry lookup fails)
+            let none_meta = store
+                .build_session_meta(&SharedString::from("not-registered"), &solution);
+            assert!(none_meta.is_none(), "unknown agent yields None");
+        });
+    });
+
+    // Empty-prompt branch: a registered adapter that produces an empty
+    // string must yield None so we don't ship a `_meta.systemPrompt:
+    // {append: ""}` envelope (claude-agent-acp would then append nothing
+    // to the preset and the round-trip wastes bandwidth + clutters the
+    // request log).
+    struct EmptyAdapter;
+    impl crate::adapter::SolutionAgentAdapter for EmptyAdapter {
+        fn agent_id(&self) -> AgentServerId {
+            SharedString::from("empty-adapter")
+        }
+        fn display_name(&self) -> SharedString {
+            SharedString::from("empty")
+        }
+        fn icon(&self) -> ui::IconName {
+            ui::IconName::Sparkle
+        }
+        fn build_initial_system_prompt(&self, _: &Solution) -> String {
+            String::new()
+        }
+    }
+    cx.update(|cx| {
+        let mut empty_registry = AdapterRegistry::new();
+        empty_registry.register(Arc::new(EmptyAdapter));
+        SolutionAgentStore::init_global(cx, Arc::new(empty_registry));
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, _| {
+            let meta = store.build_session_meta(&SharedString::from("empty-adapter"), &solution);
+            assert!(meta.is_none(), "empty prompt yields None");
+        });
+    });
+}

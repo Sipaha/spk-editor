@@ -272,6 +272,7 @@ impl SolutionSessionsNavigator {
     pub(crate) fn render_status_row(
         &mut self,
         active_view: Option<&Entity<SolutionSessionView>>,
+        is_resuming: bool,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let session_id = self
@@ -313,9 +314,11 @@ impl SolutionSessionsNavigator {
         // doesn't see a misleading bare "Idle" while the subprocess
         // is dead-asleep or mid-handshake.
         let is_cold = s.is_cold();
-        let is_resuming = active_view
-            .map(|view| view.read(cx).is_resuming())
-            .unwrap_or(false);
+        // `is_resuming` is precomputed by the caller (`SolutionSessionView`)
+        // and passed in. Reading it from `active_view` here would double-lease
+        // the view: this method runs inside `nav.update(...)` invoked from
+        // *within* `SolutionSessionView::render`, so the view entity is
+        // already leased by GPUI's renderer.
         let (state_text, error_text): (SharedString, Option<SharedString>) = if is_resuming {
             (SharedString::from("Resuming…"), None)
         } else if is_cold {
@@ -346,10 +349,7 @@ impl SolutionSessionsNavigator {
                 // this an in-foreground watcher only sees "Thinking…"
                 // disappear). Cleared on the next Running transition.
                 SessionState::Idle if s.last_turn_duration.is_some() => {
-                    let secs = s
-                        .last_turn_duration
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
+                    let secs = s.last_turn_duration.map(|d| d.as_secs()).unwrap_or(0);
                     let label = if secs >= 1 {
                         format!("Done in {}", format_elapsed(secs))
                     } else {

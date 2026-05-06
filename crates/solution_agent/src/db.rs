@@ -70,34 +70,47 @@ impl SolutionAgentDb {
         "})?()
         .map_err(|e| anyhow!("Failed to create solution_sessions table: {}", e))?;
 
-        // Idempotent ALTER for the History popover preview + token-usage
-        // display + soft-close marker. SQLite has no `ADD COLUMN IF NOT
-        // EXISTS`, so we ignore the "duplicate column" error on
-        // already-migrated DBs. `closed_at` is the timestamp at which
-        // `close_session` was called; rows with NULL are still live
-        // (or were live in a previous editor process and never closed
-        // cleanly — treated as live on next launch).
-        for ddl in [
-            "ALTER TABLE solution_sessions ADD COLUMN preview TEXT",
-            "ALTER TABLE solution_sessions ADD COLUMN total_tokens INTEGER",
-            "ALTER TABLE solution_sessions ADD COLUMN closed_at INTEGER",
-            "ALTER TABLE solution_sessions ADD COLUMN context_count INTEGER NOT NULL DEFAULT 1",
-            // Working directory the session was created against. NULL
-            // for rows written before this column existed — the resume
-            // path falls back to `solution.root` in that case.
-            "ALTER TABLE solution_sessions ADD COLUMN cwd TEXT",
-            // Per-solution open-tab strip ordering for the
-            // `SolutionSessionsNavigator`. NULL = session is closed
-            // (visible only via History); INTEGER = session is open at
-            // that 0-indexed position. Updated as a batch under
-            // `update_tab_orders` whenever the user reorders, opens, or
-            // closes a tab.
-            "ALTER TABLE solution_sessions ADD COLUMN tab_order INTEGER",
-        ] {
-            if let Ok(mut run) = connection.exec(ddl) {
-                let _ = run();
-            }
-        }
+        // Idempotent ALTERs for columns added across the project's
+        // history. SQLite has no `ADD COLUMN IF NOT EXISTS`, so we
+        // detect the already-applied case by matching the
+        // "duplicate column name" error and surface every other
+        // failure as a `log::warn` instead of swallowing it.
+        //
+        // Background: the previous shape was
+        //
+        //   if let Ok(mut run) = connection.exec(ddl) {
+        //       let _ = run();
+        //   }
+        //
+        // — which silently dropped two failure modes (prepare-time
+        // `Err` and run-time `Err`). At least one user wound up
+        // with a DB that had the first four ALTERs applied but
+        // `cwd` and `tab_order` still missing, with no breadcrumb
+        // explaining why. Subsequent INSERT/SELECT calls
+        // referencing those columns failed (no such column), but
+        // the failure was several layers away from the migration
+        // that should have added them, so the root cause was
+        // invisible. Logging the first time a real error happens
+        // beats hunting it down via DB forensics later.
+        apply_idempotent_add_column(&connection, "preview TEXT");
+        apply_idempotent_add_column(&connection, "total_tokens INTEGER");
+        apply_idempotent_add_column(&connection, "closed_at INTEGER");
+        apply_idempotent_add_column(
+            &connection,
+            "context_count INTEGER NOT NULL DEFAULT 1",
+        );
+        // `cwd` is the working directory the session was created
+        // against. NULL for rows written before this column
+        // existed — the resume path falls back to `solution.root`
+        // in that case.
+        apply_idempotent_add_column(&connection, "cwd TEXT");
+        // `tab_order` drives per-solution open-tab strip ordering
+        // for the `SolutionSessionsNavigator`. NULL = closed
+        // (visible only via History); INTEGER = open at that
+        // 0-indexed position. Updated as a batch under
+        // `update_tab_orders` whenever the user reorders, opens,
+        // or closes a tab.
+        apply_idempotent_add_column(&connection, "tab_order INTEGER");
 
         connection.exec(indoc! {"
             CREATE INDEX IF NOT EXISTS idx_session_by_solution
@@ -224,6 +237,42 @@ impl SolutionAgentDb {
             let connection = connection.lock();
             select_open_tabs(&connection, &solution_id)
         })
+    }
+}
+
+/// Apply `ALTER TABLE solution_sessions ADD COLUMN <column_def>` and
+/// silently swallow only the *expected* "duplicate column name" error
+/// (the marker that the column has already been added on an earlier
+/// run). Every other error — prepare-time *or* run-time — gets logged
+/// at `warn` so a busted migration leaves a breadcrumb instead of
+/// silently leaving the schema half-applied.
+fn apply_idempotent_add_column(connection: &Connection, column_def: &str) {
+    let ddl = format!("ALTER TABLE solution_sessions ADD COLUMN {column_def}");
+    let mut run = match connection.exec(&ddl) {
+        Ok(run) => run,
+        Err(err) => {
+            // `Statement::prepare` doesn't (today) emit a duplicate-
+            // column error — that comes from the run step — but
+            // future SQLite versions might do early validation, so
+            // mirror the run-side filter to stay future-proof.
+            let msg = err.to_string();
+            if !msg.contains("duplicate column name") {
+                log::warn!(
+                    target: "solution_agent::db",
+                    "migration prepare failed for {column_def:?}: {msg}",
+                );
+            }
+            return;
+        }
+    };
+    if let Err(err) = run() {
+        let msg = err.to_string();
+        if !msg.contains("duplicate column name") {
+            log::warn!(
+                target: "solution_agent::db",
+                "migration run failed for {column_def:?}: {msg}",
+            );
+        }
     }
 }
 

@@ -158,7 +158,7 @@ pub fn to_persisted(entry: &AgentThreadEntry, cx: &App) -> Option<PersistedEntry
             Some(PersistedEntryV2::Tool(PersistedToolCall {
                 id: call.id.0.to_string(),
                 label_md: call.label.read(cx).source().to_string(),
-                kind: call.kind.clone(),
+                kind: call.kind,
                 status,
                 content,
                 raw_input: call.raw_input.clone(),

@@ -5,11 +5,11 @@ use acp_thread::{AgentThreadEntry, ToolCallContent, UserMessageId};
 use agent_client_protocol::schema as acp;
 use base64::Engine;
 use gpui::{
-    AnyElement, App, ClipboardEntry, Context, DragMoveEvent, Empty, Entity, EntityId, EventEmitter,
-    ExternalPaths, FocusHandle, Focusable, FollowMode, InteractiveElement as _, IntoElement,
-    ListAlignment, ListSizingBehavior, ListState, MouseButton, MouseDownEvent, ParentElement,
-    Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
-    WeakEntity, Window, div, list, px,
+    AnyElement, App, ClipboardEntry, ClipboardItem, Context, DragMoveEvent, Empty, Entity,
+    EntityId, EventEmitter, ExternalPaths, FocusHandle, Focusable, FollowMode,
+    InteractiveElement as _, IntoElement, ListAlignment, ListSizingBehavior, ListState,
+    MouseButton, MouseDownEvent, ParentElement, Pixels, Render, SharedString,
+    StatefulInteractiveElement as _, Styled, Subscription, WeakEntity, Window, div, list, px,
 };
 use markdown::{Markdown, MarkdownFont, MarkdownStyle};
 use ui::prelude::*;
@@ -19,7 +19,6 @@ use workspace::{
     notifications::{NotificationId, simple_message_notification::MessageNotification},
 };
 
-use crate::navigator::SolutionSessionsNavigator;
 use crate::actions::{
     FindClose, FindInSession, FindNextMatch, FindPreviousMatch, PasteWithoutFormatting,
     StopResponse,
@@ -32,6 +31,7 @@ use crate::expanded_compose::{
     ExpandedComposeWindowView,
 };
 use crate::model::{SessionState, SolutionSession, SolutionSessionId};
+use crate::navigator::SolutionSessionsNavigator;
 use crate::slash_commands::SlashCommandsProvider;
 use crate::store::SolutionAgentStore;
 
@@ -84,6 +84,13 @@ const DEFAULT_COMPOSE_HEIGHT: f32 = 96.0;
 /// scroll wobbles at the cost of more layout work; the upstream
 /// `agent_ui` thread view uses 2048px for the same role.
 const LIST_OVERDRAW_PX: f32 = 2048.0;
+/// Initial floor for scroll-driven incremental measurement: this many
+/// recent entries are pre-warmed at session-open so the typical scroll-
+/// up burst (mouse wheel, trackpad fling) stays inside already-measured
+/// territory. Items past this floor get measured on demand as the user
+/// scrolls toward them — see `ListState::measure_last` for the chunked
+/// extension and the eager catch-up path that handles drag-to-top.
+const MEASURE_TAIL_LEN: usize = 500;
 /// Lower bound — leave enough room for one editor line + Send button.
 const MIN_COMPOSE_HEIGHT: f32 = 56.0;
 /// Upper bound — past this the conversation starts feeling cramped on
@@ -366,7 +373,16 @@ impl SolutionSessionView {
                 // worked in isolation, but mis-laid-out the very first
                 // message when the wrapper isn't a flex container —
                 // safer to mirror the upstream invariant.
-                let state = ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW_PX));
+                //
+                // `measure_last(MEASURE_TAIL_LEN)` pre-measures the most
+                // recent entries on the first layout pass so scrolling
+                // up through them doesn't trigger scrollbar jumps from
+                // lazy height discovery. Older entries (past the tail
+                // window) stay `Unmeasured` and get measured lazily on
+                // the regular visible-band path — bounding the cold-load
+                // cost on long-resumed conversations.
+                let state = ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW_PX))
+                    .measure_last(MEASURE_TAIL_LEN);
                 state.set_follow_mode(FollowMode::Tail);
                 state
             },
@@ -613,8 +629,7 @@ impl SolutionSessionView {
             .acp_thread
             .as_ref()
             .map(|thread| thread.read(cx).project().read(cx).languages().clone());
-        let entity =
-            cx.new(|cx| Markdown::new(source.clone(), language_registry, None, cx));
+        let entity = cx.new(|cx| Markdown::new(source.clone(), language_registry, None, cx));
         self.pending_markdown = Some(entity);
         self.pending_markdown_source = source;
     }
@@ -655,8 +670,7 @@ impl SolutionSessionView {
             .acp_thread
             .as_ref()
             .map(|thread| thread.read(cx).project().read(cx).languages().clone());
-        let entity =
-            cx.new(|cx| Markdown::new(source.clone(), language_registry, None, cx));
+        let entity = cx.new(|cx| Markdown::new(source.clone(), language_registry, None, cx));
         self.resuming_markdown = Some(entity);
         self.resuming_markdown_source = source;
     }
@@ -804,7 +818,6 @@ impl SolutionSessionView {
         find.selected = if matches.is_empty() { None } else { Some(0) };
         find.matches = matches;
     }
-
 
     /// Floating "Jump to latest" affordance shown in the bottom-right of
     /// the conversation list when the user has scrolled away from the
@@ -1093,11 +1106,7 @@ impl SolutionSessionView {
     /// images. Returns `true` when a restore happened so the caller can
     /// stop further Esc handling. No-op + `false` when there's nothing
     /// to restore.
-    fn restore_recalled_bundle(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    fn restore_recalled_bundle(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(bundle) = self.recalled_bundle.take() else {
             return false;
         };
@@ -1194,7 +1203,7 @@ impl SolutionSessionView {
             self.compose_editor.update(cx, |e, cx| e.clear(window, cx));
             self.pending_send = Some(blocks);
             self.resuming = true;
-            self.start_resume(cx);
+            self.start_resume(window, cx);
             cx.notify();
             return;
         }
@@ -1261,10 +1270,13 @@ impl SolutionSessionView {
     /// user just hit Send on. The captured ACP blocks live in
     /// `pending_send` and get dispatched by `flush_pending_send_if_ready`
     /// when the session entity gains an `acp_thread`. On resume failure
-    /// this clears `resuming` and surfaces a toast — the message is
-    /// dropped (the user can retype; a more elaborate "restore draft"
-    /// flow is out of scope for v1).
-    fn start_resume(&mut self, cx: &mut Context<Self>) {
+    /// this clears `resuming` and surfaces a toast, AND restores the
+    /// would-be-sent text + images back into the compose editor so the
+    /// user doesn't lose their input. If the user typed something else
+    /// into the compose box during the 3-4s handshake, the failed
+    /// message is prepended (failed_text + "\n" + current_text) so
+    /// neither gets clobbered.
+    fn start_resume(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(workspace) = self.workspace.upgrade() else {
             self.resuming = false;
             self.pending_send = None;
@@ -1288,7 +1300,7 @@ impl SolutionSessionView {
         let store = SolutionAgentStore::global(cx);
         let task = store.update(cx, |store, cx| store.resume_session(meta, project, cx));
         let session_id = self.session_id;
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let resume_result = task.await;
             // Detect "view dropped while we were waiting for the
             // ACP handshake" — i.e. the user clicked Close on the
@@ -1298,7 +1310,7 @@ impl SolutionSessionView {
             // leaving a phantom subprocess with no UI driving it.
             // Close it back out so we don't leak the agent.
             if this.update(cx, |_, _| ()).is_err() {
-                let _ = cx.update(|cx| {
+                let _ = cx.update(|_, cx| {
                     if let Some(global) = SolutionAgentStore::try_global(cx) {
                         global.update(cx, |store, cx| {
                             if let Err(err) = store.close_session(session_id, cx) {
@@ -1312,16 +1324,53 @@ impl SolutionSessionView {
                 return;
             }
             if let Err(err) = resume_result {
-                let _ = this.update(cx, |this, cx| {
-                    if let Some(blocks) = this.pending_send.as_ref() {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    // Pull the would-be-sent blocks back out of
+                    // `pending_send` and unpack them into the same
+                    // (text, images) shape the recall path uses, so
+                    // the user can re-edit / retry instead of losing
+                    // what they typed.
+                    let restored_blocks = this.pending_send.take();
+                    if let Some(blocks) = restored_blocks {
                         log::warn!(
                             target: "solution_agent::queue",
-                            "session={session_id} dropped pending cold-send on resume failure (err={err:#}) — content: {}",
-                            crate::store::summarize_blocks_for_log(blocks),
+                            "session={session_id} restoring pending cold-send into compose on resume failure (err={err:#}) — content: {}",
+                            crate::store::summarize_blocks_for_log(&blocks),
                         );
+                        let (failed_text, failed_images) =
+                            recall::unpack_recalled_bundle(blocks);
+                        // If the compose box already has user-typed
+                        // text (the user didn't sit on their hands
+                        // during the 3-4s wait), prepend the failed
+                        // message + "\n" so both survive. This is
+                        // explicitly what the user asked for: a
+                        // failed send must never destroy whatever
+                        // they typed while waiting.
+                        let current_text = this.compose_editor.read(cx).text(cx);
+                        let merged_text = if current_text.is_empty() {
+                            failed_text
+                        } else if failed_text.is_empty() {
+                            current_text
+                        } else {
+                            format!("{failed_text}\n{current_text}")
+                        };
+                        if !merged_text.is_empty() {
+                            this.compose_editor.update(cx, |editor, cx| {
+                                editor.set_text(merged_text, window, cx);
+                            });
+                        }
+                        // Restore failed images at the FRONT of
+                        // `pending_images` — their `[image #N]`
+                        // placeholders sit at the start of the
+                        // merged text, so positional ordering must
+                        // match.
+                        if !failed_images.is_empty() {
+                            let mut merged = failed_images;
+                            merged.extend(std::mem::take(&mut this.pending_images));
+                            this.pending_images = merged;
+                        }
                     }
                     this.resuming = false;
-                    this.pending_send = None;
                     this.show_toast(
                         SharedString::from(format!("Failed to resume session: {err:#}")),
                         cx,
@@ -1453,11 +1502,31 @@ impl SolutionSessionView {
             return;
         };
         workspace.update(cx, |workspace, cx| {
-            struct SlashCommandRejected;
+            struct SolutionAgentToast;
             workspace.show_notification(
-                NotificationId::unique::<SlashCommandRejected>(),
+                NotificationId::unique::<SolutionAgentToast>(),
                 cx,
-                move |cx| cx.new(|cx| MessageNotification::new(message, cx)),
+                move |cx| {
+                    // The default `MessageNotification::new` body is a
+                    // plain `Label` whose text is not selectable, so a
+                    // user who wants to grab e.g. an ACP session UUID
+                    // out of a "Failed to resume session: …" error has
+                    // no way to copy it. Wire in a one-click "Copy"
+                    // primary button so the full toast contents (the
+                    // most common thing the user actually wants) goes
+                    // to the clipboard with a single press.
+                    let clipboard_payload = message.clone();
+                    cx.new(move |cx| {
+                        MessageNotification::new(message.clone(), cx)
+                            .primary_message("Copy")
+                            .primary_icon(IconName::Copy)
+                            .primary_on_click(move |_, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    clipboard_payload.to_string(),
+                                ));
+                            })
+                    })
+                },
             );
         });
     }
@@ -1929,8 +1998,7 @@ impl Render for SolutionSessionView {
                                     return Empty.into_any_element();
                                 };
                                 let view_weak = cx.entity().downgrade();
-                                let queue_expanded =
-                                    this.expanded_queue_markers.contains(&idx);
+                                let queue_expanded = this.expanded_queue_markers.contains(&idx);
                                 render_entry(
                                     idx,
                                     entry,
@@ -2061,9 +2129,15 @@ impl Render for SolutionSessionView {
                 // (compact, history popover) need `cx.listener`
                 // bindings against `SolutionSessionsNavigator::Self`.
                 let active_view = cx.entity();
+                // Precompute view-local flags BEFORE entering `nav.update`:
+                // inside that closure GPUI has the view entity leased (we're
+                // in our own `render`), so `active_view.read(cx)` would
+                // double-lease and panic. The navigator's status row only
+                // needs the resulting `bool`, not the live entity.
+                let is_resuming = self.is_resuming();
                 self.navigator.upgrade().and_then(|nav| {
                     nav.update(cx, |nav, ncx| {
-                        nav.render_status_row(Some(&active_view), ncx)
+                        nav.render_status_row(Some(&active_view), is_resuming, ncx)
                     })
                 })
             })
