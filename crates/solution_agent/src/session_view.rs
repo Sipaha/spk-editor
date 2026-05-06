@@ -14,7 +14,7 @@ use gpui::{
 };
 use markdown::{Markdown, MarkdownFont, MarkdownStyle};
 use ui::prelude::*;
-use ui::{Icon, IconButton, IconName, Label, Tooltip};
+use ui::{Icon, IconButton, IconName, Label, Tooltip, WithScrollbar};
 use workspace::{
     Workspace,
     notifications::{NotificationId, simple_message_notification::MessageNotification},
@@ -1502,13 +1502,20 @@ impl Render for SolutionSessionView {
                         // without `display:flex` on this wrapper, the
                         // list element's `.flex_grow()` is a no-op,
                         // leaving the list at its `Auto`-sized 0 height.
+                        // `vertical_scrollbar_for(&self.list_state, …)`
+                        // bolts the editor's standard auto-hide scrollbar
+                        // onto the right edge — `ListState` already
+                        // implements `ScrollableHandle`, so the bar
+                        // tracks the same offset/viewport the
+                        // virtualized list scrolls.
                         v_flex()
                             .id("solution-session-conversation")
                             .flex_1()
                             .min_h_0()
                             .px_2()
                             .py_1()
-                            .child(conversation_body),
+                            .child(conversation_body)
+                            .vertical_scrollbar_for(&self.list_state, window, cx),
                     )
                     .when_some(thinking_badge, |this, badge| this.child(badge))
                     .when(pending_has_any, |this| this.child(pending_section))
