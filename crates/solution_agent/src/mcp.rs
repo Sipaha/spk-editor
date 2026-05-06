@@ -383,10 +383,7 @@ impl McpServerTool for CreateSessionTool {
 // the helper of the same name in `solutions::mcp` (kept private there);
 // duplicated here to avoid widening the `solutions` crate's public API
 // just for this MCP tool.
-fn project_for_solution(
-    solution_id: &str,
-    cx: &mut App,
-) -> Option<Entity<project::Project>> {
+fn project_for_solution(solution_id: &str, cx: &mut App) -> Option<Entity<project::Project>> {
     let store = SolutionStore::try_global(cx)?;
     let root = store.read_with(cx, |s, _| {
         s.solutions()
@@ -675,10 +672,7 @@ impl McpServerTool for RenameSessionTool {
             !input.session_id.is_empty(),
             "invalid_params: session_id is required"
         );
-        anyhow::ensure!(
-            !input.title.is_empty(),
-            "invalid_params: title is required"
-        );
+        anyhow::ensure!(!input.title.is_empty(), "invalid_params: title is required");
         let session_id = SolutionSessionId::parse(&input.session_id)
             .map_err(|e| anyhow!("bad session id: {e}"))?;
         let title = SharedString::from(input.title);
@@ -954,9 +948,7 @@ impl McpServerTool for CompactSessionTool {
         cx.update(|cx| {
             let store = SolutionAgentStore::global(cx);
             store.update(cx, |store, cx| {
-                store
-                    .send_message(old_session_id, prompt_text, cx)
-                    .detach();
+                store.send_message(old_session_id, prompt_text, cx).detach();
             });
         });
 
@@ -1000,7 +992,10 @@ fn validate_handoff_files(compact_dir: &std::path::Path) -> Result<()> {
         "compact_incomplete: session-state.json is empty"
     );
     let state_text = std::fs::read_to_string(&state_json_path).with_context(|| {
-        format!("compact_incomplete: cannot read {}", state_json_path.display())
+        format!(
+            "compact_incomplete: cannot read {}",
+            state_json_path.display()
+        )
     })?;
     let state_json: serde_json::Value = serde_json::from_str(&state_text)
         .with_context(|| "compact_incomplete: session-state.json is not valid JSON")?;
@@ -1152,7 +1147,11 @@ impl McpServerTool for ReadSessionHistoryTool {
         });
         if let Some((title, entries)) = live {
             let total = entries.len();
-            let slice = entries.into_iter().skip(offset).take(limit).collect::<Vec<_>>();
+            let slice = entries
+                .into_iter()
+                .skip(offset)
+                .take(limit)
+                .collect::<Vec<_>>();
             let returned = slice.len();
             return Ok(ToolResponse {
                 content: vec![ToolResponseContent::Text {
@@ -1182,9 +1181,7 @@ impl McpServerTool for ReadSessionHistoryTool {
             None => None,
         };
         let blob = blob.ok_or_else(|| {
-            anyhow!(
-                "session_not_found: {session_id} is neither open nor archived in the database"
-            )
+            anyhow!("session_not_found: {session_id} is neither open nor archived in the database")
         })?;
         let snapshot: PersistedSession = serde_json::from_slice(&blob)
             .with_context(|| format!("decoding archived session {session_id}"))?;

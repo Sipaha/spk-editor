@@ -170,8 +170,7 @@ impl McpServerTool for ListSolutionsTool {
     ) -> anyhow::Result<ToolResponse<Self::Output>> {
         let summaries = cx.update(|cx| {
             let store = SolutionStore::global(cx);
-            let solutions = store
-                .read_with(cx, |store, _| store.solutions().to_vec());
+            let solutions = store.read_with(cx, |store, _| store.solutions().to_vec());
             solutions
                 .iter()
                 .map(|sol| build_summary(sol, cx))
@@ -411,9 +410,7 @@ impl<'de> Deserialize<'de> for CreateSolutionParams {
             name: String,
         }
         Ok(Self {
-            name: Option::<Inner>::deserialize(de)?
-                .unwrap_or_default()
-                .name,
+            name: Option::<Inner>::deserialize(de)?.unwrap_or_default().name,
         })
     }
 }
@@ -1120,8 +1117,12 @@ impl McpServerTool for RemoveCatalogProjectTool {
 // catalog.edit_project
 // =====================================================================
 
-/// Edit `name` and/or `default_branch` of a catalog entry. `remote_url` is
-/// immutable in v1; to change it, remove and re-add (a new clone is required).
+/// Edit `name` and/or `default_branch` of a catalog entry via the MCP
+/// surface. The UI modal also lets the user change `remote_url` (which
+/// rewrites every existing clone's `origin`); that capability is
+/// intentionally not exposed here — agent-driven URL changes would need
+/// separate plumbing to confirm-or-rollback the cascading remote-rewrite,
+/// and no use case has come up yet. Use the UI modal for URL edits.
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct EditCatalogProjectParams {
     pub catalog_id: String,
@@ -1176,7 +1177,7 @@ impl McpServerTool for EditCatalogProjectTool {
             let store = SolutionStore::global(cx);
             let id = crate::CatalogId(input.catalog_id);
             store.update(cx, |s, cx| {
-                s.edit_catalog_project(&id, input.name, input.default_branch, cx)
+                s.edit_catalog_project(&id, input.name, input.default_branch, None, cx)
             })?;
             Ok(())
         })?;
@@ -1254,10 +1255,7 @@ impl McpServerTool for ClearCacheTool {
                         .with_context(|| format!("catalog_not_found: {id}"))?;
                     Ok(vec![url])
                 } else {
-                    Ok(s.catalog()
-                        .iter()
-                        .map(|p| p.remote_url.clone())
-                        .collect())
+                    Ok(s.catalog().iter().map(|p| p.remote_url.clone()).collect())
                 }
             })
         })?;
@@ -1275,7 +1273,10 @@ impl McpServerTool for ClearCacheTool {
 
         let summary = match removed.len() {
             0 => "no cache directories to remove".to_string(),
-            n => format!("removed {n} cache director{}", if n == 1 { "y" } else { "ies" }),
+            n => format!(
+                "removed {n} cache director{}",
+                if n == 1 { "y" } else { "ies" }
+            ),
         };
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text { text: summary }],
@@ -1462,18 +1463,21 @@ impl McpServerTool for AddMemberTool {
         let catalog_id_for_log = input.catalog_id.clone();
 
         cx.spawn(async move |cx| {
-            cx.update(|cx| {
-                editor_mcp::op_record_progress(
-                    &op_id_for_task,
-                    "starting".to_string(),
-                    Some(0),
-                    cx,
-                );
-            });
+            // Forward every git progress tick to op_record_progress so the
+            // operation's published `operation_progress` notifications stay
+            // in sync with what the in-process store events broadcast.
+            let op_id_for_cb = op_id_for_task.clone();
+            let on_progress: crate::add_member::AddProgressCallback = Box::new(
+                move |stage: &str, percent: Option<u8>, app: &mut gpui::App| {
+                    editor_mcp::op_record_progress(&op_id_for_cb, stage.to_string(), percent, app);
+                },
+            );
 
             let task = cx.update(|cx| {
                 let store = SolutionStore::global(cx);
-                store.update(cx, |s, cx| s.add_member(sol_id, cat_id, cache_root, cx))
+                store.update(cx, |s, cx| {
+                    s.add_member_with_progress(sol_id, cat_id, cache_root, on_progress, cx)
+                })
             });
             let result = task.await;
 
@@ -1497,7 +1501,10 @@ impl McpServerTool for AddMemberTool {
 
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text {
-                text: format!("queued add_member: {}/{}", input.solution_id, input.catalog_id),
+                text: format!(
+                    "queued add_member: {}/{}",
+                    input.solution_id, input.catalog_id
+                ),
             }],
             structured_content: AddMemberResult { operation_id },
         })
@@ -1756,22 +1763,21 @@ fn collect_buffers(solution_id: &str, cx: &mut App) -> Vec<BufferInfo> {
                 // project_path so we can flag exactly the entry the user is
                 // currently looking at, even if the same buffer is open in
                 // another pane.
-                let active_project_path =
-                    workspace.active_item(cx).and_then(|item| item.project_path(cx));
+                let active_project_path = workspace
+                    .active_item(cx)
+                    .and_then(|item| item.project_path(cx));
                 let active_pane_id = workspace.active_pane().entity_id();
 
                 let mut buffers = Vec::new();
                 for pane_entity in workspace.panes() {
                     let pane = pane_entity.read(cx);
                     let pane_is_active = pane_entity.entity_id() == active_pane_id;
-                    let pane_active_item_id =
-                        pane.active_item().map(|item| item.item_id());
+                    let pane_active_item_id = pane.active_item().map(|item| item.item_id());
                     for item in pane.items() {
                         let Some(project_path) = item.project_path(cx) else {
                             continue;
                         };
-                        let is_active_in_pane =
-                            pane_active_item_id == Some(item.item_id());
+                        let is_active_in_pane = pane_active_item_id == Some(item.item_id());
                         let focused = pane_is_active
                             && is_active_in_pane
                             && active_project_path
@@ -1967,10 +1973,7 @@ impl McpServerTool for DispatchActionTool {
     }
 }
 
-fn find_window_for_solution(
-    solution_id: &str,
-    cx: &mut App,
-) -> Option<gpui::AnyWindowHandle> {
+fn find_window_for_solution(solution_id: &str, cx: &mut App) -> Option<gpui::AnyWindowHandle> {
     let store = SolutionStore::try_global(cx)?;
     let root = store.read_with(cx, |s, _| {
         s.solutions()
@@ -2069,7 +2072,11 @@ impl McpServerTool for ScreenshotTool {
             !input.solution_id.is_empty(),
             "invalid_params: solution_id is required"
         );
-        let format = input.format.as_deref().unwrap_or("jpeg").to_ascii_lowercase();
+        let format = input
+            .format
+            .as_deref()
+            .unwrap_or("jpeg")
+            .to_ascii_lowercase();
         let quality = input.quality.unwrap_or(80).clamp(1, 100);
 
         let rgba = cx.update(|cx| -> anyhow::Result<image::RgbaImage> {
@@ -2085,12 +2092,7 @@ impl McpServerTool for ScreenshotTool {
                 let scale = max_dim as f32 / max_side as f32;
                 let new_w = ((orig_w as f32 * scale).round() as u32).max(1);
                 let new_h = ((orig_h as f32 * scale).round() as u32).max(1);
-                image::imageops::resize(
-                    &rgba,
-                    new_w,
-                    new_h,
-                    image::imageops::FilterType::Lanczos3,
-                )
+                image::imageops::resize(&rgba, new_w, new_h, image::imageops::FilterType::Lanczos3)
             } else {
                 rgba
             }
@@ -2118,9 +2120,7 @@ impl McpServerTool for ScreenshotTool {
                 let rgb = dyn_image.to_rgb8();
                 let mut encoder =
                     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, quality);
-                encoder
-                    .encode_image(&rgb)
-                    .with_context(|| "encode jpeg")?;
+                encoder.encode_image(&rgb).with_context(|| "encode jpeg")?;
                 "image/jpeg"
             }
             other => anyhow::bail!("unsupported_format: {other}"),
@@ -2311,10 +2311,7 @@ fn build_visual_tree(solution_id: &str, cx: &mut App) -> Option<VisualNode> {
     build_visual_tree_for_window(handle, cx)
 }
 
-fn build_visual_tree_for_window(
-    handle: gpui::AnyWindowHandle,
-    cx: &mut App,
-) -> Option<VisualNode> {
+fn build_visual_tree_for_window(handle: gpui::AnyWindowHandle, cx: &mut App) -> Option<VisualNode> {
     let window_handle = handle.downcast::<workspace::MultiWorkspace>()?;
     window_handle
         .read_with(cx, |multi, cx| build_workspace_node(multi, cx))
@@ -2465,11 +2462,7 @@ fn build_workspace_node(multi: &workspace::MultiWorkspace, cx: &App) -> VisualNo
     }
 }
 
-fn build_dock_node(
-    side: &str,
-    dock: &gpui::Entity<workspace::dock::Dock>,
-    cx: &App,
-) -> VisualNode {
+fn build_dock_node(side: &str, dock: &gpui::Entity<workspace::dock::Dock>, cx: &App) -> VisualNode {
     let dock = dock.read(cx);
     let is_open = dock.is_open();
     let active_panel_label = dock
@@ -2508,9 +2501,7 @@ fn build_pane_area_node(workspace: &workspace::Workspace, cx: &App) -> VisualNod
                     let label = item
                         .project_path(cx)
                         .map(|p| p.path.as_unix_str().to_string())
-                        .unwrap_or_else(|| {
-                            item.tab_content_text(0, cx).to_string()
-                        });
+                        .unwrap_or_else(|| item.tab_content_text(0, cx).to_string());
                     let is_active = active_item_id
                         .map(|id| id == item.item_id())
                         .unwrap_or(false);
@@ -2707,22 +2698,20 @@ fn collect_diagnostic_summaries(
                 let mut by_path: std::collections::BTreeMap<String, DiagnosticPathSummary> =
                     std::collections::BTreeMap::new();
 
-                for (project_path, _server_id, summary) in
-                    project.diagnostic_summaries(false, cx)
-                {
+                for (project_path, _server_id, summary) in project.diagnostic_summaries(false, cx) {
                     let path_str = project_path.path.as_unix_str().to_string();
                     if let Some(filter) = input.buffer_path.as_deref() {
                         if path_str != filter {
                             continue;
                         }
                     }
-                    let entry = by_path.entry(path_str.clone()).or_insert(
-                        DiagnosticPathSummary {
+                    let entry = by_path
+                        .entry(path_str.clone())
+                        .or_insert(DiagnosticPathSummary {
                             path: path_str,
                             error_count: 0,
                             warning_count: 0,
-                        },
-                    );
+                        });
                     entry.error_count += summary.error_count;
                     entry.warning_count += summary.warning_count;
                 }
@@ -2773,8 +2762,7 @@ async fn collect_diagnostic_items(
     let mut items = Vec::new();
     for project_path in project_paths {
         let path_str = project_path.path.as_unix_str().to_string();
-        let buffer_task =
-            project.update(cx, |project, cx| project.open_buffer(project_path, cx));
+        let buffer_task = project.update(cx, |project, cx| project.open_buffer(project_path, cx));
         let buffer = match buffer_task.await {
             Ok(buffer) => buffer,
             Err(err) => {
@@ -3192,10 +3180,7 @@ impl McpServerTool for ReadBufferTool {
             !input.solution_id.is_empty(),
             "invalid_params: solution_id is required"
         );
-        anyhow::ensure!(
-            !input.path.is_empty(),
-            "invalid_params: path is required"
-        );
+        anyhow::ensure!(!input.path.is_empty(), "invalid_params: path is required");
 
         cx.update(|cx| validate_path_in_solution(&input.solution_id, &input.path, cx))
             .map_err(|err| anyhow::anyhow!("{err}"))?;
@@ -3319,10 +3304,7 @@ impl McpServerTool for ApplyEditTool {
             !input.solution_id.is_empty(),
             "invalid_params: solution_id is required"
         );
-        anyhow::ensure!(
-            !input.path.is_empty(),
-            "invalid_params: path is required"
-        );
+        anyhow::ensure!(!input.path.is_empty(), "invalid_params: path is required");
         anyhow::ensure!(
             !input.edits.is_empty(),
             "invalid_params: at least one edit is required"
@@ -3375,10 +3357,7 @@ impl McpServerTool for ApplyEditTool {
 // every open `MultiWorkspace` window and return the first project whose
 // visible worktrees include the Solution's root (or a member directory
 // underneath it).
-fn project_for_solution(
-    solution_id: &str,
-    cx: &mut App,
-) -> Option<gpui::Entity<project::Project>> {
+fn project_for_solution(solution_id: &str, cx: &mut App) -> Option<gpui::Entity<project::Project>> {
     let store = SolutionStore::try_global(cx)?;
     let root = store.read_with(cx, |s, _| {
         s.solutions()
@@ -3500,10 +3479,7 @@ impl McpServerTool for SaveBufferTool {
             !input.solution_id.is_empty(),
             "invalid_params: solution_id is required"
         );
-        anyhow::ensure!(
-            !input.path.is_empty(),
-            "invalid_params: path is required"
-        );
+        anyhow::ensure!(!input.path.is_empty(), "invalid_params: path is required");
 
         cx.update(|cx| validate_path_in_solution(&input.solution_id, &input.path, cx))
             .map_err(|err| anyhow::anyhow!("{err}"))?;
@@ -3594,10 +3570,7 @@ impl McpServerTool for OpenFileTool {
             !input.solution_id.is_empty(),
             "invalid_params: solution_id is required"
         );
-        anyhow::ensure!(
-            !input.path.is_empty(),
-            "invalid_params: path is required"
-        );
+        anyhow::ensure!(!input.path.is_empty(), "invalid_params: path is required");
 
         cx.update(|cx| validate_path_in_solution(&input.solution_id, &input.path, cx))
             .map_err(|err| anyhow::anyhow!("{err}"))?;
@@ -3699,10 +3672,7 @@ impl McpServerTool for CloseBufferTool {
             !input.solution_id.is_empty(),
             "invalid_params: solution_id is required"
         );
-        anyhow::ensure!(
-            !input.path.is_empty(),
-            "invalid_params: path is required"
-        );
+        anyhow::ensure!(!input.path.is_empty(), "invalid_params: path is required");
 
         cx.update(|cx| validate_path_in_solution(&input.solution_id, &input.path, cx))
             .map_err(|err| anyhow::anyhow!("{err}"))?;
@@ -3769,7 +3739,9 @@ impl McpServerTool for CloseBufferTool {
         let mut saved_flag = false;
         if save && any_dirty {
             let buffer = project
-                .update(cx, |project, cx| project.open_buffer(project_path.clone(), cx))
+                .update(cx, |project, cx| {
+                    project.open_buffer(project_path.clone(), cx)
+                })
                 .await?;
             project
                 .update(cx, |project, cx| project.save_buffer(buffer, cx))
@@ -3871,10 +3843,7 @@ impl McpServerTool for CreateFileTool {
             !input.solution_id.is_empty(),
             "invalid_params: solution_id is required"
         );
-        anyhow::ensure!(
-            !input.path.is_empty(),
-            "invalid_params: path is required"
-        );
+        anyhow::ensure!(!input.path.is_empty(), "invalid_params: path is required");
 
         cx.update(|cx| validate_path_in_solution(&input.solution_id, &input.path, cx))
             .map_err(|err| anyhow::anyhow!("{err}"))?;
@@ -3888,8 +3857,7 @@ impl McpServerTool for CreateFileTool {
             .update(|cx| project_for_solution(&input.solution_id, cx))
             .ok_or_else(|| anyhow::anyhow!("solution_not_open: {}", input.solution_id))?;
 
-        let fs: std::sync::Arc<dyn fs::Fs> =
-            cx.update(|cx| project.read(cx).fs().clone());
+        let fs: std::sync::Arc<dyn fs::Fs> = cx.update(|cx| project.read(cx).fs().clone());
         let bytes = input.content.unwrap_or_default().into_bytes();
         fs.write(&abs_path, &bytes).await?;
 
@@ -3955,10 +3923,7 @@ impl McpServerTool for DeleteFileTool {
             !input.solution_id.is_empty(),
             "invalid_params: solution_id is required"
         );
-        anyhow::ensure!(
-            !input.path.is_empty(),
-            "invalid_params: path is required"
-        );
+        anyhow::ensure!(!input.path.is_empty(), "invalid_params: path is required");
 
         cx.update(|cx| validate_path_in_solution(&input.solution_id, &input.path, cx))
             .map_err(|err| anyhow::anyhow!("{err}"))?;
@@ -4201,10 +4166,7 @@ impl McpServerTool for FindInBuffersTool {
             !input.solution_id.is_empty(),
             "invalid_params: solution_id is required"
         );
-        anyhow::ensure!(
-            !input.query.is_empty(),
-            "invalid_params: query is required"
-        );
+        anyhow::ensure!(!input.query.is_empty(), "invalid_params: query is required");
         let max = input.max.unwrap_or(100).clamp(1, 1000);
         let case_sensitive = input.case_sensitive.unwrap_or(false);
         let use_regex = input.regex.unwrap_or(false);
@@ -4221,15 +4183,11 @@ impl McpServerTool for FindInBuffersTool {
                     })
                 })
             })
-            .ok_or_else(|| {
-                anyhow::anyhow!("solution_not_open: {}", input.solution_id)
-            })?;
+            .ok_or_else(|| anyhow::anyhow!("solution_not_open: {}", input.solution_id))?;
 
         let project = cx
             .update(|cx| project_for_solution(&input.solution_id, cx))
-            .ok_or_else(|| {
-                anyhow::anyhow!("solution_not_open: {}", input.solution_id)
-            })?;
+            .ok_or_else(|| anyhow::anyhow!("solution_not_open: {}", input.solution_id))?;
 
         // Build the SearchQuery. We pass the optional file_glob through
         // the project search engine's own include matcher so gitignore
@@ -4269,12 +4227,8 @@ impl McpServerTool for FindInBuffersTool {
         };
         let query = query.map_err(|err| anyhow::anyhow!("invalid_query: {err}"))?;
 
-        let results =
-            cx.update(|cx| project.update(cx, |proj, cx| proj.search(query, cx)));
-        let project::SearchResults {
-            rx,
-            _task_handle,
-        } = results;
+        let results = cx.update(|cx| project.update(cx, |proj, cx| proj.search(query, cx)));
+        let project::SearchResults { rx, _task_handle } = results;
 
         let mut all_matches: Vec<SearchMatch> = Vec::new();
         let mut hit_limit = false;
@@ -4308,16 +4262,12 @@ impl McpServerTool for FindInBuffersTool {
                             return Vec::new();
                         }
                         let worktree_id = file.worktree_id(cx);
-                        let Some(worktree) =
-                            project.read(cx).worktree_for_id(worktree_id, cx)
+                        let Some(worktree) = project.read(cx).worktree_for_id(worktree_id, cx)
                         else {
                             return Vec::new();
                         };
-                        let worktree_root = worktree
-                            .read(cx)
-                            .abs_path()
-                            .to_string_lossy()
-                            .into_owned();
+                        let worktree_root =
+                            worktree.read(cx).abs_path().to_string_lossy().into_owned();
                         let rel_path = file.path().as_unix_str().to_string();
 
                         let mut local_matches = Vec::new();
@@ -4357,8 +4307,7 @@ impl McpServerTool for FindInBuffersTool {
                     // <= start_after).
                     for m in collected {
                         if !start_after.is_empty() {
-                            let key =
-                                format!("{}|{}:{}", m.worktree_root, m.path, m.line);
+                            let key = format!("{}|{}:{}", m.worktree_root, m.path, m.line);
                             if key.as_str() <= start_after.as_str() {
                                 continue;
                             }
@@ -4474,10 +4423,7 @@ impl McpServerTool for GotoDefinitionTool {
             !input.solution_id.is_empty(),
             "invalid_params: solution_id is required"
         );
-        anyhow::ensure!(
-            !input.path.is_empty(),
-            "invalid_params: path is required"
-        );
+        anyhow::ensure!(!input.path.is_empty(), "invalid_params: path is required");
 
         cx.update(|cx| validate_path_in_solution(&input.solution_id, &input.path, cx))
             .map_err(|err| anyhow::anyhow!("{err}"))?;
@@ -4493,9 +4439,7 @@ impl McpServerTool for GotoDefinitionTool {
             .await?;
 
         let position = language::Point::new(input.line, input.col);
-        let task = project.update(cx, |project, cx| {
-            project.definitions(&buffer, position, cx)
-        });
+        let task = project.update(cx, |project, cx| project.definitions(&buffer, position, cx));
 
         let definitions = match task.await {
             Ok(Some(links)) => cx.update(|cx| location_links_to_refs(&links, cx)),
@@ -4621,10 +4565,7 @@ impl McpServerTool for FindReferencesTool {
             !input.solution_id.is_empty(),
             "invalid_params: solution_id is required"
         );
-        anyhow::ensure!(
-            !input.path.is_empty(),
-            "invalid_params: path is required"
-        );
+        anyhow::ensure!(!input.path.is_empty(), "invalid_params: path is required");
 
         cx.update(|cx| validate_path_in_solution(&input.solution_id, &input.path, cx))
             .map_err(|err| anyhow::anyhow!("{err}"))?;
@@ -4640,9 +4581,7 @@ impl McpServerTool for FindReferencesTool {
             .await?;
 
         let position = language::Point::new(input.line, input.col);
-        let task = project.update(cx, |project, cx| {
-            project.references(&buffer, position, cx)
-        });
+        let task = project.update(cx, |project, cx| project.references(&buffer, position, cx));
 
         let references = match task.await {
             Ok(Some(locations)) => cx.update(|cx| locations_to_refs(&locations, cx)),
@@ -4715,8 +4654,7 @@ mod tests {
 
     #[test]
     fn list_params_deserialize_from_null() {
-        let _: ListSolutionsParams =
-            serde_json::from_value(serde_json::Value::Null).expect("null");
+        let _: ListSolutionsParams = serde_json::from_value(serde_json::Value::Null).expect("null");
     }
 
     #[test]
@@ -4730,8 +4668,7 @@ mod tests {
 
     #[test]
     fn get_params_accepts_null() {
-        let p: GetSolutionParams =
-            serde_json::from_value(serde_json::Value::Null).expect("null");
+        let p: GetSolutionParams = serde_json::from_value(serde_json::Value::Null).expect("null");
         assert!(p.solution_id.is_empty());
     }
 
@@ -4867,8 +4804,7 @@ mod tests {
 
     #[test]
     fn list_catalog_params_accepts_null() {
-        let _: ListCatalogParams =
-            serde_json::from_value(serde_json::Value::Null).expect("null");
+        let _: ListCatalogParams = serde_json::from_value(serde_json::Value::Null).expect("null");
     }
 
     #[test]
@@ -4965,8 +4901,7 @@ mod tests {
 
     #[test]
     fn remove_member_params_accepts_null() {
-        let p: RemoveMemberParams =
-            serde_json::from_value(serde_json::Value::Null).expect("null");
+        let p: RemoveMemberParams = serde_json::from_value(serde_json::Value::Null).expect("null");
         assert!(p.solution_id.is_empty());
         assert!(p.catalog_id.is_empty());
     }
@@ -5052,8 +4987,7 @@ mod tests {
 
     #[test]
     fn list_buffers_params_accepts_null() {
-        let p: ListBuffersParams =
-            serde_json::from_value(serde_json::Value::Null).expect("null");
+        let p: ListBuffersParams = serde_json::from_value(serde_json::Value::Null).expect("null");
         assert!(p.solution_id.is_empty());
     }
 
@@ -5113,8 +5047,7 @@ mod tests {
 
     #[test]
     fn screenshot_params_accepts_null() {
-        let p: ScreenshotParams =
-            serde_json::from_value(serde_json::Value::Null).expect("null");
+        let p: ScreenshotParams = serde_json::from_value(serde_json::Value::Null).expect("null");
         assert!(p.solution_id.is_empty());
         assert!(p.format.is_none());
         assert!(p.quality.is_none());
@@ -5173,8 +5106,7 @@ mod tests {
 
     #[test]
     fn list_files_params_accepts_null() {
-        let p: ListFilesParams =
-            serde_json::from_value(serde_json::Value::Null).expect("null");
+        let p: ListFilesParams = serde_json::from_value(serde_json::Value::Null).expect("null");
         assert!(p.solution_id.is_empty());
         assert!(p.glob.is_none());
         assert!(p.scope.is_none());
@@ -5230,8 +5162,7 @@ mod tests {
 
     #[test]
     fn read_buffer_params_accepts_null() {
-        let p: ReadBufferParams =
-            serde_json::from_value(serde_json::Value::Null).expect("null");
+        let p: ReadBufferParams = serde_json::from_value(serde_json::Value::Null).expect("null");
         assert!(p.solution_id.is_empty());
         assert!(p.path.is_empty());
     }
@@ -5255,8 +5186,7 @@ mod tests {
 
     #[test]
     fn apply_edit_params_accepts_null() {
-        let p: ApplyEditParams =
-            serde_json::from_value(serde_json::Value::Null).expect("null");
+        let p: ApplyEditParams = serde_json::from_value(serde_json::Value::Null).expect("null");
         assert!(p.solution_id.is_empty());
         assert!(p.path.is_empty());
         assert!(p.edits.is_empty());
@@ -5275,8 +5205,7 @@ mod tests {
 
     #[test]
     fn save_buffer_params_accepts_null() {
-        let p: SaveBufferParams =
-            serde_json::from_value(serde_json::Value::Null).expect("null");
+        let p: SaveBufferParams = serde_json::from_value(serde_json::Value::Null).expect("null");
         assert!(p.solution_id.is_empty());
         assert!(p.path.is_empty());
     }
@@ -5296,8 +5225,7 @@ mod tests {
 
     #[test]
     fn open_file_params_accepts_null() {
-        let p: OpenFileParams =
-            serde_json::from_value(serde_json::Value::Null).expect("null");
+        let p: OpenFileParams = serde_json::from_value(serde_json::Value::Null).expect("null");
         assert!(p.solution_id.is_empty());
         assert!(p.path.is_empty());
         assert!(p.focus.is_none());
@@ -5318,8 +5246,7 @@ mod tests {
 
     #[test]
     fn close_buffer_params_accepts_null() {
-        let p: CloseBufferParams =
-            serde_json::from_value(serde_json::Value::Null).expect("null");
+        let p: CloseBufferParams = serde_json::from_value(serde_json::Value::Null).expect("null");
         assert!(p.solution_id.is_empty());
         assert!(p.path.is_empty());
         assert!(p.save.is_none());
@@ -5340,8 +5267,7 @@ mod tests {
 
     #[test]
     fn create_file_params_accepts_null() {
-        let p: CreateFileParams =
-            serde_json::from_value(serde_json::Value::Null).expect("null");
+        let p: CreateFileParams = serde_json::from_value(serde_json::Value::Null).expect("null");
         assert!(p.solution_id.is_empty());
         assert!(p.path.is_empty());
         assert!(p.content.is_none());
@@ -5360,8 +5286,7 @@ mod tests {
 
     #[test]
     fn delete_file_params_accepts_null() {
-        let p: DeleteFileParams =
-            serde_json::from_value(serde_json::Value::Null).expect("null");
+        let p: DeleteFileParams = serde_json::from_value(serde_json::Value::Null).expect("null");
         assert!(p.solution_id.is_empty());
         assert!(p.path.is_empty());
     }
@@ -5381,8 +5306,7 @@ mod tests {
 
     #[test]
     fn rename_file_params_accepts_null() {
-        let p: RenameFileParams =
-            serde_json::from_value(serde_json::Value::Null).expect("null");
+        let p: RenameFileParams = serde_json::from_value(serde_json::Value::Null).expect("null");
         assert!(p.solution_id.is_empty());
         assert!(p.from.is_empty());
         assert!(p.to.is_empty());
@@ -5413,8 +5337,7 @@ mod tests {
 
     #[test]
     fn find_in_buffers_params_accepts_null() {
-        let p: FindInBuffersParams =
-            serde_json::from_value(serde_json::Value::Null).expect("null");
+        let p: FindInBuffersParams = serde_json::from_value(serde_json::Value::Null).expect("null");
         assert!(p.solution_id.is_empty());
         assert!(p.query.is_empty());
         assert!(p.case_sensitive.is_none());

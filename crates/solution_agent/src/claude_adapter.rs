@@ -29,10 +29,7 @@ impl SolutionAgentAdapter for ClaudeAcpAdapter {
     fn build_initial_system_prompt(&self, solution: &Solution) -> String {
         let mut buf = String::new();
         buf.push_str("You are working inside a Solution — a multi-project workspace.\n\n");
-        buf.push_str(&format!(
-            "Solution root: {}\n",
-            solution.root.display()
-        ));
+        buf.push_str(&format!("Solution root: {}\n", solution.root.display()));
         buf.push_str("Member projects (subdirectories you can navigate freely):\n");
         if solution.members.is_empty() {
             buf.push_str("  (none yet — solution is empty)\n");

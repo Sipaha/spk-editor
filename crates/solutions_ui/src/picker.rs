@@ -19,19 +19,14 @@ pub struct OpenSolutionModal {
 impl OpenSolutionModal {
     pub fn register(workspace: &mut Workspace, _: Option<&mut Window>, _: &mut Context<Workspace>) {
         workspace.register_action(|workspace, _: &OpenSolution, window, cx| {
-            let weak = cx.weak_entity();
             workspace.toggle_modal(window, cx, move |window, cx| {
-                OpenSolutionModal::new(weak, window, cx)
+                OpenSolutionModal::new(window, cx)
             });
         });
     }
 
-    fn new(
-        workspace: WeakEntity<Workspace>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let delegate = OpenSolutionDelegate::new(workspace, cx.entity().downgrade(), cx);
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let delegate = OpenSolutionDelegate::new(cx.entity().downgrade(), cx);
         let picker = cx.new(|cx| Picker::uniform_list(delegate, window, cx));
         Self { picker }
     }
@@ -63,7 +58,6 @@ struct SolutionEntry {
 }
 
 pub struct OpenSolutionDelegate {
-    workspace: WeakEntity<Workspace>,
     modal: WeakEntity<OpenSolutionModal>,
     all: Vec<SolutionEntry>,
     matches: Vec<usize>,
@@ -71,11 +65,7 @@ pub struct OpenSolutionDelegate {
 }
 
 impl OpenSolutionDelegate {
-    fn new(
-        workspace: WeakEntity<Workspace>,
-        modal: WeakEntity<OpenSolutionModal>,
-        cx: &mut App,
-    ) -> Self {
+    fn new(modal: WeakEntity<OpenSolutionModal>, cx: &mut App) -> Self {
         let store = SolutionStore::global(cx);
         let mut all: Vec<SolutionEntry> = store.read_with(cx, |s, _| {
             s.solutions()
@@ -90,7 +80,6 @@ impl OpenSolutionDelegate {
         all.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         let matches = (0..all.len()).collect();
         Self {
-            workspace,
             modal,
             all,
             matches,

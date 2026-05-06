@@ -198,13 +198,7 @@ pub fn open_solution(
                                     cx,
                                 )
                             });
-                            ws.add_item_to_active_pane(
-                                Box::new(page),
-                                None,
-                                true,
-                                window,
-                                cx,
-                            );
+                            ws.add_item_to_active_pane(Box::new(page), None, true, window, cx);
                         });
                     })
                     .log_err();
@@ -247,10 +241,7 @@ pub(crate) fn workspace_has_solution(
     })
 }
 
-fn find_window_for_solution(
-    sol_id: &SolutionId,
-    cx: &App,
-) -> Option<WindowHandle<MultiWorkspace>> {
+fn find_window_for_solution(sol_id: &SolutionId, cx: &App) -> Option<WindowHandle<MultiWorkspace>> {
     let skip = skip_window_id(cx);
     for handle in cx.windows() {
         if Some(handle.window_id()) == skip {

@@ -14,10 +14,9 @@ impl SolutionsStatusItem {
     pub fn new(workspace: &Workspace, cx: &mut gpui::Context<Self>) -> Self {
         let weak = workspace.weak_handle();
         let store = SolutionStore::global(cx);
-        let store_subscription =
-            cx.subscribe(&store, |_, _, _e: &SolutionStoreEvent, cx| {
-                cx.notify();
-            });
+        let store_subscription = cx.subscribe(&store, |_, _, _e: &SolutionStoreEvent, cx| {
+            cx.notify();
+        });
         Self {
             workspace: weak,
             _store_subscription: store_subscription,
@@ -43,11 +42,7 @@ impl SolutionsStatusItem {
 }
 
 impl Render for SolutionsStatusItem {
-    fn render(
-        &mut self,
-        _: &mut Window,
-        cx: &mut gpui::Context<Self>,
-    ) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let Some((name, member_count)) = self.current_solution(cx) else {
             return div().into_any_element();
         };

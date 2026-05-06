@@ -40,9 +40,8 @@ pub fn install(cx: &mut App) {
         subscriptions: Vec::new(),
     });
     coordinator.update(cx, |this, cx| {
-        this.subscriptions.push(cx.subscribe(
-            &store,
-            |_this, _store, event, cx| match event {
+        this.subscriptions.push(
+            cx.subscribe(&store, |_this, _store, event, cx| match event {
                 SolutionAgentStoreEvent::SessionCreated(id) => {
                     editor_mcp::emit_notification(
                         cx,
@@ -93,8 +92,8 @@ pub fn install(cx: &mut App) {
                         }),
                     );
                 }
-            },
-        ));
+            }),
+        );
     });
 
     cx.set_global(GlobalEventSourceCoordinator(coordinator));

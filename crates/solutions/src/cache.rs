@@ -77,7 +77,11 @@ mod tests {
         let url = bare.to_str().expect("path to str").to_string();
 
         let path = smol::block_on(ensure_cache(&cache_root, &url, |_| {})).expect("ensure_cache");
-        assert!(path.exists(), "cache dir was not created at {}", path.display());
+        assert!(
+            path.exists(),
+            "cache dir was not created at {}",
+            path.display()
+        );
         assert!(path.join("HEAD").exists() || path.join(".git").exists());
     }
 

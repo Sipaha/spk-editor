@@ -1,24 +1,37 @@
-use crate::cache;
+use crate::add_member::InFlightAdd;
 use crate::git;
 use crate::model::{CatalogId, CatalogProject, Solution, SolutionId, SolutionMember};
 use crate::persistence::{CURRENT_VERSION, SolutionsConfig, load_or_default, save_atomic};
 use crate::slug::unique_slug;
 use anyhow::{Context as _, Result, bail};
 use chrono::Utc;
-use gpui::{App, AppContext as _, AsyncApp, Entity, EventEmitter, Global, Task};
+use collections::HashMap;
+use gpui::{App, AppContext as _, Entity, EventEmitter, Global};
 use std::path::PathBuf;
 use std::sync::Arc;
-use util::ResultExt as _;
 
 pub struct SolutionStore {
     config_path: PathBuf,
-    config: SolutionsConfig,
-    fs_lock: Arc<smol::lock::Mutex<()>>,
+    pub(crate) config: SolutionsConfig,
+    pub(crate) fs_lock: Arc<smol::lock::Mutex<()>>,
+    pub(crate) in_flight_adds: HashMap<(SolutionId, CatalogId), InFlightAdd>,
 }
 
 #[derive(Clone, Debug)]
 pub enum SolutionStoreEvent {
     Changed,
+    MemberAddProgress {
+        solution: SolutionId,
+        catalog: CatalogId,
+        stage: String,
+        percent: Option<u8>,
+    },
+    MemberAddCompleted {
+        solution: SolutionId,
+        catalog: CatalogId,
+        /// `None` on success; `Some(msg)` on failure or cancellation.
+        error: Option<String>,
+    },
 }
 
 impl EventEmitter<SolutionStoreEvent> for SolutionStore {}
@@ -40,6 +53,7 @@ impl SolutionStore {
             config_path,
             config,
             fs_lock: Arc::new(smol::lock::Mutex::new(())),
+            in_flight_adds: HashMap::default(),
         });
         cx.set_global(GlobalSolutionStore(store));
     }
@@ -60,6 +74,7 @@ impl SolutionStore {
                 ..Default::default()
             },
             fs_lock: Arc::new(smol::lock::Mutex::new(())),
+            in_flight_adds: HashMap::default(),
         })
     }
 
@@ -113,6 +128,7 @@ impl SolutionStore {
         id: &CatalogId,
         new_name: Option<String>,
         new_default_branch: Option<String>,
+        new_remote_url: Option<String>,
         cx: &mut gpui::Context<Self>,
     ) -> Result<()> {
         let proj = self
@@ -127,9 +143,56 @@ impl SolutionStore {
         if let Some(branch) = new_default_branch {
             proj.default_branch = Some(branch);
         }
+        // Track whether the URL actually changed so we can propagate the
+        // new value to existing solution-member clones below. Comparing
+        // before reassigning avoids both no-op `git remote set-url`
+        // round-trips and re-reading the freshly-written value out of
+        // `proj` after the assignment.
+        let url_change: Option<String> = new_remote_url.and_then(|url| {
+            if proj.remote_url == url {
+                None
+            } else {
+                proj.remote_url = url.clone();
+                Some(url)
+            }
+        });
         self.persist()?;
         cx.emit(SolutionStoreEvent::Changed);
         cx.notify();
+
+        if let Some(new_url) = url_change {
+            // For every existing clone that points at this catalog entry,
+            // rewrite `.git/config`'s `origin` so the next pull / fetch
+            // hits the new URL. The warm-cache key is hashed from the URL
+            // (see `cache.rs`), so a stale `origin` plus a fresh cache
+            // would eventually diverge — better to fix both halves
+            // atomically. Fire-and-forget on the foreground executor (so
+            // the GPUI test scheduler can pump it deterministically); a
+            // failed `git remote set-url` is logged but not surfaced to
+            // the user, since the worst case is "next fetch fails with
+            // the old error" which is the pre-edit state anyway.
+            let targets: Vec<PathBuf> = self
+                .config
+                .solutions
+                .iter()
+                .flat_map(|sol| sol.members.iter())
+                .filter(|m| m.catalog_id == *id)
+                .map(|m| m.local_path.clone())
+                .collect();
+            if !targets.is_empty() {
+                cx.spawn(async move |_, _| {
+                    for target in targets {
+                        if let Err(err) = git::set_remote_url(&target, "origin", &new_url).await {
+                            log::warn!(
+                                "edit_catalog_project: git remote set-url failed for {}: {err}",
+                                target.display(),
+                            );
+                        }
+                    }
+                })
+                .detach();
+            }
+        }
         Ok(())
     }
 
@@ -159,13 +222,67 @@ impl SolutionStore {
         Ok(())
     }
 
+    /// Snapshot of which solutions reference a given catalog entry. Used
+    /// by the delete-confirmation modal to render "this will be removed
+    /// from N solution(s):" before the user pulls the trigger.
+    pub fn solutions_referencing(&self, id: &CatalogId) -> Vec<(SolutionId, String)> {
+        self.config
+            .solutions
+            .iter()
+            .filter(|s| s.members.iter().any(|m| m.catalog_id == *id))
+            .map(|s| (s.id.clone(), s.name.clone()))
+            .collect()
+    }
+
+    /// Remove a catalog entry, cascading the deletion to every solution
+    /// that references it (drops the matching `SolutionMember` from
+    /// each). Returns the list of clone directories that the caller
+    /// should remove from disk — disk cleanup is the caller's
+    /// responsibility (mirrors `delete_solution` which expects the
+    /// `DeleteSolutionModal` to wipe `solution.root`). No-op + `bail!`
+    /// if the id is not in the catalog.
+    pub fn remove_catalog_project_cascade(
+        &mut self,
+        id: &CatalogId,
+        cx: &mut gpui::Context<Self>,
+    ) -> Result<Vec<PathBuf>> {
+        if !self.config.catalog.iter().any(|c| c.id == *id) {
+            bail!("catalog_not_found: {}", id.0);
+        }
+        let mut clone_paths: Vec<PathBuf> = Vec::new();
+        for sol in self.config.solutions.iter_mut() {
+            sol.members.retain(|m| {
+                if m.catalog_id == *id {
+                    clone_paths.push(m.local_path.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        // Also drop any in-flight or failed `add_member` rows for this
+        // catalog id so the panel doesn't paint orphan "Adding…" /
+        // "Failed: …" rows after the catalog entry itself is gone.
+        self.in_flight_adds.retain(|(_, cat), _| cat != id);
+        self.config.catalog.retain(|c| c.id != *id);
+        self.persist()?;
+        cx.emit(SolutionStoreEvent::Changed);
+        cx.notify();
+        Ok(clone_paths)
+    }
+
     pub fn create_solution(
         &mut self,
         name: &str,
         root_base: PathBuf,
         cx: &mut gpui::Context<Self>,
     ) -> Result<SolutionId> {
-        let taken: Vec<String> = self.config.solutions.iter().map(|s| s.id.0.clone()).collect();
+        let taken: Vec<String> = self
+            .config
+            .solutions
+            .iter()
+            .map(|s| s.id.0.clone())
+            .collect();
         let slug = unique_slug(name, &taken);
         let id = SolutionId(slug.clone());
         let root = root_base.join(&slug);
@@ -197,11 +314,7 @@ impl SolutionStore {
         Ok(())
     }
 
-    pub fn delete_solution(
-        &mut self,
-        id: &SolutionId,
-        cx: &mut gpui::Context<Self>,
-    ) -> Result<()> {
+    pub fn delete_solution(&mut self, id: &SolutionId, cx: &mut gpui::Context<Self>) -> Result<()> {
         let before = self.config.solutions.len();
         self.config.solutions.retain(|s| s.id != *id);
         if self.config.solutions.len() == before {
@@ -224,68 +337,6 @@ impl SolutionStore {
         cx.emit(SolutionStoreEvent::Changed);
         cx.notify();
         Ok(())
-    }
-
-    pub fn add_member(
-        &mut self,
-        solution_id: SolutionId,
-        catalog_id: CatalogId,
-        cache_root: PathBuf,
-        cx: &mut gpui::Context<Self>,
-    ) -> Task<Result<()>> {
-        let sol = match self.config.solutions.iter().find(|s| s.id == solution_id) {
-            Some(s) => s.clone(),
-            None => {
-                let id = solution_id.0.clone();
-                return cx.background_spawn(async move { bail!("solution not found: {id}") });
-            }
-        };
-        let cat = match self.config.catalog.iter().find(|c| c.id == catalog_id) {
-            Some(c) => c.clone(),
-            None => {
-                let id = catalog_id.0.clone();
-                return cx.background_spawn(async move { bail!("catalog project not found: {id}") });
-            }
-        };
-        if sol.members.iter().any(|m| m.catalog_id == catalog_id) {
-            let sol_name = sol.name;
-            let cat_name = cat.name;
-            return cx.background_spawn(async move {
-                bail!("solution {sol_name} already contains {cat_name}")
-            });
-        }
-        let target = sol.root.join(&catalog_id.0);
-        let remote_url = cat.remote_url;
-        let default_branch = cat.default_branch;
-        let lock = Arc::clone(&self.fs_lock);
-
-        cx.spawn(async move |weak: gpui::WeakEntity<Self>, cx: &mut AsyncApp| {
-            let _guard = lock.lock().await;
-            let cache_path = cache::ensure_cache(&cache_root, &remote_url, |_| {}).await?;
-            git::clone_local(&cache_path, &target, |_| {}).await?;
-            git::set_remote_url(&target, "origin", &remote_url).await?;
-            if let Some(branch) = default_branch.as_deref() {
-                git::checkout(&target, branch).await.ok();
-            }
-            weak.update(cx, |store, cx| {
-                if let Some(sol) = store
-                    .config
-                    .solutions
-                    .iter_mut()
-                    .find(|s| s.id == solution_id)
-                {
-                    sol.members.push(SolutionMember {
-                        catalog_id: catalog_id.clone(),
-                        local_path: target.clone(),
-                    });
-                    store.persist().log_err();
-                    cx.emit(SolutionStoreEvent::Changed);
-                    cx.notify();
-                }
-                Ok::<(), anyhow::Error>(())
-            })??;
-            Ok(())
-        })
     }
 
     pub fn remove_member(
@@ -350,7 +401,7 @@ impl SolutionStore {
             .with_context(|| format!("solution not found: {}", id.0))
     }
 
-    fn persist(&self) -> Result<()> {
+    pub(crate) fn persist(&self) -> Result<()> {
         save_atomic(&self.config_path, &self.config)
             .with_context(|| format!("writing {}", self.config_path.display()))
     }
@@ -383,6 +434,7 @@ mod tests {
     use super::*;
     use crate::git::test_support;
     use gpui::TestAppContext;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     #[gpui::test]
@@ -414,7 +466,9 @@ mod tests {
         let store = cx.update(|cx| SolutionStore::for_test(cfg_path, cx));
 
         let id1 = store
-            .update(cx, |s, cx| s.add_catalog_project("Foo", "git@x:foo.git", None, cx))
+            .update(cx, |s, cx| {
+                s.add_catalog_project("Foo", "git@x:foo.git", None, cx)
+            })
             .expect("first add");
         let id2 = store
             .update(cx, |s, cx| {
@@ -432,7 +486,9 @@ mod tests {
         let store = cx.update(|cx| SolutionStore::for_test(cfg_path, cx));
 
         let cat_id = store
-            .update(cx, |s, cx| s.add_catalog_project("Foo", "git@x:foo.git", None, cx))
+            .update(cx, |s, cx| {
+                s.add_catalog_project("Foo", "git@x:foo.git", None, cx)
+            })
             .expect("add catalog");
         let solutions_root = std::env::temp_dir().join("spke-test-solutions");
         let sol_id = store
@@ -447,56 +503,15 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn add_member_clones_and_records(cx: &mut TestAppContext) {
-        cx.executor().allow_parking();
-        let dir = tempdir().expect("tempdir");
-        let bare = test_support::make_bare_with_one_commit(dir.path()).await;
-        let cache_root = dir.path().join("cache");
-        let cfg_path = dir.path().join("solutions.json");
-        let solutions_root = dir.path().join("solutions");
-        std::fs::create_dir_all(&solutions_root).expect("mkdir solutions");
-
-        let store = cx.update(|cx| SolutionStore::for_test(cfg_path, cx));
-        let cat_id = store
-            .update(cx, |s, cx| {
-                s.add_catalog_project(
-                    "Bare",
-                    bare.to_str().expect("path str"),
-                    Some("master".into()),
-                    cx,
-                )
-            })
-            .expect("add catalog");
-        let sol_id = store
-            .update(cx, |s, cx| s.create_solution("S", solutions_root, cx))
-            .expect("create solution");
-
-        let task = store.update(cx, |s, cx| {
-            s.add_member(sol_id.clone(), cat_id.clone(), cache_root, cx)
-        });
-        task.await.expect("add_member");
-
-        let target = store.read_with(cx, |s, _| {
-            s.solutions()
-                .iter()
-                .find(|x| x.id == sol_id)
-                .expect("solution exists")
-                .members[0]
-                .local_path
-                .clone()
-        });
-        assert!(target.join(".git").exists());
-    }
-
-    #[gpui::test]
     async fn solution_for_path_matches_root_and_descendants(cx: &mut TestAppContext) {
         let dir = tempdir().expect("tempdir");
-        let store =
-            cx.update(|cx| SolutionStore::for_test(dir.path().join("c.json"), cx));
+        let store = cx.update(|cx| SolutionStore::for_test(dir.path().join("c.json"), cx));
         let root_base = dir.path().join("alpha-root");
         std::fs::create_dir_all(&root_base).expect("mkdir sol root");
         let sol_id = store
-            .update(cx, |s, cx| s.create_solution("Alpha", root_base.clone(), cx))
+            .update(cx, |s, cx| {
+                s.create_solution("Alpha", root_base.clone(), cx)
+            })
             .expect("create solution");
         // create_solution joins the slug onto root_base — fetch the real root.
         let actual_root = store
@@ -527,7 +542,8 @@ mod tests {
             assert!(s.solution_for_path(&root_base).is_none());
             // Unrelated path.
             assert!(
-                s.solution_for_path(std::path::Path::new("/tmp/elsewhere")).is_none(),
+                s.solution_for_path(std::path::Path::new("/tmp/elsewhere"))
+                    .is_none(),
             );
         });
     }
@@ -535,20 +551,182 @@ mod tests {
     #[gpui::test]
     async fn solution_for_path_returns_none_when_no_solutions(cx: &mut TestAppContext) {
         let dir = tempdir().expect("tempdir");
-        let store =
-            cx.update(|cx| SolutionStore::for_test(dir.path().join("c.json"), cx));
+        let store = cx.update(|cx| SolutionStore::for_test(dir.path().join("c.json"), cx));
         store.read_with(cx, |s, _| {
             assert!(s.solution_for_path(dir.path()).is_none());
         });
     }
 
     #[gpui::test]
+    async fn remove_catalog_project_cascade_drops_from_solutions(cx: &mut TestAppContext) {
+        let dir = tempdir().expect("tempdir");
+        let cfg_path = dir.path().join("solutions.json");
+        let store = cx.update(|cx| SolutionStore::for_test(cfg_path, cx));
+
+        let cat_a = store
+            .update(cx, |s, cx| s.add_catalog_project("A", "git@x:a", None, cx))
+            .expect("add A");
+        let cat_b = store
+            .update(cx, |s, cx| s.add_catalog_project("B", "git@x:b", None, cx))
+            .expect("add B");
+        let sol_one = store
+            .update(cx, |s, cx| {
+                s.create_solution("One", dir.path().to_path_buf(), cx)
+            })
+            .expect("sol One");
+        let sol_two = store
+            .update(cx, |s, cx| {
+                s.create_solution("Two", dir.path().to_path_buf(), cx)
+            })
+            .expect("sol Two");
+        store.update(cx, |s, _| {
+            s.test_force_add_member(&sol_one, &cat_a);
+            s.test_force_add_member(&sol_one, &cat_b);
+            s.test_force_add_member(&sol_two, &cat_a);
+        });
+
+        // Removing A cascades into both solutions; B is untouched.
+        let dropped_paths = store
+            .update(cx, |s, cx| s.remove_catalog_project_cascade(&cat_a, cx))
+            .expect("cascade remove");
+        // Cascade returns the local paths the caller now owns the
+        // responsibility of wiping. test_force_add_member assigns them
+        // synthetically; we just confirm the count is right.
+        assert_eq!(dropped_paths.len(), 2, "two members of A were dropped");
+
+        store.read_with(cx, |s, _| {
+            assert!(
+                s.catalog().iter().all(|c| c.id != cat_a),
+                "catalog entry must be gone"
+            );
+            assert!(s.catalog().iter().any(|c| c.id == cat_b), "B preserved");
+            let one = s.solutions().iter().find(|x| x.id == sol_one).unwrap();
+            assert_eq!(one.members.len(), 1, "One keeps only B");
+            assert_eq!(one.members[0].catalog_id, cat_b);
+            let two = s.solutions().iter().find(|x| x.id == sol_two).unwrap();
+            assert!(two.members.is_empty(), "Two had only A so it ends up empty");
+        });
+    }
+
+    #[gpui::test]
+    async fn remove_catalog_project_cascade_errors_for_unknown_id(cx: &mut TestAppContext) {
+        let dir = tempdir().expect("tempdir");
+        let store = cx.update(|cx| SolutionStore::for_test(dir.path().join("solutions.json"), cx));
+        let result = store.update(cx, |s, cx| {
+            s.remove_catalog_project_cascade(&CatalogId("ghost".into()), cx)
+        });
+        assert!(result.is_err());
+    }
+
+    #[gpui::test]
+    async fn solutions_referencing_lists_consumers(cx: &mut TestAppContext) {
+        let dir = tempdir().expect("tempdir");
+        let store = cx.update(|cx| SolutionStore::for_test(dir.path().join("solutions.json"), cx));
+        let cat = store
+            .update(cx, |s, cx| s.add_catalog_project("X", "git@x:x", None, cx))
+            .expect("add X");
+        let sol_a = store
+            .update(cx, |s, cx| {
+                s.create_solution("A", dir.path().to_path_buf(), cx)
+            })
+            .expect("sol A");
+        let sol_b = store
+            .update(cx, |s, cx| {
+                s.create_solution("B", dir.path().to_path_buf(), cx)
+            })
+            .expect("sol B");
+        store.update(cx, |s, _| {
+            s.test_force_add_member(&sol_a, &cat);
+            s.test_force_add_member(&sol_b, &cat);
+        });
+        let mut refs = store.read_with(cx, |s, _| s.solutions_referencing(&cat));
+        refs.sort_by(|a, b| a.1.cmp(&b.1));
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].0, sol_a);
+        assert_eq!(refs[1].0, sol_b);
+    }
+
+    #[gpui::test]
+    async fn edit_catalog_url_rewrites_member_origin(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let dir = tempdir().expect("tempdir");
+        let bare = test_support::make_bare_with_one_commit(dir.path()).await;
+        let cache_root = dir.path().join("cache");
+        let cfg_path = dir.path().join("solutions.json");
+        let solutions_root = dir.path().join("solutions");
+        std::fs::create_dir_all(&solutions_root).expect("mkdir solutions");
+
+        let store = cx.update(|cx| SolutionStore::for_test(cfg_path, cx));
+        let original_url = bare.to_str().expect("path str").to_string();
+        let cat_id = store
+            .update(cx, |s, cx| {
+                s.add_catalog_project("Bare", &original_url, Some("master".into()), cx)
+            })
+            .expect("add catalog");
+        let sol_id = store
+            .update(cx, |s, cx| s.create_solution("S", solutions_root, cx))
+            .expect("create solution");
+        let task = store.update(cx, |s, cx| {
+            s.add_member(sol_id.clone(), cat_id.clone(), cache_root, cx)
+        });
+        task.await.expect("add_member success");
+
+        let new_url = format!("{original_url}-renamed");
+        store
+            .update(cx, |s, cx| {
+                s.edit_catalog_project(&cat_id, None, None, Some(new_url.clone()), cx)
+            })
+            .expect("edit catalog");
+
+        let local_path = store.read_with(cx, |s, _| {
+            s.solutions()
+                .iter()
+                .find(|x| x.id == sol_id)
+                .unwrap()
+                .members[0]
+                .local_path
+                .clone()
+        });
+        // The URL update spawns a foreground task that shells out to
+        // `git remote set-url`. Drive the executor until the new URL
+        // shows up in `.git/config`. We poll instead of asserting after
+        // a single `run_until_parked` because the spawned `git` child
+        // process awaits real I/O outside the GPUI scheduler — one
+        // pump cycle isn't enough.
+        let config_path = local_path.join(".git/config");
+        let mut attempts = 0u32;
+        let observed = loop {
+            cx.run_until_parked();
+            cx.background_executor
+                .timer(Duration::from_millis(50))
+                .await;
+            let text = std::fs::read_to_string(&config_path).expect("read .git/config");
+            let url = text
+                .lines()
+                .map(str::trim)
+                .find(|line| line.starts_with("url ="))
+                .map(|line| line.trim_start_matches("url =").trim().to_string());
+            if url.as_deref() == Some(new_url.as_str()) {
+                break url.unwrap();
+            }
+            attempts += 1;
+            assert!(
+                attempts < 100,
+                "origin URL never updated; last seen {:?}",
+                url
+            );
+        };
+        assert_eq!(observed, new_url);
+    }
+
+    #[gpui::test]
     async fn paths_for_open_returns_member_paths_in_order(cx: &mut TestAppContext) {
         let dir = tempdir().expect("tempdir");
-        let store =
-            cx.update(|cx| SolutionStore::for_test(dir.path().join("c.json"), cx));
+        let store = cx.update(|cx| SolutionStore::for_test(dir.path().join("c.json"), cx));
         let sol_id = store
-            .update(cx, |s, cx| s.create_solution("S", dir.path().to_path_buf(), cx))
+            .update(cx, |s, cx| {
+                s.create_solution("S", dir.path().to_path_buf(), cx)
+            })
             .expect("create solution");
         let cat_a = store
             .update(cx, |s, cx| s.add_catalog_project("A", "git@x:a", None, cx))
@@ -560,8 +738,7 @@ mod tests {
             s.test_force_add_member(&sol_id, &cat_a);
             s.test_force_add_member(&sol_id, &cat_b);
         });
-        let paths =
-            store.read_with(cx, |s, _| s.paths_for_open(&sol_id).expect("paths"));
+        let paths = store.read_with(cx, |s, _| s.paths_for_open(&sol_id).expect("paths"));
         assert_eq!(paths.len(), 2);
         assert!(paths[0].ends_with("a"));
         assert!(paths[1].ends_with("b"));

@@ -191,14 +191,11 @@ fn render_section(cx: &mut App) -> Option<AnyElement> {
     );
     if entries.is_empty() {
         list = list.child(
-            ui::v_flex()
-                .px_1()
-                .py_2()
-                .child(
-                    Label::new("No solutions yet — create one to get started.")
-                        .color(Color::Muted)
-                        .size(LabelSize::Small),
-                ),
+            ui::v_flex().px_1().py_2().child(
+                Label::new("No solutions yet — create one to get started.")
+                    .color(Color::Muted)
+                    .size(LabelSize::Small),
+            ),
         );
     } else {
         for (index, entry) in entries.into_iter().enumerate() {
@@ -270,12 +267,7 @@ fn render_create_button() -> impl IntoElement {
 
 /// IDEA-style card: colored avatar, name, path, last-opened ago.
 /// Trash + rename buttons on hover.
-fn render_card(
-    index: usize,
-    entry: RecentSolution,
-    renaming: bool,
-    cx: &App,
-) -> impl IntoElement {
+fn render_card(index: usize, entry: RecentSolution, renaming: bool, cx: &App) -> impl IntoElement {
     let entry_id = entry.id.clone();
     let entry_id_for_delete = entry.id.clone();
     let entry_id_for_rename = entry.id.clone();
@@ -358,9 +350,7 @@ fn render_card(
                                 .map(|row| {
                                     if renaming {
                                         if let Some(state) = cx.try_global::<WelcomeEditState>() {
-                                            row.child(
-                                                div().flex_1().child(state.editor.clone()),
-                                            )
+                                            row.child(div().flex_1().child(state.editor.clone()))
                                         } else {
                                             row.child(
                                                 Label::new(entry.label.clone())
@@ -372,13 +362,16 @@ fn render_card(
                                             Label::new(entry.label.clone())
                                                 .size(LabelSize::Default),
                                         )
-                                        .when(entry.is_empty, |this| {
-                                            this.child(
-                                                Label::new("(empty)")
-                                                    .color(Color::Muted)
-                                                    .size(LabelSize::XSmall),
-                                            )
-                                        })
+                                        .when(
+                                            entry.is_empty,
+                                            |this| {
+                                                this.child(
+                                                    Label::new("(empty)")
+                                                        .color(Color::Muted)
+                                                        .size(LabelSize::XSmall),
+                                                )
+                                            },
+                                        )
                                     }
                                 }),
                         )
@@ -389,11 +382,7 @@ fn render_card(
                                 .truncate(),
                         ),
                 )
-                .child(
-                    Label::new(meta)
-                        .color(Color::Muted)
-                        .size(LabelSize::XSmall),
-                ),
+                .child(Label::new(meta).color(Color::Muted).size(LabelSize::XSmall)),
         )
         .map(|row| {
             if renaming {
@@ -508,11 +497,7 @@ fn initials_of(name: &str) -> String {
             s.push(c.to_ascii_uppercase());
         }
     }
-    if s.is_empty() {
-        "?".into()
-    } else {
-        s
-    }
+    if s.is_empty() { "?".into() } else { s }
 }
 
 /// Pick a stable accent color from the theme palette by hashing the name.
@@ -607,7 +592,11 @@ mod tests {
             for i in 0..3 {
                 store
                     .update(cx, |s, cx| {
-                        s.create_solution(&format!("Unopen{i}"), dir.path().join(format!("u{i}")), cx)
+                        s.create_solution(
+                            &format!("Unopen{i}"),
+                            dir.path().join(format!("u{i}")),
+                            cx,
+                        )
                     })
                     .expect("create");
             }

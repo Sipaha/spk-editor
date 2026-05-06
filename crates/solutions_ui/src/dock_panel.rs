@@ -5,7 +5,10 @@ use gpui::{
     MouseButton, Pixels, Render, WeakEntity, Window, px,
 };
 use solution_agent::store::{SolutionAgentStore, SolutionAgentStoreEvent};
-use solutions::{CatalogProject, Solution, SolutionId, SolutionStore, SolutionStoreEvent};
+use solutions::{
+    CatalogId, CatalogProject, PendingAddView, Solution, SolutionId, SolutionStore,
+    SolutionStoreEvent, default_cache_root,
+};
 use ui::{Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::{
@@ -13,7 +16,7 @@ use workspace::{
     dock::{DockPosition, Panel, PanelEvent},
 };
 
-use crate::actions::{NewSolution, ToggleSolutionsPanel};
+use crate::actions::{DeleteCatalogProject, EditCatalogProject, NewSolution, ToggleSolutionsPanel};
 use crate::open::{OpenIntent, open_solution, workspace_has_solution};
 
 struct RenameState {
@@ -37,17 +40,19 @@ impl SolutionsPanel {
         cx: &mut gpui::Context<Self>,
     ) -> Self {
         let store = SolutionStore::global(cx);
-        let store_subscription =
-            cx.subscribe(&store, |_, _, _event: &SolutionStoreEvent, cx| {
-                cx.notify();
-            });
+        let store_subscription = cx.subscribe(&store, |_, _, _event: &SolutionStoreEvent, cx| {
+            cx.notify();
+        });
         // Re-render when agent sessions change so the running indicator
         // and session count badge stay in sync without requiring the
         // user to click the panel.
         let agent_store_subscription = SolutionAgentStore::try_global(cx).map(|agent_store| {
-            cx.subscribe(&agent_store, |_, _, _event: &SolutionAgentStoreEvent, cx| {
-                cx.notify();
-            })
+            cx.subscribe(
+                &agent_store,
+                |_, _, _event: &SolutionAgentStoreEvent, cx| {
+                    cx.notify();
+                },
+            )
         });
         Self {
             focus_handle: cx.focus_handle(),
@@ -124,12 +129,209 @@ impl SolutionsPanel {
     }
 
     fn render_catalog_row(project: &CatalogProject) -> impl IntoElement {
+        let edit_id = project.id.as_str().to_string();
+        let delete_id = edit_id.clone();
+        let row_group = SharedString::from(format!("catalog-row-{}", project.id.as_str()));
         h_flex()
+            .id(SharedString::from(format!(
+                "catalog-{}",
+                project.id.as_str()
+            )))
+            .group(row_group.clone())
             .px_2()
             .py_1()
             .gap_2()
+            .items_center()
             .child(Icon::new(IconName::GitBranch).size(IconSize::Small))
-            .child(Label::new(project.name.clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .child(Label::new(project.name.clone()).truncate()),
+            )
+            .child(
+                IconButton::new(
+                    SharedString::from(format!("catalog-edit-{}", project.id.as_str())),
+                    IconName::Pencil,
+                )
+                .icon_size(IconSize::Small)
+                .icon_color(Color::Muted)
+                .visible_on_hover(row_group.clone())
+                .tooltip(Tooltip::text("Edit project settings"))
+                .on_click(move |_, window, cx| {
+                    window.dispatch_action(
+                        Box::new(EditCatalogProject {
+                            id: edit_id.clone(),
+                        }),
+                        cx,
+                    );
+                }),
+            )
+            .child(
+                IconButton::new(
+                    SharedString::from(format!("catalog-delete-{}", project.id.as_str())),
+                    IconName::Trash,
+                )
+                .icon_size(IconSize::Small)
+                .icon_color(Color::Muted)
+                .visible_on_hover(row_group)
+                .tooltip(Tooltip::text("Delete from catalog"))
+                .on_click(move |_, window, cx| {
+                    window.dispatch_action(
+                        Box::new(DeleteCatalogProject {
+                            id: delete_id.clone(),
+                        }),
+                        cx,
+                    );
+                }),
+            )
+    }
+
+    /// Ghost row rendered directly under a Solution row while an
+    /// `add_member` is in flight, or while a failed add is waiting for the
+    /// user to Retry / Edit / Dismiss. The row state is read from
+    /// `SolutionStore::pending_adds_for` and refreshes via the existing
+    /// `SolutionStoreEvent` subscription installed in `new`.
+    fn render_pending_add_row(
+        &self,
+        sol_id: &SolutionId,
+        pending: &PendingAddView,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl IntoElement {
+        let sol_id = sol_id.clone();
+        let cat_id = pending.catalog_id.clone();
+        let is_failed = pending.error.is_some();
+        let row_id = SharedString::from(format!("pending-{}-{}", sol_id.as_str(), cat_id.as_str()));
+        let group = SharedString::from(format!(
+            "pending-row-{}-{}",
+            sol_id.as_str(),
+            cat_id.as_str()
+        ));
+
+        // Status icon: error glyph for the failure state, neutral spinner-ish
+        // glyph (not animated) for in-progress. The percent counter is the
+        // load-bearing motion cue here, not the icon.
+        let status_icon = if is_failed {
+            Icon::new(IconName::Warning)
+                .size(IconSize::Small)
+                .color(Color::Error)
+        } else {
+            Icon::new(IconName::ArrowCircle)
+                .size(IconSize::Small)
+                .color(Color::Muted)
+        };
+
+        let secondary_text = if let Some(err) = pending.error.as_ref() {
+            truncate_one_line(err, 120)
+        } else if let Some(pct) = pending.percent {
+            format!("{} {}%", pending.stage, pct)
+        } else {
+            pending.stage.clone()
+        };
+
+        let mut row = h_flex()
+            .id(row_id)
+            .group(group)
+            .pl_6()
+            .pr_2()
+            .py_1()
+            .gap_2()
+            .items_center()
+            .child(status_icon)
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(Label::new(pending.catalog_name.clone()).truncate())
+                    .child(
+                        Label::new(secondary_text)
+                            .color(if is_failed {
+                                Color::Error
+                            } else {
+                                Color::Muted
+                            })
+                            .size(LabelSize::XSmall),
+                    ),
+            );
+
+        if is_failed {
+            let retry_sol = sol_id.clone();
+            let retry_cat = cat_id.clone();
+            let edit_cat = cat_id.clone();
+            let dismiss_sol = sol_id.clone();
+            let dismiss_cat = cat_id.clone();
+            row = row
+                .child(
+                    IconButton::new(
+                        SharedString::from(format!(
+                            "retry-{}-{}",
+                            sol_id.as_str(),
+                            cat_id.as_str()
+                        )),
+                        IconName::ArrowCircle,
+                    )
+                    .icon_size(IconSize::Small)
+                    .icon_color(Color::Muted)
+                    .tooltip(Tooltip::text("Retry"))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        retry_pending_add(&retry_sol, &retry_cat, cx);
+                    })),
+                )
+                .child(
+                    IconButton::new(
+                        SharedString::from(format!("edit-{}-{}", sol_id.as_str(), cat_id.as_str())),
+                        IconName::Pencil,
+                    )
+                    .icon_size(IconSize::Small)
+                    .icon_color(Color::Muted)
+                    .tooltip(Tooltip::text("Edit project settings"))
+                    .on_click(cx.listener(move |_, _, window, cx| {
+                        window.dispatch_action(
+                            Box::new(EditCatalogProject {
+                                id: edit_cat.0.clone(),
+                            }),
+                            cx,
+                        );
+                    })),
+                )
+                .child(
+                    IconButton::new(
+                        SharedString::from(format!(
+                            "dismiss-{}-{}",
+                            sol_id.as_str(),
+                            cat_id.as_str()
+                        )),
+                        IconName::Close,
+                    )
+                    .icon_size(IconSize::Small)
+                    .icon_color(Color::Muted)
+                    .tooltip(Tooltip::text("Dismiss"))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        SolutionStore::global(cx).update(cx, |s, cx| {
+                            s.clear_failed_add(&dismiss_sol, &dismiss_cat, cx);
+                        });
+                    })),
+                );
+        } else {
+            let cancel_sol = sol_id.clone();
+            let cancel_cat = cat_id.clone();
+            row = row.child(
+                IconButton::new(
+                    SharedString::from(format!("cancel-{}-{}", sol_id.as_str(), cat_id.as_str())),
+                    IconName::Close,
+                )
+                .icon_size(IconSize::Small)
+                .icon_color(Color::Muted)
+                .tooltip(Tooltip::text("Cancel"))
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    SolutionStore::global(cx).update(cx, |s, cx| {
+                        s.cancel_add_member(&cancel_sol, &cancel_cat, cx);
+                    });
+                })),
+            );
+        }
+
+        row
     }
 
     fn render_solution_row(
@@ -192,19 +394,17 @@ impl SolutionsPanel {
             })
             .child(status_dot)
             .child(Icon::new(IconName::Folder).size(IconSize::Small))
-            .child(
-                v_flex().flex_1().min_w_0().gap_0p5().map(|col| {
-                    if let Some(editor) = rename_editor.clone() {
-                        col.child(div().flex_1().child(editor))
-                    } else {
-                        col.child(Label::new(s.name.clone()).truncate()).child(
-                            Label::new(format!("{} projects", s.members.len()))
-                                .color(Color::Muted)
-                                .size(LabelSize::XSmall),
-                        )
-                    }
-                }),
-            );
+            .child(v_flex().flex_1().min_w_0().gap_0p5().map(|col| {
+                if let Some(editor) = rename_editor.clone() {
+                    col.child(div().flex_1().child(editor))
+                } else {
+                    col.child(Label::new(s.name.clone()).truncate()).child(
+                        Label::new(format!("{} projects", s.members.len()))
+                            .color(Color::Muted)
+                            .size(LabelSize::XSmall),
+                    )
+                }
+            }));
 
         if session_count > 0 {
             let count_label = SharedString::from(session_count.to_string());
@@ -341,7 +541,8 @@ impl SolutionsPanel {
                 .read(cx)
                 .multi_workspace()
                 .and_then(|w| w.upgrade())
-            && mw.read(cx)
+            && mw
+                .read(cx)
                 .workspaces()
                 .any(|ws| workspace_has_solution(ws, sol_id, cx))
         {
@@ -381,7 +582,7 @@ impl SolutionsPanel {
                 let session_ids: Vec<_> = store
                     .sessions_for(&sol_id)
                     .into_iter()
-                    .map(|session| session.read(cx).id.clone())
+                    .map(|session| session.read(cx).id)
                     .collect();
                 for id in session_ids {
                     store.close_session(id, cx).log_err();
@@ -432,8 +633,7 @@ fn close_solution_workspaces_in(
         .cloned()
         .collect();
     for ws in to_close {
-        mw.close_workspace(&ws, window, cx)
-            .detach_and_log_err(cx);
+        mw.close_workspace(&ws, window, cx).detach_and_log_err(cx);
     }
 }
 
@@ -521,8 +721,25 @@ impl Panel for SolutionsPanel {
 impl Render for SolutionsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let store = SolutionStore::global(cx);
-        let (catalog, solutions) =
-            store.read_with(cx, |s, _| (s.catalog().to_vec(), s.solutions().to_vec()));
+        let (catalog, solutions, pending_per_solution) = store.read_with(cx, |s, _| {
+            let solutions = s.solutions().to_vec();
+            let pending: Vec<Vec<PendingAddView>> = solutions
+                .iter()
+                .map(|sol| s.pending_adds_for(&sol.id))
+                .collect();
+            (s.catalog().to_vec(), solutions, pending)
+        });
+
+        let mut solution_rows: Vec<gpui::AnyElement> = Vec::new();
+        for (sol, pending) in solutions.iter().zip(pending_per_solution.iter()) {
+            solution_rows.push(self.render_solution_row(sol, window, cx).into_any_element());
+            for p in pending {
+                solution_rows.push(
+                    self.render_pending_add_row(&sol.id, p, cx)
+                        .into_any_element(),
+                );
+            }
+        }
 
         v_flex()
             .key_context("SolutionsPanel")
@@ -534,12 +751,7 @@ impl Render for SolutionsPanel {
                 Box::new(NewSolution),
                 "New solution",
             ))
-            .children(
-                solutions
-                    .iter()
-                    .map(|s| self.render_solution_row(s, window, cx).into_any_element())
-                    .collect::<Vec<_>>(),
-            )
+            .children(solution_rows)
             .child(div().h(px(8.)))
             .child(Self::render_section_header(
                 "Catalog",
@@ -548,6 +760,34 @@ impl Render for SolutionsPanel {
                 "Add project to catalog",
             ))
             .children(catalog.iter().map(Self::render_catalog_row))
+    }
+}
+
+/// Re-runs `add_member` for a previously-failed (sol, cat) pair, after
+/// clearing the failed in-flight entry. The store wipes any partial
+/// directory before cloning, so this is safe even if the previous attempt
+/// half-cloned into the target.
+fn retry_pending_add(sol: &SolutionId, cat: &CatalogId, cx: &mut App) {
+    let store = SolutionStore::global(cx);
+    let task = store.update(cx, |s, cx| {
+        s.clear_failed_add(sol, cat, cx);
+        s.add_member(sol.clone(), cat.clone(), default_cache_root(), cx)
+    });
+    task.detach_and_log_err(cx);
+}
+
+/// Collapse multi-line errors and clip overly long ones for the
+/// pending-add row's secondary line. Git emits useful error text on the
+/// last stderr line (already handled in `git.rs`), so the first line is
+/// almost always the right one to surface.
+fn truncate_one_line(s: &str, max_chars: usize) -> String {
+    let head = s.lines().next().unwrap_or("").trim();
+    if head.chars().count() > max_chars {
+        let mut out: String = head.chars().take(max_chars.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    } else {
+        head.to_string()
     }
 }
 
@@ -573,10 +813,7 @@ pub fn init(cx: &mut App) {
 /// as a hidden worktree so the project panel stays clean while the
 /// workspace still knows which solution it belongs to). Returns `None`
 /// when this workspace has no solution association.
-fn active_solution_id_for_workspace(
-    workspace: &Workspace,
-    cx: &App,
-) -> Option<SolutionId> {
+fn active_solution_id_for_workspace(workspace: &Workspace, cx: &App) -> Option<SolutionId> {
     let store = SolutionStore::try_global(cx)?;
     let project = workspace.project().clone();
     for tree in project.read(cx).worktrees(cx) {

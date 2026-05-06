@@ -29,9 +29,7 @@ use crate::{SolutionStore, SolutionStoreEvent};
 use collections::HashMap;
 use gpui::{App, AppContext as _, Entity, Global, Subscription};
 use language::{Buffer, BufferEvent, BufferId, File as _};
-use project::{
-    LspStoreEvent, buffer_store::BufferStoreEvent, lsp_store::LspStore,
-};
+use project::{LspStoreEvent, buffer_store::BufferStoreEvent, lsp_store::LspStore};
 use serde_json::json;
 use std::path::PathBuf;
 use workspace::MultiWorkspace;
@@ -69,14 +67,45 @@ pub fn install(cx: &mut App) {
 
     coordinator.update(cx, |this, cx| {
         if let Some(store) = SolutionStore::try_global(cx) {
-            this.subscriptions.push(cx.subscribe(
-                &store,
-                |_this, _store, event, cx| match event {
+            this.subscriptions.push(
+                cx.subscribe(&store, |_this, _store, event, cx| match event {
                     SolutionStoreEvent::Changed => {
                         editor_mcp::emit_notification(cx, "solution_changed", json!({}));
                     }
-                },
-            ));
+                    SolutionStoreEvent::MemberAddProgress {
+                        solution,
+                        catalog,
+                        stage,
+                        percent,
+                    } => {
+                        editor_mcp::emit_notification(
+                            cx,
+                            "solution_member_add_progress",
+                            json!({
+                                "solution_id": solution.0,
+                                "catalog_id": catalog.0,
+                                "stage": stage,
+                                "percent": percent,
+                            }),
+                        );
+                    }
+                    SolutionStoreEvent::MemberAddCompleted {
+                        solution,
+                        catalog,
+                        error,
+                    } => {
+                        editor_mcp::emit_notification(
+                            cx,
+                            "solution_member_add_completed",
+                            json!({
+                                "solution_id": solution.0,
+                                "catalog_id": catalog.0,
+                                "error": error,
+                            }),
+                        );
+                    }
+                }),
+            );
         }
     });
 
@@ -132,9 +161,8 @@ fn wire_project(
         .push(cx.subscribe(&lsp_store, on_lsp_event));
 
     let buffer_store = project.read(cx).buffer_store().clone();
-    this.subscriptions.push(cx.subscribe(
-        &buffer_store,
-        |this, _store, event, cx| match event {
+    this.subscriptions.push(
+        cx.subscribe(&buffer_store, |this, _store, event, cx| match event {
             BufferStoreEvent::BufferAdded(buffer) => {
                 let buffer_id = buffer.read(cx).remote_id();
                 let path = buffer_abs_path(buffer, cx);
@@ -171,8 +199,8 @@ fn wire_project(
                 this.buffer_paths.insert(buffer_id, new_path);
             }
             _ => {}
-        },
-    ));
+        }),
+    );
 }
 
 fn on_lsp_event(

@@ -70,7 +70,10 @@ mod tests {
     #[test]
     fn falls_back_to_hash_for_empty_after_normalisation() {
         let s = slugify("漢字");
-        assert!(!s.is_empty(), "got empty slug for non-ASCII-only input: {s:?}");
+        assert!(
+            !s.is_empty(),
+            "got empty slug for non-ASCII-only input: {s:?}"
+        );
         assert!(s.starts_with("repo-"), "expected hash fallback, got: {s:?}");
     }
 

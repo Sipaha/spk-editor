@@ -103,6 +103,9 @@ mod tests {
             ],
             last_opened_at: None,
         };
-        assert_eq!(s.first_member().expect("non-empty").catalog_id.as_str(), "foo");
+        assert_eq!(
+            s.first_member().expect("non-empty").catalog_id.as_str(),
+            "foo"
+        );
     }
 }

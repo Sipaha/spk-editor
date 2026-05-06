@@ -57,9 +57,7 @@ impl Render for EmptySolutionPage {
             .justify_center()
             .gap_4()
             .bg(cx.theme().colors().editor_background)
-            .child(
-                Label::new(format!("Solution \"{name}\" is empty")).size(LabelSize::Large),
-            )
+            .child(Label::new(format!("Solution \"{name}\" is empty")).size(LabelSize::Large))
             .child(
                 Label::new("Add a project from your catalog to start working in this solution.")
                     .color(Color::Muted)

@@ -235,22 +235,18 @@ impl PickerDelegate for AddMemberDelegate {
             .spacing(ListItemSpacing::Sparse)
             .toggle_state(selected);
         let item = match entry {
-            PickerEntry::Catalog(c) => item
-                .child(Label::new(c.name.clone()))
-                .end_slot(
-                    Label::new(c.remote_url.clone())
-                        .color(Color::Muted)
-                        .size(LabelSize::Small),
-                ),
+            PickerEntry::Catalog(c) => item.child(Label::new(c.name.clone())).end_slot(
+                Label::new(c.remote_url.clone())
+                    .color(Color::Muted)
+                    .size(LabelSize::Small),
+            ),
             PickerEntry::AddNew => item
                 .start_slot(
                     Icon::new(IconName::Plus)
                         .color(Color::Muted)
                         .size(IconSize::Small),
                 )
-                .child(
-                    Label::new("Add new project to catalog…").color(Color::Accent),
-                ),
+                .child(Label::new("Add new project to catalog…").color(Color::Accent)),
         };
         Some(item)
     }

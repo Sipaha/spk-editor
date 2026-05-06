@@ -59,12 +59,7 @@ pub async fn read_line(stream: &mut UnixStream) -> Vec<u8> {
 /// not match the request — the MCP server interleaves event broadcasts
 /// (e.g. `agent_session_*`) with regular responses on the same socket, so
 /// clients must filter by id.
-pub async fn call_tool(
-    stream: &mut UnixStream,
-    id: u64,
-    name: &str,
-    args: Value,
-) -> Value {
+pub async fn call_tool(stream: &mut UnixStream, id: u64, name: &str, args: Value) -> Value {
     let req = json!({
         "jsonrpc": "2.0",
         "id": id,

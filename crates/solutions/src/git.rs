@@ -46,7 +46,10 @@ pub async fn clone_from_remote(
         std::fs::create_dir_all(parent).ok();
     }
     let mut cmd = Command::new("git");
-    cmd.arg("clone").arg("--progress").arg(remote_url).arg(target);
+    cmd.arg("clone")
+        .arg("--progress")
+        .arg(remote_url)
+        .arg(target);
     drain_command(&mut cmd, on_progress, &format!("git clone {remote_url}")).await
 }
 
@@ -61,7 +64,12 @@ pub async fn checkout(repo: &Path, branch: &str) -> Result<()> {
 #[allow(dead_code)]
 pub async fn fetch_all(repo: &Path, on_progress: impl FnMut(GitProgress)) -> Result<()> {
     let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(repo).arg("fetch").arg("--all").arg("--prune").arg("--progress");
+    cmd.arg("-C")
+        .arg(repo)
+        .arg("fetch")
+        .arg("--all")
+        .arg("--prune")
+        .arg("--progress");
     drain_command(&mut cmd, on_progress, "git fetch --all").await
 }
 
@@ -136,8 +144,13 @@ pub mod test_support {
         run(&["add", "."], Some(work)).await;
         run(
             &[
-                "-c", "user.name=t", "-c", "user.email=t@t",
-                "commit", "-m", "init",
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-m",
+                "init",
             ],
             Some(work),
         )
@@ -151,11 +164,7 @@ pub mod test_support {
         let work = dir.join("seed-work");
         std::fs::create_dir(&work).expect("mkdir work");
         init_seed(&work).await;
-        run(
-            &["remote", "add", "origin", bare_str],
-            Some(&work),
-        )
-        .await;
+        run(&["remote", "add", "origin", bare_str], Some(&work)).await;
         run(&["push", "origin", "HEAD:master"], Some(&work)).await;
         bare
     }
@@ -181,8 +190,7 @@ mod tests {
     fn run_git_failure_is_reported() {
         let dir = tempdir().expect("tempdir");
         std::fs::create_dir_all(dir.path().join(".git")).ok();
-        let result =
-            smol::block_on(run_git(dir.path(), &["this-is-not-a-real-command"], |_| {}));
+        let result = smol::block_on(run_git(dir.path(), &["this-is-not-a-real-command"], |_| {}));
         assert!(result.is_err());
     }
 

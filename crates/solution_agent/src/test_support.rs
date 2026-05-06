@@ -73,9 +73,7 @@ impl acp_thread::AgentConnection for MockConnection {
                 project,
                 action_log,
                 session_id,
-                watch::Receiver::constant(
-                    agent_client_protocol::schema::PromptCapabilities::new(),
-                ),
+                watch::Receiver::constant(agent_client_protocol::schema::PromptCapabilities::new()),
                 cx,
             )
         });
@@ -143,10 +141,7 @@ impl MockAgentServer {
         }
     }
 
-    pub fn with_gate(
-        connect_count: Arc<AtomicUsize>,
-        gate: async_channel::Receiver<()>,
-    ) -> Self {
+    pub fn with_gate(connect_count: Arc<AtomicUsize>, gate: async_channel::Receiver<()>) -> Self {
         Self {
             connect_count,
             gate: parking_lot::Mutex::new(Some(gate)),
