@@ -706,7 +706,20 @@ impl Markdown {
         self.active_search_highlight
     }
 
-    fn copy(&self, text: &RenderedText, _: &mut Window, cx: &mut Context<Self>) {
+    fn copy(&mut self, text: &RenderedText, _: &mut Window, cx: &mut Context<Self>) {
+        // Right-click → menu → "Copy" path: `capture_for_context_menu`
+        // (fired during MouseDown-Right capture) stashed the live
+        // selection here. By the time the menu's `Copy` action
+        // dispatches the inline `self.selection` may already have been
+        // collapsed (the popup steals focus / a stray click outside the
+        // hitbox lands as a fresh left-down). Mirror `copy_as_markdown`
+        // and consume the stashed value first; without this fallback,
+        // right-click → Copy was a silent no-op while Ctrl+C kept
+        // working through `self.selection` directly.
+        if let Some(text) = self.context_menu_selected_text.take() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            return;
+        }
         if self.selection.end <= self.selection.start {
             return;
         }
