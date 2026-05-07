@@ -101,6 +101,79 @@ impl SolutionsDb {
             SELECT id, name, remote_url, default_branch FROM catalog_projects
         }
     }
+
+    query! {
+        pub async fn save_solution(
+            id: String,
+            name: String,
+            root: String,
+            last_opened_at: Option<i64>
+        ) -> Result<()> {
+            INSERT OR REPLACE INTO solutions (id, name, root, last_opened_at)
+            VALUES (?, ?, ?, ?)
+        }
+    }
+
+    query! {
+        pub async fn delete_solution_row(id: String) -> Result<()> {
+            DELETE FROM solutions WHERE id = ?
+        }
+    }
+
+    query! {
+        pub async fn update_last_opened(id: String, last_opened_at: i64) -> Result<()> {
+            UPDATE solutions SET last_opened_at = ?2 WHERE id = ?1
+        }
+    }
+
+    query! {
+        pub async fn set_solution_member(
+            solution_id: String,
+            catalog_id: String,
+            local_path: String,
+            position: i32
+        ) -> Result<()> {
+            INSERT OR REPLACE INTO solution_members (solution_id, catalog_id, local_path, position)
+            VALUES (?, ?, ?, ?)
+        }
+    }
+
+    query! {
+        pub async fn delete_solution_member(
+            solution_id: String,
+            catalog_id: String
+        ) -> Result<()> {
+            DELETE FROM solution_members WHERE solution_id = ? AND catalog_id = ?
+        }
+    }
+
+    // LEFT JOIN keeps solutions with zero members in the result. NULL
+    // member columns are read as empty strings / 0 by sqlez's String/i32
+    // Column impls (column_text returns "" on NULL, column_int returns
+    // 0). Caller groups by solution id and treats catalog_id == "" as
+    // "no member row". COALESCE in the SELECT would be cleaner, but the
+    // sqlez_macros sql! proc-macro tokenises with the Rust lexer and
+    // rejects empty single-quoted SQL string literals as empty char
+    // literals — so we let sqlez handle the NULL coercion instead.
+    query! {
+        pub async fn load_all_solutions_with_members()
+            -> Result<Vec<(
+                String,
+                String,
+                String,
+                Option<i64>,
+                String,
+                String,
+                i32
+            )>>
+        {
+            SELECT s.id, s.name, s.root, s.last_opened_at,
+                   m.catalog_id, m.local_path, m.position
+            FROM solutions s
+            LEFT JOIN solution_members m ON m.solution_id = s.id
+            ORDER BY s.id, m.position
+        }
+    }
 }
 
 #[cfg(test)]
@@ -154,5 +227,53 @@ mod tests {
         let rows = db.load_all_catalog_projects().await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0, "b");
+    }
+
+    #[gpui::test]
+    async fn solution_with_members_roundtrips() {
+        let db = SolutionsDb::open_test_db("solutions_db_solution_roundtrip").await;
+        db.save_solution(
+            "sol-1".into(),
+            "Alpha".into(),
+            "/tmp/sol-1".into(),
+            Some(1_700_000_000_000),
+        )
+        .await
+        .unwrap();
+        db.set_solution_member("sol-1".into(), "cat-a".into(), "/tmp/sol-1/cat-a".into(), 0)
+            .await
+            .unwrap();
+        db.set_solution_member("sol-1".into(), "cat-b".into(), "/tmp/sol-1/cat-b".into(), 1)
+            .await
+            .unwrap();
+
+        let rows = db.load_all_solutions_with_members().await.unwrap();
+        assert_eq!(rows.len(), 2);
+        let cat_ids: Vec<String> = rows.iter().map(|r| r.4.clone()).collect();
+        assert_eq!(cat_ids, vec!["cat-a", "cat-b"]);
+
+        db.delete_solution_member("sol-1".into(), "cat-a".into())
+            .await
+            .unwrap();
+        let rows = db.load_all_solutions_with_members().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].4, "cat-b");
+
+        db.delete_solution_row("sol-1".into()).await.unwrap();
+        let rows = db.load_all_solutions_with_members().await.unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[gpui::test]
+    async fn solution_with_no_members_still_returned() {
+        let db = SolutionsDb::open_test_db("solutions_db_solution_empty").await;
+        db.save_solution("empty".into(), "E".into(), "/x/empty".into(), None)
+            .await
+            .unwrap();
+        let rows = db.load_all_solutions_with_members().await.unwrap();
+        // The LEFT JOIN should yield exactly one row with empty member columns.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "empty");
+        assert!(rows[0].4.is_empty());
     }
 }
