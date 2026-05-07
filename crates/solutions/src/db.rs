@@ -174,6 +174,25 @@ impl SolutionsDb {
             ORDER BY s.id, m.position
         }
     }
+
+    query! {
+        pub async fn set_panel_selection(
+            solution_id: String,
+            panel_kind: String,
+            catalog_id: String
+        ) -> Result<()> {
+            INSERT OR REPLACE INTO panel_member_selections (solution_id, panel_kind, catalog_id)
+            VALUES (?, ?, ?)
+        }
+    }
+
+    query! {
+        pub async fn load_all_panel_selections()
+            -> Result<Vec<(String, String, String)>>
+        {
+            SELECT solution_id, panel_kind, catalog_id FROM panel_member_selections
+        }
+    }
 }
 
 #[cfg(test)]
@@ -275,5 +294,34 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0, "empty");
         assert!(rows[0].4.is_empty());
+    }
+
+    #[gpui::test]
+    async fn panel_selection_roundtrips() {
+        let db = SolutionsDb::open_test_db("solutions_db_panel_sel").await;
+        db.save_solution("s1".into(), "S1".into(), "/x".into(), None)
+            .await
+            .unwrap();
+        db.set_panel_selection("s1".into(), "tree".into(), "cat-a".into())
+            .await
+            .unwrap();
+        db.set_panel_selection("s1".into(), "git".into(), "cat-b".into())
+            .await
+            .unwrap();
+
+        let rows = db.load_all_panel_selections().await.unwrap();
+        assert_eq!(rows.len(), 2);
+
+        db.set_panel_selection("s1".into(), "tree".into(), "cat-c".into())
+            .await
+            .unwrap();
+        let rows = db.load_all_panel_selections().await.unwrap();
+        assert_eq!(rows.len(), 2);
+        let tree = rows.iter().find(|r| r.1 == "tree").unwrap();
+        assert_eq!(tree.2, "cat-c");
+
+        db.delete_solution_row("s1".into()).await.unwrap();
+        let rows = db.load_all_panel_selections().await.unwrap();
+        assert!(rows.is_empty(), "FK cascade should remove panel selections");
     }
 }
