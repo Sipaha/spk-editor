@@ -1,9 +1,12 @@
 mod application_menu;
 pub mod collab;
+mod fork_height;
 mod onboarding_banner;
 mod plan_chip;
 mod title_bar_settings;
 mod update_version;
+
+pub use fork_height::{FORK_TITLE_BAR_CONTENT_HEIGHT_PX, fork_title_bar_content_height};
 
 use crate::application_menu::{ApplicationMenu, show_menus};
 use crate::plan_chip::PlanChip;
