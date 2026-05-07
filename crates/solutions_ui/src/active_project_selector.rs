@@ -97,6 +97,10 @@ impl ActiveProjectSelector {
         this
     }
 
+    pub fn solution_id(&self) -> Option<&SolutionId> {
+        self.solution_id.as_ref()
+    }
+
     pub fn selected_catalog_id(&self) -> Option<&CatalogId> {
         self.selected_catalog_id.as_ref()
     }
