@@ -11,6 +11,7 @@ mod open;
 mod picker;
 pub mod solution_picker_dropdown;
 pub mod solution_tab;
+pub mod solution_tab_strip;
 mod status_bar;
 mod switch;
 mod welcome;
