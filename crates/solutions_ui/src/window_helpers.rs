@@ -3,8 +3,8 @@
 //! Welcome trigger.
 
 use gpui::{App, WindowHandle};
-use solutions::SolutionId;
-use workspace::MultiWorkspace;
+use solutions::{SolutionId, SolutionStore};
+use workspace::{MultiWorkspace, Workspace};
 
 use crate::open::workspace_has_solution;
 
@@ -32,4 +32,95 @@ pub fn find_window_for_solution(
 
 pub fn is_solution_open_anywhere(sol_id: &SolutionId, cx: &App) -> bool {
     find_window_for_solution(sol_id, cx).is_some()
+}
+
+/// First solution in the registry whose `root` is an ancestor of any
+/// visible worktree in `workspace`'s project. Mirrors the behaviour
+/// the title-bar tab strip uses to highlight the active tab — tabs
+/// and panel selectors must agree on which solution is active.
+pub fn active_solution_in_workspace(workspace: &Workspace, cx: &App) -> Option<SolutionId> {
+    let store = SolutionStore::try_global(cx)?;
+    let store = store.read(cx);
+    let project = workspace.project().read(cx);
+    let paths = project
+        .visible_worktrees(cx)
+        .map(|worktree| worktree.read(cx).abs_path());
+    active_solution_for_paths(store, paths)
+}
+
+/// Inner pure-data helper: walks `paths` and returns the id of the first
+/// solution whose root is an ancestor of any path. Kept private so tests
+/// can drive it directly without needing a full workspace harness.
+fn active_solution_for_paths<P>(store: &SolutionStore, paths: impl IntoIterator<Item = P>) -> Option<SolutionId>
+where
+    P: AsRef<std::path::Path>,
+{
+    for path in paths {
+        if let Some(sol) = store.solution_for_path(path.as_ref()) {
+            return Some(sol.id.clone());
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use solutions::SolutionStore;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    #[gpui::test]
+    async fn active_solution_for_paths_matches_first_worktree(cx: &mut TestAppContext) {
+        let dir = tempdir().expect("tempdir");
+
+        let store = cx.update(|cx| SolutionStore::for_test(PathBuf::new(), cx));
+        let sol_id = store
+            .update(cx, |s, cx| s.create_solution("S", dir.path().to_path_buf(), cx))
+            .expect("create");
+
+        // `create_solution` appends the slug ("s") to the base, so the actual
+        // root is `dir/s`. A path under that root must match.
+        let worktree_path = dir.path().join("s").join("some-project");
+        let result = store.read_with(cx, |store, _cx| {
+            active_solution_for_paths(store, [worktree_path])
+        });
+        assert_eq!(result, Some(sol_id));
+    }
+
+    #[gpui::test]
+    async fn active_solution_for_paths_returns_none_when_no_match(cx: &mut TestAppContext) {
+        let dir = tempdir().expect("tempdir");
+
+        let store = cx.update(|cx| SolutionStore::for_test(PathBuf::new(), cx));
+        store
+            .update(cx, |s, cx| s.create_solution("S", dir.path().to_path_buf(), cx))
+            .expect("create");
+
+        // A path outside the solution root should not match.
+        let other_dir = tempdir().expect("tempdir");
+        let other_path = other_dir.path().join("file.txt");
+        let result = store.read_with(cx, |store, _cx| {
+            active_solution_for_paths(store, [other_path])
+        });
+        assert_eq!(result, None);
+    }
+
+    #[gpui::test]
+    async fn active_solution_for_paths_returns_none_on_empty_paths(cx: &mut TestAppContext) {
+        let dir = tempdir().expect("tempdir");
+
+        let store = cx.update(|cx| SolutionStore::for_test(PathBuf::new(), cx));
+        store
+            .update(cx, |s, cx| {
+                s.create_solution("S", dir.path().to_path_buf(), cx)
+            })
+            .expect("create");
+
+        let result = store.read_with(cx, |store, _cx| {
+            active_solution_for_paths(store, Vec::<PathBuf>::new())
+        });
+        assert_eq!(result, None);
+    }
 }
