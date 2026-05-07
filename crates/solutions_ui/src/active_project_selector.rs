@@ -26,6 +26,7 @@ use solutions::{
     CatalogId, SolutionId, SolutionMember, SolutionStore, SolutionStoreEvent, db::PanelKind,
 };
 use ui::{Color, Icon, IconName, Label, prelude::*};
+use util::ResultExt as _;
 use workspace::Workspace;
 
 use crate::window_helpers::active_solution_in_workspace;
@@ -149,7 +150,8 @@ impl ActiveProjectSelector {
             if needs_persist {
                 let panel = self.panel_kind;
                 SolutionStore::global(cx).update(cx, |s, cx| {
-                    let _ = s.set_panel_member_selection(sol_id, panel, cat_id, cx);
+                    s.set_panel_member_selection(sol_id, panel, cat_id, cx)
+                        .log_err();
                 });
             }
         }
