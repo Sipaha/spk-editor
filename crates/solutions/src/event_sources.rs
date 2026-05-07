@@ -10,7 +10,9 @@
 //! would create the architectural cycles that earlier phases already had to
 //! resolve.
 //!
-//! Wired event kinds: `solution_changed`, `buffer_opened`, `buffer_closed`,
+//! Wired event kinds: `solution_changed`, `solution_active_changed`,
+//! `solution_member_add_progress`, `solution_member_add_completed`,
+//! `solution_panel_member_selection_changed`, `buffer_opened`, `buffer_closed`,
 //! `buffer_saved`, `buffer_dirty_changed`, `diagnostic_updated`,
 //! `lsp_started`, `lsp_stopped`, `window_focused`.
 //!
