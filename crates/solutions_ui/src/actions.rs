@@ -29,6 +29,41 @@ pub struct DeleteSolution {
     pub id: String,
 }
 
+/// Close a Solution from the title-bar tab strip — stops AI sessions and
+/// closes any retained / active workspaces hosting it. Mirrors what the
+/// (retired) dock panel's `close_solution` button used to do.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, JsonSchema, Action)]
+#[action(namespace = solutions)]
+pub struct CloseSolutionFromTabBar {
+    pub id: String,
+}
+
+/// Open the destructive-action confirmation modal for the given Solution
+/// from the title-bar tab strip's right-click menu. The modal lists the
+/// registry entry and on-disk folder; on confirm it dispatches
+/// `DeleteSolution { id }` (which performs the actual deletion).
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, JsonSchema, Action)]
+#[action(namespace = solutions)]
+pub struct DeleteSolutionFromTabBar {
+    pub id: String,
+}
+
+/// Reveal the on-disk root folder of a Solution in the OS file manager.
+/// Triggered from the title-bar tab strip's right-click menu.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, JsonSchema, Action)]
+#[action(namespace = solutions)]
+pub struct RevealSolutionFolder {
+    pub id: String,
+}
+
+/// Open the rename modal for a Solution by id. Triggered from the title-bar
+/// tab strip's right-click menu (and, eventually, the picker dropdown).
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, JsonSchema, Action)]
+#[action(namespace = solutions)]
+pub struct RenameSolution {
+    pub id: String,
+}
+
 /// Open the edit modal for a catalog project (Name / Remote URL / default
 /// branch). Triggered from the failed in-flight add row in the Solutions
 /// panel — the most common reason an add fails is a wrong URL, and this

@@ -1,0 +1,210 @@
+//! One open-solution tab in the title-bar strip.
+//!
+//! Click → switch to this Solution in the same window via
+//! [`crate::open::open_solution`] (`OpenIntent::SameWindow`). Middle-click
+//! is intentionally a no-op — closing a solution is explicit (right-click
+//! → Close, or the picker dropdown). Right-click → context menu (Close,
+//! Delete…, Reveal Solution Folder, Rename…).
+//!
+//! Visuals: deterministic colour dot derived from the id, name (truncated),
+//! AI session badge (Sparkle + count) when there are live sessions for this
+//! solution, clone-progress spinner while an `add_member` is in flight,
+//! active-tab highlight (background + border accent).
+//!
+//! The badge counts and clone-in-flight flag are caller-driven (passed
+//! into `new`) so this `RenderOnce` element doesn't read globals during
+//! render — the `SolutionTabStrip` (Task 7) will subscribe to the store
+//! events that change them and pass fresh values down on each rerender.
+
+use gpui::{
+    App, ClickEvent, Hsla, IntoElement, RenderOnce, SharedString, WeakEntity, Window, div, hsla,
+    px,
+};
+use solutions::SolutionId;
+use std::cell::RefCell;
+use ui::{ContextMenu, Indicator, prelude::*, right_click_menu};
+use workspace::Workspace;
+
+use crate::actions::{
+    CloseSolutionFromTabBar, DeleteSolutionFromTabBar, RenameSolution, RevealSolutionFolder,
+};
+use crate::open::{OpenIntent, open_solution};
+
+#[derive(IntoElement)]
+pub struct SolutionTab {
+    id: SolutionId,
+    name: SharedString,
+    is_active: bool,
+    ai_session_count: usize,
+    clone_in_flight: bool,
+    /// Held for parity with the spec and to give Task 7's tab-strip a
+    /// stable handle path; currently unused inside `render` because the
+    /// click handler dispatches through `cx.windows()` and the right-
+    /// click context menu dispatches actions globally.
+    #[allow(dead_code)]
+    weak_workspace: WeakEntity<Workspace>,
+}
+
+impl SolutionTab {
+    pub fn new(
+        id: SolutionId,
+        name: SharedString,
+        is_active: bool,
+        ai_session_count: usize,
+        clone_in_flight: bool,
+        weak_workspace: WeakEntity<Workspace>,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            is_active,
+            ai_session_count,
+            clone_in_flight,
+            weak_workspace,
+        }
+    }
+}
+
+impl RenderOnce for SolutionTab {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let dot = dot_color(&self.id);
+        let id_for_click = self.id.clone();
+        let id_for_menu = self.id.clone();
+        let active_bg = if self.is_active {
+            Some(cx.theme().colors().tab_active_background)
+        } else {
+            None
+        };
+        let active_border = cx.theme().colors().border_focused;
+        let inactive_border = cx.theme().colors().border_transparent;
+        let row_id = SharedString::from(format!("solution-tab-{}", self.id.as_str()));
+        let menu_id = SharedString::from(format!("solution-tab-menu-{}", self.id.as_str()));
+
+        let row = h_flex()
+            .id(row_id)
+            .h_full()
+            .px_2()
+            .gap_2()
+            .min_w(px(80.0))
+            .max_w(px(200.0))
+            .items_center()
+            .when_some(active_bg, |this, bg| this.bg(bg))
+            .border_b_2()
+            .border_color(if self.is_active {
+                active_border
+            } else {
+                inactive_border
+            })
+            .cursor_pointer()
+            .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(dot))
+            .child(
+                Label::new(self.name.clone()).truncate().color(if self.is_active {
+                    Color::Default
+                } else {
+                    Color::Muted
+                }),
+            )
+            .when(self.ai_session_count > 0, |this| {
+                this.child(
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Icon::new(IconName::Sparkle)
+                                .size(IconSize::XSmall)
+                                .color(Color::Accent),
+                        )
+                        .child(
+                            Label::new(self.ai_session_count.to_string())
+                                .size(LabelSize::Small)
+                                .color(Color::Accent),
+                        ),
+                )
+            })
+            .when(self.clone_in_flight, |this| {
+                this.child(
+                    Indicator::icon(Icon::new(IconName::ArrowCircle)).color(Color::Accent),
+                )
+            })
+            .on_click({
+                move |_event: &ClickEvent, window, cx| {
+                    let id = id_for_click.clone();
+                    let source = window.window_handle().downcast();
+                    open_solution(id, source, OpenIntent::SameWindow, cx);
+                }
+            });
+
+        // Wrap the row in a `right_click_menu` so the user can reach
+        // Close / Delete / Reveal / Rename. Each entry just dispatches
+        // the matching action — the workspace-level handlers (registered
+        // in `solutions_ui::register_tab_actions`) own the actual
+        // behaviour, which keeps this element pure presentation. The
+        // `RefCell` dance mirrors `solution_agent::conversation_render`:
+        // `right_click_menu::trigger` takes an `Fn` closure but we want
+        // to consume the row exactly once when the trigger fires.
+        let row_cell = RefCell::new(Some(row.into_any_element()));
+        right_click_menu(menu_id)
+            .trigger(move |_, _, _| {
+                row_cell
+                    .borrow_mut()
+                    .take()
+                    .unwrap_or_else(|| div().into_any_element())
+            })
+            .menu(move |window, cx| {
+                let id_str = id_for_menu.0.clone();
+                ContextMenu::build(window, cx, move |menu, _, _| {
+                    menu.action(
+                        "Close",
+                        Box::new(CloseSolutionFromTabBar {
+                            id: id_str.clone(),
+                        }),
+                    )
+                    .action(
+                        "Delete…",
+                        Box::new(DeleteSolutionFromTabBar {
+                            id: id_str.clone(),
+                        }),
+                    )
+                    .separator()
+                    .action(
+                        "Reveal Solution Folder",
+                        Box::new(RevealSolutionFolder {
+                            id: id_str.clone(),
+                        }),
+                    )
+                    .action("Rename…", Box::new(RenameSolution { id: id_str }))
+                })
+            })
+            .into_any_element()
+    }
+}
+
+/// Deterministic hue derived from the solution's id. Stable across
+/// restarts — keeps a tab visually identifiable even when its name
+/// changes — and reasonably spread across the colour wheel for short
+/// id strings (the persistence layer uses uuid-shaped ids, so the
+/// `DefaultHasher` distribution is fine).
+fn dot_color(id: &SolutionId) -> Hsla {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    id.as_str().hash(&mut h);
+    let hue = (h.finish() % 360) as f32;
+    hsla(hue / 360.0, 0.55, 0.55, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dot_color_is_stable_for_same_id() {
+        let id = SolutionId("abc-123".to_string());
+        assert_eq!(dot_color(&id), dot_color(&id));
+    }
+
+    #[test]
+    fn dot_color_differs_across_ids() {
+        let a = dot_color(&SolutionId("a".to_string()));
+        let b = dot_color(&SolutionId("b".to_string()));
+        assert_ne!(a, b);
+    }
+}
