@@ -8,6 +8,7 @@ pub mod db;
 mod event_sources;
 pub mod git;
 pub mod mcp;
+pub mod migrate;
 mod model;
 mod persistence;
 mod settings;

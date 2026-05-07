@@ -90,6 +90,12 @@ impl SolutionStore {
     }
 
     fn init_with_db(db: SolutionsDb, cx: &mut App) {
+        let json_path = paths::config_dir().join("solutions.json");
+        if let Err(err) = crate::migrate::run_one_time_migration(&db, &json_path) {
+            log::error!(
+                "solutions::store: legacy import failed: {err}. Continuing with empty DB."
+            );
+        }
         let config = match Self::load_from_db_blocking(&db) {
             Ok(cfg) => cfg,
             Err(err) => {
@@ -111,7 +117,7 @@ impl SolutionStore {
             }
         }
         let store = cx.new(|_| SolutionStore {
-            config_path: paths::config_dir().join("solutions.json"),
+            config_path: json_path,
             config,
             db: Some(db),
             fs_lock: Arc::new(smol::lock::Mutex::new(())),

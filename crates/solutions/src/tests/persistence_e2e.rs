@@ -116,3 +116,47 @@ async fn set_panel_selection_persists_and_emits(cx: &mut TestAppContext) {
     assert_eq!(rows[0].1, "tree");
     assert_eq!(rows[0].2, "cat-x");
 }
+
+use std::fs;
+
+#[gpui::test]
+async fn migration_imports_old_json_once(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let tmp = tempfile::tempdir().unwrap();
+    let json_path = tmp.path().join("solutions.json");
+
+    let old = serde_json::json!({
+        "version": 1,
+        "catalog": [
+            { "id": "cat-a", "name": "Cat A", "remote_url": "git@x:a", "default_branch": "main" }
+        ],
+        "solutions": [
+            {
+                "id": "sol-1",
+                "name": "Sol One",
+                "root": "/tmp/sol-1",
+                "members": [
+                    { "catalog_id": "cat-a", "local_path": "/tmp/sol-1/cat-a" }
+                ]
+            }
+        ]
+    });
+    fs::write(&json_path, serde_json::to_string_pretty(&old).unwrap()).unwrap();
+
+    let db = SolutionsDb::open_test_db("solutions_migrate_imports").await;
+    crate::migrate::run_one_time_migration(&db, &json_path).unwrap();
+
+    let cat = db.load_all_catalog_projects().await.unwrap();
+    assert_eq!(cat.len(), 1);
+    let sol = db.load_all_solutions_with_members().await.unwrap();
+    assert_eq!(sol.len(), 1);
+    assert_eq!(sol[0].4, "cat-a");
+
+    assert!(!json_path.exists());
+    let bak = tmp.path().join("solutions.json.migrated.bak");
+    assert!(bak.exists());
+
+    crate::migrate::run_one_time_migration(&db, &json_path).unwrap();
+    let cat = db.load_all_catalog_projects().await.unwrap();
+    assert_eq!(cat.len(), 1);
+}
