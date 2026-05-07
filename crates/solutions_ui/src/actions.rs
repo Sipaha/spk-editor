@@ -116,7 +116,10 @@ pub struct SwitchToNextProjectInPanel {
     pub panel_kind: String,
 }
 
-/// Cycle the per-panel project selection backward (previous member).
+/// Cycle the per-panel project selection backward (previous member) within
+/// the active solution. `panel_kind` is `"tree"` or `"git"` — matches the
+/// `panel_member_selections.panel_kind` SQL string. Ships without a default
+/// keymap; users bind themselves.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize, JsonSchema, Action)]
 #[action(namespace = solutions)]
 pub struct SwitchToPrevProjectInPanel {

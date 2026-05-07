@@ -233,6 +233,10 @@ fn close_solution(
     }
 }
 
+/// Advances or retreats the per-panel project selection for the active
+/// solution by `dir` steps (`+1` = next, `-1` = previous), wrapping at
+/// both ends. No-op if the workspace has no active solution, the
+/// solution has no members, or the panel kind isn't recognised.
 fn cycle_project_in_panel(
     workspace: &Workspace,
     panel_kind: &str,
@@ -308,7 +312,8 @@ mod tests {
 
     #[test]
     fn cycle_index_single_element() {
-        assert_eq!(cycle_index(1, 1, 1), 0);
+        assert_eq!(cycle_index(0, 1, 1), 0);
+        assert_eq!(cycle_index(0, 1, -1), 0);
     }
 }
 
