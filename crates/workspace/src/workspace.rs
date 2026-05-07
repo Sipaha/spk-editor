@@ -65,7 +65,7 @@ use gpui::{
     Focusable, Global, HitboxBehavior, Hsla, KeyContext, Keystroke, ManagedView, MouseButton,
     PathPromptOptions, Point, PromptLevel, Render, ResizeEdge, Size, Stateful, Subscription,
     SystemWindowTabController, Task, Tiling, WeakEntity, WindowBounds, WindowHandle, WindowId,
-    WindowOptions, actions, canvas, point, relative, size, transparent_black,
+    WindowOptions, actions, canvas, point, px, relative, size, transparent_black,
 };
 pub use history_manager::*;
 pub use item::{
@@ -7706,6 +7706,7 @@ impl Workspace {
         let colors = cx.theme().colors();
         v_flex()
             .flex_none()
+            .w(px(40.))
             .h_full()
             .px_1()
             .py_2()
@@ -7723,6 +7724,7 @@ impl Workspace {
         let colors = cx.theme().colors();
         v_flex()
             .flex_none()
+            .w(px(40.))
             .h_full()
             .px_1()
             .py_2()

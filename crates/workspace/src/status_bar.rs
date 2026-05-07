@@ -74,6 +74,7 @@ impl Render for StatusBar {
 
         h_flex()
             .w_full()
+            .h(px(30.))
             .justify_between()
             .gap(DynamicSpacing::Base08.rems(cx))
             .p(DynamicSpacing::Base04.rems(cx))
