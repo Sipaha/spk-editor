@@ -10,7 +10,6 @@ use crate::open::workspace_has_solution;
 
 /// Returns the window handle that currently has `sol_id` as one of its
 /// open solutions, or `None` if no such window exists.
-#[allow(dead_code)] // wired by Phase 2 Tasks 4-7
 pub fn find_window_for_solution(
     sol_id: &SolutionId,
     cx: &App,

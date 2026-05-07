@@ -1,5 +1,5 @@
 //! Shared "open this Solution" entry point used by the welcome page,
-//! the Solutions dock panel and the picker. Centralises three concerns
+//! the title-bar tab strip and the picker. Centralises three concerns
 //! that were previously copy-pasted:
 //!
 //! 1. Reuse an already-open window for the Solution if one exists.

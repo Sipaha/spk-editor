@@ -181,13 +181,17 @@ impl RenderOnce for SolutionTab {
 /// Deterministic hue derived from the solution's id. Stable across
 /// restarts — keeps a tab visually identifiable even when its name
 /// changes — and reasonably spread across the colour wheel for short
-/// id strings (the persistence layer uses uuid-shaped ids, so the
-/// `DefaultHasher` distribution is fine).
+/// id strings (the persistence layer uses uuid-shaped ids).
 fn dot_color(id: &SolutionId) -> Hsla {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    id.as_str().hash(&mut h);
-    let hue = (h.finish() % 360) as f32;
+    // FNV-1a 32-bit. Stable across Rust toolchain upgrades unlike
+    // `DefaultHasher` (whose algorithm is explicitly unstable). The
+    // 360-mod means we don't care about higher-quality hashing.
+    let mut h: u32 = 2166136261;
+    for byte in id.as_str().bytes() {
+        h ^= byte as u32;
+        h = h.wrapping_mul(16777619);
+    }
+    let hue = (h % 360) as f32;
     hsla(hue / 360.0, 0.55, 0.55, 1.0)
 }
 

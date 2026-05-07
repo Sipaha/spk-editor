@@ -13,8 +13,7 @@
 
 use editor::{Editor, EditorEvent};
 use gpui::{
-    AppContext as _, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Subscription,
-    WeakEntity, px,
+    DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Subscription, WeakEntity, px,
 };
 use solutions::{Solution, SolutionId, SolutionStore, SolutionStoreEvent};
 use std::path::PathBuf;
@@ -28,7 +27,6 @@ use crate::window_helpers::is_solution_open_anywhere;
 pub struct SolutionPickerDropdown {
     workspace: WeakEntity<Workspace>,
     search_editor: Entity<Editor>,
-    focus_handle: FocusHandle,
     closed_solutions: Vec<ClosedSolutionRow>,
     _store_subscription: Subscription,
     _search_subscription: Subscription,
@@ -79,12 +77,9 @@ impl SolutionPickerDropdown {
             },
         );
 
-        let focus_handle = cx.focus_handle();
-
         let mut this = Self {
             workspace,
             search_editor,
-            focus_handle,
             closed_solutions: Vec::new(),
             _store_subscription: store_subscription,
             _search_subscription: search_subscription,
@@ -291,7 +286,10 @@ impl Render for SolutionPickerDropdown {
 
         v_flex()
             .key_context("SolutionPickerDropdown")
-            .track_focus(&self.focus_handle)
+            .track_focus(&self.search_editor.focus_handle(cx))
+            .on_action(cx.listener(|_, _: &menu::Cancel, _, cx| {
+                cx.emit(DismissEvent);
+            }))
             .min_w(px(280.0))
             .max_h(px(360.0))
             .bg(cx.theme().colors().elevated_surface_background)
