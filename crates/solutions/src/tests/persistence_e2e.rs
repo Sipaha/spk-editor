@@ -162,6 +162,42 @@ async fn migration_imports_old_json_once(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn panel_member_selections_persist_across_reinit(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let db = SolutionsDb::open_test_db("solutions_panel_sel_reinit").await;
+    let tmp = tempfile::tempdir().unwrap();
+
+    let db_first = db.clone();
+    let id = cx.update(|cx| {
+        crate::store::SolutionStore::init_global_for_test(db_first, cx);
+        let store = crate::store::SolutionStore::global(cx);
+        let id = store.update(cx, |s, cx| {
+            s.create_solution("S", tmp.path().to_path_buf(), cx).unwrap()
+        });
+        store.update(cx, |s, cx| {
+            s.set_panel_member_selection(
+                id.clone(),
+                PanelKind::Tree,
+                CatalogId("cat-x".into()),
+                cx,
+            )
+            .unwrap();
+        });
+        cx.remove_global::<crate::store::GlobalSolutionStore>();
+        id
+    });
+
+    cx.update(|cx| {
+        crate::store::SolutionStore::init_global_for_test(db, cx);
+        let store = crate::store::SolutionStore::global(cx);
+        store.read_with(cx, |s, _| {
+            let cat = s.panel_member_selection(&id, PanelKind::Tree);
+            assert_eq!(cat.map(|c| c.as_str()), Some("cat-x"));
+        });
+    });
+}
+
+#[gpui::test]
 async fn full_lifecycle_persists_across_reinit(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let db = SolutionsDb::open_test_db("solutions_full_lifecycle").await;

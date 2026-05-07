@@ -11,6 +11,7 @@ use collections::HashMap;
 use gpui::{App, AppContext as _, Entity, EventEmitter, Global};
 use std::path::PathBuf;
 use std::sync::Arc;
+use util::ResultExt as _;
 
 pub struct SolutionStore {
     pub(crate) config: SolutionsConfig,
@@ -102,7 +103,15 @@ impl SolutionStore {
                 }
             }
         };
-        let panel_rows = gpui::block_on(db.load_all_panel_selections()).unwrap_or_default();
+        let panel_rows = match gpui::block_on(db.load_all_panel_selections()) {
+            Ok(rows) => rows,
+            Err(err) => {
+                log::error!(
+                    "solutions::store: failed to load panel_member_selections: {err}"
+                );
+                Vec::new()
+            }
+        };
         let mut panel_member_selections: HashMap<(SolutionId, crate::db::PanelKind), CatalogId> =
             HashMap::default();
         for (sid, pk, cid) in panel_rows {
@@ -247,6 +256,12 @@ impl SolutionStore {
         catalog: CatalogId,
         cx: &mut gpui::Context<Self>,
     ) -> anyhow::Result<()> {
+        // Cache → DB → emit, matching every other mutator in this store.
+        // If the DB write fails the cache is briefly ahead of the DB, but
+        // a subsequent successful write reconciles them and a fresh init
+        // rebuilds the cache from the DB anyway.
+        self.panel_member_selections
+            .insert((solution.clone(), panel), catalog.clone());
         if let Some(db) = self.db.as_ref() {
             gpui::block_on(db.set_panel_selection(
                 solution.0.clone(),
@@ -254,8 +269,6 @@ impl SolutionStore {
                 catalog.0.clone(),
             ))?;
         }
-        self.panel_member_selections
-            .insert((solution.clone(), panel), catalog.clone());
         cx.emit(SolutionStoreEvent::PanelMemberSelectionChanged {
             solution,
             panel,
@@ -464,7 +477,7 @@ impl SolutionStore {
                 for sol in self.config.solutions.iter() {
                     db.delete_solution_member(sol.id.0.clone(), id.0.clone())
                         .await
-                        .ok();
+                        .log_err();
                 }
                 db.delete_catalog_project(id.0.clone()).await
             })?;
@@ -531,6 +544,11 @@ impl SolutionStore {
             bail!("solution not found: {}", id.0);
         }
         self.db_delete_solution(id)?;
+        // DB rows for this solution's panel selections are removed by
+        // `ON DELETE CASCADE`; mirror that on the in-memory cache so
+        // stale entries don't leak past the deletion.
+        self.panel_member_selections
+            .retain(|(sid, _), _| sid != id);
         cx.emit(SolutionStoreEvent::Changed);
         cx.notify();
         Ok(())
@@ -568,6 +586,10 @@ impl SolutionStore {
             bail!("member not in solution");
         }
         self.db_delete_member(solution_id, catalog_id)?;
+        // Drop any panel selection that pointed at the now-gone member
+        // so panels don't keep a dangling catalog id in their cache.
+        self.panel_member_selections
+            .retain(|(sid, _), cid| !(sid == solution_id && cid == catalog_id));
         cx.emit(SolutionStoreEvent::Changed);
         cx.notify();
         Ok(())
