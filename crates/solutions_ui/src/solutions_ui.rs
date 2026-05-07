@@ -33,7 +33,8 @@ use workspace::Workspace;
 
 use crate::actions::{
     CloseSolutionFromTabBar, DeleteSolutionFromTabBar, RenameSolution, RemoveMember,
-    RevealSolutionFolder, SwitchToNextSolution, SwitchToPrevSolution,
+    RevealSolutionFolder, SwitchToNextProjectInPanel, SwitchToPrevProjectInPanel,
+    SwitchToNextSolution, SwitchToPrevSolution,
 };
 
 pub fn init(cx: &mut App) {
@@ -108,6 +109,12 @@ fn register_tab_actions(
     });
     workspace.register_action(|_workspace, _: &SwitchToPrevSolution, _, cx| {
         crate::switch::cycle_solution(-1, cx);
+    });
+    workspace.register_action(|workspace, action: &SwitchToNextProjectInPanel, _, cx| {
+        cycle_project_in_panel(workspace, &action.panel_kind, 1, cx);
+    });
+    workspace.register_action(|workspace, action: &SwitchToPrevProjectInPanel, _, cx| {
+        cycle_project_in_panel(workspace, &action.panel_kind, -1, cx);
     });
     workspace.register_action(|workspace, action: &RemoveMember, window, cx| {
         use util::ResultExt as _;
@@ -223,6 +230,85 @@ fn close_solution(
                 close_solution_workspaces_in(mw, &sol_id, window, cx);
             })
             .log_err();
+    }
+}
+
+fn cycle_project_in_panel(
+    workspace: &Workspace,
+    panel_kind: &str,
+    dir: isize,
+    cx: &mut gpui::App,
+) {
+    use util::ResultExt as _;
+
+    let panel = match panel_kind {
+        "tree" => solutions::db::PanelKind::Tree,
+        "git" => solutions::db::PanelKind::Git,
+        _ => return,
+    };
+    let Some(sol_id) = crate::window_helpers::active_solution_in_workspace(workspace, cx) else {
+        return;
+    };
+    let store = SolutionStore::global(cx);
+    let Some((members, current)) = store.read_with(cx, |s, _| {
+        let sol = s.solutions().iter().find(|sol| sol.id == sol_id)?;
+        let members: Vec<solutions::CatalogId> =
+            sol.members.iter().map(|m| m.catalog_id.clone()).collect();
+        if members.is_empty() {
+            return None;
+        }
+        let current = s
+            .panel_member_selection(&sol.id, panel)
+            .cloned()
+            .unwrap_or_else(|| members[0].clone());
+        Some((members, current))
+    }) else {
+        return;
+    };
+    let new_idx = cycle_index(
+        members.iter().position(|c| *c == current).unwrap_or(0),
+        members.len(),
+        dir,
+    );
+    let new_catalog = members[new_idx].clone();
+    store
+        .update(cx, |s, cx| {
+            s.set_panel_member_selection(sol_id, panel, new_catalog, cx)
+        })
+        .log_err();
+}
+
+fn cycle_index(cur: usize, len: usize, dir: isize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let n = len as isize;
+    let new = (((cur as isize + dir) % n) + n) % n;
+    new as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cycle_index;
+
+    #[test]
+    fn cycle_index_forward() {
+        assert_eq!(cycle_index(0, 3, 1), 1);
+    }
+
+    #[test]
+    fn cycle_index_wrap_forward() {
+        assert_eq!(cycle_index(2, 3, 1), 0);
+    }
+
+    #[test]
+    fn cycle_index_wrap_backward() {
+        assert_eq!(cycle_index(0, 3, -1), 2);
+    }
+
+    #[test]
+    fn cycle_index_single_element() {
+        assert_eq!(cycle_index(1, 1, 1), 0);
     }
 }
 
