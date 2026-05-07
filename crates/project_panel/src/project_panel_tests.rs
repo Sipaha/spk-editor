@@ -10145,6 +10145,12 @@ pub(crate) fn init_test(cx: &mut TestAppContext) {
         theme_settings::init(theme::LoadThemes::JustBase, cx);
         crate::init(cx);
 
+        // ProjectPanel now hosts ActiveProjectSelector which calls
+        // SolutionStore::global(cx). Install a minimal store so tests
+        // that don't exercise solution filtering still construct cleanly.
+        let store = solutions::SolutionStore::for_test(PathBuf::new(), cx);
+        solutions::install_global_for_test(store, cx);
+
         cx.update_global::<SettingsStore, _>(|store, cx| {
             store.update_user_settings(cx, |settings| {
                 settings
@@ -10164,6 +10170,9 @@ fn init_test_with_editor(cx: &mut TestAppContext) {
         editor::init(cx);
         crate::init(cx);
         workspace::init(app_state, cx);
+
+        let store = solutions::SolutionStore::for_test(PathBuf::new(), cx);
+        solutions::install_global_for_test(store, cx);
 
         cx.update_global::<SettingsStore, _>(|store, cx| {
             store.update_user_settings(cx, |settings| {
@@ -10338,4 +10347,39 @@ impl Render for TestProjectItemView {
     fn render(&mut self, _window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         Empty
     }
+}
+
+/// Smoke test: the panel constructs without panic when the GlobalSolutionStore is
+/// installed but no solution matches the workspace (selector renders "No solution"
+/// and selected_member() returns None, so no filtering is applied).
+#[gpui::test]
+async fn project_panel_constructs_with_solution_store(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        "/root1",
+        json!({
+            "a.txt": "",
+        }),
+    )
+    .await;
+
+    let project = Project::test(fs.clone(), ["/root1".as_ref()], cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+
+    // Panel must construct without panic; selector's selected_member() returns None
+    // (no solution matches) so visible_entries is not filtered.
+    let panel = workspace.update_in(cx, ProjectPanel::new);
+    cx.run_until_parked();
+
+    // All entries visible when no member is selected (no filtering).
+    assert_eq!(
+        visible_entries_as_strings(&panel, 0..5, cx),
+        &["v root1", "      a.txt"],
+    );
 }

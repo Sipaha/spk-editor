@@ -76,7 +76,7 @@ impl ActiveProjectSelector {
             }
             _ => {}
         });
-        let mut this = Self {
+        let this = Self {
             panel_kind,
             workspace,
             solution_id: None,
@@ -85,7 +85,15 @@ impl ActiveProjectSelector {
             change_counts: HashMap::default(),
             _subscriptions: vec![store_subscription],
         };
-        this.rebuild(cx);
+        // Defer the initial rebuild so it does not run while the host panel's
+        // containing entity (e.g. Workspace) is still being mutably updated.
+        // This avoids the "cannot read X while it is already being updated"
+        // panic that occurs when a panel is constructed inside
+        // `workspace.update_in(cx, PanelType::new)`.
+        cx.spawn(async move |this, cx| {
+            this.update(cx, |this, cx| this.rebuild(cx)).log_err();
+        })
+        .detach();
         this
     }
 

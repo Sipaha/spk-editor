@@ -16758,6 +16758,7 @@ dependencies = [
  "solutions",
  "tempfile",
  "theme",
+ "theme_settings",
  "ui",
  "util",
  "workspace",

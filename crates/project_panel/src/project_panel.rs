@@ -163,6 +163,8 @@ pub struct ProjectPanel {
     update_visible_entries_task: UpdateVisibleEntriesTask,
     undo_manager: UndoManager,
     state: State,
+    solution_selector: gpui::Entity<solutions_ui::ActiveProjectSelector>,
+    _selector_subscription: gpui::Subscription,
 }
 
 struct UpdateVisibleEntriesTask {
@@ -798,6 +800,19 @@ impl ProjectPanel {
 
             let scroll_handle = UniformListScrollHandle::new();
             let weak_project_panel = cx.weak_entity();
+
+            let solution_selector = cx.new(|cx| {
+                solutions_ui::ActiveProjectSelector::new(
+                    solutions::db::PanelKind::Tree,
+                    workspace.weak_handle(),
+                    cx,
+                )
+            });
+            let selector_subscription = cx.observe_in(&solution_selector, window, |this, _, window, cx| {
+                this.update_visible_entries(None, false, false, window, cx);
+                cx.notify();
+            });
+
             let mut this = Self {
                 project: project.clone(),
                 hover_scroll_task: None,
@@ -834,6 +849,8 @@ impl ProjectPanel {
                 },
                 update_visible_entries_task: Default::default(),
                 undo_manager: UndoManager::new(workspace.weak_handle(), weak_project_panel, &cx),
+                solution_selector,
+                _selector_subscription: selector_subscription,
             };
             this.update_visible_entries(None, false, false, window, cx);
 
@@ -4213,6 +4230,20 @@ impl ProjectPanel {
                 .await;
             this.update_in(cx, |this, window, cx| {
                 this.state = new_state;
+                if let Some(filter_path) = this
+                    .solution_selector
+                    .read(cx)
+                    .selected_member()
+                    .map(|m| m.local_path.clone())
+                {
+                    let project = this.project.read(cx);
+                    this.state.visible_entries.retain(|vw| {
+                        project
+                            .worktree_for_id(vw.worktree_id, cx)
+                            .map(|wt| wt.read(cx).abs_path().starts_with(&filter_path))
+                            .unwrap_or(false)
+                    });
+                }
                 if let Some((worktree_id, entry_id)) = new_selected_entry {
                     this.selection = Some(SelectedEntry {
                         worktree_id,
@@ -6843,6 +6874,7 @@ impl Render for ProjectPanel {
                 .track_focus(&self.focus_handle(cx))
                 .child(
                     v_flex()
+                        .child(self.solution_selector.clone())
                         .child(self.render_toolbar(cx))
                         .child(
                             uniform_list("entries", item_count, {
@@ -7258,6 +7290,7 @@ impl Render for ProjectPanel {
                 .text_center()
                 .text_size(rems(0.8125))
                 .track_focus(&self.focus_handle(cx))
+                .child(self.solution_selector.clone())
                 .child(div().w_full().child("Solution is empty"))
                 .child(
                     div()
