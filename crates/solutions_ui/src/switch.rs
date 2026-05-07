@@ -177,7 +177,6 @@ fn previous_solution_id(
             .find_map(|wt| store_read.solution_for_path(&wt.read(cx).abs_path()))
             .map(|sol| sol.id.clone())
     })
-    .map_err(Into::into)
 }
 
 // =====================================================================
@@ -263,12 +262,10 @@ impl McpServerTool for SwitchSolutionTool {
                 let multi = handle
                     .downcast::<MultiWorkspace>()
                     .with_context(|| format!("window_not_multi_workspace: {window_id_str}"))?;
-                multi
-                    .update(cx, |multi_workspace, window, cx| {
-                        let workspace = multi_workspace.workspace().clone().downgrade();
-                        switch_active_solution_in_place(workspace, target_id.clone(), window, cx)
-                    })
-                    .map_err(anyhow::Error::from)
+                multi.update(cx, |multi_workspace, window, cx| {
+                    let workspace = multi_workspace.workspace().clone().downgrade();
+                    switch_active_solution_in_place(workspace, target_id.clone(), window, cx)
+                })
             })?;
         task.await?;
 
