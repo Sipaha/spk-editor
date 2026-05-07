@@ -34,7 +34,7 @@ impl SolutionSessionsNavigator {
         let trigger = ui::IconButton::new("solution-sessions-history", IconName::HistoryRerun)
             .shape(ui::IconButtonShape::Wide)
             .size(ButtonSize::Large)
-            .icon_size(IconSize::Custom(rems_from_px(24.)))
+            .icon_size(IconSize::Custom(rems_from_px(20.)))
             .icon_color(Color::Muted)
             .tooltip(ui::Tooltip::text("Recent sessions"));
         let weak = cx.entity().downgrade();

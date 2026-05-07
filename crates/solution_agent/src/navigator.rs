@@ -865,7 +865,7 @@ impl SolutionSessionsNavigator {
         let trigger = ui::IconButton::new("solution-sessions-new", IconName::Plus)
             .shape(IconButtonShape::Wide)
             .size(ButtonSize::Large)
-            .icon_size(IconSize::Custom(rems_from_px(24.)))
+            .icon_size(IconSize::Custom(rems_from_px(20.)))
             .icon_color(Color::Muted)
             .tooltip(ui::Tooltip::text("New session"));
 
@@ -1006,6 +1006,9 @@ impl SolutionSessionsNavigator {
                     div()
                         .flex_1()
                         .min_w_0()
+                        .flex()
+                        .items_center()
+                        .h_full()
                         .child(
                             Label::new(title)
                                 .size(LabelSize::Default)
@@ -1088,7 +1091,7 @@ impl SolutionSessionsNavigator {
                     .h_full()
                     .items_center()
                     .gap_1()
-                    .px_2()
+                    .pr_2()
                     .when_some(new_btn, |this, btn| this.child(btn))
                     .when_some(history_btn, |this, btn| this.child(btn)),
             );

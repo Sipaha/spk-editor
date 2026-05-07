@@ -1423,7 +1423,7 @@ impl Render for PanelButtons {
         let has_buttons = !buttons.is_empty();
 
         if vertical {
-            return v_flex().gap_1().children(buttons).into_any_element();
+            return v_flex().gap_2().children(buttons).into_any_element();
         }
 
         h_flex()
