@@ -2,6 +2,7 @@
 //! modals, status-bar widget, welcome integration.
 
 mod actions;
+pub mod active_project_selector;
 mod add_member_picker;
 pub mod delete_confirm_modal;
 mod empty_solution_page;
@@ -17,6 +18,7 @@ mod welcome;
 mod welcome_trigger;
 pub mod window_helpers;
 
+pub use active_project_selector::ActiveProjectSelector;
 pub use empty_solution_page::EmptySolutionPage;
 pub use open::{OpenIntent, open_solution};
 pub use status_bar::SolutionsStatusItem;
