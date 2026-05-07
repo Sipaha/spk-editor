@@ -13,6 +13,12 @@ pub struct SolutionsConfig {
     pub solutions: Vec<Solution>,
 }
 
+// `LoadError` and `load_or_default` are retained for the upcoming
+// JSON-to-DB migration step (Task 10 of the Solutions UI Overhaul):
+// when a `solutions.json` exists alongside a fresh DB, we'll parse
+// the legacy file once and seed the DB from it. After that lands and
+// runs in production they can be deleted.
+#[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
     #[error("io error: {0}")]
@@ -23,6 +29,7 @@ pub enum LoadError {
     UnsupportedVersion(u32),
 }
 
+#[allow(dead_code)]
 pub fn load_or_default(path: &Path) -> Result<SolutionsConfig, LoadError> {
     if !path.exists() {
         return Ok(SolutionsConfig {

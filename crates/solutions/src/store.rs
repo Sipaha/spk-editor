@@ -1,7 +1,8 @@
 use crate::add_member::InFlightAdd;
+use crate::db::SolutionsDb;
 use crate::git;
 use crate::model::{CatalogId, CatalogProject, Solution, SolutionId, SolutionMember};
-use crate::persistence::{CURRENT_VERSION, SolutionsConfig, load_or_default, save_atomic};
+use crate::persistence::{CURRENT_VERSION, SolutionsConfig, save_atomic};
 use crate::slug::unique_slug;
 use crate::tabs_snapshot::{SolutionTabsSnapshot, TabSnapshots};
 use anyhow::{Context as _, Result, bail};
@@ -14,6 +15,13 @@ use std::sync::Arc;
 pub struct SolutionStore {
     config_path: PathBuf,
     pub(crate) config: SolutionsConfig,
+    /// `Some` for stores hydrated from `SolutionsDb` (production via
+    /// `init_global` and tests via `init_global_for_test`); `None` for
+    /// `for_test` stores that exercise mutations through the legacy
+    /// JSON path without a DB. Tasks 7-9 will start writing through
+    /// this connection in addition to (then instead of) `persist()`.
+    #[allow(dead_code)]
+    pub(crate) db: Option<SolutionsDb>,
     pub(crate) fs_lock: Arc<smol::lock::Mutex<()>>,
     pub(crate) in_flight_adds: HashMap<(SolutionId, CatalogId), InFlightAdd>,
     /// Per-Solution open-tab snapshots, populated by the in-place
@@ -55,11 +63,20 @@ impl EventEmitter<SolutionStoreEvent> for SolutionStore {}
 
 impl SolutionStore {
     pub fn init_global(cx: &mut App) {
-        let config_path = paths::config_dir().join("solutions.json");
-        let config = match load_or_default(&config_path) {
+        let db = SolutionsDb::global(cx);
+        Self::init_with_db(db, cx);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn init_global_for_test(db: SolutionsDb, cx: &mut App) {
+        Self::init_with_db(db, cx);
+    }
+
+    fn init_with_db(db: SolutionsDb, cx: &mut App) {
+        let config = match Self::load_from_db_blocking(&db) {
             Ok(cfg) => cfg,
             Err(err) => {
-                log::error!("solutions::store: failed to load solutions.json: {err}");
+                log::error!("solutions::store: failed to hydrate from DB: {err}");
                 SolutionsConfig {
                     version: CURRENT_VERSION,
                     ..Default::default()
@@ -67,13 +84,59 @@ impl SolutionStore {
             }
         };
         let store = cx.new(|_| SolutionStore {
-            config_path,
+            config_path: paths::config_dir().join("solutions.json"),
             config,
+            db: Some(db),
             fs_lock: Arc::new(smol::lock::Mutex::new(())),
             in_flight_adds: HashMap::default(),
             tab_snapshots: TabSnapshots::default(),
         });
         cx.set_global(GlobalSolutionStore(store));
+    }
+
+    fn load_from_db_blocking(db: &SolutionsDb) -> anyhow::Result<SolutionsConfig> {
+        let catalog_rows = gpui::block_on(db.load_all_catalog_projects())?;
+        let catalog: Vec<CatalogProject> = catalog_rows
+            .into_iter()
+            .map(|(id, name, remote_url, default_branch)| CatalogProject {
+                id: CatalogId(id),
+                name,
+                remote_url,
+                default_branch,
+            })
+            .collect();
+
+        let solution_rows = gpui::block_on(db.load_all_solutions_with_members())?;
+        let mut by_id: collections::HashMap<String, Solution> = collections::HashMap::default();
+        let mut order: Vec<String> = Vec::new();
+        for (sid, sname, sroot, last_opened_at, catalog_id, local_path, _position) in solution_rows
+        {
+            let entry = by_id.entry(sid.clone()).or_insert_with(|| {
+                order.push(sid.clone());
+                Solution {
+                    id: SolutionId(sid.clone()),
+                    name: sname,
+                    root: PathBuf::from(sroot),
+                    members: vec![],
+                    last_opened_at: last_opened_at
+                        .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis),
+                }
+            });
+            if !catalog_id.is_empty() {
+                entry.members.push(SolutionMember {
+                    catalog_id: CatalogId(catalog_id),
+                    local_path: PathBuf::from(local_path),
+                });
+            }
+        }
+        let solutions: Vec<Solution> =
+            order.into_iter().filter_map(|k| by_id.remove(&k)).collect();
+
+        Ok(SolutionsConfig {
+            version: CURRENT_VERSION,
+            catalog,
+            solutions,
+        })
     }
 
     pub fn global(cx: &App) -> Entity<SolutionStore> {
@@ -91,6 +154,7 @@ impl SolutionStore {
                 version: CURRENT_VERSION,
                 ..Default::default()
             },
+            db: None,
             fs_lock: Arc::new(smol::lock::Mutex::new(())),
             in_flight_adds: HashMap::default(),
             tab_snapshots: TabSnapshots::default(),

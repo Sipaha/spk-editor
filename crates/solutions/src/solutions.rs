@@ -36,3 +36,8 @@ pub fn init(cx: &mut App) {
     // `auto_trust` module docs.
     auto_trust::init(cx).detach();
 }
+
+#[cfg(test)]
+mod tests {
+    mod persistence_e2e;
+}
