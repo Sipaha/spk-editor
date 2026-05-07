@@ -704,7 +704,7 @@ impl SolutionStore {
         gpui::block_on(db.update_last_opened(id.0.clone(), ts_ms))
     }
 
-    fn find_solution_mut(&mut self, id: &SolutionId) -> Result<&mut Solution> {
+    pub(crate) fn find_solution_mut(&mut self, id: &SolutionId) -> Result<&mut Solution> {
         self.config
             .solutions
             .iter_mut()

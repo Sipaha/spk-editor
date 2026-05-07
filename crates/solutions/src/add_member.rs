@@ -295,6 +295,44 @@ impl SolutionStore {
         )
     }
 
+    /// Create a member that has no catalog backing — the user wanted a
+    /// fresh empty project that lives only inside this solution. Spec D4:
+    /// solutions are built only from catalog clones or empty projects;
+    /// external folders are not addable. The new member's `catalog_id` is a
+    /// slug derived from `project_name` and uniquified against the
+    /// solution's existing member catalog ids; nothing is inserted into
+    /// `catalog_projects`. The directory `solution.root/<slug>` is created
+    /// (incl. parents). Display name in selectors comes from the path's
+    /// last segment via the orphan-rendering rule.
+    pub fn add_empty_member(
+        &mut self,
+        solution_id: &SolutionId,
+        project_name: &str,
+        cx: &mut gpui::Context<Self>,
+    ) -> Result<CatalogId> {
+        let trimmed = project_name.trim();
+        if trimmed.is_empty() {
+            bail!("empty project name");
+        }
+        let sol = self.find_solution_mut(solution_id)?;
+        let taken: Vec<String> = sol.members.iter().map(|m| m.catalog_id.0.clone()).collect();
+        let slug = crate::slug::unique_slug(trimmed, &taken);
+        let cat_id = CatalogId(slug.clone());
+        let local_path = sol.root.join(&slug);
+        std::fs::create_dir_all(&local_path)
+            .with_context(|| format!("creating {}", local_path.display()))?;
+        sol.members.push(SolutionMember {
+            catalog_id: cat_id.clone(),
+            local_path,
+        });
+        let position = (sol.members.len() - 1) as i32;
+        let new_member = sol.members.last().expect("just pushed").clone();
+        self.db_set_member(solution_id, &new_member, position).log_err();
+        cx.emit(SolutionStoreEvent::Changed);
+        cx.notify();
+        Ok(cat_id)
+    }
+
     /// Snapshot of every in-flight or failed add for a solution. The dock
     /// panel renders these as ghost rows with spinners or error messages.
     pub fn pending_adds_for(&self, sol_id: &SolutionId) -> Vec<PendingAddView> {
@@ -532,6 +570,80 @@ mod tests {
             0,
             "UI row must disappear synchronously on cancel"
         );
+    }
+
+    #[gpui::test]
+    async fn add_empty_member_creates_directory_and_member(cx: &mut TestAppContext) {
+        use std::fs;
+        let dir = tempdir().expect("tempdir");
+        let cfg_path = dir.path().join("solutions.json");
+        let solutions_root = dir.path().join("solutions");
+        fs::create_dir_all(&solutions_root).expect("mkdir solutions");
+
+        let store = cx.update(|cx| SolutionStore::for_test(cfg_path, cx));
+        let sol_id = store
+            .update(cx, |s, cx| s.create_solution("S", solutions_root.clone(), cx))
+            .expect("create solution");
+
+        let cat_id = store
+            .update(cx, |s, cx| s.add_empty_member(&sol_id, "Frontend", cx))
+            .expect("add_empty_member");
+
+        let (member_path, member_cat_id) = store.read_with(cx, |s, _| {
+            let sol = s.solutions().iter().find(|x| x.id == sol_id).expect("solution");
+            let m = sol.members.first().expect("member");
+            (m.local_path.clone(), m.catalog_id.clone())
+        });
+
+        assert_eq!(member_cat_id, cat_id);
+        assert!(member_path.is_dir(), "directory must exist on disk");
+        assert!(member_path.starts_with(&solutions_root), "must live inside solution.root");
+        assert_eq!(
+            member_path.file_name().and_then(|n| n.to_str()),
+            Some("frontend"),
+            "slug from name"
+        );
+    }
+
+    #[gpui::test]
+    async fn add_empty_member_uniquifies_slug_within_solution(cx: &mut TestAppContext) {
+        use std::fs;
+        let dir = tempdir().expect("tempdir");
+        let cfg_path = dir.path().join("solutions.json");
+        let solutions_root = dir.path().join("solutions");
+        fs::create_dir_all(&solutions_root).expect("mkdir solutions");
+
+        let store = cx.update(|cx| SolutionStore::for_test(cfg_path, cx));
+        let sol_id = store
+            .update(cx, |s, cx| s.create_solution("S", solutions_root, cx))
+            .expect("create solution");
+        let id1 = store
+            .update(cx, |s, cx| s.add_empty_member(&sol_id, "Frontend", cx))
+            .expect("first add");
+        let id2 = store
+            .update(cx, |s, cx| s.add_empty_member(&sol_id, "Frontend", cx))
+            .expect("second add — must not collide");
+        assert_ne!(id1, id2, "two empty members from the same name must get distinct slugs");
+    }
+
+    #[gpui::test]
+    async fn add_empty_member_does_not_add_catalog_row(cx: &mut TestAppContext) {
+        use std::fs;
+        let dir = tempdir().expect("tempdir");
+        let cfg_path = dir.path().join("solutions.json");
+        let solutions_root = dir.path().join("solutions");
+        fs::create_dir_all(&solutions_root).expect("mkdir solutions");
+
+        let store = cx.update(|cx| SolutionStore::for_test(cfg_path, cx));
+        let sol_id = store
+            .update(cx, |s, cx| s.create_solution("S", solutions_root, cx))
+            .expect("create solution");
+        let _ = store
+            .update(cx, |s, cx| s.add_empty_member(&sol_id, "Frontend", cx))
+            .expect("add empty");
+        store.read_with(cx, |s, _| {
+            assert!(s.catalog().is_empty(), "empty members must not pollute the catalog");
+        });
     }
 
     #[gpui::test]
