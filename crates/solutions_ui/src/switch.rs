@@ -309,3 +309,70 @@ async fn close_all_editor_items(
     }
     Ok(())
 }
+
+// =====================================================================
+// Keyboard cycle actions: SwitchToNext/PrevSolution
+// =====================================================================
+
+/// Cycle to the next or previous open Solution within the active window.
+/// Direction: `1` for next, `-1` for previous. Wraps at boundaries using
+/// modular arithmetic: `(((idx + dir) % n) + n) % n` handles negative wraps.
+pub fn cycle_solution(direction: i32, cx: &mut App) {
+    let Some(window) = cx.active_window() else { return };
+    let Some(mw_handle) = window.downcast::<MultiWorkspace>() else { return };
+
+    mw_handle
+        .update(cx, |mw, window, cx| {
+            let Some(active_id) = active_solution_id_in(mw, cx) else {
+                return;
+            };
+            let ids = open_solution_ids_in(mw, cx);
+            if ids.is_empty() {
+                return;
+            }
+            let cur_idx = ids
+                .iter()
+                .position(|id| id == &active_id)
+                .unwrap_or(0);
+            let n = ids.len() as i32;
+            let next_idx = (((cur_idx as i32 + direction) % n) + n) % n;
+            let target = ids[next_idx as usize].clone();
+            let active_workspace = mw.workspace().clone();
+            let weak = active_workspace.downgrade();
+            crate::switch::switch_active_solution_in_place(weak, target, window, cx).detach_and_log_err(cx);
+        })
+        .ok();
+}
+
+fn active_solution_id_in(mw: &MultiWorkspace, cx: &App) -> Option<SolutionId> {
+    let active_workspace = mw.workspace().clone();
+    let store = SolutionStore::global(cx);
+    let store_read = store.read(cx);
+    let project = active_workspace.read(cx).project().clone();
+    project.read(cx).worktrees(cx).find_map(|tree| {
+        store_read
+            .solution_for_path(&tree.read(cx).abs_path())
+            .map(|sol| sol.id.clone())
+    })
+}
+
+fn open_solution_ids_in(mw: &MultiWorkspace, cx: &App) -> Vec<SolutionId> {
+    let store = SolutionStore::global(cx);
+    let store_read = store.read(cx);
+    let mut seen_ids = Vec::new();
+    for ws in mw.workspaces() {
+        let project = ws.read(cx).project().clone();
+        if let Some(sol_id) = project.read(cx).worktrees(cx).find_map(|tree| {
+            store_read
+                .solution_for_path(&tree.read(cx).abs_path())
+                .map(|sol| sol.id.clone())
+        }) {
+            // Avoid duplicates if the same solution is open in multiple
+            // workspaces (active + retained).
+            if !seen_ids.contains(&sol_id) {
+                seen_ids.push(sol_id);
+            }
+        }
+    }
+    seen_ids
+}

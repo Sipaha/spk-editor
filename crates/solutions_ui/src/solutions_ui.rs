@@ -31,6 +31,7 @@ use workspace::Workspace;
 
 use crate::actions::{
     CloseSolutionFromTabBar, DeleteSolutionFromTabBar, RenameSolution, RevealSolutionFolder,
+    SwitchToNextSolution, SwitchToPrevSolution,
 };
 
 pub fn init(cx: &mut App) {
@@ -99,6 +100,12 @@ fn register_tab_actions(
     workspace.register_action(|workspace, action: &RenameSolution, window, cx| {
         let id = SolutionId(action.id.clone());
         crate::modals::open_rename_solution(workspace, id, window, cx);
+    });
+    workspace.register_action(|_workspace, _: &SwitchToNextSolution, _, cx| {
+        crate::switch::cycle_solution(1, cx);
+    });
+    workspace.register_action(|_workspace, _: &SwitchToPrevSolution, _, cx| {
+        crate::switch::cycle_solution(-1, cx);
     });
 }
 

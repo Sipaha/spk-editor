@@ -3,6 +3,16 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 actions!(
+    solutions_ui,
+    [
+        /// Switch to the next open Solution in the window.
+        SwitchToNextSolution,
+        /// Switch to the previous open Solution in the window.
+        SwitchToPrevSolution,
+    ]
+);
+
+actions!(
     solutions,
     [
         /// Open the picker to switch to a Solution.
