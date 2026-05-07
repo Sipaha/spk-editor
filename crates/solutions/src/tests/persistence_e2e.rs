@@ -49,3 +49,39 @@ async fn add_catalog_project_persists_to_db(cx: &mut TestAppContext) {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].1, "Foo");
 }
+
+#[gpui::test]
+async fn create_and_remove_solution_persists(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let db = SolutionsDb::open_test_db("solutions_store_e2e_create_remove").await;
+    let tmp = tempfile::tempdir().unwrap();
+    let db_for_init = db.clone();
+    cx.update(|cx| {
+        crate::store::SolutionStore::init_global_for_test(db_for_init, cx);
+        let store = crate::store::SolutionStore::global(cx);
+        let id = store
+            .update(cx, |s, cx| s.create_solution("My Sol", tmp.path().to_path_buf(), cx).unwrap());
+        store.update(cx, |s, cx| s.touch_last_opened(&id, cx).unwrap());
+        store.update(cx, |s, cx| s.delete_solution(&id, cx).unwrap());
+    });
+
+    let rows = db.load_all_solutions_with_members().await.unwrap();
+    assert!(rows.is_empty(), "delete_solution should remove the row");
+}
+
+#[gpui::test]
+async fn touch_last_opened_persists_timestamp(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let db = SolutionsDb::open_test_db("solutions_store_e2e_touch_last").await;
+    let tmp = tempfile::tempdir().unwrap();
+    let db_for_init = db.clone();
+    cx.update(|cx| {
+        crate::store::SolutionStore::init_global_for_test(db_for_init, cx);
+        let store = crate::store::SolutionStore::global(cx);
+        let id = store
+            .update(cx, |s, cx| s.create_solution("S", tmp.path().to_path_buf(), cx).unwrap());
+        store.update(cx, |s, cx| s.touch_last_opened(&id, cx).unwrap());
+    });
+    let rows = db.load_all_solutions_with_members().await.unwrap();
+    assert!(rows.iter().any(|r| r.3.is_some()), "last_opened_at should be set");
+}

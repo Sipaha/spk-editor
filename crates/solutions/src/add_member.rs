@@ -230,17 +230,25 @@ impl SolutionStore {
                 match work_result {
                     Ok(()) => {
                         weak.update(cx, |store, cx| {
-                            if let Some(sol) = store
+                            let new_member_and_pos: Option<(SolutionMember, i32)> = store
                                 .config
                                 .solutions
                                 .iter_mut()
                                 .find(|s| s.id == solution_id)
-                            {
-                                sol.members.push(SolutionMember {
-                                    catalog_id: catalog_id.clone(),
-                                    local_path: target.clone(),
+                                .map(|sol| {
+                                    sol.members.push(SolutionMember {
+                                        catalog_id: catalog_id.clone(),
+                                        local_path: target.clone(),
+                                    });
+                                    let new_member =
+                                        sol.members.last().expect("just pushed").clone();
+                                    let position = (sol.members.len() - 1) as i32;
+                                    (new_member, position)
                                 });
-                                store.persist().log_err();
+                            if let Some((new_member, position)) = new_member_and_pos {
+                                store
+                                    .db_set_member(&solution_id, &new_member, position)
+                                    .log_err();
                             }
                             store
                                 .in_flight_adds

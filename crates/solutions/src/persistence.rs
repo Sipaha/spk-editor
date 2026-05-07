@@ -45,6 +45,7 @@ pub fn load_or_default(path: &Path) -> Result<SolutionsConfig, LoadError> {
     Ok(cfg)
 }
 
+#[allow(dead_code)]
 pub fn save_atomic(path: &Path, cfg: &SolutionsConfig) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

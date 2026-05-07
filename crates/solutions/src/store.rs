@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub struct SolutionStore {
+    #[allow(dead_code)]
     config_path: PathBuf,
     pub(crate) config: SolutionsConfig,
     /// `Some` for stores hydrated from `SolutionsDb` (production via
@@ -422,7 +423,7 @@ impl SolutionStore {
             members: vec![],
             last_opened_at: None,
         });
-        self.persist()?;
+        self.db_save_solution(self.config.solutions.last().expect("just pushed"))?;
         cx.emit(SolutionStoreEvent::Changed);
         cx.notify();
         Ok(id)
@@ -436,7 +437,14 @@ impl SolutionStore {
     ) -> Result<()> {
         let sol = self.find_solution_mut(id)?;
         sol.name = new_name.into();
-        self.persist()?;
+        let updated = self
+            .config
+            .solutions
+            .iter()
+            .find(|s| s.id == *id)
+            .expect("just renamed")
+            .clone();
+        self.db_save_solution(&updated)?;
         cx.emit(SolutionStoreEvent::Changed);
         cx.notify();
         Ok(())
@@ -448,7 +456,7 @@ impl SolutionStore {
         if self.config.solutions.len() == before {
             bail!("solution not found: {}", id.0);
         }
-        self.persist()?;
+        self.db_delete_solution(id)?;
         cx.emit(SolutionStoreEvent::Changed);
         cx.notify();
         Ok(())
@@ -461,7 +469,8 @@ impl SolutionStore {
     ) -> Result<()> {
         let sol = self.find_solution_mut(id)?;
         sol.last_opened_at = Some(Utc::now());
-        self.persist()?;
+        let ts = sol.last_opened_at.expect("just set").timestamp_millis();
+        self.db_update_last_opened(id, ts)?;
         // `Changed` first so listeners that watch the broad signal
         // see the broadcast in chronological order; the more specific
         // `ActiveSolutionChanged` follows so subscribers that only
@@ -484,7 +493,7 @@ impl SolutionStore {
         if sol.members.len() == before {
             bail!("member not in solution");
         }
-        self.persist()?;
+        self.db_delete_member(solution_id, catalog_id)?;
         cx.emit(SolutionStoreEvent::Changed);
         cx.notify();
         Ok(())
@@ -510,7 +519,10 @@ impl SolutionStore {
         for (_, m) in by_id {
             sol.members.push(m);
         }
-        self.persist()?;
+        let snapshot: Vec<SolutionMember> = sol.members.clone();
+        for (i, m) in snapshot.iter().enumerate() {
+            self.db_set_member(solution_id, m, i as i32)?;
+        }
         cx.emit(SolutionStoreEvent::Changed);
         cx.notify();
         Ok(())
@@ -545,6 +557,57 @@ impl SolutionStore {
         gpui::block_on(db.delete_catalog_project(id.0.clone()))
     }
 
+    fn db_save_solution(&self, s: &Solution) -> anyhow::Result<()> {
+        let Some(db) = self.db.as_ref() else {
+            return Ok(());
+        };
+        let last_ms = s.last_opened_at.map(|t| t.timestamp_millis());
+        gpui::block_on(db.save_solution(
+            s.id.0.clone(),
+            s.name.clone(),
+            s.root.to_string_lossy().into_owned(),
+            last_ms,
+        ))
+    }
+
+    fn db_delete_solution(&self, id: &SolutionId) -> anyhow::Result<()> {
+        let Some(db) = self.db.as_ref() else {
+            return Ok(());
+        };
+        gpui::block_on(db.delete_solution_row(id.0.clone()))
+    }
+
+    pub(crate) fn db_set_member(
+        &self,
+        sol_id: &SolutionId,
+        m: &SolutionMember,
+        position: i32,
+    ) -> anyhow::Result<()> {
+        let Some(db) = self.db.as_ref() else {
+            return Ok(());
+        };
+        gpui::block_on(db.set_solution_member(
+            sol_id.0.clone(),
+            m.catalog_id.0.clone(),
+            m.local_path.to_string_lossy().into_owned(),
+            position,
+        ))
+    }
+
+    fn db_delete_member(&self, sol_id: &SolutionId, cat_id: &CatalogId) -> anyhow::Result<()> {
+        let Some(db) = self.db.as_ref() else {
+            return Ok(());
+        };
+        gpui::block_on(db.delete_solution_member(sol_id.0.clone(), cat_id.0.clone()))
+    }
+
+    fn db_update_last_opened(&self, id: &SolutionId, ts_ms: i64) -> anyhow::Result<()> {
+        let Some(db) = self.db.as_ref() else {
+            return Ok(());
+        };
+        gpui::block_on(db.update_last_opened(id.0.clone(), ts_ms))
+    }
+
     fn find_solution_mut(&mut self, id: &SolutionId) -> Result<&mut Solution> {
         self.config
             .solutions
@@ -553,6 +616,7 @@ impl SolutionStore {
             .with_context(|| format!("solution not found: {}", id.0))
     }
 
+    #[allow(dead_code)]
     pub(crate) fn persist(&self) -> Result<()> {
         save_atomic(&self.config_path, &self.config)
             .with_context(|| format!("writing {}", self.config_path.display()))
