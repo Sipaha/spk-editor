@@ -31,7 +31,6 @@ pub fn find_window_for_solution(
         })
 }
 
-#[allow(dead_code)] // wired by Phase 2 Tasks 4-7
 pub fn is_solution_open_anywhere(sol_id: &SolutionId, cx: &App) -> bool {
     find_window_for_solution(sol_id, cx).is_some()
 }

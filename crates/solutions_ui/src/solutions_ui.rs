@@ -9,6 +9,7 @@ mod empty_solution_page;
 mod modals;
 mod open;
 mod picker;
+pub mod solution_picker_dropdown;
 pub mod solution_tab;
 mod status_bar;
 mod switch;
