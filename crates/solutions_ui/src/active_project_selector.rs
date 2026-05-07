@@ -12,10 +12,13 @@
 //!  - pub fn selected_catalog_id(&self) -> Option<&CatalogId>
 //!  - pub fn set_change_counts(&mut self, ..., cx) — for git_panel
 //!  - impl Render — renders a trigger button with the selected
-//!    member's display name and a caret icon.
+//!    member's display name and a caret icon. Clicking the trigger
+//!    opens the member-picker popover.
 //!
-//! Subsequent tasks add the member-picker popover, the [+] add-project
-//! dropdown, the trash icon, and the change-count badges.
+//! Subsequent tasks add the [+] add-project dropdown, the trash icon,
+//! and the change-count badges.
+
+mod member_picker;
 
 use collections::HashMap;
 use gpui::{
@@ -25,7 +28,7 @@ use gpui::{
 use solutions::{
     CatalogId, SolutionId, SolutionMember, SolutionStore, SolutionStoreEvent, db::PanelKind,
 };
-use ui::{Color, Icon, IconName, Label, prelude::*};
+use ui::{Color, Icon, IconName, IconSize, PopoverMenu, prelude::*};
 use util::ResultExt as _;
 use workspace::Workspace;
 
@@ -171,17 +174,42 @@ impl Render for ActiveProjectSelector {
             None if self.solution_id.is_none() => "No solution".into(),
             None => "No project".into(),
         };
+
+        let solution_id = self.solution_id.clone();
+        let panel_kind = self.panel_kind;
+        let members = self.members.clone();
+        let selected = self.selected_catalog_id.clone();
+        let change_counts = self.change_counts.clone();
+
+        let trigger = Button::new("active-project-selector-trigger", label_text)
+            .start_icon(Icon::new(IconName::ChevronDown).size(IconSize::XSmall).color(Color::Muted))
+            .style(ButtonStyle::Subtle);
+
         h_flex()
             .id("active-project-selector")
             .w_full()
-            .gap_1()
-            .px_2()
             .child(
-                Icon::new(IconName::ChevronDown)
-                    .size(IconSize::XSmall)
-                    .color(Color::Muted),
+                PopoverMenu::new("active-project-member-picker")
+                    .trigger(trigger)
+                    .menu(move |window, cx| {
+                        let Some(solution_id) = solution_id.clone() else {
+                            return None;
+                        };
+                        Some(cx.new(|cx| {
+                            member_picker::MemberPicker::new(
+                                panel_kind,
+                                solution_id,
+                                members.clone(),
+                                selected.clone(),
+                                change_counts.clone(),
+                                window,
+                                cx,
+                            )
+                        }))
+                    })
+                    .anchor(gpui::Anchor::TopLeft)
+                    .attach(gpui::Anchor::BottomLeft),
             )
-            .child(Label::new(label_text).size(LabelSize::Default))
     }
 }
 
@@ -202,8 +230,12 @@ pub(crate) fn member_display_name(m: &SolutionMember, store: &SolutionStore) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use collections::HashMap;
     use gpui::TestAppContext;
+    use solutions::install_global_for_test;
     use std::path::PathBuf;
+    use tempfile::tempdir;
+    use theme_settings;
 
     #[gpui::test]
     async fn member_display_name_uses_catalog_when_present(cx: &mut TestAppContext) {
@@ -230,5 +262,82 @@ mod tests {
         };
         let name = store.read_with(cx, |s, _| member_display_name(&m, s));
         assert_eq!(name, "backend");
+    }
+
+    /// Tests the core of the member-picker click path: constructing a
+    /// `MemberPicker` directly (no Workspace needed) and calling
+    /// `confirm_member` updates the store's persisted selection.
+    ///
+    /// We use `add_window_view` to obtain a `VisualTestContext` (which
+    /// implements `VisualContext`) so we can call `update_in` with a
+    /// `Window` reference — `Editor::single_line` and `confirm_member`
+    /// both require one.
+    #[gpui::test]
+    async fn member_picker_confirm_persists_selection(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            settings::init(cx);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+
+        let dir = tempdir().expect("tempdir");
+        let solutions_root = dir.path().join("solutions");
+        std::fs::create_dir_all(&solutions_root).expect("mkdir solutions");
+        let cfg_path = dir.path().join("solutions.json");
+
+        let store = cx.update(|cx| SolutionStore::for_test(cfg_path, cx));
+        cx.update(|cx| install_global_for_test(store.clone(), cx));
+
+        let sol_id = store
+            .update(cx, |s, cx| s.create_solution("TestSol", solutions_root, cx))
+            .expect("create solution");
+
+        let cat_id_a = store
+            .update(cx, |s, cx| s.add_empty_member(&sol_id, "Alpha", cx))
+            .expect("add alpha");
+        let cat_id_b = store
+            .update(cx, |s, cx| s.add_empty_member(&sol_id, "Beta", cx))
+            .expect("add beta");
+
+        let members = store.read_with(cx, |s, _| {
+            s.solutions()
+                .iter()
+                .find(|sol| sol.id == sol_id)
+                .map(|sol| sol.members.clone())
+                .unwrap_or_default()
+        });
+
+        let sol_id_for_picker = sol_id.clone();
+        let (picker, cx) = cx.add_window_view(move |window, cx| {
+            member_picker::MemberPicker::new(
+                PanelKind::Tree,
+                sol_id_for_picker,
+                members,
+                Some(cat_id_a),
+                HashMap::default(),
+                window,
+                cx,
+            )
+        });
+
+        // Before confirm: no persisted selection for this fresh solution.
+        let before = store.read_with(cx, |s, _| {
+            s.panel_member_selection(&sol_id, PanelKind::Tree).cloned()
+        });
+        assert_eq!(before, None, "no persisted selection before picker confirm");
+
+        // Confirm the second member.
+        picker.update_in(cx, |picker, window, cx| {
+            picker.confirm_member(cat_id_b.clone(), window, cx);
+        });
+
+        // After confirm: store must reflect the second member.
+        let after = store.read_with(cx, |s, _| {
+            s.panel_member_selection(&sol_id, PanelKind::Tree).cloned()
+        });
+        assert_eq!(
+            after,
+            Some(cat_id_b),
+            "persisted selection must equal confirmed member"
+        );
     }
 }
