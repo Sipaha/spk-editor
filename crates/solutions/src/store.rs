@@ -20,7 +20,6 @@ pub struct SolutionStore {
     /// `for_test` stores that exercise mutations through the legacy
     /// JSON path without a DB. Tasks 7-9 will start writing through
     /// this connection in addition to (then instead of) `persist()`.
-    #[allow(dead_code)]
     pub(crate) db: Option<SolutionsDb>,
     pub(crate) fs_lock: Arc<smol::lock::Mutex<()>>,
     pub(crate) in_flight_adds: HashMap<(SolutionId, CatalogId), InFlightAdd>,
@@ -230,7 +229,7 @@ impl SolutionStore {
             remote_url: remote_url.into(),
             default_branch,
         });
-        self.persist()?;
+        self.db_save_catalog(self.config.catalog.last().expect("just pushed"))?;
         cx.emit(SolutionStoreEvent::Changed);
         cx.notify();
         Ok(id)
@@ -269,7 +268,14 @@ impl SolutionStore {
                 Some(url)
             }
         });
-        self.persist()?;
+        let updated = self
+            .config
+            .catalog
+            .iter()
+            .find(|c| c.id == *id)
+            .expect("just edited")
+            .clone();
+        self.db_save_catalog(&updated)?;
         cx.emit(SolutionStoreEvent::Changed);
         cx.notify();
 
@@ -329,7 +335,7 @@ impl SolutionStore {
             );
         }
         self.config.catalog.retain(|c| c.id != *id);
-        self.persist()?;
+        self.db_delete_catalog(id)?;
         cx.emit(SolutionStoreEvent::Changed);
         cx.notify();
         Ok(())
@@ -378,7 +384,16 @@ impl SolutionStore {
         // "Failed: …" rows after the catalog entry itself is gone.
         self.in_flight_adds.retain(|(_, cat), _| cat != id);
         self.config.catalog.retain(|c| c.id != *id);
-        self.persist()?;
+        if let Some(db) = self.db.as_ref() {
+            gpui::block_on(async {
+                for sol in self.config.solutions.iter() {
+                    db.delete_solution_member(sol.id.0.clone(), id.0.clone())
+                        .await
+                        .ok();
+                }
+                db.delete_catalog_project(id.0.clone()).await
+            })?;
+        }
         cx.emit(SolutionStoreEvent::Changed);
         cx.notify();
         Ok(clone_paths)
@@ -511,6 +526,25 @@ impl SolutionStore {
         Ok(sol.members.iter().map(|m| m.local_path.clone()).collect())
     }
 
+    fn db_save_catalog(&self, c: &CatalogProject) -> anyhow::Result<()> {
+        let Some(db) = self.db.as_ref() else {
+            return Ok(());
+        };
+        gpui::block_on(db.save_catalog_project(
+            c.id.0.clone(),
+            c.name.clone(),
+            c.remote_url.clone(),
+            c.default_branch.clone(),
+        ))
+    }
+
+    fn db_delete_catalog(&self, id: &CatalogId) -> anyhow::Result<()> {
+        let Some(db) = self.db.as_ref() else {
+            return Ok(());
+        };
+        gpui::block_on(db.delete_catalog_project(id.0.clone()))
+    }
+
     fn find_solution_mut(&mut self, id: &SolutionId) -> Result<&mut Solution> {
         self.config
             .solutions
@@ -554,28 +588,6 @@ mod tests {
     use gpui::TestAppContext;
     use std::time::Duration;
     use tempfile::tempdir;
-
-    #[gpui::test]
-    async fn add_catalog_project_persists(cx: &mut TestAppContext) {
-        let dir = tempdir().expect("tempdir");
-        let cfg_path = dir.path().join("solutions.json");
-        let store = cx.update(|cx| SolutionStore::for_test(cfg_path.clone(), cx));
-
-        store
-            .update(cx, |store, cx| {
-                store.add_catalog_project(
-                    "ECOS Base",
-                    "git@example.com:ecos/ecos-base.git",
-                    None,
-                    cx,
-                )
-            })
-            .expect("add_catalog_project");
-
-        let raw = std::fs::read_to_string(&cfg_path).expect("read config");
-        assert!(raw.contains("ecos-base"));
-        assert!(raw.contains("git@example.com:ecos/ecos-base.git"));
-    }
 
     #[gpui::test]
     async fn add_catalog_project_dedupes_slug(cx: &mut TestAppContext) {

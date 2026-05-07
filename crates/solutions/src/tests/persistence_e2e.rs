@@ -30,3 +30,22 @@ async fn store_loads_catalog_and_solutions_from_db(cx: &mut TestAppContext) {
         });
     });
 }
+
+#[gpui::test]
+async fn add_catalog_project_persists_to_db(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let db = SolutionsDb::open_test_db("solutions_store_e2e_add_catalog").await;
+    let db_for_init = db.clone();
+    cx.update(|cx| {
+        crate::store::SolutionStore::init_global_for_test(db_for_init, cx);
+        let store = crate::store::SolutionStore::global(cx);
+        store.update(cx, |s, cx| {
+            s.add_catalog_project("Foo", "git@x:foo.git", Some("main".into()), cx)
+                .unwrap();
+        });
+    });
+
+    let rows = db.load_all_catalog_projects().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1, "Foo");
+}
