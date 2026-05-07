@@ -15,6 +15,7 @@ pub mod solution_tab_strip;
 mod status_bar;
 mod switch;
 mod welcome;
+mod welcome_trigger;
 pub mod window_helpers;
 
 pub use empty_solution_page::EmptySolutionPage;
@@ -165,12 +166,33 @@ fn close_solution_workspaces_in(
     window: &mut Window,
     cx: &mut gpui::Context<workspace::MultiWorkspace>,
 ) {
+    use util::ResultExt as _;
+
     let to_close: Vec<_> = mw
         .workspaces()
         .filter(|ws| crate::open::workspace_has_solution(ws, sol_id, cx))
         .cloned()
         .collect();
-    for ws in to_close {
-        mw.close_workspace(&ws, window, cx).detach_and_log_err(cx);
+    if to_close.is_empty() {
+        return;
     }
+    let close_tasks: Vec<_> = to_close
+        .into_iter()
+        .map(|ws| mw.close_workspace(&ws, window, cx))
+        .collect();
+    // Spawn one coordinator that awaits every close before checking
+    // whether this window still hosts any solution. Awaiting
+    // sequentially is fine — close ordering doesn't matter for the
+    // emptiness check, and join_all would pull `futures` in just to
+    // save microseconds on an action triggered by a human click.
+    cx.spawn_in(window, async move |this, cx| {
+        for task in close_tasks {
+            task.await.log_err();
+        }
+        this.update(cx, |mw, cx| {
+            crate::welcome_trigger::open_welcome_if_window_empty(mw, cx);
+        })
+        .log_err();
+    })
+    .detach();
 }
