@@ -1015,6 +1015,11 @@ impl Render for NewProjectInSolutionModal {
     }
 }
 
+/// Convenience entry point for the `CreateNewProjectInSolution` action.
+/// Opens [`NewProjectInSolutionModal`] for the given solution so the user
+/// can name a fresh empty project. Validation (empty name, slug
+/// uniqueness) lives in `SolutionStore::add_empty_member`; this helper
+/// just shows the modal.
 pub fn open_new_project_in_solution(
     workspace: &mut Workspace,
     solution_id: SolutionId,
