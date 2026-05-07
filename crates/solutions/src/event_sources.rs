@@ -111,6 +111,21 @@ pub fn install(cx: &mut App) {
                             }),
                         );
                     }
+                    SolutionStoreEvent::PanelMemberSelectionChanged {
+                        solution,
+                        panel,
+                        catalog,
+                    } => {
+                        editor_mcp::emit_notification(
+                            cx,
+                            "solution_panel_member_selection_changed",
+                            json!({
+                                "solution_id": solution.0,
+                                "panel": panel.as_sql_str(),
+                                "catalog_id": catalog.0,
+                            }),
+                        );
+                    }
                 }),
             );
         }

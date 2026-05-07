@@ -1,4 +1,5 @@
-use crate::db::SolutionsDb;
+use crate::db::{PanelKind, SolutionsDb};
+use crate::model::CatalogId;
 use gpui::TestAppContext;
 
 #[gpui::test]
@@ -84,4 +85,34 @@ async fn touch_last_opened_persists_timestamp(cx: &mut TestAppContext) {
     });
     let rows = db.load_all_solutions_with_members().await.unwrap();
     assert!(rows.iter().any(|r| r.3.is_some()), "last_opened_at should be set");
+}
+
+#[gpui::test]
+async fn set_panel_selection_persists_and_emits(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let db = SolutionsDb::open_test_db("solutions_store_e2e_panel_sel").await;
+    let tmp = tempfile::tempdir().unwrap();
+    let db_for_init = db.clone();
+    let id = cx.update(|cx| {
+        crate::store::SolutionStore::init_global_for_test(db_for_init, cx);
+        let store = crate::store::SolutionStore::global(cx);
+        store.update(cx, |s, cx| s.create_solution("S", tmp.path().to_path_buf(), cx).unwrap())
+    });
+    cx.update(|cx| {
+        let store = crate::store::SolutionStore::global(cx);
+        store.update(cx, |s, cx| {
+            s.set_panel_member_selection(
+                id.clone(),
+                PanelKind::Tree,
+                CatalogId("cat-x".into()),
+                cx,
+            )
+            .unwrap();
+        });
+    });
+
+    let rows = db.load_all_panel_selections().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1, "tree");
+    assert_eq!(rows[0].2, "cat-x");
 }

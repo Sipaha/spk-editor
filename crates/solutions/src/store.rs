@@ -31,6 +31,13 @@ pub struct SolutionStore {
     /// tabs themselves), and persistence would mean keeping
     /// `solutions.json` in sync with potentially-stale path lists.
     pub(crate) tab_snapshots: TabSnapshots,
+    /// Per-(solution, panel) catalog member selection. Hydrated from
+    /// the `panel_member_selections` DB table at init time and
+    /// updated through `set_panel_member_selection`. Lives only in the
+    /// DB (no JSON equivalent) — the cache field exists so panels
+    /// don't have to round-trip through SQL on every render.
+    pub(crate) panel_member_selections:
+        HashMap<(SolutionId, crate::db::PanelKind), CatalogId>,
 }
 
 #[derive(Clone, Debug)]
@@ -56,6 +63,16 @@ pub enum SolutionStoreEvent {
         catalog: CatalogId,
         /// `None` on success; `Some(msg)` on failure or cancellation.
         error: Option<String>,
+    },
+    /// Emitted when `set_panel_member_selection` updates the
+    /// per-(solution, panel) catalog selection. UI listeners (e.g. the
+    /// `ActiveProjectSelector` from Phase 3) react to this so a
+    /// programmatic selection change in one window is reflected in
+    /// every other window that shows the same Solution.
+    PanelMemberSelectionChanged {
+        solution: SolutionId,
+        panel: crate::db::PanelKind,
+        catalog: CatalogId,
     },
 }
 
@@ -83,6 +100,16 @@ impl SolutionStore {
                 }
             }
         };
+        let panel_rows = gpui::block_on(db.load_all_panel_selections()).unwrap_or_default();
+        let mut panel_member_selections: HashMap<(SolutionId, crate::db::PanelKind), CatalogId> =
+            HashMap::default();
+        for (sid, pk, cid) in panel_rows {
+            if let Some(panel) = crate::db::PanelKind::from_sql_str(&pk) {
+                panel_member_selections.insert((SolutionId(sid), panel), CatalogId(cid));
+            } else {
+                log::warn!("unknown panel_kind in panel_member_selections: {pk}");
+            }
+        }
         let store = cx.new(|_| SolutionStore {
             config_path: paths::config_dir().join("solutions.json"),
             config,
@@ -90,6 +117,7 @@ impl SolutionStore {
             fs_lock: Arc::new(smol::lock::Mutex::new(())),
             in_flight_adds: HashMap::default(),
             tab_snapshots: TabSnapshots::default(),
+            panel_member_selections,
         });
         cx.set_global(GlobalSolutionStore(store));
     }
@@ -158,6 +186,7 @@ impl SolutionStore {
             fs_lock: Arc::new(smol::lock::Mutex::new(())),
             in_flight_adds: HashMap::default(),
             tab_snapshots: TabSnapshots::default(),
+            panel_member_selections: HashMap::default(),
         })
     }
 
@@ -189,6 +218,47 @@ impl SolutionStore {
         }
         cx.emit(SolutionStoreEvent::Changed);
         cx.notify();
+    }
+
+    /// Read the catalog id currently selected for the given (solution,
+    /// panel) pair, or `None` if nothing has been recorded yet. Backed
+    /// by an in-memory cache hydrated from the
+    /// `panel_member_selections` DB table at init.
+    pub fn panel_member_selection(
+        &self,
+        solution: &SolutionId,
+        panel: crate::db::PanelKind,
+    ) -> Option<&CatalogId> {
+        self.panel_member_selections.get(&(solution.clone(), panel))
+    }
+
+    /// Persist a per-(solution, panel) catalog selection through the
+    /// DB and update the in-memory cache. Emits
+    /// `PanelMemberSelectionChanged` so other windows observing the
+    /// store can mirror the change.
+    pub fn set_panel_member_selection(
+        &mut self,
+        solution: SolutionId,
+        panel: crate::db::PanelKind,
+        catalog: CatalogId,
+        cx: &mut gpui::Context<Self>,
+    ) -> anyhow::Result<()> {
+        if let Some(db) = self.db.as_ref() {
+            gpui::block_on(db.set_panel_selection(
+                solution.0.clone(),
+                panel.as_sql_str().to_string(),
+                catalog.0.clone(),
+            ))?;
+        }
+        self.panel_member_selections
+            .insert((solution.clone(), panel), catalog.clone());
+        cx.emit(SolutionStoreEvent::PanelMemberSelectionChanged {
+            solution,
+            panel,
+            catalog,
+        });
+        cx.notify();
+        Ok(())
     }
 
     pub fn catalog(&self) -> &[CatalogProject] {
