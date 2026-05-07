@@ -4,9 +4,8 @@
 //! `panel_member_selections` entry and emit DismissEvent. Search input
 //! filters by display name, case-insensitive substring.
 //!
-//! The trash-icon-per-row (Task 8) and the change-count badge
-//! (Task 9) come later — but the badge slot is rendered here already
-//! so Task 10 can fill it without touching this file.
+//! Each row has a trash icon that dispatches `RemoveMember` (Task 8)
+//! and a change-count badge slot (Task 10).
 
 use collections::HashMap;
 use editor::Editor;
@@ -128,20 +127,42 @@ impl Render for MemberPicker {
 
         let mut list = v_flex().gap_0p5();
         for (catalog_id, label, active, count) in members {
+            let sol = self.solution_id.clone();
+            let cat = catalog_id.clone();
             let row = ListItem::new(SharedString::from(catalog_id.0.clone()))
                 .inset(true)
                 .spacing(ListItemSpacing::Sparse)
                 .toggle_state(active)
                 .child(Label::new(label))
-                .when_some(count.filter(|count| *count > 0), |this, count| {
-                    this.end_slot(
-                        h_flex().gap_1().child(
-                            Label::new(format!("● {count}"))
-                                .color(Color::Accent)
-                                .size(LabelSize::Small),
+                .end_slot(
+                    h_flex()
+                        .gap_2()
+                        .when_some(count.filter(|c| *c > 0), |this, c| {
+                            this.child(
+                                Label::new(format!("● {c}"))
+                                    .color(Color::Accent)
+                                    .size(LabelSize::Small),
+                            )
+                        })
+                        .child(
+                            ui::IconButton::new(
+                                SharedString::from(format!("delete-{}", cat.0)),
+                                ui::IconName::Trash,
+                            )
+                            .size(ui::ButtonSize::Compact)
+                            .icon_color(Color::Muted)
+                            .on_click(cx.listener(move |_this, _, window, cx| {
+                                cx.emit(DismissEvent);
+                                window.dispatch_action(
+                                    Box::new(crate::actions::RemoveMember {
+                                        solution_id: sol.0.clone(),
+                                        catalog_id: cat.0.clone(),
+                                    }),
+                                    cx,
+                                );
+                            })),
                         ),
-                    )
-                })
+                )
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.confirm_member(catalog_id.clone(), window, cx);
                 }));

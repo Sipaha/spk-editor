@@ -26,14 +26,14 @@ pub use switch::switch_active_solution_in_place;
 
 pub use actions::{DeleteSolution, NewSolution, OpenSolution, RefreshCacheForCurrent};
 
-use gpui::{App, Window};
+use gpui::{App, AppContext as _, Window};
 use solutions::{SolutionId, SolutionStore};
 use ui::SharedString;
 use workspace::Workspace;
 
 use crate::actions::{
-    CloseSolutionFromTabBar, DeleteSolutionFromTabBar, RenameSolution, RevealSolutionFolder,
-    SwitchToNextSolution, SwitchToPrevSolution,
+    CloseSolutionFromTabBar, DeleteSolutionFromTabBar, RenameSolution, RemoveMember,
+    RevealSolutionFolder, SwitchToNextSolution, SwitchToPrevSolution,
 };
 
 pub fn init(cx: &mut App) {
@@ -108,6 +108,69 @@ fn register_tab_actions(
     });
     workspace.register_action(|_workspace, _: &SwitchToPrevSolution, _, cx| {
         crate::switch::cycle_solution(-1, cx);
+    });
+    workspace.register_action(|workspace, action: &RemoveMember, window, cx| {
+        use util::ResultExt as _;
+
+        let sol_id = SolutionId(action.solution_id.clone());
+        let cat_id = solutions::CatalogId(action.catalog_id.clone());
+        let store = SolutionStore::global(cx);
+        let Some((sol_name, member_path, member_label)) = store.read_with(cx, |s, _| {
+            let sol = s.solutions().iter().find(|sol| sol.id == sol_id)?;
+            let m = sol.members.iter().find(|m| m.catalog_id == cat_id)?;
+            let label = m
+                .local_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| m.catalog_id.0.clone());
+            Some((sol.name.clone(), m.local_path.clone(), label))
+        }) else {
+            return;
+        };
+        let folder_label = SharedString::from(format!("Folder {}", member_path.display()));
+        let title = SharedString::from(format!(
+            "Remove project \"{}\" from solution \"{}\"?",
+            member_label, sol_name,
+        ));
+        let path_for_rm = member_path.clone();
+        crate::delete_confirm_modal::open_delete_confirm(
+            workspace,
+            title,
+            "This will permanently delete:",
+            vec![
+                crate::delete_confirm_modal::DeleteConfirmItem {
+                    label: "Member entry from this solution".into(),
+                    path: None,
+                },
+                crate::delete_confirm_modal::DeleteConfirmItem {
+                    label: folder_label,
+                    path: Some(member_path),
+                },
+            ],
+            move |_window, cx| {
+                let store = SolutionStore::global(cx);
+                store
+                    .update(cx, |s, cx| s.remove_member(&sol_id, &cat_id, cx))
+                    .log_err();
+                let path = path_for_rm.clone();
+                cx.background_spawn(async move {
+                    let result: std::io::Result<()> =
+                        smol::unblock(move || std::fs::remove_dir_all(&path)).await;
+                    if let Err(err) = result {
+                        if err.kind() != std::io::ErrorKind::NotFound {
+                            log::warn!(
+                                "RemoveMember: removing {} failed: {err} (orphaned files left on disk)",
+                                path_for_rm.display(),
+                            );
+                        }
+                    }
+                })
+                .detach();
+            },
+            window,
+            cx,
+        );
     });
 }
 

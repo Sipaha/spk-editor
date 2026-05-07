@@ -94,3 +94,14 @@ pub struct DeleteCatalogProject {
 pub struct CreateNewProjectInSolution {
     pub solution_id: String,
 }
+
+/// Open the destructive-action confirmation modal for removing a member
+/// from a solution. Dispatched from the trash icon on a member-picker
+/// row. The modal lists the registry entry + on-disk folder; on confirm
+/// it calls `SolutionStore::remove_member` and rm-rfs the folder.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, JsonSchema, Action)]
+#[action(namespace = solutions)]
+pub struct RemoveMember {
+    pub solution_id: String,
+    pub catalog_id: String,
+}

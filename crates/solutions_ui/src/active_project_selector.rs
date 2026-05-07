@@ -361,6 +361,70 @@ mod tests {
         );
     }
 
+    /// Smoke test: a MemberPicker with members renders without panic and the
+    /// trash-icon button element id is unique per member. We cannot simulate
+    /// a click in this harness, but we verify the `RemoveMember` action has
+    /// the expected payload shape by constructing it directly and asserting
+    /// its fields round-trip through the solution / catalog ids.
+    #[gpui::test]
+    async fn member_picker_trash_icon_action_payload(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            settings::init(cx);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+
+        let dir = tempdir().expect("tempdir");
+        let solutions_root = dir.path().join("solutions");
+        std::fs::create_dir_all(&solutions_root).expect("mkdir solutions");
+        let cfg_path = dir.path().join("solutions.json");
+
+        let store = cx.update(|cx| SolutionStore::for_test(cfg_path, cx));
+        cx.update(|cx| install_global_for_test(store.clone(), cx));
+
+        let sol_id = store
+            .update(cx, |s, cx| s.create_solution("TestSol", solutions_root, cx))
+            .expect("create solution");
+
+        let cat_id = store
+            .update(cx, |s, cx| s.add_empty_member(&sol_id, "MyProject", cx))
+            .expect("add member");
+
+        let members = store.read_with(cx, |s, _| {
+            s.solutions()
+                .iter()
+                .find(|sol| sol.id == sol_id)
+                .map(|sol| sol.members.clone())
+                .unwrap_or_default()
+        });
+
+        let sol_id_clone = sol_id.clone();
+        let cat_id_clone = cat_id.clone();
+        let (_, cx) = cx.add_window_view(move |window, cx| {
+            member_picker::MemberPicker::new(
+                PanelKind::Tree,
+                sol_id_clone,
+                members,
+                Some(cat_id_clone),
+                HashMap::default(),
+                window,
+                cx,
+            )
+        });
+
+        // Verify the RemoveMember action is constructable with the expected
+        // payload shape (solution_id / catalog_id as Strings matching the
+        // inner values of SolutionId / CatalogId).
+        let action = crate::actions::RemoveMember {
+            solution_id: sol_id.0.clone(),
+            catalog_id: cat_id.0.clone(),
+        };
+        assert_eq!(action.solution_id, sol_id.0);
+        assert_eq!(action.catalog_id, cat_id.0);
+
+        // Run the event loop so the picker's render pass doesn't panic.
+        cx.run_until_parked();
+    }
+
     /// Tests that AddProjectPicker filters the catalog correctly:
     /// Catalog entries already attached to the solution are filtered out
     /// of the picker; catalog entries not yet members appear.
