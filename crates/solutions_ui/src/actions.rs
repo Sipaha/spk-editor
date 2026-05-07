@@ -86,3 +86,11 @@ pub struct EditCatalogProject {
 pub struct DeleteCatalogProject {
     pub id: String,
 }
+
+/// Open the modal that creates a new empty member inside the named
+/// solution. Dispatched from the panel selector's `+` dropdown.
+#[derive(PartialEq, Clone, Debug, Deserialize, Serialize, JsonSchema, Action)]
+#[action(namespace = solutions)]
+pub struct CreateNewProjectInSolution {
+    pub solution_id: String,
+}
