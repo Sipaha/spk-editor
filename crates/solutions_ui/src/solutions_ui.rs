@@ -12,6 +12,7 @@ mod picker;
 mod status_bar;
 mod switch;
 mod welcome;
+pub mod window_helpers;
 
 pub use empty_solution_page::EmptySolutionPage;
 pub use open::{OpenIntent, open_solution};
