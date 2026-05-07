@@ -362,9 +362,8 @@ mod tests {
     }
 
     /// Tests that AddProjectPicker filters the catalog correctly:
-    /// - Projects already members of the solution are excluded.
-    /// - Projects not yet members appear in catalog_entries.
-    /// - Calling add_catalog on a visible entry does not panic.
+    /// Catalog entries already attached to the solution are filtered out
+    /// of the picker; catalog entries not yet members appear.
     #[gpui::test]
     async fn add_project_picker_filters_catalog(cx: &mut TestAppContext) {
         cx.update(|cx| {
@@ -384,78 +383,50 @@ mod tests {
             .update(cx, |s, cx| s.create_solution("TestSol", solutions_root, cx))
             .expect("create solution");
 
-        // Add two catalog projects.
-        let _cat_id_member = store
+        // unique_slug derives "frontend" from "Frontend" in both uniqueness
+        // contexts (catalog ids vs this solution's member catalog ids), so
+        // both calls below land on CatalogId("frontend"). The catalog entry
+        // and the (empty) solution member share that id, which is exactly
+        // the case the picker's already_member filter must catch.
+        store
             .update(cx, |s, cx| {
-                s.add_catalog_project("AlreadyMember", "git@x:member.git", None, cx)
+                s.add_catalog_project("Frontend", "git@x:frontend.git", None, cx)
             })
-            .expect("add catalog member");
-        let _cat_id_available = store
+            .expect("add catalog Frontend");
+        store
             .update(cx, |s, cx| {
-                s.add_catalog_project("Available", "git@x:available.git", None, cx)
+                s.add_catalog_project("Backend", "git@x:backend.git", None, cx)
             })
-            .expect("add catalog available");
+            .expect("add catalog Backend");
+        store
+            .update(cx, |s, cx| s.add_empty_member(&sol_id, "Frontend", cx))
+            .expect("add empty member Frontend");
 
-        // Add AlreadyMember as an empty member so it shows up in the solution's member list.
-        // We use add_empty_member here (no git clone needed) to simulate a pre-existing member.
-        // Since add_empty_member generates its own CatalogId (slug), we instead directly set
-        // the member via add_empty_member and then verify the picker filters by catalog_id.
-        // To properly test filtering: add "AlreadyMember" catalog project as a solution member
-        // using add_empty_member to get a member entry with a catalog_id in the solution.
-        // We need to push a member with cat_id_member into the solution manually.
-        // add_empty_member creates its own new CatalogId so we can't use it to register an
-        // existing catalog entry. Instead, we rely on the store's test-support API.
-        // The simplest approach: call add_empty_member for a slot, then check that the
-        // picker's already_member set uses catalog_ids from solution.members.
-        //
-        // Instead, let's directly verify the filtering logic works when there are 0 members:
-        // - Both catalog projects should appear in the picker (none are members yet).
         let (picker, cx) = cx.add_window_view(move |window, cx| {
             add_project_picker::AddProjectPicker::new(sol_id, window, cx)
         });
 
-        // With no members yet, both catalog projects must be present.
-        let entry_count = picker.read_with(cx, |p, _| p.catalog_entries.len());
+        let entries: Vec<String> = picker.read_with(cx, |p, _| {
+            p.catalog_entries.iter().map(|c| c.name.clone()).collect()
+        });
         assert_eq!(
-            entry_count, 2,
-            "both catalog entries must appear when solution has no members"
+            entries,
+            vec!["Backend".to_string()],
+            "Frontend is already a member and must be filtered out; Backend is not"
         );
 
-        // Now add an empty member to the solution (which gets its own slug-based CatalogId,
-        // not the catalog_id). To test that a *catalog* member is filtered out, we need
-        // a solution member whose catalog_id matches the catalog. We test this by checking
-        // that a picker built after the solution has one catalog_id in its members set
-        // excludes that catalog entry.
-        //
-        // We manipulate the store to add cat_id_member directly as a solution member
-        // by calling add_empty_member (which uses a slug). For true catalog filtering,
-        // simulate by building the picker with a different solution state. The unit test
-        // for filtering with an actual member is below.
-
-        // Build a second solution and add cat_id_member as a member via add_empty_member
-        // to confirm the filtering path. Since add_empty_member generates a slug CatalogId,
-        // we push a real SolutionMember with cat_id_member by using the for_test APIs.
-        // The store exposes no direct "push member without clone" for catalog entries,
-        // so we verify via querying the picker's own catalog_entries after calling
-        // add_catalog (which emits DismissEvent and kicks off a clone task).
-        //
-        // For coverage of the exclusion path: create a fresh solution where cat_id_member
-        // is already a member (modeled by calling add_empty_member twice, which creates
-        // two slug-based members that won't collide with the catalog). Then build a picker
-        // for a third solution to exercise the empty-catalog-entries path.
-
-        // Exercise add_catalog does not panic (the task will fail because there's no real
-        // git remote, which is fine — we just want to verify it doesn't panic).
-        let available_entry = store.read_with(cx, |s, _| {
+        // Also verify add_catalog does not panic on a visible entry; the
+        // clone task will fail (no real remote), which is fine — emit-and-
+        // dismiss is the only behaviour the picker owns.
+        let backend_entry = store.read_with(cx, |s, _| {
             s.catalog()
                 .iter()
-                .find(|p| p.name == "Available")
+                .find(|p| p.name == "Backend")
                 .cloned()
-                .expect("available entry must exist")
+                .expect("Backend entry exists")
         });
         picker.update_in(cx, |picker, window, cx| {
-            picker.add_catalog(available_entry, window, cx);
+            picker.add_catalog(backend_entry, window, cx);
         });
-        // DismissEvent is emitted — no panic is the assertion here.
     }
 }
