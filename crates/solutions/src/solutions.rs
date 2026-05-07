@@ -4,6 +4,7 @@
 mod add_member;
 mod auto_trust;
 mod cache;
+pub mod db;
 mod event_sources;
 pub mod git;
 pub mod mcp;

@@ -16704,6 +16704,7 @@ dependencies = [
  "chrono",
  "collections",
  "context_server",
+ "db",
  "editor_mcp",
  "fs",
  "globset",
