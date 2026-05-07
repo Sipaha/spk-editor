@@ -41,19 +41,6 @@ pub fn load_or_default(path: &Path) -> Result<SolutionsConfig, LoadError> {
     Ok(cfg)
 }
 
-#[allow(dead_code)]
-pub fn save_atomic(path: &Path, cfg: &SolutionsConfig) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    let pretty = serde_json::to_string_pretty(cfg)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&tmp, pretty)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,16 +81,6 @@ mod tests {
     }
 
     #[test]
-    fn save_then_load_yields_same_config() {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("solutions.json");
-        let cfg = sample_config();
-        save_atomic(&path, &cfg).expect("save");
-        let back = load_or_default(&path).expect("load");
-        assert_eq!(cfg, back);
-    }
-
-    #[test]
     fn load_missing_file_returns_default() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("does-not-exist.json");
@@ -122,16 +99,6 @@ mod tests {
         assert!(result.is_err());
         let preserved = std::fs::read_to_string(&path).expect("read after");
         assert_eq!(preserved, "not valid json {");
-    }
-
-    #[test]
-    fn save_is_atomic_via_tmp_rename() {
-        let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("solutions.json");
-        save_atomic(&path, &sample_config()).expect("save");
-        assert!(path.exists());
-        let tmp = path.with_extension("json.tmp");
-        assert!(!tmp.exists(), "tmp file must be cleaned up after rename");
     }
 
     #[test]

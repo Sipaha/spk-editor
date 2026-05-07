@@ -2,7 +2,7 @@ use crate::add_member::InFlightAdd;
 use crate::db::SolutionsDb;
 use crate::git;
 use crate::model::{CatalogId, CatalogProject, Solution, SolutionId, SolutionMember};
-use crate::persistence::{CURRENT_VERSION, SolutionsConfig, save_atomic};
+use crate::persistence::{CURRENT_VERSION, SolutionsConfig};
 use crate::slug::unique_slug;
 use crate::tabs_snapshot::{SolutionTabsSnapshot, TabSnapshots};
 use anyhow::{Context as _, Result, bail};
@@ -13,14 +13,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub struct SolutionStore {
-    #[allow(dead_code)]
-    config_path: PathBuf,
     pub(crate) config: SolutionsConfig,
     /// `Some` for stores hydrated from `SolutionsDb` (production via
     /// `init_global` and tests via `init_global_for_test`); `None` for
-    /// `for_test` stores that exercise mutations through the legacy
-    /// JSON path without a DB. Tasks 7-9 will start writing through
-    /// this connection in addition to (then instead of) `persist()`.
+    /// `for_test` stores that exercise mutations without a DB.
     pub(crate) db: Option<SolutionsDb>,
     pub(crate) fs_lock: Arc<smol::lock::Mutex<()>>,
     pub(crate) in_flight_adds: HashMap<(SolutionId, CatalogId), InFlightAdd>,
@@ -117,7 +113,6 @@ impl SolutionStore {
             }
         }
         let store = cx.new(|_| SolutionStore {
-            config_path: json_path,
             config,
             db: Some(db),
             fs_lock: Arc::new(smol::lock::Mutex::new(())),
@@ -181,9 +176,12 @@ impl SolutionStore {
         cx.try_global::<GlobalSolutionStore>().map(|g| g.0.clone())
     }
 
-    pub fn for_test(config_path: PathBuf, cx: &mut App) -> Entity<SolutionStore> {
+    /// Build an in-memory `SolutionStore` for tests. The `_config_path`
+    /// argument is retained only to avoid churning the ~38 call sites
+    /// across the workspace; the JSON write path was removed in Task 11
+    /// (Phase 1) so the path is no longer used for anything.
+    pub fn for_test(_config_path: PathBuf, cx: &mut App) -> Entity<SolutionStore> {
         cx.new(|_| SolutionStore {
-            config_path,
             config: SolutionsConfig {
                 version: CURRENT_VERSION,
                 ..Default::default()
@@ -690,12 +688,6 @@ impl SolutionStore {
             .iter_mut()
             .find(|s| s.id == *id)
             .with_context(|| format!("solution not found: {}", id.0))
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn persist(&self) -> Result<()> {
-        save_atomic(&self.config_path, &self.config)
-            .with_context(|| format!("writing {}", self.config_path.display()))
     }
 
     #[cfg(test)]
