@@ -1384,7 +1384,7 @@ impl Render for PanelButtons {
                             // Include active state in element ID to invalidate the cached
                             // tooltip when panel state changes (e.g., via keyboard shortcut)
                             let icon_size = if vertical {
-                                IconSize::Medium
+                                IconSize::Custom(rems_from_px(24.))
                             } else {
                                 IconSize::Small
                             };
