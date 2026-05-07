@@ -419,6 +419,8 @@ impl ProjectPicker {
                 connection_string: format!("mock-{}", options.id).into(),
                 nickname: None,
             },
+            #[cfg(not(any(test, feature = "test-support")))]
+            _ => unreachable!("Mock variant is only available in test/test-support"),
         };
         let _path_task = cx
             .spawn_in(window, {

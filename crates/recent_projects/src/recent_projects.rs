@@ -1879,6 +1879,8 @@ pub(crate) fn icon_for_remote_connection(options: Option<&RemoteConnectionOption
             RemoteConnectionOptions::Docker(_) => IconName::Box,
             #[cfg(any(test, feature = "test-support"))]
             RemoteConnectionOptions::Mock(_) => IconName::Server,
+            #[cfg(not(any(test, feature = "test-support")))]
+            _ => unreachable!("Mock variant is only available in test/test-support"),
         },
     }
 }
