@@ -4243,6 +4243,22 @@ impl ProjectPanel {
                             .map(|wt| wt.read(cx).abs_path().starts_with(&filter_path))
                             .unwrap_or(false)
                     });
+                    // The flat max-width index was computed pre-filter and
+                    // can now point past the end of the retained list (or
+                    // to the wrong entry). Recomputing is overkill for a
+                    // hint that's purely about horizontal scroll width;
+                    // dropping it lets the next render fall back to the
+                    // intrinsic content width.
+                    this.state.max_width_item_index = None;
+                    // Recompute last_worktree_root_id so context-menu /
+                    // drag-drop targeting against the "last" worktree
+                    // doesn't reference a worktree we just hid.
+                    this.state.last_worktree_root_id = this
+                        .state
+                        .visible_entries
+                        .last()
+                        .and_then(|vw| project.worktree_for_id(vw.worktree_id, cx))
+                        .and_then(|wt| wt.read(cx).root_entry().map(|entry| entry.id));
                 }
                 if let Some((worktree_id, entry_id)) = new_selected_entry {
                     this.selection = Some(SelectedEntry {
