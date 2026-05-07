@@ -714,7 +714,9 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let outline_panel = OutlinePanel::load(workspace_handle.clone(), cx.clone());
         let terminal_panel = TerminalPanel::load(workspace_handle.clone(), cx.clone());
         let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
-        let solutions_panel = solutions_ui::load(workspace_handle.clone(), cx.clone());
+        // SPK Editor: the upstream-style left-dock SolutionsPanel was
+        // removed; Solutions are surfaced via the title-bar tab strip
+        // (`solutions_ui::solution_tab_strip`) instead.
         // Collab panel disabled in spk-editor (no Zed Industries collab server access).
         // let channels_panel =
         //     collab_ui::collab_panel::CollabPanel::load(workspace_handle.clone(), cx.clone());
@@ -740,7 +742,6 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(outline_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(terminal_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(solutions_panel, workspace_handle.clone(), cx.clone()),
             // add_panel_when_ready(channels_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
             // SPK Editor: agent_panel disabled — this fork's AI story is the

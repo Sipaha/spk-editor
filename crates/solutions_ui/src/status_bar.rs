@@ -3,7 +3,7 @@ use solutions::{SolutionStore, SolutionStoreEvent};
 use ui::prelude::*;
 use workspace::{StatusItemView, Workspace, item::ItemHandle};
 
-use crate::actions::ToggleSolutionsPanel;
+use crate::actions::OpenSolution;
 
 pub struct SolutionsStatusItem {
     workspace: WeakEntity<Workspace>,
@@ -53,7 +53,7 @@ impl Render for SolutionsStatusItem {
         .label_size(LabelSize::Small)
         .style(ButtonStyle::Subtle)
         .on_click(|_, window, cx| {
-            window.dispatch_action(Box::new(ToggleSolutionsPanel), cx);
+            window.dispatch_action(Box::new(OpenSolution), cx);
         })
         .into_any_element()
     }

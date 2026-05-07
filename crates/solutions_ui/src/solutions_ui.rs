@@ -1,10 +1,9 @@
-//! UI layer for the solutions crate: dock panel, picker, modals,
-//! title-bar segment, status-bar widget, welcome integration.
+//! UI layer for the solutions crate: title-bar tab strip, picker,
+//! modals, status-bar widget, welcome integration.
 
 mod actions;
 mod add_member_picker;
 pub mod delete_confirm_modal;
-mod dock_panel;
 mod empty_solution_page;
 mod modals;
 mod open;
@@ -23,10 +22,7 @@ pub use open::{OpenIntent, open_solution};
 pub use status_bar::SolutionsStatusItem;
 pub use switch::switch_active_solution_in_place;
 
-pub use actions::{
-    DeleteSolution, NewSolution, OpenSolution, RefreshCacheForCurrent, ToggleSolutionsPanel,
-};
-pub use dock_panel::{SolutionsPanel, load};
+pub use actions::{DeleteSolution, NewSolution, OpenSolution, RefreshCacheForCurrent};
 
 use gpui::{App, Window};
 use solutions::{SolutionId, SolutionStore};
@@ -38,7 +34,6 @@ use crate::actions::{
 };
 
 pub fn init(cx: &mut App) {
-    dock_panel::init(cx);
     cx.observe_new(picker::OpenSolutionModal::register).detach();
     cx.observe_new(modals::register).detach();
     cx.observe_new(register_tab_actions).detach();
@@ -108,12 +103,11 @@ fn register_tab_actions(
 }
 
 /// Close every workspace (active or retained) that hosts `sol_id` and
-/// stop its AI sessions. Mirrors the (retired) dock panel's
-/// close-solution flow — extracted so the title-bar tab strip can call
-/// it without depending on `SolutionsPanel`. Iterates every window: the
-/// caller's window via the workspace's `MultiWorkspace` handle (so we
-/// don't double-lease the in-flight window), then the rest by
-/// downcasting `cx.windows()`.
+/// stop its AI sessions. Originally lived on the (retired) dock panel —
+/// extracted so the title-bar tab strip can call it without a panel
+/// dependency. Iterates every window: the caller's window via the
+/// workspace's `MultiWorkspace` handle (so we don't double-lease the
+/// in-flight window), then the rest by downcasting `cx.windows()`.
 fn close_solution(
     workspace: &mut Workspace,
     sol_id: SolutionId,

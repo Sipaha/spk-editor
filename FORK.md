@@ -158,7 +158,7 @@ open editor tabs into `SolutionStore::tab_snapshots`, (2) bumps
 (3) reconciles worktrees inside the existing `Project` via
 `Workspace::swap_worktrees_to`, and (4) replays the target Solution's
 saved tab snapshot. Upstream panels react to `WorktreeAdded`/`Removed`
-automatically; fork panels (`SolutionsPanel`,
+automatically; fork panels (`SolutionTabStrip`,
 `SolutionSessionsNavigator`) listen to `ActiveSolutionChanged` —
 *don't* assume your panel will be re-`new`'d on switch. The
 `OpenIntent::SameWindow` path in `solutions_ui::open::open_solution`

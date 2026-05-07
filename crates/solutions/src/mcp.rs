@@ -2178,8 +2178,8 @@ fn render_window_to_image(
 /// `PaneArea` / `Pane` / `Tab` / `StatusBar` nodes with visibility and
 /// focus state.
 ///
-/// This is a logical structure (suitable for assertions like "is the
-/// SolutionsPanel open"), NOT the full GPUI element tree.
+/// This is a logical structure (suitable for assertions like "which
+/// pane is focused"), NOT the full GPUI element tree.
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct DumpVisualStructureParams {
     pub solution_id: String,

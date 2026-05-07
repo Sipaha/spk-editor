@@ -63,7 +63,7 @@ impl SolutionTabStrip {
         ));
 
         // Agent store may not be initialised in headless / test contexts;
-        // mirror `SolutionsPanel`'s pattern and only subscribe when present.
+        // only subscribe when present.
         if let Some(agent_store) = SolutionAgentStore::try_global(cx) {
             subscriptions.push(cx.subscribe(
                 &agent_store,
@@ -91,9 +91,9 @@ impl SolutionTabStrip {
 }
 
 /// Walk a `Workspace`'s worktrees and return the first one that maps to
-/// a registered Solution. Mirrors the helper in `dock_panel.rs` and the
-/// logic inside `workspace_has_solution` — extracted here so we can
-/// build the (id, name, badges) tuple list in a single pass.
+/// a registered Solution. Mirrors the logic inside
+/// `workspace_has_solution` — extracted here so we can build the
+/// (id, name, badges) tuple list in a single pass.
 fn solution_id_for_workspace(
     workspace: &Entity<Workspace>,
     store: &SolutionStore,
