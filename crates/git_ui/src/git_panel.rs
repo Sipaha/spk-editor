@@ -3477,8 +3477,9 @@ impl GitPanel {
 
     /// If the solution selector has a member selected, override `active_repository`
     /// to the repo whose `work_directory_abs_path` is under the selected member's
-    /// `local_path`. Called at the end of `update_visible_entries` so the
-    /// selector-driven choice wins over the upstream `active_repository(cx)` default.
+    /// `local_path`. Called at the start of `update_visible_entries`, immediately
+    /// after the upstream `project.active_repository(cx)` assignment, so the
+    /// selector-driven choice wins for all downstream logic in that fn.
     fn refresh_active_repository_for_selector(&mut self, cx: &mut Context<Self>) {
         let Some(member) = self.solution_selector.read(cx).selected_member().cloned() else {
             return;
@@ -3670,7 +3671,11 @@ impl GitPanel {
         let mut max_width_item_index = None;
 
         let Some(repo) = self.active_repository.as_ref() else {
-            // Just clear entries if no repository is active.
+            // Just clear entries if no repository is active. Still refresh
+            // the per-member change counts before bailing — non-active
+            // members may still have repos with changes, and their badges
+            // would otherwise go stale.
+            self.refresh_change_counts_for_selector(cx);
             cx.notify();
             return;
         };

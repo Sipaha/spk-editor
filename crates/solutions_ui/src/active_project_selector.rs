@@ -97,6 +97,9 @@ impl ActiveProjectSelector {
         this
     }
 
+    /// Solution this selector is currently scoped to, derived at rebuild
+    /// time from the workspace's visible worktrees. `None` when no
+    /// solution hosts any of the workspace's worktrees.
     pub fn solution_id(&self) -> Option<&SolutionId> {
         self.solution_id.as_ref()
     }
