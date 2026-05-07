@@ -705,7 +705,7 @@ impl SolutionStore {
     }
 }
 
-struct GlobalSolutionStore(Entity<SolutionStore>);
+pub(crate) struct GlobalSolutionStore(Entity<SolutionStore>);
 
 impl Global for GlobalSolutionStore {}
 

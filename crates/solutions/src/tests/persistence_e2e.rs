@@ -160,3 +160,48 @@ async fn migration_imports_old_json_once(cx: &mut TestAppContext) {
     let cat = db.load_all_catalog_projects().await.unwrap();
     assert_eq!(cat.len(), 1);
 }
+
+#[gpui::test]
+async fn full_lifecycle_persists_across_reinit(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let db = SolutionsDb::open_test_db("solutions_full_lifecycle").await;
+    let tmp = tempfile::tempdir().unwrap();
+
+    let db_first = db.clone();
+    cx.update(|cx| {
+        crate::store::SolutionStore::init_global_for_test(db_first, cx);
+        let store = crate::store::SolutionStore::global(cx);
+        store.update(cx, |s, cx| {
+            let cat_id = s
+                .add_catalog_project("Cat", "git@x:c.git", None, cx)
+                .unwrap();
+            let sol_id = s
+                .create_solution("Sol", tmp.path().to_path_buf(), cx)
+                .unwrap();
+            let member = crate::model::SolutionMember {
+                catalog_id: cat_id,
+                local_path: tmp.path().join("Sol").join("c"),
+            };
+            let sol = s
+                .config
+                .solutions
+                .iter_mut()
+                .find(|sol| sol.id == sol_id)
+                .unwrap();
+            sol.members.push(member.clone());
+            s.db_set_member(&sol_id, &member, 0).unwrap();
+        });
+        cx.remove_global::<crate::store::GlobalSolutionStore>();
+    });
+
+    cx.update(|cx| {
+        crate::store::SolutionStore::init_global_for_test(db, cx);
+        let store = crate::store::SolutionStore::global(cx);
+        store.read_with(cx, |s, _| {
+            assert_eq!(s.catalog().len(), 1);
+            assert_eq!(s.solutions().len(), 1);
+            assert_eq!(s.solutions()[0].members.len(), 1);
+            assert_eq!(s.solutions()[0].members[0].catalog_id.as_str(), "cat");
+        });
+    });
+}
