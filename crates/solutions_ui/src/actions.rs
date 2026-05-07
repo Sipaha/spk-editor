@@ -11,11 +11,6 @@ actions!(
         NewSolution,
         /// Refresh the cache for every catalog project referenced by the active Solution.
         RefreshCacheForCurrent,
-        /// Open the catalog picker to add a project to the active Solution.
-        /// Resolves "active Solution" via the workspace's worktrees (a
-        /// solution-bound workspace has at least one worktree under
-        /// `solution.root`, even when that worktree is hidden).
-        AddProjectToActiveSolution,
     ]
 );
 
