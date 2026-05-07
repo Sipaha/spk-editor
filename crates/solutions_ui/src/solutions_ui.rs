@@ -3,6 +3,7 @@
 
 mod actions;
 mod add_member_picker;
+pub mod delete_confirm_modal;
 mod dock_panel;
 mod empty_solution_page;
 mod modals;
