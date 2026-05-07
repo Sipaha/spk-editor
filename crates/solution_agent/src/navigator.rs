@@ -857,24 +857,15 @@ impl SolutionSessionsNavigator {
                 }]
             });
 
-        // Slim `+` IconButton — matches the upstream pane "new tab"
-        // affordance (a single Plus icon with a tooltip) instead of
-        // a wide labelled button. The previous "+ New Session" button
-        // visually disconnected from the tabs because of its
-        // different shape; an icon-only button reads as the natural
-        // extension of the tab strip ("add tab"). Tooltip + popover
-        // menu still surface the full create-session UX.
-        //
-        // `Square` shape + `Medium` (16px) icon: the previous default
-        // (`Wide` + `Small`) had a 14px glyph inside a content-sized
-        // button — the visible icon was small and the hit area
-        // wandered with the icon's metrics, so the user kept missing
-        // the click. A 16px icon inside a deterministic
-        // `Square(28px)` hit area scales the visual + click target
-        // up together while still reading as a tab-strip extension.
+        // `Wide` + `ButtonSize::Large` because `Square` auto-sizes from
+        // `IconSize` and `IconSize::Custom` has a known padding bug that
+        // produces a 72px square for a 24px icon. Wide + Large gives a
+        // deterministic 32px-tall hit area; the natural Base08 horizontal
+        // padding around the 24px glyph lands at ~40px width.
         let trigger = ui::IconButton::new("solution-sessions-new", IconName::Plus)
-            .shape(IconButtonShape::Square)
-            .icon_size(IconSize::Medium)
+            .shape(IconButtonShape::Wide)
+            .size(ButtonSize::Large)
+            .icon_size(IconSize::Custom(rems_from_px(24.)))
             .icon_color(Color::Muted)
             .tooltip(ui::Tooltip::text("New session"));
 
@@ -1015,7 +1006,12 @@ impl SolutionSessionsNavigator {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(Label::new(title).size(LabelSize::Default).truncate()),
+                        .child(
+                            Label::new(title)
+                                .size(LabelSize::Default)
+                                .line_height_style(LineHeightStyle::UiLabel)
+                                .truncate(),
+                        ),
                 )
                 .on_mouse_down(
                     MouseButton::Left,
@@ -1069,6 +1065,7 @@ impl SolutionSessionsNavigator {
                     .child(
                         Label::new(format!("Starting {}…", pending.display_name))
                             .size(LabelSize::Small)
+                            .line_height_style(LineHeightStyle::UiLabel)
                             .color(Color::Muted),
                     ),
             );
