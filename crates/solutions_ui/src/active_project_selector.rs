@@ -104,15 +104,27 @@ impl ActiveProjectSelector {
         self.solution_id.as_ref()
     }
 
+    /// Catalog id of the member this panel is currently scoped to. `None`
+    /// when no solution hosts the workspace's worktrees, or the active
+    /// solution has no members. Read by host panels to drive their content
+    /// filter (project_panel: worktree visibility; git_panel: active repo).
     pub fn selected_catalog_id(&self) -> Option<&CatalogId> {
         self.selected_catalog_id.as_ref()
     }
 
+    /// The currently-selected member object, joined from the cached
+    /// member list and `selected_catalog_id`. Returns `None` when no
+    /// member is selected or the cached list is empty (e.g. the picker
+    /// fired before the first rebuild populated the cache).
     pub fn selected_member(&self) -> Option<&SolutionMember> {
         let cat = self.selected_catalog_id.as_ref()?;
         self.members.iter().find(|m| m.catalog_id == *cat)
     }
 
+    /// Push a per-member changed-file count map for the dropdown rows to
+    /// render `[● N]` badges. Called by `git_panel` after each git status
+    /// refresh; ignored by `project_panel`. Guarded so an unchanged map
+    /// doesn't trigger a re-render.
     pub fn set_change_counts(
         &mut self,
         counts: HashMap<CatalogId, usize>,
