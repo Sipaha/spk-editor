@@ -10,7 +10,7 @@ For fork **philosophy** (rebrand identifiers, what's disabled, build conventions
 |---|---|---|
 | `crates/editor_mcp` | Embedded JSON-RPC MCP server (`~/.config/spk-editor/mcp.sock`) so an external agent can drive a live editor for E2E tests + autonomous work. Owns `SingleInstanceLock`, server bind, broadcast. | 50 builtin tools across `editor.*` / `windows.*` / `workspace.*` / `project.*` / `diagnostics.*` namespaces. Tools registered from each domain crate's `init`. |
 | `crates/solutions` | Multi-project workspace abstraction. A **Solution** groups N catalog projects (each a remote git URL) into one editor window with all members mounted as worktrees. Persisted to SQLite via `SolutionsDb` (one-time migration from legacy `solutions.json`); warm clone cache at `~/.cache/spk-editor/catalog/<sha256>/`. | Adds 11 `solutions.*` + 6 `catalog.*` MCP tools. Emits `solution_changed` events. |
-| `crates/solutions_ui` | UI for Solutions: title-bar tab strip, picker, modals, welcome integration, status bar. | Touches upstream `title_bar`, `welcome`, `app_menus` for integration points. |
+| `crates/solutions_ui` | UI for Solutions: title-bar tab strip, picker, modals, welcome integration, status bar, plus the per-panel `ActiveProjectSelector` element hosted by `project_panel` and `git_panel`. | Touches upstream `title_bar`, `welcome`, `app_menus`, `project_panel`, `git_ui` for integration points. |
 | `crates/solution_agent` | N parallel Claude Code-style AI sessions scoped to a Solution, multiplexed onto a shared `claude` subprocess per `(solution_id, agent_id)` pair. First-class pane items + side-dock navigator + status bar widget. SQLite persistence at `~/.config/spk-editor/solution_agent/solution_agent.db`. | Adds 8 `solution_agent.*` MCP tools. Emits `agent_session_*` event kinds. Auth via subscription (`claude` CLI's own `~/.claude/`); no `ANTHROPIC_API_KEY`. |
 
 ## Disabled upstream subsystems
@@ -39,6 +39,8 @@ Within these files, refactor / rename / cleanup is fine — diff-minimality buys
 | `crates/gpui/src/elements/list.rs` | `ListState::measure_last(N)` chunked tail prefetch (plus `MEASURE_LAST_DEFAULT_BATCH` / `LOOKAHEAD` / `EAGER_THRESHOLD` knobs) so virtualized lists can pre-warm their most-recent items on the first layout pass without paying the full-list measurement cost. Used by `solution_agent`'s conversation list to keep scroll-up off long resumed conversations from triggering a height-discovery cascade. | `solution_agent` |
 | `crates/workspace/src/workspace.rs` | `Workspace::swap_worktrees_to(target_paths)` delta worktree reconciliation used by the in-place Solution switch (decision 16). Drops worktrees not in the set, adds missing ones, preserves overlapping `WorktreeId`s so LSP / panels / caches don't churn. | `solutions_ui` / `solutions` |
 | `crates/welcome/src/welcome.rs` | Recent Solutions section + buttons. | `solutions_ui` |
+| `crates/project_panel/src/project_panel.rs` | Hosts `solutions_ui::ActiveProjectSelector` at the top of the panel; filters `state.visible_entries` to worktrees under the selected member's `local_path` after each `update_visible_entries`; resets `max_width_item_index` and recomputes `last_worktree_root_id` post-filter. | `solutions_ui` / `solutions` |
+| `crates/git_ui/src/git_panel.rs` | Hosts `solutions_ui::ActiveProjectSelector` at the top of the panel; `refresh_active_repository_for_selector` overrides `active_repository` with the selected member's matching repo at the start of `update_visible_entries`; `refresh_change_counts_for_selector` builds a per-member changed-file count map and pushes it into the selector for the dropdown badges. | `solutions_ui` / `solutions` |
 | `crates/workspace/src/welcome.rs` | `render_agent_card` gated off via `false &&` — fork uses `solution_agent`, not upstream agent panel. | `solution_agent` |
 | `crates/paths/src/paths.rs` | `.zed` → `.spke` rename for per-worktree config dir. | rebrand |
 | `assets/keymaps/default-*.json` | Default shortcuts for Solutions / sessions. | `solutions_ui` |
@@ -182,6 +184,16 @@ Why: system `ld` is the wall-clock bottleneck of `release-fast` incremental rebu
 
 How to apply: contributors install `mold` (`apt install mold` on Debian/Ubuntu, `brew install mold` on macOS-with-Linux-cross, prebuilt binaries on the [mold releases page](https://github.com/rui314/mold/releases) elsewhere). The pinned block lives in `.cargo/config.toml` — never delete it during an upstream merge (Zed upstream may add their own `[target.x86_64-unknown-linux-gnu]` entry for some unrelated rustflag; merge by combining flags, don't drop ours). To verify mold is active on a build: `cargo build --profile release-fast -v 2>&1 | grep -m1 fuse-ld` should show `-fuse-ld=mold`.
 
+### 17. Per-panel project selectors are independent — no global "active project"
+
+The Phase 3 `ActiveProjectSelector` element lives in two places (`project_panel`, `git_panel`) and each instance keeps its own selection in the `panel_member_selections` SQL table keyed by `(solution_id, panel_kind)`. There is no global "the user's active project" concept on `SolutionStore`; cross-panel sync is intentionally absent.
+
+Why: a global active-project field cascades into search-scope, terminal cwd, new-file location, find-in-files default, and several other behaviours — an unbounded set of consequences that have to be designed before the first feature ships. Per-panel scoping keeps Phase 3's footprint tight: each panel filters its own content (project_panel filters worktrees; git_panel drives `active_repository`), and `set_panel_member_selection` emits `PanelMemberSelectionChanged` so multi-window same-solution stays in sync without a global field.
+
+How to apply: if a future feature needs cross-panel "current project" awareness, do **not** add a global field to `SolutionStore`. Pick one of: (a) "follow the focused panel's selection" heuristic, (b) "last-touched panel" heuristic, (c) per-feature opt-in argument that asks the relevant panel for its selection. The two cycle actions `SwitchToNext/PrevProjectInPanel { panel_kind }` already work this way — they're scoped to a single panel, not "the active project."
+
+Initial-selection rule, also intentional: on first load of a (solution, panel) pair, default to the first member in `solution_members.position` order **and persist the default immediately** via `set_panel_member_selection`. Subsequent loads (and other windows on the same solution) read the persisted value. This makes "what does the user see in this panel?" a deterministic single-row lookup, not a derive-from-N-signals computation.
+
 ## Where specs and plans live
 
 `docs/superpowers/{specs,plans}/` is in `.gitignore` — these are personal working notes, not committed. Each major fork feature has a design spec + step-by-step implementation plan there. They're append-only history; the canonical state of the code lives in code + this file + `.rules`.
@@ -202,6 +214,8 @@ Some sessions used `superpowers:subagent-driven-development` to land features ta
 - `solution_agent::SolutionAgentStore::create_session` takes `project: Entity<Project>` (Plan B). Synthetic single-worktree project per session was rejected as too coupled to `Arc<Client>` / `UserStore` / etc.
 - `solution_agent` registers `AgentServer` instances via `store.register_agent_server(id, Rc<dyn AgentServer>)`, not via global `AgentServerStore::get_external_agent`. The wire-up call lives in `solution_agent::init`.
 - MockAgentServer in `solution_agent::test_support` uses `unsafe impl Send` because the trait requires Send but holds non-Send test state behind a Mutex. Test-only.
+- `solutions_ui::ActiveProjectSelector` (Phase 3) hosts its two popovers via `ui::PopoverMenu<MemberPicker>` / `PopoverMenu<AddProjectPicker>` rather than the manual `anchored()` + `deferred()` + stored-trigger-bounds pattern from `solution_picker_dropdown.rs`. PopoverMenu encapsulates bounds tracking, dismiss subscription, and z-order; nothing the manual pattern provides was needed.
+- `ActiveProjectSelector::new` defers its initial `rebuild()` via `cx.spawn(...).detach()` instead of running it synchronously. Reason: panels (`ProjectPanel::new`, `GitPanel::new`) are constructed inside `workspace.update_in(cx, ...)`, which holds a mutable borrow of the `Workspace` entity. The selector's `rebuild()` reads the workspace via `active_solution_in_workspace`, which would panic with "cannot read X while it is already being updated." The defer pushes the first rebuild to the next event-loop turn, after the construction `update_in` has finished. Side-effect: the trigger renders once with the empty-state label ("No project") before the deferred rebuild populates real members; acceptable.
 
 ## Updating this file
 
