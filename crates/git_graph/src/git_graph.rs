@@ -1,5 +1,6 @@
 pub mod filters;
 pub mod highlights;
+pub mod log_toolbar;
 
 use collections::{BTreeMap, HashMap, IndexSet};
 use editor::Editor;
@@ -988,7 +989,6 @@ pub struct GitGraph {
     /// Chip-based log filters (Branch / User / Date / Path / Query). S-FLT
     /// scaffolding — fields exist, chip UI + plumbing through
     /// `repository::initial_graph_data` lands per-chip in follow-ups.
-    #[allow(dead_code)]
     filters: filters::LogFilters,
     /// Row-decoration toggles (My commits / New since refresh). S-FLT
     /// scaffolding — wired when chip-Highlights toolbar lands.
@@ -1011,6 +1011,23 @@ impl GitGraph {
         self.search_state.state.next_state();
         cx.emit(ItemEvent::Edit);
         cx.notify();
+    }
+
+    pub fn set_date_filter(
+        &mut self,
+        range: Option<filters::DateRange>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.filters.date_range == range {
+            return;
+        }
+        self.filters.date_range = range;
+        self.invalidate_state(cx);
+        self.fetch_initial_graph_data(cx);
+    }
+
+    fn render_log_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        log_toolbar::LogToolbar::new(cx.weak_entity(), self.filters.date_range).render(cx)
     }
 
     /// Computes the height of a single commit row in the git graph.
@@ -3004,6 +3021,7 @@ impl Render for GitGraph {
                 v_flex()
                     .size_full()
                     .child(self.render_search_bar(cx))
+                    .child(self.render_log_toolbar(cx))
                     .child(div().flex_1().child(content)),
             )
             .children(self.context_menu.as_ref().map(|(menu, position, _)| {
