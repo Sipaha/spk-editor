@@ -79,6 +79,11 @@ impl AddProjectPicker {
         );
     }
 
+    pub fn add_from_git(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(DismissEvent);
+        window.dispatch_action(Box::new(crate::modals::AddCatalogProject), cx);
+    }
+
     pub fn add_catalog(
         &mut self,
         catalog_project: CatalogProject,
@@ -117,6 +122,17 @@ impl Render for AddProjectPicker {
             .child(Label::new("Create new project in solution…").color(Color::Accent))
             .on_click(cx.listener(|this, _, window, cx| this.create_empty(window, cx)));
 
+        let add_from_git_row = ListItem::new("add-from-git")
+            .inset(true)
+            .spacing(ListItemSpacing::Sparse)
+            .start_slot(
+                Icon::new(IconName::GitBranch)
+                    .color(Color::Accent)
+                    .size(IconSize::Small),
+            )
+            .child(Label::new("Add new project from git…").color(Color::Accent))
+            .on_click(cx.listener(|this, _, window, cx| this.add_from_git(window, cx)));
+
         let query = self.query.clone();
         let mut list = v_flex().gap_0p5();
         for catalog_project in self.catalog_entries.iter() {
@@ -144,6 +160,7 @@ impl Render for AddProjectPicker {
         v_flex()
             .key_context("ActiveProjectAddPicker")
             .track_focus(&self.focus_handle)
+            .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(DismissEvent)))
             .w(rems(34.))
             .p_2()
             .gap_2()
@@ -153,6 +170,7 @@ impl Render for AddProjectPicker {
             .rounded_md()
             .child(self.search_editor.clone())
             .child(create_row)
+            .child(add_from_git_row)
             .child(list)
     }
 }

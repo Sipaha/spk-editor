@@ -172,6 +172,7 @@ impl Render for MemberPicker {
         v_flex()
             .key_context("ActiveProjectMemberPicker")
             .track_focus(&self.focus_handle)
+            .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(DismissEvent)))
             .w(rems(28.))
             .p_2()
             .gap_2()
