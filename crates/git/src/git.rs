@@ -114,6 +114,36 @@ actions!(
     ]
 );
 
+/// Opens the undo registry as a modal — restore a branch to before a recent
+/// destructive op (cherry-pick, drop, squash, rebase, …) recorded by the
+/// S-BAK auto-backup framework.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = git)]
+#[serde(deny_unknown_fields)]
+pub struct UndoLast;
+
+/// Deletes spk-editor backup-refs older than `older_than_days` from the
+/// active repository. Default 30 days.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = git)]
+#[serde(deny_unknown_fields)]
+pub struct CleanupBackups {
+    #[serde(default = "default_cleanup_days")]
+    pub older_than_days: u32,
+}
+
+impl Default for CleanupBackups {
+    fn default() -> Self {
+        Self {
+            older_than_days: default_cleanup_days(),
+        }
+    }
+}
+
+fn default_cleanup_days() -> u32 {
+    30
+}
+
 /// Renames a git branch.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = git)]

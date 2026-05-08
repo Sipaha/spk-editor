@@ -111,6 +111,16 @@ struct ActiveServer {
 impl Global for ActiveServer {}
 
 pub fn start_server(cx: &mut App) -> Result<()> {
+    // S-BAK: derive process-global caller capabilities from the
+    // `SPK_EDITOR_MCP_BRIDGE_CAPS` env var on first server start. The bridge
+    // (`agent_servers::acp::spk_editor_mcp_bridge_server`) stamps this on
+    // each subagent's `--nc` subprocess; the editor itself usually inherits
+    // an unset value, in which case we default to Write (subagent-safe).
+    // See `tier_guard.rs` for the trade-off (process-global, not per-conn).
+    let caps_value = std::env::var(crate::tier::BRIDGE_CAPS_ENV_VAR).unwrap_or_default();
+    let caps = crate::tier::CallerCapabilities::from_bridge_env_value(&caps_value);
+    crate::tier_guard::set_process_caps(caps);
+
     let lock = match SingleInstanceLock::acquire(&lock_path()) {
         Ok(lock) => lock,
         Err(err) => {

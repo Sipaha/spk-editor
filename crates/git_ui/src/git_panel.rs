@@ -157,6 +157,11 @@ enum TrashCancel {
     Cancel,
 }
 
+/// Marker type — only used as a phantom for `NotificationId::unique`. One
+/// instance covers all credential-warning toasts so re-firing replaces the
+/// previous notification rather than stacking.
+struct CredentialsWarningId;
+
 struct GitMenuState {
     has_tracked_changes: bool,
     has_staged_changes: bool,
@@ -2321,6 +2326,46 @@ impl GitPanel {
 
         if self.add_coauthors {
             self.fill_co_authors(&mut message, cx);
+        }
+
+        // S-BAK soft credential warning. Runs in the background; emits a
+        // toast if any high-confidence pattern matches the staged diff.
+        // Never blocks the commit — this is a warning, not a guard.
+        if crate::credentials::WARN_ON_CREDENTIALS && self.has_staged_changes() {
+            let workspace = self.workspace.clone();
+            let diff_task = active_repository.update(cx, |repo, cx| {
+                repo.diff(git::repository::DiffType::HeadToIndex, cx)
+            });
+            cx.spawn(async move |_, cx| {
+                let Ok(Ok(diff)) = diff_task.await else {
+                    return;
+                };
+                let matches = crate::credentials::scan_diff(&diff);
+                if matches.is_empty() {
+                    return;
+                }
+                let count = matches.len();
+                let kinds: std::collections::BTreeSet<_> =
+                    matches.iter().map(|m| m.kind).collect();
+                let kind_summary: Vec<String> =
+                    kinds.iter().map(|k| (*k).to_string()).collect();
+                workspace
+                    .update(cx, |workspace, cx| {
+                        let toast = workspace::Toast::new(
+                            workspace::notifications::NotificationId::unique::<
+                                CredentialsWarningId,
+                            >(),
+                            format!(
+                                "Detected possible credentials in staged changes ({count} match{plural}: {kinds})",
+                                plural = if count == 1 { "" } else { "es" },
+                                kinds = kind_summary.join(", "),
+                            ),
+                        );
+                        workspace.show_toast(toast, cx);
+                    })
+                    .ok();
+            })
+            .detach();
         }
 
         let task = if self.has_staged_changes() {

@@ -1,7 +1,8 @@
 //! Tool registry: holds boxed registration callbacks until `start_server`
 //! drains them and applies to the live `McpServer`.
 use crate::tier::ToolTier;
-use context_server::listener::McpServer;
+use crate::tier_guard::TierGuardTool;
+use context_server::listener::{McpServer, McpServerTool};
 use gpui::{App, Global};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -76,6 +77,42 @@ pub fn register_tool_with_tier<F>(
         );
     }
     registry.pending.borrow_mut().push(Box::new(registration));
+}
+
+/// Register a typed tool wrapped in [`TierGuardTool`] so the declared tier
+/// is enforced at dispatch time — caller capabilities below the tool's tier
+/// produce a `-32401`-coded error before [`McpServerTool::run`] runs. Use
+/// this for new and migrated tools; the legacy [`register_tool_with_tier`]
+/// path declares the tier in metadata but does NOT enforce it at dispatch
+/// (kept while the existing fleet of tools is migrated incrementally).
+pub fn register_typed_tool_with_tier<T>(cx: &mut App, tier: ToolTier, tool: T)
+where
+    T: McpServerTool + Clone + 'static,
+{
+    init(cx);
+    let registry = cx.global::<Registry>();
+    if *registry.started.borrow() {
+        debug_assert!(
+            false,
+            "register_typed_tool_with_tier called after start_server"
+        );
+        log::error!(
+            "editor_mcp: register_typed_tool_with_tier(\"{}\") called after start_server — tool not registered",
+            T::NAME
+        );
+        return;
+    }
+    if let Some(prev) = registry.tool_tiers.borrow_mut().insert(T::NAME, tier) {
+        debug_assert!(false, "duplicate tier registration for tool \"{}\"", T::NAME);
+        log::warn!(
+            "editor_mcp: tool \"{}\" tier overwritten ({prev:?} -> {tier:?})",
+            T::NAME,
+        );
+    }
+    let registration: Registration = Box::new(move |server: &mut McpServer| {
+        server.add_tool(TierGuardTool::new(tool, tier));
+    });
+    registry.pending.borrow_mut().push(registration);
 }
 
 /// Look up the declared tier for `tool_name`. Returns [`ToolTier::Destructive`]
