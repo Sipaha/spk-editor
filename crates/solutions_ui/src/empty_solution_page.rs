@@ -3,7 +3,7 @@
 
 use gpui::{
     App, Context, EventEmitter, FocusHandle, Focusable, IntoElement, Render, SharedString,
-    Subscription, WeakEntity, Window,
+    Subscription, WeakEntity, Window, px,
 };
 use solutions::{SolutionId, SolutionStore, SolutionStoreEvent};
 use ui::ButtonLike;
@@ -74,17 +74,45 @@ impl EmptySolutionPage {
 impl Render for EmptySolutionPage {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let name = self.solution_name.clone();
+        // The page mounts as a Pane Item between the side docks. With
+        // both side docks open on a typical-width window the central
+        // pane narrows to ~10–20px and any unbounded text in here would
+        // wrap character-by-character. Cap each label to a single line
+        // (`truncate()`) and clip the whole page with `overflow_hidden`
+        // so a squeezed pane just shows truncated copy instead of a
+        // vertical character salad. The project panel's empty-state
+        // body and its `+ No project` selector remain the always-
+        // clickable CTAs in the squeezed case.
         v_flex()
             .size_full()
+            .min_w(px(360.))
+            .overflow_hidden()
             .items_center()
             .justify_center()
             .gap_4()
             .bg(cx.theme().colors().editor_background)
-            .child(Label::new(format!("Solution \"{name}\" is empty")).size(LabelSize::Large))
             .child(
-                Label::new("Add a project from your catalog to start working in this solution.")
-                    .color(Color::Muted)
-                    .size(LabelSize::Small),
+                h_flex()
+                    .max_w_full()
+                    .px_4()
+                    .child(
+                        Label::new(format!("Solution \"{name}\" is empty"))
+                            .size(LabelSize::Large)
+                            .truncate(),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .max_w_full()
+                    .px_4()
+                    .child(
+                        Label::new(
+                            "Add a project from your catalog to start working in this solution.",
+                        )
+                        .color(Color::Muted)
+                        .size(LabelSize::Small)
+                        .truncate(),
+                    ),
             )
             .child(
                 ButtonLike::new("empty-solution-add-member")
