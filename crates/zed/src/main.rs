@@ -234,6 +234,23 @@ fn main() {
         }
     }
 
+    // `zed --git-rebase-helper <todo-path>` runs as `GIT_SEQUENCE_EDITOR`
+    // during programmatic interactive rebase. Stub — full implementation
+    // lands in S-RBL. The argv namespace is reserved now so an upstream
+    // merge that adds a colliding `--git-*` flag is caught at parse time.
+    if args.git_rebase_helper.is_some() {
+        eprintln!("--git-rebase-helper is reserved for S-RBL (not yet implemented)");
+        process::exit(2);
+    }
+
+    // `zed --git-message-set <token>` runs as an `exec` step in interactive
+    // rebase to swap a commit message via `git commit --amend -F`. Stub for
+    // S-RBL.
+    if args.git_message_set.is_some() {
+        eprintln!("--git-message-set is reserved for S-RBL (not yet implemented)");
+        process::exit(2);
+    }
+
     #[cfg(all(not(debug_assertions), target_os = "windows"))]
     unsafe {
         use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
@@ -679,7 +696,9 @@ fn main() {
         solutions::init(cx);
         editor_mcp::init(cx);
         solution_agent::init(cx);
+        solution_git::init(cx);
         solutions_ui::init(cx);
+        git_conflict_ui::init(cx);
         let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
             enterprise_uri: language::language_settings::all_language_settings(None, cx)
                 .edit_predictions
@@ -1854,6 +1873,20 @@ struct Args {
     /// by having SPK Editor act like netcat communicating over a Unix socket.
     #[arg(long, hide = true)]
     nc: Option<String>,
+
+    /// Used as `GIT_SEQUENCE_EDITOR` during programmatic interactive rebase.
+    /// Reads the pre-built todo from the session directory pointed to by
+    /// `SPK_GIT_HELPER_SESSION` and overwrites the path passed by `git`.
+    /// See plan task S-RBL.
+    #[arg(long, hide = true)]
+    git_rebase_helper: Option<PathBuf>,
+
+    /// Used as `exec` step inside a programmatic interactive rebase.
+    /// Reads a pre-supplied commit message from the session directory
+    /// pointed to by `SPK_GIT_HELPER_SESSION` and runs
+    /// `git commit --amend -F <path>` in the rebase worktree. See plan task S-RBL.
+    #[arg(long, hide = true)]
+    git_message_set: Option<String>,
 
     /// Used for recording minidumps on crashes by having SPK Editor run a separate
     /// process communicating over a socket.

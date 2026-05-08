@@ -83,6 +83,7 @@ members = [
     "crates/fuzzy",
     "crates/fuzzy_nucleo",
     "crates/git",
+    "crates/git_conflict_ui",
     "crates/git_graph",
     "crates/git_hosting_providers",
     "crates/git_ui",
@@ -186,6 +187,7 @@ members = [
     "crates/snippet_provider",
     "crates/snippets_ui",
     "crates/solution_agent",
+    "crates/solution_git",
     "crates/solutions",
     "crates/solutions_ui",
     "crates/sqlez",
@@ -340,6 +342,7 @@ fs = { path = "crates/fs" }
 fuzzy = { path = "crates/fuzzy" }
 fuzzy_nucleo = { path = "crates/fuzzy_nucleo" }
 git = { path = "crates/git" }
+git_conflict_ui = { path = "crates/git_conflict_ui" }
 git_graph = { path = "crates/git_graph" }
 git_hosting_providers = { path = "crates/git_hosting_providers" }
 git_ui = { path = "crates/git_ui" }
@@ -446,6 +449,7 @@ snippet = { path = "crates/snippet" }
 snippet_provider = { path = "crates/snippet_provider" }
 snippets_ui = { path = "crates/snippets_ui" }
 solution_agent = { path = "crates/solution_agent" }
+solution_git = { path = "crates/solution_git" }
 solutions = { path = "crates/solutions" }
 solutions_ui = { path = "crates/solutions_ui" }
 sqlez = { path = "crates/sqlez" }

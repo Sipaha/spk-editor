@@ -1,0 +1,19 @@
+[package]
+name = "solution_git"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/solution_git.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+git_ui.workspace = true
+gpui.workspace = true
+log.workspace = true

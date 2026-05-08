@@ -7334,6 +7334,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "git_conflict_ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui",
+ "log",
+]
+
+[[package]]
 name = "git_graph"
 version = "0.1.0"
 dependencies = [
@@ -16700,6 +16709,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "solution_git"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "git_ui",
+ "gpui",
+ "log",
+]
+
+[[package]]
 name = "solutions"
 version = "0.1.0"
 dependencies = [
@@ -22591,6 +22610,7 @@ dependencies = [
  "fs",
  "futures 0.3.32",
  "git",
+ "git_conflict_ui",
  "git_graph",
  "git_hosting_providers",
  "git_ui",
@@ -22662,6 +22682,7 @@ dependencies = [
  "snippet_provider",
  "snippets_ui",
  "solution_agent",
+ "solution_git",
  "solutions",
  "solutions_ui",
  "svg_preview",
