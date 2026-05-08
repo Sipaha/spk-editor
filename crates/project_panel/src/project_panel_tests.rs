@@ -10153,10 +10153,15 @@ pub(crate) fn init_test(cx: &mut TestAppContext) {
 
         cx.update_global::<SettingsStore, _>(|store, cx| {
             store.update_user_settings(cx, |settings| {
-                settings
-                    .project_panel
-                    .get_or_insert_default()
-                    .auto_fold_dirs = Some(false);
+                let panel = settings.project_panel.get_or_insert_default();
+                panel.auto_fold_dirs = Some(false);
+                // Tests assert tree shape with the worktree root visible
+                // (`v root1` followed by its children). The fork-default
+                // hides the root because the active-project selector
+                // header already names it; pin it back to `false` here so
+                // the upstream tree assertions still apply. Tests that
+                // explicitly cover `hide_root=true` flip it locally.
+                panel.hide_root = Some(false);
                 settings.project.worktree.file_scan_exclusions = Some(Vec::new());
             });
         });
@@ -10176,10 +10181,11 @@ fn init_test_with_editor(cx: &mut TestAppContext) {
 
         cx.update_global::<SettingsStore, _>(|store, cx| {
             store.update_user_settings(cx, |settings| {
-                settings
-                    .project_panel
-                    .get_or_insert_default()
-                    .auto_fold_dirs = Some(false);
+                let panel = settings.project_panel.get_or_insert_default();
+                panel.auto_fold_dirs = Some(false);
+                // See `init_test`: pin `hide_root` to false so the
+                // upstream tree-shape assertions hold.
+                panel.hide_root = Some(false);
                 settings.project.worktree.file_scan_exclusions = Some(Vec::new())
             });
         });

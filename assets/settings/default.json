@@ -862,7 +862,10 @@
     "drag_and_drop": true,
     // Whether to hide the root entry when only one folder is open in the window;
     // this also affects how file paths appear in the file finder history.
-    "hide_root": false,
+    // Defaults to `true` in this fork: Solutions render exactly one worktree
+    // at a time and the active-project selector header already names it, so
+    // showing the worktree root again as a foldable tree node duplicates it.
+    "hide_root": true,
     // Whether to hide the hidden entries in the project panel.
     "hide_hidden": false,
     // Settings for automatically opening files.

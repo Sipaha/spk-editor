@@ -3969,17 +3969,35 @@ impl ProjectPanel {
         let old_ancestors = self.state.ancestors.clone();
         let temporary_unfolded_pending_state = self.state.temporarily_unfolded_pending_state.take();
         let mut new_state = State::derive(&self.state);
-        new_state.last_worktree_root_id = project
-            .visible_worktrees(cx)
-            .next_back()
-            .and_then(|worktree| worktree.read(cx).root_entry())
-            .map(|entry| entry.id);
         let mut max_width_item = None;
 
+        // SPK fork: in Solutions mode the active-member selector picks
+        // one worktree to render at a time, so apply that filter up
+        // front. Otherwise `hide_root` (gated on `len() == 1` to avoid
+        // collapsing multi-folder workspaces) would see 3 worktrees in
+        // a 3-member solution and refuse to hide the root, even though
+        // post-filter only one worktree actually renders. Filtering
+        // here also drops the wasted background traversal of
+        // worktrees we know we're going to discard, and lets
+        // `last_worktree_root_id` (used by context-menu / drag-drop
+        // targeting) line up with the worktree that's actually visible.
+        let active_member_path = self
+            .solution_selector
+            .read(cx)
+            .selected_member()
+            .map(|m| m.local_path.clone());
         let visible_worktrees: Vec<_> = project
             .visible_worktrees(cx)
+            .filter(|worktree| match active_member_path.as_ref() {
+                Some(path) => worktree.read(cx).abs_path().starts_with(path),
+                None => true,
+            })
             .map(|worktree| worktree.read(cx).snapshot())
             .collect();
+        new_state.last_worktree_root_id = visible_worktrees
+            .last()
+            .and_then(|snapshot| snapshot.root_entry())
+            .map(|entry| entry.id);
         let hide_root = settings.hide_root && visible_worktrees.len() == 1;
         let hide_hidden = settings.hide_hidden;
 
@@ -4230,36 +4248,6 @@ impl ProjectPanel {
                 .await;
             this.update_in(cx, |this, window, cx| {
                 this.state = new_state;
-                if let Some(filter_path) = this
-                    .solution_selector
-                    .read(cx)
-                    .selected_member()
-                    .map(|m| m.local_path.clone())
-                {
-                    let project = this.project.read(cx);
-                    this.state.visible_entries.retain(|vw| {
-                        project
-                            .worktree_for_id(vw.worktree_id, cx)
-                            .map(|wt| wt.read(cx).abs_path().starts_with(&filter_path))
-                            .unwrap_or(false)
-                    });
-                    // The flat max-width index was computed pre-filter and
-                    // can now point past the end of the retained list (or
-                    // to the wrong entry). Recomputing is overkill for a
-                    // hint that's purely about horizontal scroll width;
-                    // dropping it lets the next render fall back to the
-                    // intrinsic content width.
-                    this.state.max_width_item_index = None;
-                    // Recompute last_worktree_root_id so context-menu /
-                    // drag-drop targeting against the "last" worktree
-                    // doesn't reference a worktree we just hid.
-                    this.state.last_worktree_root_id = this
-                        .state
-                        .visible_entries
-                        .last()
-                        .and_then(|vw| project.worktree_for_id(vw.worktree_id, cx))
-                        .and_then(|wt| wt.read(cx).root_entry().map(|entry| entry.id));
-                }
                 if let Some((worktree_id, entry_id)) = new_selected_entry {
                     this.selection = Some(SelectedEntry {
                         worktree_id,
@@ -6890,8 +6878,8 @@ impl Render for ProjectPanel {
                 .track_focus(&self.focus_handle(cx))
                 .child(
                     v_flex()
-                        .child(self.solution_selector.clone())
                         .child(self.render_toolbar(cx))
+                        .child(self.solution_selector.clone())
                         .child(
                             uniform_list("entries", item_count, {
                                 cx.processor(|this, range: Range<usize>, window, cx| {
@@ -7295,9 +7283,10 @@ impl Render for ProjectPanel {
         } else {
             // SPK fork: workspaces always belong to a Solution, so the
             // upstream "Open Project / Clone Repository" empty state is
-            // never the right CTA. The selector sits at the top like in
-            // the populated branch; the empty-state copy lives in a
-            // centred body below it.
+            // never the right CTA. The toolbar's "Select Opened File"
+            // button has nothing to act on with an empty pane, so it's
+            // dropped here; the selector sits at the top with the
+            // empty-state body in a centred block below it.
             v_flex()
                 .id("empty-project_panel")
                 .size_full()
