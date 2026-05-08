@@ -7295,24 +7295,29 @@ impl Render for ProjectPanel {
         } else {
             // SPK fork: workspaces always belong to a Solution, so the
             // upstream "Open Project / Clone Repository" empty state is
-            // never the right CTA. Show a plain message; the
-            // solutions_ui dock already offers the catalog picker.
+            // never the right CTA. The selector sits at the top like in
+            // the populated branch; the empty-state copy lives in a
+            // centred body below it.
             v_flex()
                 .id("empty-project_panel")
-                .p_4()
                 .size_full()
-                .justify_center()
-                .gap_1()
-                .text_center()
-                .text_size(rems(0.8125))
                 .track_focus(&self.focus_handle(cx))
                 .child(self.solution_selector.clone())
-                .child(div().w_full().child("Solution is empty"))
                 .child(
-                    div()
-                        .w_full()
-                        .text_color(cx.theme().colors().text_muted)
-                        .child("Add projects from the catalog to start working."),
+                    v_flex()
+                        .flex_1()
+                        .p_4()
+                        .justify_center()
+                        .gap_1()
+                        .text_center()
+                        .text_size(rems(0.8125))
+                        .child(div().w_full().child("Solution is empty"))
+                        .child(
+                            div()
+                                .w_full()
+                                .text_color(cx.theme().colors().text_muted)
+                                .child("Add projects from the catalog to start working."),
+                        ),
                 )
                 .when(is_local, |div| {
                     div.when(panel_settings.drag_and_drop, |div| {
