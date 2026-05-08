@@ -3,22 +3,19 @@ pub mod highlights;
 pub mod log_toolbar;
 pub mod view_options;
 
-use collections::{BTreeMap, HashMap, IndexSet};
+use collections::{BTreeMap, HashMap};
 use editor::Editor;
 use git::{
     BuildCommitPermalinkParams, GitHostingProviderRegistry, GitRemote, Oid, ParsedGitRemote,
     parse_git_remote_url,
-    repository::{
-        CommitDiff, CommitFile, InitialGraphCommitData, LogOrder, LogSource, RepoPath,
-        SearchCommitArgs,
-    },
+    repository::{CommitDiff, CommitFile, InitialGraphCommitData, LogOrder, LogSource, RepoPath},
     status::{FileStatus, StatusCode, TrackedStatus},
 };
 use git_ui::{commit_tooltip::CommitAvatar, commit_view::CommitView, git_status_icon};
 use gpui::{
     Anchor, AnyElement, App, Bounds, ClickEvent, ClipboardItem, DefiniteLength, DragMoveEvent,
     ElementId, Empty, Entity, EventEmitter, FocusHandle, Focusable, Hsla, PathBuilder, Pixels,
-    Point, ScrollStrategy, ScrollWheelEvent, SharedString, Subscription, Task, TextStyleRefinement,
+    Point, ScrollStrategy, ScrollWheelEvent, SharedString, Subscription, Task,
     UniformListScrollHandle, WeakEntity, Window, actions, anchored, deferred, point, prelude::*,
     px, uniform_list,
 };
@@ -33,8 +30,7 @@ use project::{
 };
 use project_panel::ProjectPanel;
 use search::{
-    SearchOption, SearchOptions, SearchSource, SelectNextMatch, SelectPreviousMatch,
-    ToggleCaseSensitive, buffer_search,
+    SearchOption, SearchOptions, SearchSource, ToggleCaseSensitive, ToggleRegex, buffer_search,
 };
 use smallvec::{SmallVec, smallvec};
 use std::{
@@ -48,7 +44,7 @@ use theme::AccentColors;
 use time::{OffsetDateTime, UtcOffset, format_description::BorrowedFormatItem};
 use ui::{
     ButtonLike, Chip, ColumnWidthConfig, CommonAnimationExt as _, ContextMenu, DiffStat, Divider,
-    HeaderResizeInfo, HighlightedLabel, RedistributableColumnsState, ScrollableHandle, Table,
+    HeaderResizeInfo, RedistributableColumnsState, ScrollableHandle, Table,
     TableInteractionState, TableRenderContext, TableResizeBehavior, Tooltip, WithScrollbar,
     bind_redistributable_columns, prelude::*, render_redistributable_columns_resize_handles,
     render_table_header, table_row::TableRow,
@@ -213,27 +209,16 @@ impl ChangedFileEntry {
     }
 }
 
-enum QueryState {
-    Pending(SharedString),
-    Confirmed((SharedString, Task<()>)),
-    Empty,
-}
-
-impl QueryState {
-    fn next_state(&mut self) {
-        match self {
-            Self::Confirmed((query, _)) => *self = Self::Pending(std::mem::take(query)),
-            _ => {}
-        };
-    }
-}
-
 struct SearchState {
     case_sensitive: bool,
+    regex: bool,
+    search_in_diffs: bool,
     editor: Entity<Editor>,
-    state: QueryState,
-    pub matches: IndexSet<Oid>,
-    pub selected_index: Option<usize>,
+    /// Debounce timer for re-fetching the log when the query input changes.
+    /// Replaced (and dropped, cancelling its timer) on every keystroke so
+    /// only the last edit within the debounce window triggers a refetch.
+    debounce_task: Option<Task<()>>,
+    _editor_subscription: Subscription,
 }
 
 pub struct SplitState {
@@ -287,6 +272,10 @@ actions!(
         OpenCommitView,
         /// Focuses the search field.
         FocusSearch,
+        /// Toggles whether the Query filter searches commit content (`-G`)
+        /// instead of just commit messages (`--grep`). Slow on large
+        /// histories.
+        ToggleSearchInDiffs,
     ]
 );
 
@@ -1025,9 +1014,6 @@ pub struct GitGraph {
 impl GitGraph {
     fn invalidate_state(&mut self, cx: &mut Context<Self>) {
         self.graph_data.clear();
-        self.search_state.matches.clear();
-        self.search_state.selected_index = None;
-        self.search_state.state.next_state();
         cx.emit(ItemEvent::Edit);
         cx.notify();
     }
@@ -1082,6 +1068,54 @@ impl GitGraph {
         self.filters.paths = paths;
         self.invalidate_state(cx);
         self.fetch_initial_graph_data(cx);
+    }
+
+    pub fn set_query_filter(
+        &mut self,
+        query: Option<filters::QueryFilter>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.filters.query == query {
+            return;
+        }
+        self.filters.query = query;
+        self.invalidate_state(cx);
+        self.fetch_initial_graph_data(cx);
+    }
+
+    /// Debounce text-input changes — overwriting the prior task drops it,
+    /// which cancels the in-flight timer so only the last keystroke within
+    /// a 250ms window triggers a `git log` re-run.
+    fn schedule_query_filter_update(&mut self, cx: &mut Context<Self>) {
+        self.search_state.debounce_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(250))
+                .await;
+            this.update(cx, |this, cx| {
+                this.search_state.debounce_task = None;
+                this.update_query_filter(cx);
+            })
+            .ok();
+        }));
+    }
+
+    /// Build a `QueryFilter` from the search bar editor text + toggle flags
+    /// and commit it to `filters.query`. Empty text → `None` (filter
+    /// cleared). Called after the 250ms text-change debounce and on every
+    /// toggle click so the active query stays in sync with UI state.
+    fn update_query_filter(&mut self, cx: &mut Context<Self>) {
+        let text = self.search_state.editor.read(cx).text(cx);
+        let query = if text.is_empty() {
+            None
+        } else {
+            Some(filters::QueryFilter {
+                text: text.into(),
+                regex: self.search_state.regex,
+                case_sensitive: self.search_state.case_sensitive,
+                search_in_diffs: self.search_state.search_in_diffs,
+            })
+        };
+        self.set_query_filter(query, cx);
     }
 
     pub fn set_all_refs(&mut self, all_refs: bool, cx: &mut Context<Self>) {
@@ -1321,15 +1355,26 @@ impl GitGraph {
         })
         .detach();
 
+        let editor_subscription = cx.subscribe_in(
+            &search_editor,
+            window,
+            |this, _editor, event: &editor::EditorEvent, _window, cx| {
+                if let editor::EditorEvent::BufferEdited = event {
+                    this.schedule_query_filter_update(cx);
+                }
+            },
+        );
+
         let mut this = GitGraph {
             focus_handle,
             git_store,
             search_state: SearchState {
                 case_sensitive: false,
+                regex: false,
+                search_in_diffs: false,
                 editor: search_editor,
-                matches: IndexSet::default(),
-                selected_index: None,
-                state: QueryState::Empty,
+                debounce_task: None,
+                _editor_subscription: editor_subscription,
             },
             workspace,
             graph_data: graph,
@@ -1665,7 +1710,6 @@ impl GitGraph {
                     .unwrap_or_else(|| accent_colors.0.first().copied().unwrap_or_default());
 
                 let is_selected = self.selected_entry_idx == Some(idx);
-                let is_matched = self.search_state.matches.contains(&commit.data.sha);
                 let column_label = |label: SharedString| {
                     Label::new(label)
                         .when(!is_selected, |c| c.color(Color::Muted))
@@ -1673,43 +1717,7 @@ impl GitGraph {
                         .into_any_element()
                 };
 
-                let subject_label = if is_matched {
-                    let query = match &self.search_state.state {
-                        QueryState::Confirmed((query, _)) => Some(query.clone()),
-                        _ => None,
-                    };
-                    let highlight_ranges = query
-                        .and_then(|q| {
-                            let ranges = if self.search_state.case_sensitive {
-                                subject
-                                    .match_indices(q.as_str())
-                                    .map(|(start, matched)| start..start + matched.len())
-                                    .collect::<Vec<_>>()
-                            } else {
-                                let q = q.to_lowercase();
-                                let subject_lower = subject.to_lowercase();
-
-                                subject_lower
-                                    .match_indices(&q)
-                                    .filter_map(|(start, matched)| {
-                                        let end = start + matched.len();
-                                        subject.is_char_boundary(start).then_some(()).and_then(
-                                            |_| subject.is_char_boundary(end).then_some(start..end),
-                                        )
-                                    })
-                                    .collect::<Vec<_>>()
-                            };
-
-                            (!ranges.is_empty()).then_some(ranges)
-                        })
-                        .unwrap_or_default();
-                    HighlightedLabel::from_ranges(subject.clone(), highlight_ranges)
-                        .when(!is_selected, |c| c.color(Color::Muted))
-                        .truncate()
-                        .into_any_element()
-                } else {
-                    column_label(subject.clone())
-                };
+                let subject_label = column_label(subject.clone());
 
                 let ref_chips_element = (!commit.data.ref_names.is_empty()).then(|| {
                     let total = commit.data.ref_names.len();
@@ -1842,78 +1850,6 @@ impl GitGraph {
         self.open_selected_commit_view(window, cx);
     }
 
-    fn search(&mut self, query: SharedString, cx: &mut Context<Self>) {
-        let Some(repo) = self.get_repository(cx) else {
-            return;
-        };
-
-        self.search_state.matches.clear();
-        self.search_state.selected_index = None;
-        self.search_state.editor.update(cx, |editor, _cx| {
-            editor.set_text_style_refinement(Default::default());
-        });
-
-        if query.as_str().is_empty() {
-            self.search_state.state = QueryState::Empty;
-            cx.notify();
-            return;
-        }
-
-        let (request_tx, request_rx) = async_channel::unbounded::<Oid>();
-
-        repo.update(cx, |repo, cx| {
-            repo.search_commits(
-                self.log_source.clone(),
-                SearchCommitArgs {
-                    query: query.clone(),
-                    case_sensitive: self.search_state.case_sensitive,
-                },
-                request_tx,
-                cx,
-            );
-        });
-
-        let search_task = cx.spawn(async move |this, cx| {
-            while let Ok(first_oid) = request_rx.recv().await {
-                let mut pending_oids = vec![first_oid];
-                while let Ok(oid) = request_rx.try_recv() {
-                    pending_oids.push(oid);
-                }
-
-                this.update(cx, |this, cx| {
-                    if this.search_state.selected_index.is_none() {
-                        this.search_state.selected_index = Some(0);
-                        this.select_commit_by_sha(first_oid, cx);
-                    }
-
-                    this.search_state.matches.extend(pending_oids);
-                    cx.notify();
-                })
-                .ok();
-            }
-
-            this.update(cx, |this, cx| {
-                if this.search_state.matches.is_empty() {
-                    this.search_state.editor.update(cx, |editor, cx| {
-                        editor.set_text_style_refinement(TextStyleRefinement {
-                            color: Some(Color::Error.color(cx)),
-                            ..Default::default()
-                        });
-                    });
-                }
-            })
-            .ok();
-        });
-
-        self.search_state.state = QueryState::Confirmed((query, search_task));
-        cx.emit(ItemEvent::Edit);
-    }
-
-    fn confirm_search(&mut self, _: &menu::Confirm, _window: &mut Window, cx: &mut Context<Self>) {
-        let query = self.search_state.editor.read(cx).text(cx).into();
-        self.search(query, cx);
-    }
-
     fn select_entry(
         &mut self,
         idx: usize,
@@ -1960,50 +1896,6 @@ impl GitGraph {
 
         cx.emit(ItemEvent::Edit);
         cx.notify();
-    }
-
-    fn select_previous_match(&mut self, cx: &mut Context<Self>) {
-        if self.search_state.matches.is_empty() {
-            return;
-        }
-
-        let mut prev_selection = self.search_state.selected_index.unwrap_or_default();
-
-        if prev_selection == 0 {
-            prev_selection = self.search_state.matches.len() - 1;
-        } else {
-            prev_selection -= 1;
-        }
-
-        let Some(&oid) = self.search_state.matches.get_index(prev_selection) else {
-            return;
-        };
-
-        self.search_state.selected_index = Some(prev_selection);
-        self.select_commit_by_sha(oid, cx);
-    }
-
-    fn select_next_match(&mut self, cx: &mut Context<Self>) {
-        if self.search_state.matches.is_empty() {
-            return;
-        }
-
-        let mut next_selection = self
-            .search_state
-            .selected_index
-            .map(|index| index + 1)
-            .unwrap_or_default();
-
-        if next_selection >= self.search_state.matches.len() {
-            next_selection = 0;
-        }
-
-        let Some(&oid) = self.search_state.matches.get_index(next_selection) else {
-            return;
-        };
-
-        self.search_state.selected_index = Some(next_selection);
-        self.select_commit_by_sha(oid, cx);
     }
 
     pub fn set_repo_id(&mut self, repo_id: RepositoryId, cx: &mut Context<Self>) {
@@ -2109,8 +2001,11 @@ impl GitGraph {
                 SearchOptions::CASE_SENSITIVE,
                 self.search_state.case_sensitive,
             );
+            options.set(SearchOptions::REGEX, self.search_state.regex);
             options
         };
+        let search_in_diffs = self.search_state.search_in_diffs;
+        let in_diffs_focus_handle = query_focus_handle.clone();
 
         h_flex()
             .w_full()
@@ -2129,96 +2024,33 @@ impl GitGraph {
                     .border_color(color.border_variant)
                     .rounded_md()
                     .bg(color.toolbar_background)
-                    .on_action(cx.listener(Self::confirm_search))
                     .child(self.search_state.editor.clone())
                     .child(SearchOption::CaseSensitive.as_button(
                         search_options,
                         SearchSource::Buffer,
+                        query_focus_handle.clone(),
+                    ))
+                    .child(SearchOption::Regex.as_button(
+                        search_options,
+                        SearchSource::Buffer,
                         query_focus_handle,
-                    )),
-            )
-            .child(
-                h_flex()
-                    .min_w_64()
-                    .gap_1()
-                    .child({
-                        let focus_handle = self.focus_handle.clone();
-                        IconButton::new("git-graph-search-prev", IconName::ChevronLeft)
-                            .shape(ui::IconButtonShape::Square)
-                            .icon_size(IconSize::Small)
-                            .tooltip(move |_, cx| {
-                                Tooltip::for_action_in(
-                                    "Select Previous Match",
-                                    &SelectPreviousMatch,
-                                    &focus_handle,
-                                    cx,
-                                )
-                            })
-                            .map(|this| {
-                                if self.search_state.matches.is_empty() {
-                                    this.disabled(true)
-                                } else {
-                                    this.disabled(false).on_click(cx.listener(|this, _, _, cx| {
-                                        this.select_previous_match(cx);
-                                    }))
-                                }
-                            })
-                    })
-                    .child({
-                        let focus_handle = self.focus_handle.clone();
-                        IconButton::new("git-graph-search-next", IconName::ChevronRight)
-                            .shape(ui::IconButtonShape::Square)
-                            .icon_size(IconSize::Small)
-                            .tooltip(move |_, cx| {
-                                Tooltip::for_action_in(
-                                    "Select Next Match",
-                                    &SelectNextMatch,
-                                    &focus_handle,
-                                    cx,
-                                )
-                            })
-                            .map(|this| {
-                                if self.search_state.matches.is_empty() {
-                                    this.disabled(true)
-                                } else {
-                                    this.disabled(false).on_click(cx.listener(|this, _, _, cx| {
-                                        this.select_next_match(cx);
-                                    }))
-                                }
-                            })
-                    })
+                    ))
                     .child(
-                        h_flex()
-                            .gap_1p5()
-                            .child(
-                                Label::new(format!(
-                                    "{}/{}",
-                                    self.search_state
-                                        .selected_index
-                                        .map(|index| index + 1)
-                                        .unwrap_or(0),
-                                    self.search_state.matches.len()
-                                ))
-                                .size(LabelSize::Small)
-                                .when(self.search_state.matches.is_empty(), |this| {
-                                    this.color(Color::Disabled)
-                                }),
-                            )
-                            .when(
-                                matches!(
-                                    &self.search_state.state,
-                                    QueryState::Confirmed((_, task)) if !task.is_ready()
-                                ),
-                                |this| {
-                                    this.child(
-                                        Icon::new(IconName::ArrowCircle)
-                                            .color(Color::Accent)
-                                            .size(IconSize::Small)
-                                            .with_rotate_animation(2)
-                                            .into_any_element(),
-                                    )
-                                },
-                            ),
+                        IconButton::new("git-graph-search-in-diffs", IconName::FileDiff)
+                            .shape(ui::IconButtonShape::Square)
+                            .style(ButtonStyle::Subtle)
+                            .toggle_state(search_in_diffs)
+                            .tooltip(move |_, cx| {
+                                Tooltip::for_action_in(
+                                    "Search in commit content (slower)",
+                                    &ToggleSearchInDiffs,
+                                    &in_diffs_focus_handle,
+                                    cx,
+                                )
+                            })
+                            .on_click(cx.listener(|_, _, window, cx| {
+                                window.dispatch_action(Box::new(ToggleSearchInDiffs), cx);
+                            })),
                     ),
             )
     }
@@ -3001,12 +2833,6 @@ impl GitGraph {
 
 impl Render for GitGraph {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // This happens when we changed branches, we should refresh our search as well
-        if let QueryState::Pending(query) = &mut self.search_state.state {
-            let query = std::mem::take(query);
-            self.search_state.state = QueryState::Empty;
-            self.search(query, cx);
-        }
         let (commit_count, is_loading) = match self.graph_data.max_commit_count {
             AllCommitCount::Loaded(count) => (count, true),
             AllCommitCount::NotLoaded => {
@@ -3292,16 +3118,19 @@ impl Render for GitGraph {
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_last))
             .on_action(cx.listener(Self::confirm))
-            .on_action(cx.listener(|this, _: &SelectNextMatch, _window, cx| {
-                this.select_next_match(cx);
-            }))
-            .on_action(cx.listener(|this, _: &SelectPreviousMatch, _window, cx| {
-                this.select_previous_match(cx);
-            }))
             .on_action(cx.listener(|this, _: &ToggleCaseSensitive, _window, cx| {
                 this.search_state.case_sensitive = !this.search_state.case_sensitive;
-                this.search_state.state.next_state();
-                cx.emit(ItemEvent::Edit);
+                this.update_query_filter(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleRegex, _window, cx| {
+                this.search_state.regex = !this.search_state.regex;
+                this.update_query_filter(cx);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleSearchInDiffs, _window, cx| {
+                this.search_state.search_in_diffs = !this.search_state.search_in_diffs;
+                this.update_query_filter(cx);
                 cx.notify();
             }))
             .child(
@@ -3438,6 +3267,8 @@ impl workspace::SerializableItem for GitGraph {
             selected_sha,
             search_query,
             search_case_sensitive,
+            search_regex,
+            search_in_diffs,
             filter_branches,
             filter_authors,
             filter_paths,
@@ -3461,6 +3292,8 @@ impl workspace::SerializableItem for GitGraph {
             selected_sha,
             search_query,
             search_case_sensitive,
+            search_regex,
+            search_in_diffs,
             filter_branches,
             filter_authors,
             filter_paths,
@@ -3504,6 +3337,20 @@ impl workspace::SerializableItem for GitGraph {
                 let highlights = persistence::deserialize_highlights(&state);
                 let view_options = persistence::deserialize_view_options(&state);
 
+                let case_sensitive = state.search_case_sensitive.unwrap_or(false);
+                let regex = state.search_regex.unwrap_or(false);
+                let search_in_diffs = state.search_in_diffs.unwrap_or(false);
+                let mut filters = filters;
+                filters.query =
+                    state.search_query.as_deref().filter(|q| !q.is_empty()).map(
+                        |text| filters::QueryFilter {
+                            text: text.to_string().into(),
+                            regex,
+                            case_sensitive,
+                            search_in_diffs,
+                        },
+                    );
+
                 let git_graph = cx.new(|cx| {
                     let mut graph =
                         GitGraph::new(repo_id, git_store, workspace, Some(log_source), window, cx);
@@ -3511,6 +3358,20 @@ impl workspace::SerializableItem for GitGraph {
                     graph.filters = filters;
                     graph.highlights = highlights;
                     graph.view_options = view_options;
+                    graph.search_state.case_sensitive = case_sensitive;
+                    graph.search_state.regex = regex;
+                    graph.search_state.search_in_diffs = search_in_diffs;
+                    // `GitGraph::new` already kicked off a fetch with default
+                    // filters and (if the empty-args cache was already
+                    // populated by another `GitGraph` for the same repo)
+                    // synchronously copied those commits into `graph_data`.
+                    // Reset so the subsequent fetch's `CountUpdated` handler
+                    // computes a correct `old_count..commit_count` slice
+                    // against the now-active filtered cache instead of
+                    // collapsing the range against the leftover unfiltered
+                    // count.
+                    graph.graph_data.clear();
+                    graph.fetch_initial_graph_data(cx);
 
                     if let Some(sha) = &state.selected_sha {
                         graph.select_commit_by_sha(sha.as_str(), cx);
@@ -3519,20 +3380,17 @@ impl workspace::SerializableItem for GitGraph {
                     graph
                 });
 
-                git_graph.update(cx, |graph, cx| {
-                    graph.search_state.case_sensitive =
-                        state.search_case_sensitive.unwrap_or(false);
-
-                    if let Some(query) = &state.search_query
-                        && !query.is_empty()
-                    {
-                        graph
-                            .search_state
-                            .editor
-                            .update(cx, |editor, cx| editor.set_text(query.as_str(), window, cx));
-                        graph.search(query.clone().into(), cx);
-                    }
-                });
+                if let Some(query_text) = state.search_query.as_deref().filter(|q| !q.is_empty()) {
+                    git_graph.update(cx, |graph, cx| {
+                        graph.search_state.editor.update(cx, |editor, cx| {
+                            editor.set_text(query_text, window, cx)
+                        });
+                        // The text-edit subscription would otherwise schedule
+                        // a redundant 250ms-debounced refetch with the exact
+                        // same query we already hydrated into filters.query.
+                        graph.search_state.debounce_task = None;
+                    });
+                }
 
                 Ok(git_graph)
             })?
@@ -3572,6 +3430,16 @@ impl workspace::SerializableItem for GitGraph {
         let log_source_value = persistence::serialize_log_source_value(&self.log_source);
         let log_order = Some(persistence::serialize_log_order(&self.log_order));
         let search_case_sensitive = Some(self.search_state.case_sensitive);
+        let search_regex = if self.search_state.regex {
+            Some(true)
+        } else {
+            None
+        };
+        let search_in_diffs = if self.search_state.search_in_diffs {
+            Some(true)
+        } else {
+            None
+        };
 
         let filter_columns = persistence::serialize_log_filters(&self.filters);
         let highlight_columns = persistence::serialize_highlights(&self.highlights);
@@ -3589,6 +3457,8 @@ impl workspace::SerializableItem for GitGraph {
                 selected_sha,
                 search_query,
                 search_case_sensitive,
+                search_regex,
+                search_in_diffs,
                 filter_columns.branches,
                 filter_columns.authors,
                 filter_columns.paths,
@@ -3675,6 +3545,10 @@ mod persistence {
                 ALTER TABLE git_graphs ADD COLUMN view_compact_refs INTEGER;
                 ALTER TABLE git_graphs ADD COLUMN view_group_by_date INTEGER;
             ),
+            sql!(
+                ALTER TABLE git_graphs ADD COLUMN search_regex INTEGER;
+                ALTER TABLE git_graphs ADD COLUMN search_in_diffs INTEGER;
+            ),
         ];
     }
 
@@ -3759,6 +3633,8 @@ mod persistence {
         pub selected_sha: Option<String>,
         pub search_query: Option<String>,
         pub search_case_sensitive: Option<bool>,
+        pub search_regex: Option<bool>,
+        pub search_in_diffs: Option<bool>,
         pub filter_branches: Option<String>,
         pub filter_authors: Option<String>,
         pub filter_paths: Option<String>,
@@ -3965,6 +3841,12 @@ mod persistence {
         Option<bool>,
     );
 
+    /// Search-bar toggle flags that don't fit in [`CoreSaveTuple`] (already
+    /// at the 9-element mark, leaving headroom under sqlez's 10-tuple cap).
+    /// Kept as its own sub-tuple so `search_query` / `search_case_sensitive`
+    /// can stay co-located with the rest of the core columns.
+    pub type SearchExtraSaveTuple = (Option<bool>, Option<bool>);
+
     /// Result row for `get_git_graph` — same chunking rationale as
     /// [`CoreSaveTuple`].
     pub type CoreLoadTuple = (
@@ -3994,12 +3876,15 @@ mod persistence {
         Option<bool>,
     );
 
+    pub type SearchExtraLoadTuple = (Option<bool>, Option<bool>);
+
     impl GitGraphsDb {
         query! {
             pub async fn save_git_graph_raw(
                 core: CoreSaveTuple,
                 filters: FilterSaveTuple,
-                highlights_view: HighlightViewSaveTuple
+                highlights_view: HighlightViewSaveTuple,
+                search_extra: SearchExtraSaveTuple
             ) -> Result<()> {
                 INSERT OR REPLACE INTO git_graphs(
                     item_id, workspace_id, repo_working_path,
@@ -4008,9 +3893,10 @@ mod persistence {
                     filter_branches, filter_authors, filter_paths,
                     filter_date_since, filter_date_until, filter_all_refs,
                     highlight_my_commits, highlight_new_since_refresh, highlight_last_seen_sha,
-                    view_compact_refs, view_group_by_date
+                    view_compact_refs, view_group_by_date,
+                    search_regex, search_in_diffs
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             }
         }
 
@@ -4026,6 +3912,8 @@ mod persistence {
             selected_sha: Option<String>,
             search_query: Option<String>,
             search_case_sensitive: Option<bool>,
+            search_regex: Option<bool>,
+            search_in_diffs: Option<bool>,
             filter_branches: Option<String>,
             filter_authors: Option<String>,
             filter_paths: Option<String>,
@@ -4064,7 +3952,9 @@ mod persistence {
                 view_compact_refs,
                 view_group_by_date,
             );
-            self.save_git_graph_raw(core, filters, highlights_view).await
+            let search_extra: SearchExtraSaveTuple = (search_regex, search_in_diffs);
+            self.save_git_graph_raw(core, filters, highlights_view, search_extra)
+                .await
         }
 
         query! {
@@ -4074,7 +3964,8 @@ mod persistence {
             ) -> Result<Option<(
                 CoreLoadTuple,
                 FilterLoadTuple,
-                HighlightViewLoadTuple
+                HighlightViewLoadTuple,
+                SearchExtraLoadTuple
             )>> {
                 SELECT
                     repo_working_path,
@@ -4094,12 +3985,15 @@ mod persistence {
                     highlight_new_since_refresh,
                     highlight_last_seen_sha,
                     view_compact_refs,
-                    view_group_by_date
+                    view_group_by_date,
+                    search_regex,
+                    search_in_diffs
                 FROM git_graphs
                 WHERE item_id = ? AND workspace_id = ?
             }
         }
 
+        #[allow(clippy::type_complexity)]
         pub fn get_git_graph(
             &self,
             item_id: workspace::ItemId,
@@ -4112,6 +4006,8 @@ mod persistence {
                 Option<i32>,
                 Option<String>,
                 Option<String>,
+                Option<bool>,
+                Option<bool>,
                 Option<bool>,
                 Option<String>,
                 Option<String>,
@@ -4127,7 +4023,7 @@ mod persistence {
             )>,
         > {
             let row = self.get_git_graph_raw(item_id, workspace_id)?;
-            Ok(row.map(|(core, filters, highlights_view)| {
+            Ok(row.map(|(core, filters, highlights_view, search_extra)| {
                 let (
                     repo_working_path,
                     log_source_type,
@@ -4152,6 +4048,7 @@ mod persistence {
                     view_compact_refs,
                     view_group_by_date,
                 ) = highlights_view;
+                let (search_regex, search_in_diffs) = search_extra;
                 (
                     repo_working_path,
                     log_source_type,
@@ -4160,6 +4057,8 @@ mod persistence {
                     selected_sha,
                     search_query,
                     search_case_sensitive,
+                    search_regex,
+                    search_in_diffs,
                     filter_branches,
                     filter_authors,
                     filter_paths,
@@ -5616,6 +5515,8 @@ mod tests {
             selected_sha.clone(),
             Some("some query".to_string()),
             Some(true),
+            Some(true),
+            None,
             None,
             None,
             None,
@@ -5679,6 +5580,24 @@ mod tests {
             assert_eq!(
                 graph.search_state.case_sensitive, true,
                 "search case sensitivity should be restored"
+            );
+            assert_eq!(
+                graph.search_state.regex, true,
+                "search regex flag should be restored"
+            );
+            assert_eq!(
+                graph.search_state.search_in_diffs, false,
+                "search-in-diffs flag should default to false when persisted as NULL"
+            );
+            assert_eq!(
+                graph.filters.query,
+                Some(filters::QueryFilter {
+                    text: "some query".into(),
+                    regex: true,
+                    case_sensitive: true,
+                    search_in_diffs: false,
+                }),
+                "filters.query should be hydrated from persisted text + flags"
             );
         });
 
