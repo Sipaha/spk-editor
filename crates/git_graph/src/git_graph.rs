@@ -1,3 +1,4 @@
+pub mod context_menu;
 pub mod filters;
 pub mod highlights;
 pub mod log_toolbar;
@@ -14,11 +15,11 @@ use git::{
 };
 use git_ui::{commit_tooltip::CommitAvatar, commit_view::CommitView, git_status_icon};
 use gpui::{
-    Anchor, AnyElement, App, Bounds, ClickEvent, ClipboardItem, DefiniteLength, DragMoveEvent,
-    ElementId, Empty, Entity, EventEmitter, FocusHandle, Focusable, Hsla, PathBuilder, Pixels,
-    Point, ScrollStrategy, ScrollWheelEvent, SharedString, Subscription, Task,
-    UniformListScrollHandle, WeakEntity, Window, actions, anchored, deferred, point, prelude::*,
-    px, uniform_list,
+    Anchor, AnyElement, App, Bounds, ClickEvent, ClipboardItem, DefiniteLength, DismissEvent,
+    DragMoveEvent, ElementId, Empty, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
+    MouseButton, MouseDownEvent, PathBuilder, Pixels, Point, ScrollStrategy, ScrollWheelEvent,
+    SharedString, Subscription, Task, UniformListScrollHandle, WeakEntity, Window, actions,
+    anchored, deferred, point, prelude::*, px, uniform_list,
 };
 use language::line_diff;
 use menu::{Cancel, SelectFirst, SelectLast, SelectNext, SelectPrevious};
@@ -279,6 +280,16 @@ actions!(
         ToggleSearchInDiffs,
     ]
 );
+
+/// S-CTM cross-link to S-FLT — emitted when the commit context menu's
+/// "Show Affected Paths in Log" entry is invoked. The handler in
+/// `GitGraph::on_action` calls `set_path_filter(paths, cx)`, scoping the
+/// log to commits that touch one of the listed paths.
+#[derive(Clone, PartialEq, Debug, Default, serde::Deserialize, schemars::JsonSchema, gpui::Action)]
+#[action(namespace = git_graph)]
+pub struct ShowAffectedPathsInLog {
+    pub paths: Vec<String>,
+}
 
 fn timestamp_format() -> &'static [BorrowedFormatItem<'static>] {
     static FORMAT: OnceLock<Vec<BorrowedFormatItem<'static>>> = OnceLock::new();
@@ -1994,6 +2005,75 @@ impl GitGraph {
         })
     }
 
+    /// S-CTM right-click handler — assemble [`context_menu::CommitContext`]
+    /// from the row at `index` and deploy a [`ContextMenu`] anchored at
+    /// `position`. Subscribes to the menu's `DismissEvent` to drop the
+    /// menu state when it closes.
+    fn deploy_commit_context_menu(
+        &mut self,
+        index: usize,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(commit_entry) = self.graph_data.commits.get(index) else {
+            return;
+        };
+        let Some(repository) = self.get_repository(cx) else {
+            return;
+        };
+        let sha: SharedString = commit_entry.data.sha.to_string().into();
+        let subject: SharedString = {
+            let data = repository.update(cx, |repo, cx| {
+                repo.fetch_commit_data(commit_entry.data.sha, false, cx).clone()
+            });
+            match data {
+                CommitDataState::Loaded(data) => data.subject.clone(),
+                _ => SharedString::default(),
+            }
+        };
+        let provider = repository
+            .read(cx)
+            .default_remote_url()
+            .and_then(|url| {
+                let registry = GitHostingProviderRegistry::default_global(cx);
+                parse_git_remote_url(registry, &url)
+                    .map(|(provider, _)| (provider.name(), provider.base_url().to_string()))
+            });
+        let work_dir = Some(
+            repository
+                .read(cx)
+                .work_directory_abs_path
+                .as_ref()
+                .to_path_buf(),
+        );
+
+        let ctx = context_menu::CommitContext {
+            workspace: self.workspace.clone(),
+            repository,
+            sha,
+            subject,
+            provider,
+            work_dir,
+        };
+        let menu = context_menu::build_commit_context_menu(ctx, window, cx);
+        let subscription = cx.subscribe_in(
+            &menu,
+            window,
+            |this, _menu, _: &DismissEvent, window, cx| {
+                if this.context_menu.as_ref().is_some_and(|cm| {
+                    cm.0.focus_handle(cx).contains_focused(window, cx)
+                }) {
+                    this.focus_handle.focus(window, cx);
+                }
+                this.context_menu.take();
+                cx.notify();
+            },
+        );
+        self.context_menu = Some((menu, position, subscription));
+        cx.notify();
+    }
+
     fn render_search_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let color = cx.theme().colors();
         let query_focus_handle = self.search_state.editor.focus_handle(cx);
@@ -3027,19 +3107,44 @@ impl Render for GitGraph {
                                                 })
                                                 .ok();
                                         })
-                                        .on_click(move |event, window, cx| {
-                                            let click_count = event.click_count();
-                                            weak.update(cx, |this, cx| {
-                                                this.select_entry(
-                                                    index,
-                                                    ScrollStrategy::Center,
-                                                    cx,
-                                                );
-                                                if click_count >= 2 {
-                                                    this.open_commit_view(index, window, cx);
+                                        .on_click({
+                                            let weak = weak.clone();
+                                            move |event, window, cx| {
+                                                let click_count = event.click_count();
+                                                weak.update(cx, |this, cx| {
+                                                    this.select_entry(
+                                                        index,
+                                                        ScrollStrategy::Center,
+                                                        cx,
+                                                    );
+                                                    if click_count >= 2 {
+                                                        this.open_commit_view(index, window, cx);
+                                                    }
+                                                })
+                                                .ok();
+                                            }
+                                        })
+                                        .on_mouse_down(MouseButton::Right, {
+                                            move |event: &MouseDownEvent, window, cx| {
+                                                if event.button != MouseButton::Right {
+                                                    return;
                                                 }
-                                            })
-                                            .ok();
+                                                weak.update(cx, |this, cx| {
+                                                    this.select_entry(
+                                                        index,
+                                                        ScrollStrategy::Center,
+                                                        cx,
+                                                    );
+                                                    this.deploy_commit_context_menu(
+                                                        index,
+                                                        event.position,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                })
+                                                .ok();
+                                                cx.stop_propagation();
+                                            }
                                         })
                                         .into_any_element()
                                 })
@@ -3135,6 +3240,16 @@ impl Render for GitGraph {
                 this.update_query_filter(cx);
                 cx.notify();
             }))
+            .on_action(cx.listener(
+                |this, action: &ShowAffectedPathsInLog, _window, cx| {
+                    let paths: Vec<git::repository::RepoPath> = action
+                        .paths
+                        .iter()
+                        .filter_map(|p| git::repository::RepoPath::new(p).ok())
+                        .collect();
+                    this.set_path_filter(paths, cx);
+                },
+            ))
             .child(
                 v_flex()
                     .size_full()

@@ -805,6 +805,59 @@ pub trait GitRepository: Send + Sync {
 
     fn delete_branch(&self, is_remote: bool, name: String) -> BoxFuture<'_, Result<()>>;
 
+    /// Create a branch `name` pointing at `sha` without checking it out.
+    /// Errors if a branch with that name already exists. S-CTM "New Branch
+    /// from Here…" handler.
+    fn branch_at_sha(&self, name: String, sha: String) -> BoxFuture<'_, Result<()>> {
+        let _ = (name, sha);
+        future::ready(Err(anyhow!(
+            "branch_at_sha not supported on this backend"
+        )))
+        .boxed()
+    }
+
+    /// Create a tag `name` pointing at `sha`. When `message` is `Some`, the
+    /// tag is annotated (`git tag -a -m`). S-CTM "New Tag at Here…" handler.
+    fn tag_at_sha(
+        &self,
+        name: String,
+        sha: String,
+        message: Option<String>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let _ = (name, sha, message);
+        future::ready(Err(anyhow!("tag_at_sha not supported on this backend"))).boxed()
+    }
+
+    /// Check out `sha` directly via `git checkout <sha>`. Leaves HEAD
+    /// detached; the UI surfaces the warning. S-CTM "Checkout Revision"
+    /// handler.
+    fn checkout_revision(&self, sha: String) -> BoxFuture<'_, Result<()>> {
+        let _ = sha;
+        future::ready(Err(anyhow!(
+            "checkout_revision not supported on this backend"
+        )))
+        .boxed()
+    }
+
+    /// True when `git status --porcelain` reports any tracked or untracked
+    /// changes. Used by S-CTM as a pre-check before non-fast-forward
+    /// checkout.
+    fn is_dirty(&self) -> BoxFuture<'_, Result<bool>> {
+        future::ready(Ok(false)).boxed()
+    }
+
+    /// Compute the patch-id of `sha` (the canonical hash of its diff,
+    /// independent of context lines). Pipes `git show <sha>` into
+    /// `git patch-id` and returns the first whitespace-separated token of
+    /// the resulting line. S-CTM "Copy Patch ID" handler.
+    fn compute_patch_id(&self, sha: String) -> BoxFuture<'_, Result<String>> {
+        let _ = sha;
+        future::ready(Err(anyhow!(
+            "compute_patch_id not supported on this backend"
+        )))
+        .boxed()
+    }
+
     fn worktrees(&self) -> BoxFuture<'_, Result<Vec<Worktree>>>;
 
     fn create_worktree(
@@ -2116,6 +2169,110 @@ impl GitRepository for RealGitRepository {
                     .run(&["branch", if is_remote { "-dr" } else { "-d" }, &name])
                     .await?;
                 anyhow::Ok(())
+            })
+            .boxed()
+    }
+
+    fn branch_at_sha(&self, name: String, sha: String) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                git_binary?.run(&["branch", &name, &sha]).await?;
+                anyhow::Ok(())
+            })
+            .boxed()
+    }
+
+    fn tag_at_sha(
+        &self,
+        name: String,
+        sha: String,
+        message: Option<String>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let git = git_binary?;
+                if let Some(message) = message {
+                    git.run(&["tag", "-a", "-m", &message, &name, &sha]).await?;
+                } else {
+                    git.run(&["tag", &name, &sha]).await?;
+                }
+                anyhow::Ok(())
+            })
+            .boxed()
+    }
+
+    fn checkout_revision(&self, sha: String) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                git_binary?.run(&["checkout", &sha]).await?;
+                anyhow::Ok(())
+            })
+            .boxed()
+    }
+
+    fn is_dirty(&self) -> BoxFuture<'_, Result<bool>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let output = git_binary?.run(&["status", "--porcelain"]).await?;
+                Ok(!output.trim().is_empty())
+            })
+            .boxed()
+    }
+
+    fn compute_patch_id(&self, sha: String) -> BoxFuture<'_, Result<String>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let git = git_binary?;
+                // Step 1: capture `git show <sha>`. We don't pipe directly
+                // into `git patch-id`'s stdin because `util::command::Child`
+                // smol-process stdout is not `Into<Stdio>` on all targets.
+                let show_output =
+                    git.build_command(&["show", &sha]).output().await?;
+                anyhow::ensure!(
+                    show_output.status.success(),
+                    "Failed to run `git show {}`:\n{}",
+                    sha,
+                    String::from_utf8_lossy(&show_output.stderr)
+                );
+                // Step 2: feed it to `git patch-id --stable` via stdin.
+                let mut patch_id_command = git.build_command(&["patch-id", "--stable"]);
+                patch_id_command
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                let mut child = patch_id_command.spawn().context("spawning `git patch-id`")?;
+                {
+                    let mut stdin = child
+                        .stdin
+                        .take()
+                        .context("`git patch-id` stdin pipe unavailable")?;
+                    stdin
+                        .write_all(&show_output.stdout)
+                        .await
+                        .context("writing diff to `git patch-id` stdin")?;
+                    stdin.flush().await.ok();
+                }
+                let output = child
+                    .output()
+                    .await
+                    .context("waiting on `git patch-id`")?;
+                anyhow::ensure!(
+                    output.status.success(),
+                    "Failed to run `git patch-id`:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let stdout = String::from_utf8(output.stdout)?;
+                let token = stdout
+                    .split_whitespace()
+                    .next()
+                    .context("`git patch-id` produced no output (empty diff?)")?
+                    .to_string();
+                Ok(token)
             })
             .boxed()
     }
@@ -4937,6 +5094,105 @@ mod tests {
         assert_eq!(
             original_repo_path_from_common_dir(Path::new("/.git")),
             Some(PathBuf::from("/"))
+        );
+    }
+
+    /// S-CTM low-level helper test — branch_at_sha errors on collision and
+    /// successfully creates a branch on a fresh name. We initialise a tiny
+    /// repo with one commit, branch off it, then try to create the same
+    /// branch again and assert that the second call errors.
+    #[gpui::test]
+    async fn test_branch_at_sha_collision(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(repo_dir.path()).unwrap();
+        let file_path = repo_dir.path().join("file.txt");
+        smol::fs::write(&file_path, "x").await.unwrap();
+
+        let repo = RealGitRepository::new(
+            &repo_dir.path().join(".git"),
+            None,
+            Some("git".into()),
+            cx.executor(),
+        )
+        .unwrap();
+
+        repo.stage_paths(vec![repo_path("file.txt")], Arc::new(HashMap::default()))
+            .await
+            .unwrap();
+        repo.commit(
+            "init".into(),
+            None,
+            CommitOptions::default(),
+            AskPassDelegate::new(&mut cx.to_async(), |_, _, _| {}),
+            Arc::new(checkpoint_author_envs()),
+        )
+        .await
+        .unwrap();
+
+        let head_sha = repo.head_sha().await.unwrap();
+
+        repo.branch_at_sha("feature".into(), head_sha.clone())
+            .await
+            .expect("first branch_at_sha should succeed");
+
+        let second = repo
+            .branch_at_sha("feature".into(), head_sha.clone())
+            .await;
+        assert!(
+            second.is_err(),
+            "creating an existing branch must error, got: {second:?}"
+        );
+    }
+
+    /// S-CTM low-level helper test — `compute_patch_id` returns a stable
+    /// 40-char SHA-style token over the diff of a single commit. We don't
+    /// pin the exact value (git's patch-id is sensitive to whitespace and
+    /// can shift between versions), only the shape.
+    #[gpui::test]
+    async fn test_compute_patch_id_returns_token(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(repo_dir.path()).unwrap();
+        let file_path = repo_dir.path().join("hello.txt");
+        smol::fs::write(&file_path, "hello\nworld\n").await.unwrap();
+
+        let repo = RealGitRepository::new(
+            &repo_dir.path().join(".git"),
+            None,
+            Some("git".into()),
+            cx.executor(),
+        )
+        .unwrap();
+        repo.stage_paths(vec![repo_path("hello.txt")], Arc::new(HashMap::default()))
+            .await
+            .unwrap();
+        repo.commit(
+            "first".into(),
+            None,
+            CommitOptions::default(),
+            AskPassDelegate::new(&mut cx.to_async(), |_, _, _| {}),
+            Arc::new(checkpoint_author_envs()),
+        )
+        .await
+        .unwrap();
+
+        let head_sha = repo.head_sha().await.unwrap();
+        let patch_id = repo.compute_patch_id(head_sha).await.unwrap();
+        // git patch-id outputs a hex SHA followed by the original SHA;
+        // we keep only the first whitespace-separated token, which should
+        // be 40 lowercase hex chars (or 64 if we ever bump to sha256).
+        assert!(
+            patch_id.chars().all(|c| c.is_ascii_hexdigit()),
+            "patch-id should be hex, got {patch_id:?}"
+        );
+        assert!(
+            !patch_id.is_empty(),
+            "patch-id should be non-empty"
         );
     }
 

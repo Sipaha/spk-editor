@@ -7158,6 +7158,98 @@ impl Repository {
         )
     }
 
+    /// S-CTM "New Branch from Here…" — create `name` pointing at `sha`
+    /// without checking it out. Errors if the branch already exists.
+    pub fn branch_at_sha(
+        &mut self,
+        name: String,
+        sha: String,
+    ) -> oneshot::Receiver<Result<()>> {
+        self.send_job(
+            Some(format!("git branch {name} {sha}").into()),
+            move |repo, _cx| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                        backend.branch_at_sha(name, sha).await
+                    }
+                    RepositoryState::Remote(_) => {
+                        Err(anyhow!("branch_at_sha is not supported for remote projects"))
+                    }
+                }
+            },
+        )
+    }
+
+    /// S-CTM "New Tag at Here…" — create `name` pointing at `sha`. When
+    /// `message` is `Some`, the tag is annotated.
+    pub fn tag_at_sha(
+        &mut self,
+        name: String,
+        sha: String,
+        message: Option<String>,
+    ) -> oneshot::Receiver<Result<()>> {
+        let kind = if message.is_some() { "tag -a" } else { "tag" };
+        self.send_job(
+            Some(format!("git {kind} {name} {sha}").into()),
+            move |repo, _cx| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                        backend.tag_at_sha(name, sha, message).await
+                    }
+                    RepositoryState::Remote(_) => {
+                        Err(anyhow!("tag_at_sha is not supported for remote projects"))
+                    }
+                }
+            },
+        )
+    }
+
+    /// S-CTM "Checkout Revision" — `git checkout <sha>`. The resulting
+    /// HEAD is detached; the UI surfaces the warning before invocation.
+    pub fn checkout_revision(&mut self, sha: String) -> oneshot::Receiver<Result<()>> {
+        self.send_job(
+            Some(format!("git checkout {sha}").into()),
+            move |repo, _cx| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                        backend.checkout_revision(sha).await
+                    }
+                    RepositoryState::Remote(_) => Err(anyhow!(
+                        "checkout_revision is not supported for remote projects"
+                    )),
+                }
+            },
+        )
+    }
+
+    /// S-CTM "Checkout Revision" pre-check — `git status --porcelain`
+    /// non-empty.
+    pub fn is_dirty(&mut self) -> oneshot::Receiver<Result<bool>> {
+        self.send_job(None, move |repo, _cx| async move {
+            match repo {
+                RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                    backend.is_dirty().await
+                }
+                RepositoryState::Remote(_) => Ok(false),
+            }
+        })
+    }
+
+    /// S-CTM "Copy Patch ID" — runs `git show <sha> | git patch-id` and
+    /// returns the first whitespace-separated token of the result.
+    pub fn compute_patch_id(&mut self, sha: String) -> oneshot::Receiver<Result<String>> {
+        self.send_job(None, move |repo, _cx| async move {
+            match repo {
+                RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                    backend.compute_patch_id(sha).await
+                }
+                RepositoryState::Remote(_) => Err(anyhow!(
+                    "compute_patch_id is not supported for remote projects"
+                )),
+            }
+        })
+    }
+
     pub fn rename_branch(
         &mut self,
         branch: String,

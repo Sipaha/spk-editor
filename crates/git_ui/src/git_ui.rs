@@ -12,6 +12,8 @@ mod backup_mcp;
 mod blame_ui;
 pub mod clone;
 pub mod credentials;
+pub mod handlers;
+mod handlers_mcp;
 pub mod providers;
 pub mod undo_modal;
 
@@ -60,6 +62,7 @@ pub fn init(cx: &mut App) {
     editor::set_blame_renderer(blame_ui::GitBlameRenderer, cx);
     commit_view::init(cx);
     backup_mcp::register(cx);
+    handlers_mcp::register(cx);
 
     cx.observe_new(|editor: &mut Editor, _, cx| {
         conflict_view::register_editor(editor, editor.buffer().clone(), cx);
