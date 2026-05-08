@@ -234,21 +234,33 @@ fn main() {
         }
     }
 
-    // `zed --git-rebase-helper <todo-path>` runs as `GIT_SEQUENCE_EDITOR`
-    // during programmatic interactive rebase. Stub — full implementation
-    // lands in S-RBL. The argv namespace is reserved now so an upstream
-    // merge that adds a colliding `--git-*` flag is caught at parse time.
-    if args.git_rebase_helper.is_some() {
-        eprintln!("--git-rebase-helper is reserved for S-RBL (not yet implemented)");
-        process::exit(2);
+    // `spk-editor --git-rebase-helper <todo-path>` runs as `GIT_SEQUENCE_EDITOR`
+    // during programmatic interactive rebase (S-RBL). The implementation lives
+    // in `git::operations::helpers` so it can be exercised by unit tests
+    // without GPUI init. Exits directly without booting the editor — `git`
+    // invokes the helper many times per rebase and a heavyweight cold start
+    // would noticeably slow down each pause.
+    if let Some(todo_path) = &args.git_rebase_helper {
+        match git::operations::helpers::rebase_helper_main(todo_path) {
+            Ok(()) => process::exit(0),
+            Err(err) => {
+                eprintln!("--git-rebase-helper: {err}");
+                process::exit(1);
+            }
+        }
     }
 
-    // `zed --git-message-set <token>` runs as an `exec` step in interactive
-    // rebase to swap a commit message via `git commit --amend -F`. Stub for
-    // S-RBL.
-    if args.git_message_set.is_some() {
-        eprintln!("--git-message-set is reserved for S-RBL (not yet implemented)");
-        process::exit(2);
+    // `spk-editor --git-message-set <token>` runs as an `exec` step inside an
+    // interactive rebase to swap in a pre-staged commit message via
+    // `git commit --amend -F`.
+    if let Some(token) = &args.git_message_set {
+        match git::operations::helpers::message_set_main(token) {
+            Ok(()) => process::exit(0),
+            Err(err) => {
+                eprintln!("--git-message-set: {err}");
+                process::exit(1);
+            }
+        }
     }
 
     #[cfg(all(not(debug_assertions), target_os = "windows"))]
@@ -294,6 +306,11 @@ fn main() {
     }
 
     zlog::init();
+
+    // Best-effort cleanup of stale `git rebase` helper session directories
+    // (P-11 § orphan cleanup, S-RBL). Sessions are short-lived; anything
+    // older than an hour belongs to a crashed previous run.
+    git::operations::rebase::cleanup_orphan_sessions();
 
     if stdout_is_a_pty() {
         zlog::init_output_stdout();

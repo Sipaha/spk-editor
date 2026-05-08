@@ -10,6 +10,9 @@
 //! Concrete operations are added as their owning S-* tasks land
 //! (S-DST, S-RBL, etc.). See `docs/superpowers/plans/git-panel-plan.md`.
 
+pub mod helpers;
+pub mod rebase;
+
 use anyhow::{Result, anyhow};
 use std::path::Path;
 use std::process::Command;
