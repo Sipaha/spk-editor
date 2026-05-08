@@ -180,11 +180,15 @@ impl Render for SolutionTabStrip {
             }));
 
         let picker_workspace = self.workspace.clone();
+        let picker_mw = self.multi_workspace.clone();
         let plus_popover = PopoverMenu::new("solution-tab-strip-plus-popover")
             .trigger(plus_button)
             .menu(move |window, cx| {
                 let picker_workspace = picker_workspace.clone();
-                Some(cx.new(|cx| SolutionPickerDropdown::new(picker_workspace, window, cx)))
+                let picker_mw = picker_mw.clone();
+                Some(cx.new(|cx| {
+                    SolutionPickerDropdown::new(picker_workspace, picker_mw, window, cx)
+                }))
             });
 
         h_flex()

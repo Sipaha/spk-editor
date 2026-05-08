@@ -18,7 +18,7 @@ use gpui::{
 use solutions::{Solution, SolutionId, SolutionStore, SolutionStoreEvent};
 use std::path::PathBuf;
 use ui::{IconButtonShape, Tooltip, prelude::*};
-use workspace::{ModalView, Workspace};
+use workspace::{ModalView, MultiWorkspace, Workspace};
 
 use crate::delete_confirm_modal::{DeleteConfirmItem, open_delete_confirm};
 use crate::open::{OpenIntent, open_solution};
@@ -26,6 +26,7 @@ use crate::window_helpers::is_solution_open_anywhere;
 
 pub struct SolutionPickerDropdown {
     workspace: WeakEntity<Workspace>,
+    multi_workspace: WeakEntity<MultiWorkspace>,
     search_editor: Entity<Editor>,
     closed_solutions: Vec<ClosedSolutionRow>,
     _store_subscription: Subscription,
@@ -42,6 +43,7 @@ struct ClosedSolutionRow {
 impl SolutionPickerDropdown {
     pub fn new(
         workspace: WeakEntity<Workspace>,
+        multi_workspace: WeakEntity<MultiWorkspace>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -79,6 +81,7 @@ impl SolutionPickerDropdown {
 
         let mut this = Self {
             workspace,
+            multi_workspace,
             search_editor,
             closed_solutions: Vec::new(),
             _store_subscription: store_subscription,
@@ -89,12 +92,42 @@ impl SolutionPickerDropdown {
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
+        // `is_solution_open_anywhere` skips the window currently on the
+        // stack, so solutions only-open-in-our-window slip through. Build
+        // an explicit "open in this window's MW" set from the source MW
+        // handle and exclude those too.
+        let open_in_this_window: std::collections::HashSet<SolutionId> = self
+            .multi_workspace
+            .upgrade()
+            .map(|mw| {
+                mw.read(cx)
+                    .workspaces()
+                    .filter_map(|ws| {
+                        let store = SolutionStore::try_global(cx)?;
+                        let store = store.read(cx);
+                        ws.read(cx)
+                            .project()
+                            .read(cx)
+                            .worktrees(cx)
+                            .find_map(|tree| {
+                                store
+                                    .solution_for_path(&tree.read(cx).abs_path())
+                                    .map(|sol| sol.id.clone())
+                            })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let store = SolutionStore::global(cx);
         let mut rows: Vec<(Option<chrono::DateTime<chrono::Utc>>, ClosedSolutionRow)> = store
             .read_with(cx, |s, _| {
                 s.solutions()
                     .iter()
-                    .filter(|sol: &&Solution| !is_solution_open_anywhere(&sol.id, cx))
+                    .filter(|sol: &&Solution| {
+                        !is_solution_open_anywhere(&sol.id, cx)
+                            && !open_in_this_window.contains(&sol.id)
+                    })
                     .map(|sol| {
                         (
                             sol.last_opened_at,
