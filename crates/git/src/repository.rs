@@ -1019,11 +1019,18 @@ pub trait GitRepository: Send + Sync {
     /// before any `--` path separator. Used by the chip-filter toolbar (S-FLT) to
     /// thread `--author`, `--since`, `--grep`, and similar arguments through.
     /// Pass an empty `Vec` for the pre-S-FLT default behavior.
+    ///
+    /// `extra_paths` is appended *after* a `--` separator. Used by the chip-Path
+    /// filter (S-FLT) so `git log` restricts traversal to commits touching one
+    /// of the listed paths. Pass an empty `Vec` for the pre-S-FLT default
+    /// behavior. When `LogSource::File(_)` is used (file-history mode) the
+    /// implementation appends its file path on the same `--` block.
     fn initial_graph_data(
         &self,
         log_source: LogSource,
         log_order: LogOrder,
         extra_args: Vec<String>,
+        extra_paths: Vec<String>,
         request_tx: Sender<Vec<Arc<InitialGraphCommitData>>>,
     ) -> BoxFuture<'_, Result<()>>;
 
@@ -2962,6 +2969,7 @@ impl GitRepository for RealGitRepository {
         log_source: LogSource,
         log_order: LogOrder,
         extra_args: Vec<String>,
+        extra_paths: Vec<String>,
         request_tx: Sender<Vec<Arc<InitialGraphCommitData>>>,
     ) -> BoxFuture<'_, Result<()>> {
         let git_binary = self.git_binary();
@@ -2977,10 +2985,20 @@ impl GitRepository for RealGitRepository {
             ];
             git_log_command.extend(extra_args);
 
-            if let LogSource::File(file_path) = &log_source {
+            // `--` separator is required before any positional path argument.
+            // File-history mode (LogSource::File) and chip-Path filter
+            // (extra_paths) both feed paths on the same `--` block; if both
+            // are present, the file path comes first to preserve historic
+            // ordering.
+            let needs_path_separator =
+                matches!(&log_source, LogSource::File(_)) || !extra_paths.is_empty();
+            if needs_path_separator {
                 git_log_command.push("--".to_string());
+            }
+            if let LogSource::File(file_path) = &log_source {
                 git_log_command.push(file_path.as_unix_str().to_string());
             }
+            git_log_command.extend(extra_paths);
 
             let mut command = git.build_command(&git_log_command);
             command.stdout(Stdio::piped());

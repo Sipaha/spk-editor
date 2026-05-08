@@ -3,15 +3,17 @@
 //!
 //! `LogToolbar` is a render-only widget the `GitGraph` view embeds between
 //! its search bar and the graph content. It renders one chip per filter
-//! dimension; each chip opens a popover for editing that dimension. Date
-//! and Branch chips are wired today; User / Path / Query land in
+//! dimension; each chip opens a popover for editing that dimension. Date,
+//! Branch, User, and Path chips are wired today; Query lands in
 //! follow-ups alongside.
 
 mod branch_popover;
+mod path_popover;
 mod user_popover;
 
 use chrono::{Datelike, Local, NaiveDate, TimeZone};
 use editor::Editor;
+use git::repository::RepoPath;
 use gpui::{
     Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity, Window,
@@ -23,6 +25,7 @@ use ui::{Divider, ListItem, ListItemSpacing, PopoverMenu, TintColor, prelude::*}
 use crate::GitGraph;
 use crate::filters::DateRange;
 use branch_popover::BranchFilterPopover;
+use path_popover::PathFilterPopover;
 use user_popover::UserFilterPopover;
 
 const POPOVER_WIDTH_REMS: f32 = 18.0;
@@ -181,6 +184,7 @@ pub struct LogToolbar {
     date_range: Option<DateRange>,
     branches: Vec<SharedString>,
     authors: Vec<SharedString>,
+    paths: Vec<RepoPath>,
     repository: Option<Entity<Repository>>,
 }
 
@@ -190,6 +194,7 @@ impl LogToolbar {
         date_range: Option<DateRange>,
         branches: Vec<SharedString>,
         authors: Vec<SharedString>,
+        paths: Vec<RepoPath>,
         repository: Option<Entity<Repository>>,
     ) -> Self {
         Self {
@@ -197,6 +202,7 @@ impl LogToolbar {
             date_range,
             branches,
             authors,
+            paths,
             repository,
         }
     }
@@ -205,6 +211,7 @@ impl LogToolbar {
         let color = cx.theme().colors();
         let branch_chip = self.render_branch_chip();
         let user_chip = self.render_user_chip();
+        let path_chip = self.render_path_chip();
         let date_chip = self.render_date_chip();
         h_flex()
             .w_full()
@@ -216,6 +223,7 @@ impl LogToolbar {
             .bg(color.toolbar_background)
             .child(branch_chip)
             .child(user_chip)
+            .child(path_chip)
             .child(date_chip)
     }
 
@@ -302,6 +310,54 @@ impl LogToolbar {
             .anchor(gpui::Anchor::TopLeft)
             .attach(gpui::Anchor::BottomLeft)
     }
+
+    fn render_path_chip(&self) -> impl IntoElement {
+        let active = !self.paths.is_empty();
+        let label = path_chip_label(&self.paths);
+        let weak = self.weak_graph.clone();
+        let initial = self.paths.clone();
+        let repository = self.repository.clone();
+
+        let trigger = Button::new("git-graph-filter-path", label)
+            .end_icon(Icon::new(IconName::ChevronDown).size(IconSize::XSmall))
+            .label_size(LabelSize::Small)
+            .color(if active { Color::Default } else { Color::Muted })
+            .style(if active {
+                ButtonStyle::Tinted(TintColor::Accent)
+            } else {
+                ButtonStyle::Subtle
+            });
+
+        PopoverMenu::new("git-graph-filter-path-popover")
+            .trigger(trigger)
+            .menu(move |window, cx| {
+                let weak = weak.clone();
+                let initial = initial.clone();
+                let repository = repository.clone();
+                Some(cx.new(|cx| PathFilterPopover::new(weak, repository, initial, window, cx)))
+            })
+            .anchor(gpui::Anchor::TopLeft)
+            .attach(gpui::Anchor::BottomLeft)
+    }
+}
+
+fn path_chip_label(paths: &[RepoPath]) -> SharedString {
+    match paths.len() {
+        0 => SharedString::from("Path"),
+        1 => SharedString::from(format!("Path: {}", path_display_segment(&paths[0]))),
+        n => {
+            let first = path_display_segment(&paths[0]);
+            SharedString::from(format!("Path: {first}, +{}", n - 1))
+        }
+    }
+}
+
+/// Shorten a repo-relative path to its trailing segment so the chip stays
+/// narrow. `crates/foo/bar.rs` → `bar.rs`; a directory like `crates/foo`
+/// → `foo`.
+fn path_display_segment(path: &RepoPath) -> String {
+    let unix = path.as_unix_str();
+    unix.rsplit('/').next().unwrap_or(unix).to_string()
 }
 
 fn user_chip_label(authors: &[SharedString]) -> SharedString {

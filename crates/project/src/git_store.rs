@@ -377,10 +377,11 @@ pub struct Repository {
     askpass_delegates: Arc<Mutex<HashMap<u64, AskPassDelegate>>>,
     latest_askpass_id: u64,
     repository_state: Shared<Task<Result<RepositoryState, String>>>,
-    /// Cache key includes the chip-filter arg list (S-FLT) so concurrent
-    /// filter states don't collapse onto the same entry. Empty args ==
-    /// pre-S-FLT default.
-    initial_graph_data: HashMap<(LogSource, LogOrder, Vec<String>), InitialGitGraphData>,
+    /// Cache key includes both the chip-filter arg list and the chip-Path
+    /// arg list (S-FLT) so concurrent filter states don't collapse onto the
+    /// same entry. Empty args + empty paths == pre-S-FLT default.
+    initial_graph_data:
+        HashMap<(LogSource, LogOrder, Vec<String>, Vec<String>), InitialGitGraphData>,
     commit_data_handler: CommitDataHandlerState,
     commit_data: HashMap<Oid, CommitDataState>,
     refetch_repo_state: Arc<
@@ -478,7 +479,7 @@ pub enum RepositoryEvent {
     StashEntriesChanged,
     GitWorktreeListChanged,
     PendingOpsChanged { pending_ops: SumTree<PendingOps> },
-    GraphEvent((LogSource, LogOrder, Vec<String>), GitGraphEvent),
+    GraphEvent((LogSource, LogOrder, Vec<String>, Vec<String>), GitGraphEvent),
 }
 
 #[derive(Clone, Debug)]
@@ -1903,6 +1904,13 @@ impl GitStore {
 
     pub fn repositories(&self) -> &HashMap<RepositoryId, Entity<Repository>> {
         &self.repositories
+    }
+
+    /// Worktree store handle. Exposed so UI surfaces (e.g. the chip-Path
+    /// filter popover) can enumerate paths under the working tree of a
+    /// repository without going through the full `Project` entity.
+    pub fn worktree_store(&self) -> &Entity<WorktreeStore> {
+        &self.worktree_store
     }
 
     /// Returns the original (main) repository working directory for the given worktree.
@@ -4326,7 +4334,7 @@ impl Repository {
             RepositoryEvent::StashEntriesChanged => {
                 if this.scan_id > 2 {
                     this.initial_graph_data
-                        .retain(|(log_source, _, _), _| *log_source != LogSource::All);
+                        .retain(|(log_source, _, _, _), _| *log_source != LogSource::All);
                 }
             }
             _ => {}
@@ -4921,9 +4929,14 @@ impl Repository {
         log_source: LogSource,
         log_order: LogOrder,
         extra_args: &[String],
+        extra_paths: &[String],
     ) -> Option<&InitialGitGraphData> {
-        self.initial_graph_data
-            .get(&(log_source, log_order, extra_args.to_vec()))
+        self.initial_graph_data.get(&(
+            log_source,
+            log_order,
+            extra_args.to_vec(),
+            extra_paths.to_vec(),
+        ))
     }
 
     pub fn search_commits(
@@ -4976,16 +4989,23 @@ impl Repository {
         log_source: LogSource,
         log_order: LogOrder,
         extra_args: Vec<String>,
+        extra_paths: Vec<String>,
         range: Range<usize>,
         cx: &mut Context<Self>,
     ) -> GraphDataResponse<'_> {
         let initial_commit_data = self
             .initial_graph_data
-            .entry((log_source.clone(), log_order, extra_args.clone()))
+            .entry((
+                log_source.clone(),
+                log_order,
+                extra_args.clone(),
+                extra_paths.clone(),
+            ))
             .or_insert_with(|| {
                 let state = self.repository_state.clone();
                 let log_source = log_source.clone();
                 let extra_args_for_task = extra_args.clone();
+                let extra_paths_for_task = extra_paths.clone();
 
                 let fetch_task = cx.spawn(async move |repository, cx| {
                     let state = state.await;
@@ -4997,6 +5017,7 @@ impl Repository {
                                 log_source.clone(),
                                 log_order,
                                 extra_args_for_task.clone(),
+                                extra_paths_for_task.clone(),
                                 cx,
                             )
                             .await
@@ -5014,6 +5035,7 @@ impl Repository {
                                     log_source,
                                     log_order,
                                     extra_args_for_task,
+                                    extra_paths_for_task,
                                 )) {
                                     data.error = Some(fetch_task_error);
                                 } else {
@@ -5051,6 +5073,7 @@ impl Repository {
         log_source: LogSource,
         log_order: LogOrder,
         extra_args: Vec<String>,
+        extra_paths: Vec<String>,
         cx: &mut AsyncApp,
     ) -> Result<(), SharedString> {
         let (request_tx, request_rx) =
@@ -5059,15 +5082,16 @@ impl Repository {
         let task = cx.background_executor().spawn({
             let log_source = log_source.clone();
             let extra_args = extra_args.clone();
+            let extra_paths = extra_paths.clone();
             async move {
                 backend
-                    .initial_graph_data(log_source, log_order, extra_args, request_tx)
+                    .initial_graph_data(log_source, log_order, extra_args, extra_paths, request_tx)
                     .await
                     .map_err(|err| SharedString::from(err.to_string()))
             }
         });
 
-        let graph_data_key = (log_source, log_order, extra_args);
+        let graph_data_key = (log_source, log_order, extra_args, extra_paths);
 
         while let Ok(initial_graph_commit_data) = request_rx.recv().await {
             this.update(cx, |repository, cx| {
