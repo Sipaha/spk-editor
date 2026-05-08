@@ -64,49 +64,49 @@ pub fn open_solution(
         return;
     }
 
-    // SameWindow + the target Solution isn't already up in another
-    // window: short-circuit through the in-place switch path. The
-    // user keeps the same `Workspace`/`Project`/dock entities; we
-    // just swap worktrees inside the existing `Project` and
-    // snapshot/replay open tabs through `SolutionStore::tab_snapshots`.
-    // The previous behaviour built a fresh `Workspace` for every
-    // switch, retained the old one, and let `MultiWorkspace::activate`
-    // flip — that visibly tore down panels, lost scroll positions in
-    // ProjectPanel/OutlinePanel, and reset every panel-specific UI
-    // state on each switch. The retained-workspace mechanism still
-    // exists for `OpenIntent::NewWindow` and for the
-    // `find_window_for_solution`-already-handled focus case above.
+    // SameWindow + target not in another window: bring the Solution
+    // into this `MultiWorkspace`. With Phase 2's tab strip, each open
+    // Solution is its own retained `Workspace`, so:
+    //
+    //   * If the target is already a workspace tab in this window,
+    //     just activate that tab — no worktree swap, no Workspace
+    //     teardown. (Handles tab-strip clicks and re-opening a
+    //     Solution from the picker that's still up here.)
+    //   * Else, fall through to the `OpenMode::Add` path below, which
+    //     loads a fresh `Workspace` for the target, retains the
+    //     currently-active one, and activates the new one. The
+    //     previous Solution stays available as a tab.
+    //
+    // Defers via `cx.defer` so the activate runs AFTER the click
+    // handler's frame — reading or updating a window inline from
+    // within `Window::dispatch_event` panics with "attempted to read a
+    // window that is already on the stack."
     if intent == OpenIntent::SameWindow
         && let Some(src) = source_window
     {
-        // `cx.defer` so we run AFTER the click handler frame that
-        // reached us. Reading the window or mutating it inline here
-        // hits "attempted to read a window that is already on the
-        // stack" — the click event lives inside a `Window::dispatch_event`
-        // frame, and `read_with` / `update` on the same handle from
-        // within that frame double-lease the window.
-        let target = sol_id.clone();
-        cx.defer(move |cx| {
-            let Some(active_workspace) = src
-                .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
-                .log_err()
-            else {
-                return;
-            };
+        let already_open_here = src
+            .read_with(cx, |multi_workspace, cx| {
+                multi_workspace
+                    .workspaces()
+                    .find(|ws| workspace_has_solution(ws, &sol_id, cx))
+                    .cloned()
+            })
+            .ok()
+            .flatten();
+        if let Some(target_workspace) = already_open_here {
             if let Some(store) = SolutionStore::try_global(cx) {
                 store
-                    .update(cx, |s, cx| s.touch_last_opened(&target, cx))
+                    .update(cx, |s, cx| s.touch_last_opened(&sol_id, cx))
                     .log_err();
             }
-            let weak = active_workspace.downgrade();
-            let target_for_switch = target.clone();
-            src.update(cx, |_, window, cx| {
-                crate::switch::switch_active_solution_in_place(weak, target_for_switch, window, cx)
-                    .detach_and_log_err(cx);
-            })
-            .log_err();
-        });
-        return;
+            cx.defer(move |cx| {
+                src.update(cx, |multi_workspace, window, cx| {
+                    multi_workspace.activate(target_workspace, None, window, cx);
+                })
+                .log_err();
+            });
+            return;
+        }
     }
 
     let Some(store) = SolutionStore::try_global(cx) else {
