@@ -10,24 +10,30 @@ use crate::open::workspace_has_solution;
 
 /// Returns the window handle that currently has `sol_id` as one of its
 /// open solutions, or `None` if no such window exists.
+///
+/// Uses [`WindowHandle::read`] rather than [`WindowHandle::read_with`]:
+/// `read_with` goes through `App::read_window`, which panics with
+/// "attempted to read a window that is already on the stack" when the
+/// window's slot is taken (i.e. that window is currently in the middle
+/// of an `update` — including its own render frame). The render of any
+/// `MultiWorkspace` window iterates `cx.windows()`, which includes its
+/// own handle, so `read_with` would always panic in that path. `read`
+/// returns `Err("window not found")` instead, and we treat that as
+/// "skip — can't determine right now". As a consequence the **calling
+/// window is excluded from this iteration**: callers that care whether
+/// `sol_id` is open in their own window must determine that locally
+/// (e.g. by inspecting their own `MultiWorkspace::workspaces()`).
 pub fn find_window_for_solution(
     sol_id: &SolutionId,
     cx: &App,
 ) -> Option<WindowHandle<MultiWorkspace>> {
-    cx.windows()
-        .into_iter()
-        .find_map(|handle| {
-            let Some(mw_handle) = handle.downcast::<MultiWorkspace>() else {
-                return None;
-            };
-            mw_handle
-                .read_with(cx, |mw, cx| {
-                    mw.workspaces()
-                        .any(|ws| workspace_has_solution(ws, sol_id, cx))
-                })
-                .unwrap_or(false)
-                .then_some(mw_handle)
-        })
+    cx.windows().into_iter().find_map(|handle| {
+        let mw_handle = handle.downcast::<MultiWorkspace>()?;
+        let mw = mw_handle.read(cx).ok()?;
+        mw.workspaces()
+            .any(|ws| workspace_has_solution(ws, sol_id, cx))
+            .then_some(mw_handle)
+    })
 }
 
 pub fn is_solution_open_anywhere(sol_id: &SolutionId, cx: &App) -> bool {
@@ -35,15 +41,19 @@ pub fn is_solution_open_anywhere(sol_id: &SolutionId, cx: &App) -> bool {
 }
 
 /// First solution in the registry whose `root` is an ancestor of any
-/// visible worktree in `workspace`'s project. Mirrors the behaviour
-/// the title-bar tab strip uses to highlight the active tab — tabs
-/// and panel selectors must agree on which solution is active.
+/// worktree in `workspace`'s project (visible OR hidden). Mirrors the
+/// behaviour the title-bar tab strip uses to highlight the active
+/// tab; tabs and panel selectors must agree on which solution is
+/// active. Hidden worktrees are included because empty solutions are
+/// opened with `OpenVisible::None` — without considering hidden
+/// worktrees, an empty solution's panel selector would show
+/// "No solution" even though the solution clearly is the active one.
 pub fn active_solution_in_workspace(workspace: &Workspace, cx: &App) -> Option<SolutionId> {
     let store = SolutionStore::try_global(cx)?;
     let store = store.read(cx);
     let project = workspace.project().read(cx);
     let paths = project
-        .visible_worktrees(cx)
+        .worktrees(cx)
         .map(|worktree| worktree.read(cx).abs_path());
     active_solution_for_paths(store, paths)
 }
