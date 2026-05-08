@@ -3,9 +3,11 @@
 //!
 //! `LogToolbar` is a render-only widget the `GitGraph` view embeds between
 //! its search bar and the graph content. It renders one chip per filter
-//! dimension; each chip opens a popover for editing that dimension. This
-//! commit lights up the Date chip; Branch / User / Path / Query land in
+//! dimension; each chip opens a popover for editing that dimension. Date
+//! and Branch chips are wired today; User / Path / Query land in
 //! follow-ups alongside.
+
+mod branch_popover;
 
 use chrono::{Datelike, Local, NaiveDate, TimeZone};
 use editor::Editor;
@@ -14,10 +16,12 @@ use gpui::{
     ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity, Window,
     rems,
 };
+use project::git_store::Repository;
 use ui::{Divider, ListItem, ListItemSpacing, PopoverMenu, TintColor, prelude::*};
 
 use crate::GitGraph;
 use crate::filters::DateRange;
+use branch_popover::BranchFilterPopover;
 
 const POPOVER_WIDTH_REMS: f32 = 18.0;
 const CUSTOM_DATE_PLACEHOLDER: &str = "YYYY-MM-DD";
@@ -173,18 +177,28 @@ fn date_chip_label(range: Option<DateRange>) -> SharedString {
 pub struct LogToolbar {
     weak_graph: WeakEntity<GitGraph>,
     date_range: Option<DateRange>,
+    branches: Vec<SharedString>,
+    repository: Option<Entity<Repository>>,
 }
 
 impl LogToolbar {
-    pub fn new(weak_graph: WeakEntity<GitGraph>, date_range: Option<DateRange>) -> Self {
+    pub fn new(
+        weak_graph: WeakEntity<GitGraph>,
+        date_range: Option<DateRange>,
+        branches: Vec<SharedString>,
+        repository: Option<Entity<Repository>>,
+    ) -> Self {
         Self {
             weak_graph,
             date_range,
+            branches,
+            repository,
         }
     }
 
     pub fn render(self, cx: &mut App) -> impl IntoElement + use<> {
         let color = cx.theme().colors();
+        let branch_chip = self.render_branch_chip();
         let date_chip = self.render_date_chip();
         h_flex()
             .w_full()
@@ -194,10 +208,11 @@ impl LogToolbar {
             .border_b_1()
             .border_color(color.border_variant)
             .bg(color.toolbar_background)
+            .child(branch_chip)
             .child(date_chip)
     }
 
-    fn render_date_chip(self) -> impl IntoElement {
+    fn render_date_chip(&self) -> impl IntoElement {
         let active = self.date_range.is_some();
         let label = date_chip_label(self.date_range);
         let weak = self.weak_graph.clone();
@@ -222,6 +237,57 @@ impl LogToolbar {
             .anchor(gpui::Anchor::TopLeft)
             .attach(gpui::Anchor::BottomLeft)
     }
+
+    fn render_branch_chip(&self) -> impl IntoElement {
+        let active = !self.branches.is_empty();
+        let label = branch_chip_label(&self.branches);
+        let weak = self.weak_graph.clone();
+        let initial = self.branches.clone();
+        let repository = self.repository.clone();
+
+        let trigger = Button::new("git-graph-filter-branch", label)
+            .end_icon(Icon::new(IconName::ChevronDown).size(IconSize::XSmall))
+            .label_size(LabelSize::Small)
+            .color(if active { Color::Default } else { Color::Muted })
+            .style(if active {
+                ButtonStyle::Tinted(TintColor::Accent)
+            } else {
+                ButtonStyle::Subtle
+            });
+
+        PopoverMenu::new("git-graph-filter-branch-popover")
+            .trigger(trigger)
+            .menu(move |window, cx| {
+                let weak = weak.clone();
+                let initial = initial.clone();
+                let repository = repository.clone();
+                Some(cx.new(|cx| BranchFilterPopover::new(weak, repository, initial, window, cx)))
+            })
+            .anchor(gpui::Anchor::TopLeft)
+            .attach(gpui::Anchor::BottomLeft)
+    }
+}
+
+fn branch_chip_label(branches: &[SharedString]) -> SharedString {
+    match branches.len() {
+        0 => SharedString::from("Branch"),
+        1 => {
+            let display = branch_display_name(&branches[0]);
+            SharedString::from(format!("Branch: {display}"))
+        }
+        n => {
+            let first = branch_display_name(&branches[0]);
+            SharedString::from(format!("Branch: {first}, +{}", n - 1))
+        }
+    }
+}
+
+fn branch_display_name(ref_name: &SharedString) -> String {
+    ref_name
+        .strip_prefix("refs/heads/")
+        .or_else(|| ref_name.strip_prefix("refs/remotes/"))
+        .unwrap_or(ref_name.as_ref())
+        .to_string()
 }
 
 #[derive(Clone, Copy)]
