@@ -11,8 +11,8 @@ use git::{
     Oid, RunHook,
     blame::Blame,
     repository::{
-        AskPassDelegate, Branch, CommitData, CommitDataReader, CommitDetails, CommitOptions,
-        CreateWorktreeTarget, FetchOptions, GRAPH_CHUNK_SIZE, GitRepository,
+        AskPassDelegate, AuthorHistoryEntry, Branch, CommitData, CommitDataReader, CommitDetails,
+        CommitOptions, CreateWorktreeTarget, FetchOptions, GRAPH_CHUNK_SIZE, GitRepository,
         GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder, LogSource, PushOptions, RefEdit,
         Remote, RepoPath, ResetMode, SearchCommitArgs, Worktree,
     },
@@ -1382,6 +1382,10 @@ impl GitRepository for FakeGitRepository {
             }))
         }
         .boxed()
+    }
+
+    fn author_history(&self) -> BoxFuture<'_, Result<Vec<AuthorHistoryEntry>>> {
+        async move { Ok(Vec::new()) }.boxed()
     }
 
     fn create_remote(&self, name: String, url: String) -> BoxFuture<'_, Result<()>> {

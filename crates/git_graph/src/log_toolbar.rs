@@ -8,6 +8,7 @@
 //! follow-ups alongside.
 
 mod branch_popover;
+mod user_popover;
 
 use chrono::{Datelike, Local, NaiveDate, TimeZone};
 use editor::Editor;
@@ -22,6 +23,7 @@ use ui::{Divider, ListItem, ListItemSpacing, PopoverMenu, TintColor, prelude::*}
 use crate::GitGraph;
 use crate::filters::DateRange;
 use branch_popover::BranchFilterPopover;
+use user_popover::UserFilterPopover;
 
 const POPOVER_WIDTH_REMS: f32 = 18.0;
 const CUSTOM_DATE_PLACEHOLDER: &str = "YYYY-MM-DD";
@@ -178,6 +180,7 @@ pub struct LogToolbar {
     weak_graph: WeakEntity<GitGraph>,
     date_range: Option<DateRange>,
     branches: Vec<SharedString>,
+    authors: Vec<SharedString>,
     repository: Option<Entity<Repository>>,
 }
 
@@ -186,12 +189,14 @@ impl LogToolbar {
         weak_graph: WeakEntity<GitGraph>,
         date_range: Option<DateRange>,
         branches: Vec<SharedString>,
+        authors: Vec<SharedString>,
         repository: Option<Entity<Repository>>,
     ) -> Self {
         Self {
             weak_graph,
             date_range,
             branches,
+            authors,
             repository,
         }
     }
@@ -199,6 +204,7 @@ impl LogToolbar {
     pub fn render(self, cx: &mut App) -> impl IntoElement + use<> {
         let color = cx.theme().colors();
         let branch_chip = self.render_branch_chip();
+        let user_chip = self.render_user_chip();
         let date_chip = self.render_date_chip();
         h_flex()
             .w_full()
@@ -209,6 +215,7 @@ impl LogToolbar {
             .border_color(color.border_variant)
             .bg(color.toolbar_background)
             .child(branch_chip)
+            .child(user_chip)
             .child(date_chip)
     }
 
@@ -266,6 +273,59 @@ impl LogToolbar {
             .anchor(gpui::Anchor::TopLeft)
             .attach(gpui::Anchor::BottomLeft)
     }
+
+    fn render_user_chip(&self) -> impl IntoElement {
+        let active = !self.authors.is_empty();
+        let label = user_chip_label(&self.authors);
+        let weak = self.weak_graph.clone();
+        let initial = self.authors.clone();
+        let repository = self.repository.clone();
+
+        let trigger = Button::new("git-graph-filter-user", label)
+            .end_icon(Icon::new(IconName::ChevronDown).size(IconSize::XSmall))
+            .label_size(LabelSize::Small)
+            .color(if active { Color::Default } else { Color::Muted })
+            .style(if active {
+                ButtonStyle::Tinted(TintColor::Accent)
+            } else {
+                ButtonStyle::Subtle
+            });
+
+        PopoverMenu::new("git-graph-filter-user-popover")
+            .trigger(trigger)
+            .menu(move |window, cx| {
+                let weak = weak.clone();
+                let initial = initial.clone();
+                let repository = repository.clone();
+                Some(cx.new(|cx| UserFilterPopover::new(weak, repository, initial, window, cx)))
+            })
+            .anchor(gpui::Anchor::TopLeft)
+            .attach(gpui::Anchor::BottomLeft)
+    }
+}
+
+fn user_chip_label(authors: &[SharedString]) -> SharedString {
+    match authors.len() {
+        0 => SharedString::from("User"),
+        1 => {
+            let display = author_display_name(&authors[0]);
+            SharedString::from(format!("User: {display}"))
+        }
+        n => {
+            let first = author_display_name(&authors[0]);
+            SharedString::from(format!("User: {first}, +{}", n - 1))
+        }
+    }
+}
+
+/// Selection is keyed by email; the chip surface shows just the local
+/// part (`alice` for `alice@example.com`) so the chip stays narrow.
+/// Falls back to the raw value when there's no `@`.
+fn author_display_name(email: &SharedString) -> String {
+    email
+        .split_once('@')
+        .map(|(local, _)| local.to_string())
+        .unwrap_or_else(|| email.to_string())
 }
 
 fn branch_chip_label(branches: &[SharedString]) -> SharedString {

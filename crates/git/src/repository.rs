@@ -257,6 +257,17 @@ impl Branch {
     }
 }
 
+/// One row from `git shortlog -sne --all` — a unique author over the
+/// repository's full reachable history. Powers the chip-User filter
+/// popover (S-FLT). `commit_count` is the leading count column from
+/// shortlog; the popover surfaces it as a tail badge IDEA-style.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct AuthorHistoryEntry {
+    pub name: SharedString,
+    pub email: SharedString,
+    pub commit_count: usize,
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct Worktree {
     pub path: PathBuf,
@@ -995,6 +1006,11 @@ pub trait GitRepository: Send + Sync {
         &self,
         include_remote_name: bool,
     ) -> BoxFuture<'_, Result<Option<SharedString>>>;
+
+    /// Runs `git shortlog -sne --all` and returns one entry per unique
+    /// `(name, email)` author over the full reachable history. Powers the
+    /// chip-User filter popover (S-FLT).
+    fn author_history(&self) -> BoxFuture<'_, Result<Vec<AuthorHistoryEntry>>>;
 
     /// Runs `git rev-list --parents` to get the commit graph structure.
     /// Returns commit SHAs and their parent SHAs for building the graph visualization.
@@ -2878,6 +2894,17 @@ impl GitRepository for RealGitRepository {
             .boxed()
     }
 
+    fn author_history(&self) -> BoxFuture<'_, Result<Vec<AuthorHistoryEntry>>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let git = git_binary?;
+                let stdout = git.run_raw(&["shortlog", "-sne", "--all"]).await?;
+                Ok(parse_shortlog_output(&stdout))
+            })
+            .boxed()
+    }
+
     fn run_hook(
         &self,
         hook: RunHook,
@@ -3099,6 +3126,53 @@ impl GitRepository for RealGitRepository {
     fn is_trusted(&self) -> bool {
         self.is_trusted.load(std::sync::atomic::Ordering::Acquire)
     }
+}
+
+/// Parse `git shortlog -sne --all` stdout into one `AuthorHistoryEntry`
+/// per line. Tolerant: blank lines, BOM-prefixed input, and lines that
+/// don't match `<count>\t<name> <<email>>` are logged and skipped — this
+/// runs against arbitrary user-controlled data (commit author names) so
+/// we never panic on malformed rows.
+fn parse_shortlog_output(stdout: &str) -> Vec<AuthorHistoryEntry> {
+    let trimmed = stdout.strip_prefix('\u{feff}').unwrap_or(stdout);
+    let mut entries = Vec::new();
+    for raw in trimmed.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((count_str, rest)) = line.split_once('\t') else {
+            log::warn!("git shortlog: unexpected line (no tab): {raw:?}");
+            continue;
+        };
+        let Ok(commit_count) = count_str.trim().parse::<usize>() else {
+            log::warn!("git shortlog: unparsable count column: {raw:?}");
+            continue;
+        };
+        let Some(email_open) = rest.rfind('<') else {
+            log::warn!("git shortlog: missing '<email>' bracket: {raw:?}");
+            continue;
+        };
+        let Some(email_close) = rest.rfind('>') else {
+            log::warn!("git shortlog: missing closing '>' bracket: {raw:?}");
+            continue;
+        };
+        if email_close <= email_open {
+            log::warn!("git shortlog: malformed email brackets: {raw:?}");
+            continue;
+        }
+        let name = rest[..email_open].trim().to_string();
+        let email = rest[email_open + 1..email_close].trim().to_string();
+        if name.is_empty() && email.is_empty() {
+            continue;
+        }
+        entries.push(AuthorHistoryEntry {
+            name: SharedString::from(name),
+            email: SharedString::from(email),
+            commit_count,
+        });
+    }
+    entries
 }
 
 async fn run_commit_data_reader(
@@ -3782,6 +3856,42 @@ mod tests {
             !output.status.success(),
             "hooksPath should NOT be overridden for trusted repos"
         );
+    }
+
+    #[test]
+    fn test_parse_shortlog_output_basic() {
+        let raw = "    42\tAlice <alice@example.com>\n     1\tBob <bob@example.com>\n";
+        let entries = parse_shortlog_output(raw);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name.as_ref(), "Alice");
+        assert_eq!(entries[0].email.as_ref(), "alice@example.com");
+        assert_eq!(entries[0].commit_count, 42);
+        assert_eq!(entries[1].name.as_ref(), "Bob");
+        assert_eq!(entries[1].commit_count, 1);
+    }
+
+    #[test]
+    fn test_parse_shortlog_output_tolerates_garbage() {
+        let raw = "\u{feff}     5\tCarol <c@x.io>\n\n\t\nbad line no tab\n   \tno count\n   3\tno-brackets\n   7\tDan <d@x.io>\n";
+        let entries = parse_shortlog_output(raw);
+        // Carol + Dan only — every other line is malformed and silently skipped.
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name.as_ref(), "Carol");
+        assert_eq!(entries[0].email.as_ref(), "c@x.io");
+        assert_eq!(entries[0].commit_count, 5);
+        assert_eq!(entries[1].name.as_ref(), "Dan");
+        assert_eq!(entries[1].commit_count, 7);
+    }
+
+    #[test]
+    fn test_parse_shortlog_output_handles_email_with_angle_brackets_in_name() {
+        // Pathological but legal: name contains '<', email is still the
+        // last <...> pair on the line. `rfind` makes us pick the last
+        // pair, which is the canonical email.
+        let raw = "  2\tAlice <weird> <alice@example.com>\n";
+        let entries = parse_shortlog_output(raw);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].email.as_ref(), "alice@example.com");
     }
 
     #[gpui::test]

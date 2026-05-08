@@ -1039,11 +1039,25 @@ impl GitGraph {
         self.fetch_initial_graph_data(cx);
     }
 
+    pub fn set_user_filter(
+        &mut self,
+        authors: Vec<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.filters.authors == authors {
+            return;
+        }
+        self.filters.authors = authors;
+        self.invalidate_state(cx);
+        self.fetch_initial_graph_data(cx);
+    }
+
     fn render_log_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         log_toolbar::LogToolbar::new(
             cx.weak_entity(),
             self.filters.date_range,
             self.filters.branches.clone(),
+            self.filters.authors.clone(),
             self.get_repository(cx),
         )
         .render(cx)

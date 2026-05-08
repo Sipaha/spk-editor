@@ -33,11 +33,11 @@ use git::{
     blame::Blame,
     parse_git_remote_url,
     repository::{
-        Branch, CommitData, CommitDetails, CommitDiff, CommitFile, CommitOptions,
-        CreateWorktreeTarget, DiffType, FetchOptions, GitCommitTemplate, GitRepository,
-        GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder, LogSource, PushOptions, Remote,
-        RemoteCommandOutput, RepoPath, ResetMode, SearchCommitArgs, UpstreamTrackingStatus,
-        Worktree as GitWorktree,
+        AuthorHistoryEntry, Branch, CommitData, CommitDetails, CommitDiff, CommitFile,
+        CommitOptions, CreateWorktreeTarget, DiffType, FetchOptions, GitCommitTemplate,
+        GitRepository, GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder, LogSource,
+        PushOptions, Remote, RemoteCommandOutput, RepoPath, ResetMode, SearchCommitArgs,
+        UpstreamTrackingStatus, Worktree as GitWorktree,
     },
     stash::{GitStash, StashEntry},
     status::{
@@ -4950,6 +4950,25 @@ impl Repository {
             };
         })
         .detach();
+    }
+
+    /// Run `git shortlog -sne --all` over the active local repo. Returns
+    /// an empty vec for remote repos (collab) and surfaces backend errors
+    /// to the caller. Powers the chip-User filter popover (S-FLT).
+    pub fn author_history(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Vec<AuthorHistoryEntry>>> {
+        let repository_state = self.repository_state.clone();
+        cx.background_spawn(async move {
+            match repository_state.await {
+                Ok(RepositoryState::Local(LocalRepositoryState { backend, .. })) => {
+                    backend.author_history().await
+                }
+                Ok(RepositoryState::Remote(_)) => Ok(Vec::new()),
+                Err(err) => Err(anyhow!("{err}")),
+            }
+        })
     }
 
     pub fn graph_data(
