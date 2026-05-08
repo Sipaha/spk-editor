@@ -7359,6 +7359,7 @@ dependencies = [
  "gpui",
  "language",
  "language_model",
+ "log",
  "menu",
  "project",
  "project_panel",

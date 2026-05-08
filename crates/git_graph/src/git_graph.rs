@@ -1098,6 +1098,7 @@ impl GitGraph {
             return;
         }
         self.highlights.my_commits = on;
+        cx.emit(ItemEvent::Edit);
         cx.notify();
     }
 
@@ -1119,6 +1120,7 @@ impl GitGraph {
         } else {
             self.highlights.last_seen_sha = None;
         }
+        cx.emit(ItemEvent::Edit);
         cx.notify();
     }
 
@@ -1127,6 +1129,7 @@ impl GitGraph {
             return;
         }
         self.view_options.compact_refs = on;
+        cx.emit(ItemEvent::Edit);
         cx.notify();
     }
 
@@ -1135,6 +1138,7 @@ impl GitGraph {
             return;
         }
         self.view_options.group_by_date = on;
+        cx.emit(ItemEvent::Edit);
         cx.notify();
     }
 
@@ -3434,6 +3438,17 @@ impl workspace::SerializableItem for GitGraph {
             selected_sha,
             search_query,
             search_case_sensitive,
+            filter_branches,
+            filter_authors,
+            filter_paths,
+            filter_date_since,
+            filter_date_until,
+            filter_all_refs,
+            highlight_my_commits,
+            highlight_new_since_refresh,
+            highlight_last_seen_sha,
+            view_compact_refs,
+            view_group_by_date,
         )) = db.get_git_graph(item_id, workspace_id).ok().flatten()
         else {
             return Task::ready(Err(anyhow::anyhow!("No git graph to deserialize")));
@@ -3446,6 +3461,17 @@ impl workspace::SerializableItem for GitGraph {
             selected_sha,
             search_query,
             search_case_sensitive,
+            filter_branches,
+            filter_authors,
+            filter_paths,
+            filter_date_since,
+            filter_date_until,
+            filter_all_refs,
+            highlight_my_commits,
+            highlight_new_since_refresh,
+            highlight_last_seen_sha,
+            view_compact_refs,
+            view_group_by_date,
         };
 
         let window_handle = window.window_handle();
@@ -3474,11 +3500,17 @@ impl workspace::SerializableItem for GitGraph {
 
                 let log_source = persistence::deserialize_log_source(&state);
                 let log_order = persistence::deserialize_log_order(&state);
+                let filters = persistence::deserialize_log_filters(&state);
+                let highlights = persistence::deserialize_highlights(&state);
+                let view_options = persistence::deserialize_view_options(&state);
 
                 let git_graph = cx.new(|cx| {
                     let mut graph =
                         GitGraph::new(repo_id, git_store, workspace, Some(log_source), window, cx);
                     graph.log_order = log_order;
+                    graph.filters = filters;
+                    graph.highlights = highlights;
+                    graph.view_options = view_options;
 
                     if let Some(sha) = &state.selected_sha {
                         graph.select_commit_by_sha(sha.as_str(), cx);
@@ -3541,6 +3573,10 @@ impl workspace::SerializableItem for GitGraph {
         let log_order = Some(persistence::serialize_log_order(&self.log_order));
         let search_case_sensitive = Some(self.search_state.case_sensitive);
 
+        let filter_columns = persistence::serialize_log_filters(&self.filters);
+        let highlight_columns = persistence::serialize_highlights(&self.highlights);
+        let view_columns = persistence::serialize_view_options(&self.view_options);
+
         let db = persistence::GitGraphsDb::global(cx);
         Some(cx.background_spawn(async move {
             db.save_git_graph(
@@ -3553,6 +3589,17 @@ impl workspace::SerializableItem for GitGraph {
                 selected_sha,
                 search_query,
                 search_case_sensitive,
+                filter_columns.branches,
+                filter_columns.authors,
+                filter_columns.paths,
+                filter_columns.date_since,
+                filter_columns.date_until,
+                filter_columns.all_refs,
+                highlight_columns.my_commits,
+                highlight_columns.new_since_refresh,
+                highlight_columns.last_seen_sha,
+                view_columns.compact_refs,
+                view_columns.group_by_date,
             )
             .await
         }))
@@ -3578,7 +3625,14 @@ mod persistence {
         Oid,
         repository::{LogOrder, LogSource, RepoPath},
     };
+    use gpui::SharedString;
     use workspace::WorkspaceDb;
+
+    use crate::{
+        filters::{DateRange, LogFilters},
+        highlights::HighlightSet,
+        view_options::ViewOptions,
+    };
 
     pub struct GitGraphsDb(ThreadSafeConnection);
 
@@ -3607,6 +3661,19 @@ mod persistence {
                 ALTER TABLE git_graphs ADD COLUMN selected_sha TEXT;
                 ALTER TABLE git_graphs ADD COLUMN search_query TEXT;
                 ALTER TABLE git_graphs ADD COLUMN search_case_sensitive INTEGER;
+            ),
+            sql!(
+                ALTER TABLE git_graphs ADD COLUMN filter_branches TEXT;
+                ALTER TABLE git_graphs ADD COLUMN filter_authors TEXT;
+                ALTER TABLE git_graphs ADD COLUMN filter_paths TEXT;
+                ALTER TABLE git_graphs ADD COLUMN filter_date_since INTEGER;
+                ALTER TABLE git_graphs ADD COLUMN filter_date_until INTEGER;
+                ALTER TABLE git_graphs ADD COLUMN filter_all_refs INTEGER;
+                ALTER TABLE git_graphs ADD COLUMN highlight_my_commits INTEGER;
+                ALTER TABLE git_graphs ADD COLUMN highlight_new_since_refresh INTEGER;
+                ALTER TABLE git_graphs ADD COLUMN highlight_last_seen_sha TEXT;
+                ALTER TABLE git_graphs ADD COLUMN view_compact_refs INTEGER;
+                ALTER TABLE git_graphs ADD COLUMN view_group_by_date INTEGER;
             ),
         ];
     }
@@ -3692,42 +3759,322 @@ mod persistence {
         pub selected_sha: Option<String>,
         pub search_query: Option<String>,
         pub search_case_sensitive: Option<bool>,
+        pub filter_branches: Option<String>,
+        pub filter_authors: Option<String>,
+        pub filter_paths: Option<String>,
+        pub filter_date_since: Option<i64>,
+        pub filter_date_until: Option<i64>,
+        pub filter_all_refs: Option<bool>,
+        pub highlight_my_commits: Option<bool>,
+        pub highlight_new_since_refresh: Option<bool>,
+        pub highlight_last_seen_sha: Option<String>,
+        pub view_compact_refs: Option<bool>,
+        pub view_group_by_date: Option<bool>,
     }
+
+    /// Column values produced from a [`LogFilters`] for the `save_git_graph`
+    /// query. Bundled to keep the function signature manageable.
+    #[derive(Debug, Default, Clone)]
+    pub struct SerializedFilterColumns {
+        pub branches: Option<String>,
+        pub authors: Option<String>,
+        pub paths: Option<String>,
+        pub date_since: Option<i64>,
+        pub date_until: Option<i64>,
+        pub all_refs: Option<bool>,
+    }
+
+    #[derive(Debug, Default, Clone)]
+    pub struct SerializedHighlightColumns {
+        pub my_commits: Option<bool>,
+        pub new_since_refresh: Option<bool>,
+        pub last_seen_sha: Option<String>,
+    }
+
+    #[derive(Debug, Default, Clone)]
+    pub struct SerializedViewColumns {
+        pub compact_refs: Option<bool>,
+        pub group_by_date: Option<bool>,
+    }
+
+    pub fn serialize_log_filters(filters: &LogFilters) -> SerializedFilterColumns {
+        let branches = if filters.branches.is_empty() {
+            None
+        } else {
+            let raw: Vec<&str> = filters.branches.iter().map(|s| s.as_ref()).collect();
+            serde_json::to_string(&raw).ok()
+        };
+        let authors = if filters.authors.is_empty() {
+            None
+        } else {
+            let raw: Vec<&str> = filters.authors.iter().map(|s| s.as_ref()).collect();
+            serde_json::to_string(&raw).ok()
+        };
+        let paths = if filters.paths.is_empty() {
+            None
+        } else {
+            let raw: Vec<String> = filters
+                .paths
+                .iter()
+                .map(|p| p.as_unix_str().to_string())
+                .collect();
+            serde_json::to_string(&raw).ok()
+        };
+        let (date_since, date_until) = match filters.date_range {
+            Some(DateRange::Since(s)) => (Some(s), None),
+            Some(DateRange::Until(u)) => (None, Some(u)),
+            Some(DateRange::Between { since, until }) => (Some(since), Some(until)),
+            None => (None, None),
+        };
+        let all_refs = if filters.all_refs { Some(true) } else { None };
+
+        SerializedFilterColumns {
+            branches,
+            authors,
+            paths,
+            date_since,
+            date_until,
+            all_refs,
+        }
+    }
+
+    pub fn deserialize_log_filters(state: &SerializedGitGraphState) -> LogFilters {
+        let branches = decode_string_vec(state.filter_branches.as_deref(), "filter_branches")
+            .into_iter()
+            .map(SharedString::from)
+            .collect();
+        let authors = decode_string_vec(state.filter_authors.as_deref(), "filter_authors")
+            .into_iter()
+            .map(SharedString::from)
+            .collect();
+        let paths = decode_string_vec(state.filter_paths.as_deref(), "filter_paths")
+            .into_iter()
+            .filter_map(|s| match RepoPath::new(&s) {
+                Ok(p) => Some(p),
+                Err(err) => {
+                    log::warn!("git_graph: skipping invalid persisted path {s:?}: {err}");
+                    None
+                }
+            })
+            .collect();
+        let date_range = match (state.filter_date_since, state.filter_date_until) {
+            (Some(since), Some(until)) => Some(DateRange::Between { since, until }),
+            (Some(since), None) => Some(DateRange::Since(since)),
+            (None, Some(until)) => Some(DateRange::Until(until)),
+            (None, None) => None,
+        };
+
+        LogFilters {
+            branches,
+            authors,
+            date_range,
+            paths,
+            query: None,
+            all_refs: state.filter_all_refs.unwrap_or(false),
+            sha: None,
+        }
+    }
+
+    pub fn serialize_highlights(h: &HighlightSet) -> SerializedHighlightColumns {
+        SerializedHighlightColumns {
+            my_commits: if h.my_commits { Some(true) } else { None },
+            new_since_refresh: if h.new_since_refresh { Some(true) } else { None },
+            last_seen_sha: h.last_seen_sha.map(|oid| oid.to_string()),
+        }
+    }
+
+    pub fn deserialize_highlights(state: &SerializedGitGraphState) -> HighlightSet {
+        let last_seen_sha = state
+            .highlight_last_seen_sha
+            .as_deref()
+            .and_then(|s| match Oid::from_str(s) {
+                Ok(oid) => Some(oid),
+                Err(err) => {
+                    log::warn!(
+                        "git_graph: dropping invalid persisted last_seen_sha {s:?}: {err}"
+                    );
+                    None
+                }
+            });
+        HighlightSet {
+            my_commits: state.highlight_my_commits.unwrap_or(false),
+            new_since_refresh: state.highlight_new_since_refresh.unwrap_or(false),
+            last_seen_sha,
+        }
+    }
+
+    pub fn serialize_view_options(v: &ViewOptions) -> SerializedViewColumns {
+        SerializedViewColumns {
+            compact_refs: if v.compact_refs { Some(true) } else { None },
+            group_by_date: if v.group_by_date { Some(true) } else { None },
+        }
+    }
+
+    pub fn deserialize_view_options(state: &SerializedGitGraphState) -> ViewOptions {
+        ViewOptions {
+            compact_refs: state.view_compact_refs.unwrap_or(false),
+            group_by_date: state.view_group_by_date.unwrap_or(false),
+        }
+    }
+
+    fn decode_string_vec(raw: Option<&str>, column: &str) -> Vec<String> {
+        match raw {
+            None | Some("") => Vec::new(),
+            Some(s) => match serde_json::from_str::<Vec<String>>(s) {
+                Ok(v) => v,
+                Err(err) => {
+                    log::warn!(
+                        "git_graph: malformed JSON in column {column}: {err}; resetting to empty"
+                    );
+                    Vec::new()
+                }
+            },
+        }
+    }
+
+    /// Column tuples for `save_git_graph` — split into chunks because the
+    /// `Bind`/`Column` trait impls only cover tuples of up to 10 elements,
+    /// and the full row is wider than that. Tuples nest naturally, so the
+    /// `query!` macro can still bind/select into them as one composite row.
+    pub type CoreSaveTuple = (
+        workspace::ItemId,
+        workspace::WorkspaceId,
+        String,
+        Option<i32>,
+        Option<String>,
+        Option<i32>,
+        Option<String>,
+        Option<String>,
+        Option<bool>,
+    );
+
+    pub type FilterSaveTuple = (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        Option<bool>,
+    );
+
+    pub type HighlightViewSaveTuple = (
+        Option<bool>,
+        Option<bool>,
+        Option<String>,
+        Option<bool>,
+        Option<bool>,
+    );
+
+    /// Result row for `get_git_graph` — same chunking rationale as
+    /// [`CoreSaveTuple`].
+    pub type CoreLoadTuple = (
+        PathBuf,
+        Option<i32>,
+        Option<String>,
+        Option<i32>,
+        Option<String>,
+        Option<String>,
+        Option<bool>,
+    );
+
+    pub type FilterLoadTuple = (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        Option<bool>,
+    );
+
+    pub type HighlightViewLoadTuple = (
+        Option<bool>,
+        Option<bool>,
+        Option<String>,
+        Option<bool>,
+        Option<bool>,
+    );
 
     impl GitGraphsDb {
         query! {
-            pub async fn save_git_graph(
-                item_id: workspace::ItemId,
-                workspace_id: workspace::WorkspaceId,
-                repo_working_path: String,
-                log_source_type: Option<i32>,
-                log_source_value: Option<String>,
-                log_order: Option<i32>,
-                selected_sha: Option<String>,
-                search_query: Option<String>,
-                search_case_sensitive: Option<bool>
+            pub async fn save_git_graph_raw(
+                core: CoreSaveTuple,
+                filters: FilterSaveTuple,
+                highlights_view: HighlightViewSaveTuple
             ) -> Result<()> {
                 INSERT OR REPLACE INTO git_graphs(
                     item_id, workspace_id, repo_working_path,
                     log_source_type, log_source_value, log_order,
-                    selected_sha, search_query, search_case_sensitive
+                    selected_sha, search_query, search_case_sensitive,
+                    filter_branches, filter_authors, filter_paths,
+                    filter_date_since, filter_date_until, filter_all_refs,
+                    highlight_my_commits, highlight_new_since_refresh, highlight_last_seen_sha,
+                    view_compact_refs, view_group_by_date
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             }
         }
 
+        #[allow(clippy::too_many_arguments)]
+        pub async fn save_git_graph(
+            &self,
+            item_id: workspace::ItemId,
+            workspace_id: workspace::WorkspaceId,
+            repo_working_path: String,
+            log_source_type: Option<i32>,
+            log_source_value: Option<String>,
+            log_order: Option<i32>,
+            selected_sha: Option<String>,
+            search_query: Option<String>,
+            search_case_sensitive: Option<bool>,
+            filter_branches: Option<String>,
+            filter_authors: Option<String>,
+            filter_paths: Option<String>,
+            filter_date_since: Option<i64>,
+            filter_date_until: Option<i64>,
+            filter_all_refs: Option<bool>,
+            highlight_my_commits: Option<bool>,
+            highlight_new_since_refresh: Option<bool>,
+            highlight_last_seen_sha: Option<String>,
+            view_compact_refs: Option<bool>,
+            view_group_by_date: Option<bool>,
+        ) -> anyhow::Result<()> {
+            let core: CoreSaveTuple = (
+                item_id,
+                workspace_id,
+                repo_working_path,
+                log_source_type,
+                log_source_value,
+                log_order,
+                selected_sha,
+                search_query,
+                search_case_sensitive,
+            );
+            let filters: FilterSaveTuple = (
+                filter_branches,
+                filter_authors,
+                filter_paths,
+                filter_date_since,
+                filter_date_until,
+                filter_all_refs,
+            );
+            let highlights_view: HighlightViewSaveTuple = (
+                highlight_my_commits,
+                highlight_new_since_refresh,
+                highlight_last_seen_sha,
+                view_compact_refs,
+                view_group_by_date,
+            );
+            self.save_git_graph_raw(core, filters, highlights_view).await
+        }
+
         query! {
-            pub fn get_git_graph(
+            fn get_git_graph_raw(
                 item_id: workspace::ItemId,
                 workspace_id: workspace::WorkspaceId
             ) -> Result<Option<(
-                PathBuf,
-                Option<i32>,
-                Option<String>,
-                Option<i32>,
-                Option<String>,
-                Option<String>,
-                Option<bool>
+                CoreLoadTuple,
+                FilterLoadTuple,
+                HighlightViewLoadTuple
             )>> {
                 SELECT
                     repo_working_path,
@@ -3736,10 +4083,96 @@ mod persistence {
                     log_order,
                     selected_sha,
                     search_query,
-                    search_case_sensitive
+                    search_case_sensitive,
+                    filter_branches,
+                    filter_authors,
+                    filter_paths,
+                    filter_date_since,
+                    filter_date_until,
+                    filter_all_refs,
+                    highlight_my_commits,
+                    highlight_new_since_refresh,
+                    highlight_last_seen_sha,
+                    view_compact_refs,
+                    view_group_by_date
                 FROM git_graphs
                 WHERE item_id = ? AND workspace_id = ?
             }
+        }
+
+        pub fn get_git_graph(
+            &self,
+            item_id: workspace::ItemId,
+            workspace_id: workspace::WorkspaceId,
+        ) -> anyhow::Result<
+            Option<(
+                PathBuf,
+                Option<i32>,
+                Option<String>,
+                Option<i32>,
+                Option<String>,
+                Option<String>,
+                Option<bool>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<i64>,
+                Option<i64>,
+                Option<bool>,
+                Option<bool>,
+                Option<bool>,
+                Option<String>,
+                Option<bool>,
+                Option<bool>,
+            )>,
+        > {
+            let row = self.get_git_graph_raw(item_id, workspace_id)?;
+            Ok(row.map(|(core, filters, highlights_view)| {
+                let (
+                    repo_working_path,
+                    log_source_type,
+                    log_source_value,
+                    log_order,
+                    selected_sha,
+                    search_query,
+                    search_case_sensitive,
+                ) = core;
+                let (
+                    filter_branches,
+                    filter_authors,
+                    filter_paths,
+                    filter_date_since,
+                    filter_date_until,
+                    filter_all_refs,
+                ) = filters;
+                let (
+                    highlight_my_commits,
+                    highlight_new_since_refresh,
+                    highlight_last_seen_sha,
+                    view_compact_refs,
+                    view_group_by_date,
+                ) = highlights_view;
+                (
+                    repo_working_path,
+                    log_source_type,
+                    log_source_value,
+                    log_order,
+                    selected_sha,
+                    search_query,
+                    search_case_sensitive,
+                    filter_branches,
+                    filter_authors,
+                    filter_paths,
+                    filter_date_since,
+                    filter_date_until,
+                    filter_all_refs,
+                    highlight_my_commits,
+                    highlight_new_since_refresh,
+                    highlight_last_seen_sha,
+                    view_compact_refs,
+                    view_group_by_date,
+                )
+            }))
         }
     }
 }
@@ -4907,6 +5340,7 @@ mod tests {
             selected_sha: Some(sha.to_string()),
             search_query: Some("fix bug".to_string()),
             search_case_sensitive: Some(true),
+            ..Default::default()
         };
 
         assert_eq!(
@@ -4931,6 +5365,7 @@ mod tests {
             selected_sha: None,
             search_query: None,
             search_case_sensitive: None,
+            ..Default::default()
         };
         assert_eq!(
             persistence::deserialize_log_source(&all_state),
@@ -4970,6 +5405,130 @@ mod tests {
             persistence::deserialize_log_order(&empty_state),
             LogOrder::DateOrder
         ));
+    }
+
+    #[gpui::test]
+    fn test_filter_state_roundtrip(_cx: &mut TestAppContext) {
+        use crate::filters::{DateRange, LogFilters};
+        use crate::highlights::HighlightSet;
+        use crate::view_options::ViewOptions;
+        use persistence::SerializedGitGraphState;
+
+        let last_seen = Oid::from_bytes(&[0xcd; 20]).unwrap();
+        let filters = LogFilters {
+            branches: vec!["main".into(), "feature/x".into()],
+            authors: vec!["alice@example.com".into()],
+            date_range: Some(DateRange::Between {
+                since: 100,
+                until: 200,
+            }),
+            paths: vec![
+                RepoPath::new(&"src/main.rs").unwrap(),
+                RepoPath::new(&"docs/readme.md").unwrap(),
+            ],
+            query: None,
+            all_refs: true,
+            sha: None,
+        };
+        let highlights = HighlightSet {
+            my_commits: true,
+            new_since_refresh: true,
+            last_seen_sha: Some(last_seen),
+        };
+        let view = ViewOptions {
+            compact_refs: true,
+            group_by_date: false,
+        };
+
+        let filter_cols = persistence::serialize_log_filters(&filters);
+        let hl_cols = persistence::serialize_highlights(&highlights);
+        let view_cols = persistence::serialize_view_options(&view);
+
+        let state = SerializedGitGraphState {
+            filter_branches: filter_cols.branches,
+            filter_authors: filter_cols.authors,
+            filter_paths: filter_cols.paths,
+            filter_date_since: filter_cols.date_since,
+            filter_date_until: filter_cols.date_until,
+            filter_all_refs: filter_cols.all_refs,
+            highlight_my_commits: hl_cols.my_commits,
+            highlight_new_since_refresh: hl_cols.new_since_refresh,
+            highlight_last_seen_sha: hl_cols.last_seen_sha,
+            view_compact_refs: view_cols.compact_refs,
+            view_group_by_date: view_cols.group_by_date,
+            ..Default::default()
+        };
+
+        let restored_filters = persistence::deserialize_log_filters(&state);
+        assert_eq!(restored_filters, filters);
+
+        let restored_highlights = persistence::deserialize_highlights(&state);
+        assert_eq!(restored_highlights, highlights);
+
+        let restored_view = persistence::deserialize_view_options(&state);
+        assert_eq!(restored_view, view);
+
+        let empty = SerializedGitGraphState::default();
+        assert_eq!(
+            persistence::deserialize_log_filters(&empty),
+            LogFilters::default()
+        );
+        assert_eq!(
+            persistence::deserialize_highlights(&empty),
+            HighlightSet::default()
+        );
+        assert_eq!(
+            persistence::deserialize_view_options(&empty),
+            ViewOptions::default()
+        );
+
+        let since_only = LogFilters {
+            date_range: Some(DateRange::Since(42)),
+            ..LogFilters::default()
+        };
+        let since_cols = persistence::serialize_log_filters(&since_only);
+        let since_state = SerializedGitGraphState {
+            filter_date_since: since_cols.date_since,
+            filter_date_until: since_cols.date_until,
+            ..Default::default()
+        };
+        assert_eq!(
+            persistence::deserialize_log_filters(&since_state).date_range,
+            Some(DateRange::Since(42))
+        );
+
+        let until_only = LogFilters {
+            date_range: Some(DateRange::Until(99)),
+            ..LogFilters::default()
+        };
+        let until_cols = persistence::serialize_log_filters(&until_only);
+        let until_state = SerializedGitGraphState {
+            filter_date_since: until_cols.date_since,
+            filter_date_until: until_cols.date_until,
+            ..Default::default()
+        };
+        assert_eq!(
+            persistence::deserialize_log_filters(&until_state).date_range,
+            Some(DateRange::Until(99))
+        );
+
+        let malformed = SerializedGitGraphState {
+            filter_branches: Some("not json".into()),
+            filter_paths: Some("\"oops\"".into()),
+            ..Default::default()
+        };
+        let restored_malformed = persistence::deserialize_log_filters(&malformed);
+        assert!(restored_malformed.branches.is_empty());
+        assert!(restored_malformed.paths.is_empty());
+
+        let bad_sha_state = SerializedGitGraphState {
+            highlight_last_seen_sha: Some("not-a-sha".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            persistence::deserialize_highlights(&bad_sha_state).last_seen_sha,
+            None
+        );
     }
 
     #[gpui::test]
@@ -5057,6 +5616,17 @@ mod tests {
             selected_sha.clone(),
             Some("some query".to_string()),
             Some(true),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
         .expect("save should succeed");
