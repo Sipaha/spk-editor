@@ -17,11 +17,16 @@ For fork **philosophy** (rebrand identifiers, what's disabled, build conventions
 
 See `.rules` § "What's disabled" for the table. Brief: `auto_update`, `telemetry`, `collab` / `collab_ui`, sign-in, native cloud LLM (`CloudLanguageModelProvider`), `zeta` edit prediction, Sentry uploads, 41 CI workflows, **`agent_ui::AgentPanel` dock panel + Welcome `render_agent_card`** (the fork's AI is `solution_agent`; upstream's panel is a parallel unconfigured surface). Code stays in tree, init/dispatch/UI sites are commented out (`if false { … }` is fine) — re-enabling stays a one-line change and we haven't audited what other crates implicitly depend on these subsystems' types or globals.
 
-## Touched upstream files
+## Notable upstream file modifications
 
-The fork no longer plans periodic `git merge upstream/main`, so this table is **not** a "minimize merge cost" scoreboard. It exists for a narrower purpose: it's the list of files where a future cherry-pick from upstream will *not* apply cleanly and has to be reconciled by hand. Once a file appears here, further edits inside it don't need a new row — the cherry-pick was already going to be manual. New rows only when an upstream file gets its **first** local touch.
+This fork no longer constrains itself to additive-only modifications of upstream files. When refactoring or restructuring upstream code yields a meaningfully better result, it is done — the fork accepts the merge-conflict cost as the price of clean local code. The table below is informational, not normative: it records significant divergences from upstream, but is not a contract that prevents further changes.
 
-Within these files, refactor / rename / cleanup is fine — diff-minimality buys nothing once the file is on the manual-reconcile list. Files **not** listed here are still untouched core; the "don't refactor for style" rule applies there to keep cherry-picks cheap.
+**Working principles for upstream modifications:**
+
+1. **Locality over indirection.** Extensions live where the thing they extend lives. Don't create wrapper crates solely to keep upstream files untouched.
+2. **Refactor when it pays.** If splitting an upstream file into submodules, renaming types, or restructuring layout meaningfully improves the local code, do it. Document significant divergences in the table below.
+3. **Identifiers stay.** Crate names, module paths, and public type names follow upstream unless there's a strong reason — they're cheap to preserve and reduce friction in cross-references.
+4. **Prefer file-level rewrites over scattered patches.** If five separate hunks across a file each conflict with upstream, a single full-file rewrite is often easier to maintain than five conflicting patches.
 
 | File | Change | Owning fork crate |
 |---|---|---|
@@ -229,7 +234,7 @@ Some sessions used `superpowers:subagent-driven-development` to land features ta
 
 Add to FORK.md when:
 - A new fork-local crate is added.
-- A new upstream file is touched (additive change, not a style refactor).
+- A new upstream file gets its first local modification.
 - A non-obvious architectural decision is made — record the *why* before it gets lost.
 
 Don't add:
