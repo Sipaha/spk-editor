@@ -204,7 +204,7 @@ impl SolutionSessionsNavigator {
         let Some(thread) = store
             .read(cx)
             .session(session_id)
-            .and_then(|s| s.read(cx).acp_thread.clone())
+            .and_then(|s| s.read(cx).acp_thread().cloned())
         else {
             return;
         };
@@ -373,8 +373,7 @@ impl SolutionSessionsNavigator {
         // "0 / 1.0M · 0.0%" for any restored conversation, which
         // looked like the editor lost the agent's context.
         let usage = s
-            .acp_thread
-            .as_ref()
+            .acp_thread()
             .and_then(|thread| thread.read(cx).token_usage().cloned())
             .or_else(|| {
                 s.cached_total_tokens.map(|used| acp_thread::TokenUsage {
@@ -386,7 +385,7 @@ impl SolutionSessionsNavigator {
         // ("default", "plan", …). Claude exposes this via ACP — when
         // the connection doesn't implement modes (e.g. mock test
         // adapter) we just hide the segment.
-        let mode_text: Option<SharedString> = s.acp_thread.as_ref().and_then(|thread| {
+        let mode_text: Option<SharedString> = s.acp_thread().and_then(|thread| {
             let thread = thread.read(cx);
             let modes = thread.connection().session_modes(thread.session_id(), cx)?;
             let current = modes.current_mode();

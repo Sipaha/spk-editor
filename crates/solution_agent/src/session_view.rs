@@ -30,7 +30,7 @@ use crate::expanded_compose::{
     EXPANDED_COMPOSE_DEFAULT_H, EXPANDED_COMPOSE_DEFAULT_W, EXPANDED_COMPOSE_HEIGHT_RATIO,
     ExpandedComposeWindowView,
 };
-use crate::model::{SessionState, SolutionSession, SolutionSessionId};
+use crate::model::{SessionState, SolutionSession, SolutionSessionEvent, SolutionSessionId};
 use crate::navigator::SolutionSessionsNavigator;
 use crate::slash_commands::SlashCommandsProvider;
 use crate::store::SolutionAgentStore;
@@ -188,6 +188,17 @@ pub struct SolutionSessionView {
     /// `session.acp_thread`'s id to decide whether to reinstall the
     /// subscription.
     last_thread_entity_id: Option<EntityId>,
+    /// Push-channel listener on the session entity itself. Wakes up
+    /// `sync_thread_subscription` whenever the session emits
+    /// `SolutionSessionEvent::ThreadReplaced` (compact, `/clear`,
+    /// cold→live, etc.). Belt-and-suspenders alongside the
+    /// `cx.observe(&session)` callback registered in `new`: observation
+    /// goes through GPUI's auto-notify path, which can be lost when a
+    /// nested `session_entity.update(cx, |s, _| ...)` runs inside an
+    /// outer `store.update`. The explicit event bypasses that fragility
+    /// — every `set_acp_thread` call emits exactly one and we re-attach
+    /// directly.
+    _session_event_subscription: Option<Subscription>,
     /// Monotonic counter for `[image #N]` placeholder labels in pasted
     /// images. Increments on every paste and never resets — without it
     /// the third image pasted into a session showed `[image #1]` again
@@ -350,6 +361,22 @@ impl SolutionSessionView {
             })));
             e
         });
+        // Push-channel from `SolutionSession::set_acp_thread` straight
+        // into `sync_thread_subscription`. Set up before moving `session`
+        // into the struct literal so the borrow ends before the move.
+        let session_event_subscription = cx.subscribe(
+            &session,
+            |this, _session, event, cx| match event {
+                SolutionSessionEvent::ThreadReplaced => {
+                    // Direct re-attach. Does not rely on the
+                    // `cx.observe(&session)` callback firing — that path
+                    // goes through GPUI auto-notify, which can be lost
+                    // when a nested `session_entity.update(cx, |s, _|...)`
+                    // runs inside an outer `store.update`.
+                    this.sync_thread_subscription(cx);
+                }
+            },
+        );
         let mut view = Self {
             session_id,
             session,
@@ -394,6 +421,7 @@ impl SolutionSessionView {
             assistant_label_for_render: SharedString::from("Assistant"),
             _thread_subscription: None,
             last_thread_entity_id: None,
+            _session_event_subscription: Some(session_event_subscription),
             image_count_so_far: 0,
             queue_collapsed: true,
             pending_send: None,
@@ -417,7 +445,7 @@ impl SolutionSessionView {
         // shows up on first frame, and tail-anchor so we land on the
         // latest message instead of the head.
         let cold_count = view.session.read(cx).cold_entries.len();
-        if view.session.read(cx).acp_thread.is_none() && cold_count > 0 {
+        if view.session.read(cx).acp_thread().is_none() && cold_count > 0 {
             view.list_state.reset(cold_count);
             view.list_state.set_follow_mode(FollowMode::Tail);
             view.list_state.scroll_to_end();
@@ -452,7 +480,7 @@ impl SolutionSessionView {
     /// the first paint of a freshly-attached thread is consistent.
     fn sync_thread_subscription(&mut self, cx: &mut Context<Self>) {
         let session = self.session.read(cx);
-        let thread_opt = session.acp_thread.clone();
+        let thread_opt = session.acp_thread().cloned();
         let new_id = thread_opt.as_ref().map(Entity::entity_id);
         if new_id == self.last_thread_entity_id {
             return;
@@ -568,7 +596,7 @@ impl SolutionSessionView {
     /// frame; this version is O(N) once per thread mutation.
     fn recompute_rewind_table(&mut self, cx: &App) {
         let session = self.session.read(cx);
-        let Some(thread) = session.acp_thread.as_ref() else {
+        let Some(thread) = session.acp_thread() else {
             self.rewind_table.clear();
             return;
         };
@@ -626,8 +654,7 @@ impl SolutionSessionView {
         let language_registry = self
             .session
             .read(cx)
-            .acp_thread
-            .as_ref()
+            .acp_thread()
             .map(|thread| thread.read(cx).project().read(cx).languages().clone());
         let entity = cx.new(|cx| Markdown::new(source.clone(), language_registry, None, cx));
         self.pending_markdown = Some(entity);
@@ -667,8 +694,7 @@ impl SolutionSessionView {
         let language_registry = self
             .session
             .read(cx)
-            .acp_thread
-            .as_ref()
+            .acp_thread()
             .map(|thread| thread.read(cx).project().read(cx).languages().clone());
         let entity = cx.new(|cx| Markdown::new(source.clone(), language_registry, None, cx));
         self.resuming_markdown = Some(entity);
@@ -698,8 +724,7 @@ impl SolutionSessionView {
         let language_registry = self
             .session
             .read(cx)
-            .acp_thread
-            .as_ref()
+            .acp_thread()
             .map(|thread| thread.read(cx).project().read(cx).languages().clone());
         let entity = cx.new(|cx| Markdown::new(source.clone(), language_registry, None, cx));
         self.markdown_cache.insert(
@@ -801,7 +826,7 @@ impl SolutionSessionView {
         let query_lower = query.to_lowercase();
         let mut matches = Vec::new();
         let session = self.session.read(cx);
-        if let Some(thread) = session.acp_thread.as_ref() {
+        if let Some(thread) = session.acp_thread() {
             let thread = thread.read(cx);
             for (entry_idx, entry) in thread.entries().iter().enumerate() {
                 for (span_idx, text) in entry_text_spans(entry, cx).into_iter().enumerate() {
@@ -1425,7 +1450,7 @@ impl SolutionSessionView {
         let Some(blocks) = self.pending_send.take() else {
             return;
         };
-        if self.session.read(cx).acp_thread.is_none() {
+        if self.session.read(cx).acp_thread().is_none() {
             // Resume hasn't attached the thread yet — keep waiting.
             self.pending_send = Some(blocks);
             return;
@@ -1488,8 +1513,7 @@ impl SolutionSessionView {
         let commands = self
             .session
             .read(cx)
-            .acp_thread
-            .as_ref()
+            .acp_thread()
             .map(|thread| thread.read(cx).available_commands().to_vec())
             .unwrap_or_default();
         let matched = commands.iter().find(|cmd| cmd.name == name);
@@ -1750,7 +1774,7 @@ impl SolutionSessionView {
         // tabs from the live `AcpThread`. Both branches yield
         // `&AgentThreadEntry` so the markdown-cache pre-pass and the
         // virtualized list's processor closure stay symmetric.
-        match session.acp_thread.as_ref() {
+        match session.acp_thread() {
             Some(thread) => thread
                 .read(cx)
                 .entries()
@@ -1777,7 +1801,7 @@ impl SolutionSessionView {
     fn sync_terminal_observers(&mut self, cx: &mut Context<Self>) {
         let mut current = Vec::new();
         let session = self.session.read(cx);
-        if let Some(thread) = session.acp_thread.as_ref() {
+        if let Some(thread) = session.acp_thread() {
             for entry in thread.read(cx).entries() {
                 if let AgentThreadEntry::ToolCall(call) = entry {
                     for content in &call.content {
@@ -1986,8 +2010,7 @@ impl Render for SolutionSessionView {
                 // reconstructed into `AgentThreadEntry` shape with
                 // fresh `Markdown` widgets.
                 let entries_count = session
-                    .acp_thread
-                    .as_ref()
+                    .acp_thread()
                     .map(|t| t.read(cx).entries().len())
                     .unwrap_or_else(|| session.cold_entries.len());
 
@@ -2024,7 +2047,7 @@ impl Render for SolutionSessionView {
                                     Option<&AgentThreadEntry>,
                                     gpui::WeakEntity<acp_thread::AcpThread>,
                                     bool,
-                                ) = match session.acp_thread.as_ref() {
+                                ) = match session.acp_thread() {
                                     Some(thread_entity) => {
                                         let thread = thread_entity.read(cx);
                                         let supports = thread.supports_truncate(cx);

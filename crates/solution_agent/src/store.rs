@@ -215,8 +215,7 @@ fn serializable_snapshot(session: &SolutionSession, cx: &App) -> Vec<u8> {
     // payload that drives the rich cold-restore render. v2 filters
     // in-progress tool calls (see `cold_persistence::to_persisted`).
     let live_entries: Vec<&acp_thread::AgentThreadEntry> = session
-        .acp_thread
-        .as_ref()
+        .acp_thread()
         .map(|thread| thread.read(cx).entries().iter().collect())
         .unwrap_or_default();
     let entries: Vec<PersistedEntry> = live_entries
@@ -420,27 +419,19 @@ impl SolutionAgentStore {
                 let title_base: SharedString = project_name_for_cwd(&solution, &session_cwd, cx)
                     .unwrap_or_else(|| SharedString::from(solution.name.clone()));
                 let title = unique_session_title(&title_base, store, &solution_id, cx);
-                let session = SolutionSession {
-                    id: session_id,
-                    solution_id: solution_id.clone(),
-                    agent_id: agent_id.clone(),
-                    acp_session_id,
-                    acp_thread: Some(acp_thread.clone()),
-                    title,
-                    created_at: Utc::now(),
-                    last_activity_at: Utc::now(),
-                    state: SessionState::Idle,
-                    context_count: 1,
-                    project: Some(project.clone()),
-                    _acp_subscription: None,
-                    pending_messages: std::collections::VecDeque::new(),
-                    flush_after_cancel: false,
-                    cwd: session_cwd.clone(),
-                    cold_entries: Vec::new(),
-                    last_turn_duration: None,
-                    cached_total_tokens: None,
-                };
-                let entity = cx.new(|_| session);
+                let entity = cx.new(|cx| {
+                    let mut s = SolutionSession::new_idle(
+                        session_id,
+                        solution_id.clone(),
+                        agent_id.clone(),
+                        acp_session_id,
+                    );
+                    s.title = title;
+                    s.project = Some(project.clone());
+                    s.cwd = session_cwd.clone();
+                    s.set_acp_thread(Some(acp_thread.clone()), cx);
+                    s
+                });
                 store.sessions.insert(session_id, entity);
                 let by_sol = store.by_solution.entry(solution_id.clone()).or_default();
                 if !by_sol.contains(&session_id) {
@@ -515,8 +506,7 @@ impl SolutionAgentStore {
         // emits a usage update, respectively. The DB write uses COALESCE so a
         // None on a follow-up insert never clobbers a previously-stored value.
         let (preview, total_tokens) = s
-            .acp_thread
-            .as_ref()
+            .acp_thread()
             .map(|thread| {
                 let thread = thread.read(cx);
                 // `used_tokens` is the cumulative context usage that
@@ -578,7 +568,7 @@ impl SolutionAgentStore {
                     .get(sid)
                     .map(|s| {
                         let s = s.read(cx);
-                        s.acp_session_id == meta.acp_session_id && s.acp_thread.is_some()
+                        s.acp_session_id == meta.acp_session_id && s.acp_thread().is_some()
                     })
                     .unwrap_or(false)
             })
@@ -765,7 +755,6 @@ impl SolutionAgentStore {
                             );
                         }
                         session.acp_session_id = new_thread_session_id;
-                        session.acp_thread = Some(acp_thread.clone());
                         session.last_activity_at = Utc::now();
                         session.state = SessionState::Idle;
                         session.context_count = meta.context_count;
@@ -774,32 +763,32 @@ impl SolutionAgentStore {
                         session.flush_after_cancel = false;
                         session.cwd = resume_cwd.clone();
                         session.cold_entries.clear();
-                        cx.notify();
+                        // `set_acp_thread` emits ThreadReplaced + notify;
+                        // it must be the last mutation so SessionView
+                        // observers see a fully-populated session when
+                        // they wake up to re-attach.
+                        session.set_acp_thread(Some(acp_thread.clone()), cx);
                     });
                 } else {
-                    let session = SolutionSession {
-                        id: session_id,
-                        solution_id: meta.solution_id.clone(),
-                        agent_id: meta.agent_id.clone(),
-                        acp_session_id: new_thread_session_id,
-                        acp_thread: Some(acp_thread.clone()),
-                        title: meta.title.clone(),
-                        created_at: meta.created_at,
-                        last_activity_at: Utc::now(),
-                        state: SessionState::Idle,
-                        context_count: meta.context_count,
-                        project: Some(project.clone()),
-                        _acp_subscription: None,
-                        pending_messages: std::collections::VecDeque::new(),
-                        flush_after_cancel: false,
-                        // Persist the same cwd we resumed against so the next
-                        // restart finds the row aligned with the agent state.
-                        cwd: resume_cwd.clone(),
-                        cold_entries: Vec::new(),
-                        last_turn_duration: None,
-                        cached_total_tokens: meta.total_tokens,
-                    };
-                    let entity = cx.new(|_| session);
+                    let entity = cx.new(|cx| {
+                        let mut s = SolutionSession::new_idle(
+                            session_id,
+                            meta.solution_id.clone(),
+                            meta.agent_id.clone(),
+                            new_thread_session_id,
+                        );
+                        s.title = meta.title.clone();
+                        s.created_at = meta.created_at;
+                        s.context_count = meta.context_count;
+                        s.project = Some(project.clone());
+                        // Persist the same cwd we resumed against so the
+                        // next restart finds the row aligned with the
+                        // agent state.
+                        s.cwd = resume_cwd.clone();
+                        s.cached_total_tokens = meta.total_tokens;
+                        s.set_acp_thread(Some(acp_thread.clone()), cx);
+                        s
+                    });
                     store.sessions.insert(session_id, entity);
                 }
                 let by_sol = store
@@ -1012,32 +1001,27 @@ impl SolutionAgentStore {
                             }
                         })
                         .unwrap_or_default();
-                    let cold_session = SolutionSession {
-                        id: meta.id,
-                        solution_id: meta.solution_id.clone(),
-                        agent_id: meta.agent_id.clone(),
-                        acp_session_id: meta.acp_session_id.clone(),
-                        acp_thread: None,
-                        title: meta.title.clone(),
-                        created_at: meta.created_at,
-                        last_activity_at: meta.last_activity_at,
-                        state: SessionState::Idle,
-                        context_count: meta.context_count,
-                        project: None,
-                        _acp_subscription: None,
-                        pending_messages: std::collections::VecDeque::new(),
-                        flush_after_cancel: false,
-                        cwd: meta.cwd.clone(),
-                        cold_entries,
-                        last_turn_duration: None,
+                    let entity = cx.new(|_| {
+                        let mut s = SolutionSession::new_idle(
+                            meta.id,
+                            meta.solution_id.clone(),
+                            meta.agent_id.clone(),
+                            meta.acp_session_id.clone(),
+                        );
+                        s.title = meta.title.clone();
+                        s.created_at = meta.created_at;
+                        s.last_activity_at = meta.last_activity_at;
+                        s.context_count = meta.context_count;
+                        s.cwd = meta.cwd.clone();
+                        s.cold_entries = cold_entries;
                         // Seed from the persisted metadata so the
                         // status-row meter shows the last-known total
                         // for cold tabs (no live thread → no
                         // `TokenUsage`). The live path refreshes this
                         // on every `TokenUsageUpdated` event.
-                        cached_total_tokens: meta.total_tokens,
-                    };
-                    let entity = cx.new(|_| cold_session);
+                        s.cached_total_tokens = meta.total_tokens;
+                        s
+                    });
                     this.sessions.insert(meta.id, entity);
                     this.by_solution
                         .entry(solution_id.clone())
@@ -1244,8 +1228,7 @@ impl SolutionAgentStore {
             let new_count = this.update(cx, |store, cx| {
                 let new_acp_session_id = new_thread.read(cx).session_id().clone();
                 let new_count = current_count.saturating_add(1);
-                session_entity.update(cx, |s, _| {
-                    s.acp_thread = Some(new_thread.clone());
+                session_entity.update(cx, |s, cx| {
                     s.acp_session_id = new_acp_session_id;
                     s.context_count = new_count;
                     s.state = SessionState::Idle;
@@ -1260,6 +1243,10 @@ impl SolutionAgentStore {
                     // hint should not survive past the rotation).
                     s.cached_total_tokens = None;
                     s.last_turn_duration = None;
+                    // `set_acp_thread` emits ThreadReplaced + notify;
+                    // last so SessionView re-attaches against a fully
+                    // updated session struct.
+                    s.set_acp_thread(Some(new_thread.clone()), cx);
                 });
                 // Re-subscribe to the new AcpThread's event stream.
                 // Dropping the old subscription unhooks us from the
@@ -1346,7 +1333,7 @@ impl SolutionAgentStore {
 
             this.update(cx, |store, cx| {
                 let new_acp_session_id = new_thread.read(cx).session_id().clone();
-                session_entity.update(cx, |s, _| {
+                session_entity.update(cx, |s, cx| {
                     if !s.pending_messages.is_empty() {
                         // `/clear` wipes the session's conversation —
                         // queued follow-ups are tied to the OLD context
@@ -1366,7 +1353,6 @@ impl SolutionAgentStore {
                             previews.join(" | "),
                         );
                     }
-                    s.acp_thread = Some(new_thread.clone());
                     s.acp_session_id = new_acp_session_id;
                     s.state = SessionState::Idle;
                     s.last_activity_at = Utc::now();
@@ -1382,6 +1368,10 @@ impl SolutionAgentStore {
                     s.cached_total_tokens = None;
                     s.last_turn_duration = None;
                     s.cold_entries.clear();
+                    // `set_acp_thread` emits ThreadReplaced + notify;
+                    // last so SessionView re-attaches against a fully
+                    // wiped session struct.
+                    s.set_acp_thread(Some(new_thread.clone()), cx);
                 });
                 let new_sub = store.subscribe_to_session(session_id, new_thread, cx);
                 session_entity.update(cx, |s, _| s._acp_subscription = Some(new_sub));
@@ -1623,8 +1613,7 @@ impl SolutionAgentStore {
                 if let Some(s) = self.sessions.get(&session_id).cloned() {
                     let total = s
                         .read(cx)
-                        .acp_thread
-                        .as_ref()
+                        .acp_thread()
                         .and_then(|t| t.read(cx).token_usage().map(|u| u.used_tokens));
                     s.update(cx, |s, _| s.cached_total_tokens = total);
                 }
@@ -1657,8 +1646,7 @@ impl SolutionAgentStore {
             acp_thread::AcpThreadEvent::TitleUpdated => {
                 let new_title = session_entity
                     .read(cx)
-                    .acp_thread
-                    .as_ref()
+                    .acp_thread()
                     .and_then(|t| t.read(cx).title())
                     .unwrap_or_default();
                 session_entity.update(cx, |s, _| s.title = new_title);
@@ -1684,7 +1672,7 @@ impl SolutionAgentStore {
                 // the agent will emit a fresh `TokenUsageUpdated`
                 // against that prefix on the next turn — so we MUST
                 // NOT preemptively wipe state in the partial case.
-                let thread = session_entity.read(cx).acp_thread.clone();
+                let thread = session_entity.read(cx).acp_thread().cloned();
                 let cleared = thread
                     .as_ref()
                     .map(|t| t.read(cx).entries().is_empty())

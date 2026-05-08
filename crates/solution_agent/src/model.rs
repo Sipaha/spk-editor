@@ -5,7 +5,7 @@ use std::time::Instant;
 use acp_thread::AcpThread;
 use agent_client_protocol::schema as acp;
 use chrono::{DateTime, Utc};
-use gpui::{Entity, SharedString, Subscription};
+use gpui::{Context, Entity, EventEmitter, SharedString, Subscription};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use solutions::SolutionId;
@@ -202,7 +202,11 @@ pub struct SolutionSession {
     pub solution_id: SolutionId,
     pub agent_id: AgentServerId,
     pub acp_session_id: acp::SessionId,
-    pub acp_thread: Option<Entity<AcpThread>>,
+    /// Live thread, when one is attached. **Private**: any write must
+    /// go through [`SolutionSession::set_acp_thread`] so subscribers
+    /// (notably `SolutionSessionView::_thread_subscription`) re-attach.
+    /// Read with [`SolutionSession::acp_thread`].
+    acp_thread: Option<Entity<AcpThread>>,
     pub title: SharedString,
     pub created_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
@@ -274,13 +278,91 @@ pub struct SolutionSession {
 }
 
 impl SolutionSession {
+    /// Fresh, idle session with no live `AcpThread` attached. All
+    /// optional state (`title`, `cwd`, `cold_entries`, …) defaults to
+    /// "empty"; callers should poke the relevant `pub` fields after
+    /// construction. Use [`set_acp_thread`](Self::set_acp_thread) to
+    /// attach the live thread once available.
+    ///
+    /// This is the only legal way to materialise a `SolutionSession`
+    /// outside `model` — direct struct-literal construction is blocked
+    /// by the private `acp_thread` field, which is exactly the point:
+    /// every entry-point goes through a constructor where the thread
+    /// starts unattached and reaches the entity only via `set_acp_thread`.
+    pub fn new_idle(
+        id: SolutionSessionId,
+        solution_id: SolutionId,
+        agent_id: AgentServerId,
+        acp_session_id: acp::SessionId,
+    ) -> Self {
+        Self {
+            id,
+            solution_id,
+            agent_id,
+            acp_session_id,
+            acp_thread: None,
+            title: SharedString::default(),
+            created_at: Utc::now(),
+            last_activity_at: Utc::now(),
+            state: SessionState::Idle,
+            cwd: PathBuf::new(),
+            context_count: 1,
+            project: None,
+            _acp_subscription: None,
+            pending_messages: VecDeque::new(),
+            flush_after_cancel: false,
+            cold_entries: Vec::new(),
+            last_turn_duration: None,
+            cached_total_tokens: None,
+        }
+    }
+
     /// `true` when this session was restored from the DB but the agent
     /// subprocess hasn't been spawned yet — so rendering must come
     /// from `cold_entries` rather than `acp_thread.entries()`.
     pub fn is_cold(&self) -> bool {
         self.acp_thread.is_none()
     }
+
+    /// Live thread reference. `None` for cold tabs.
+    pub fn acp_thread(&self) -> Option<&Entity<AcpThread>> {
+        self.acp_thread.as_ref()
+    }
+
+    /// Replace the live `AcpThread` on this session. Atomically emits
+    /// `SolutionSessionEvent::ThreadReplaced` and `cx.notify()` so
+    /// `SolutionSessionView` can re-attach its per-thread subscription
+    /// (`_thread_subscription`) to the new thread.
+    ///
+    /// All callers MUST go through this method instead of poking
+    /// `acp_thread` directly. Direct assignment inside a nested
+    /// `session_entity.update(cx, |s, _| ...)` does not reliably
+    /// trigger `cx.observe(&session)` callbacks (auto-notify can be
+    /// dropped by the outer flush's deduplication), which strands
+    /// `SessionView::_thread_subscription` on the dead thread and
+    /// silently halts conversation-list rendering for that session.
+    pub fn set_acp_thread(
+        &mut self,
+        thread: Option<Entity<AcpThread>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.acp_thread = thread;
+        cx.emit(SolutionSessionEvent::ThreadReplaced);
+        cx.notify();
+    }
 }
+
+/// Events emitted by a `SolutionSession` entity. Currently only the
+/// thread-swap signal — extend as new push channels become necessary.
+#[derive(Debug, Clone, Copy)]
+pub enum SolutionSessionEvent {
+    /// The session's `acp_thread` was just replaced (compact, `/clear`,
+    /// cold→live, restart_agent reuse path). Subscribers must drop any
+    /// per-thread state and re-attach to the new `AcpThread`.
+    ThreadReplaced,
+}
+
+impl EventEmitter<SolutionSessionEvent> for SolutionSession {}
 
 /// Lightweight metadata row used for navigator listing without hydrating
 /// the full conversation blob.
@@ -309,4 +391,90 @@ pub struct SolutionSessionMetadata {
     /// written before the column existed; the resume path treats
     /// empty as "use `solution.root`".
     pub cwd: PathBuf,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{AppContext, TestAppContext};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn build_session() -> SolutionSession {
+        SolutionSession {
+            id: SolutionSessionId::new(),
+            solution_id: SolutionId("sol".into()),
+            agent_id: SharedString::from("claude-acp"),
+            acp_session_id: acp::SessionId::new("acp-mock"),
+            acp_thread: None,
+            title: SharedString::from("test"),
+            created_at: Utc::now(),
+            last_activity_at: Utc::now(),
+            state: SessionState::Idle,
+            cwd: PathBuf::new(),
+            context_count: 1,
+            project: None,
+            _acp_subscription: None,
+            pending_messages: VecDeque::new(),
+            flush_after_cancel: false,
+            cold_entries: Vec::new(),
+            last_turn_duration: None,
+            cached_total_tokens: None,
+        }
+    }
+
+    /// `set_acp_thread` is the load-bearing contract that keeps
+    /// `SolutionSessionView::_thread_subscription` from going stale when
+    /// a session swaps its `AcpThread` (compact, `/clear`, cold→live).
+    /// If anyone reverts to direct `s.acp_thread = ...` assignment
+    /// inside a nested `update`, observers wired through `cx.observe`
+    /// may be silently skipped — this test pins both signals so that
+    /// regression is caught at unit-test time.
+    #[gpui::test]
+    fn set_acp_thread_emits_thread_replaced_and_notifies(cx: &mut TestAppContext) {
+        let session = cx.update(|cx| cx.new(|_| build_session()));
+
+        let emit_count = Arc::new(AtomicUsize::new(0));
+        let observe_count = Arc::new(AtomicUsize::new(0));
+
+        cx.update(|cx| {
+            let emit = emit_count.clone();
+            cx.subscribe(
+                &session,
+                move |_session: Entity<SolutionSession>,
+                      event: &SolutionSessionEvent,
+                      _cx| {
+                    let SolutionSessionEvent::ThreadReplaced = event;
+                    emit.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+            .detach();
+            let observe = observe_count.clone();
+            cx.observe(
+                &session,
+                move |_session: Entity<SolutionSession>, _cx| {
+                    observe.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+            .detach();
+        });
+
+        cx.run_until_parked();
+        assert_eq!(emit_count.load(Ordering::SeqCst), 0);
+        assert_eq!(observe_count.load(Ordering::SeqCst), 0);
+
+        session.update(cx, |s, cx| s.set_acp_thread(None, cx));
+        cx.run_until_parked();
+
+        assert_eq!(
+            emit_count.load(Ordering::SeqCst),
+            1,
+            "set_acp_thread must emit exactly one ThreadReplaced event"
+        );
+        assert_eq!(
+            observe_count.load(Ordering::SeqCst),
+            1,
+            "set_acp_thread must wake cx.observe subscribers via cx.notify()"
+        );
+    }
 }

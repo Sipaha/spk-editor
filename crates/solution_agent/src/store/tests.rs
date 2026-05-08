@@ -20,25 +20,17 @@ pub(crate) fn insert_cold_session(
     store: &mut SolutionAgentStore,
     cx: &mut gpui::Context<SolutionAgentStore>,
 ) -> Entity<crate::model::SolutionSession> {
-    let session = cx.new(|_| crate::model::SolutionSession {
-        id: session_id,
-        solution_id: solution_id.clone(),
-        agent_id,
-        acp_session_id: agent_client_protocol::schema::SessionId::new("acp-cold"),
-        acp_thread: None,
-        title: SharedString::from("Cold"),
-        created_at: Utc::now(),
-        last_activity_at: Utc::now(),
-        state: SessionState::Idle,
-        context_count: 1,
-        project,
-        _acp_subscription: None,
-        pending_messages: std::collections::VecDeque::new(),
-        flush_after_cancel: false,
-        cwd: PathBuf::new(),
-        cold_entries: Vec::new(),
-        last_turn_duration: None,
-        cached_total_tokens,
+    let session = cx.new(|_| {
+        let mut s = crate::model::SolutionSession::new_idle(
+            session_id,
+            solution_id.clone(),
+            agent_id,
+            agent_client_protocol::schema::SessionId::new("acp-cold"),
+        );
+        s.title = SharedString::from("Cold");
+        s.project = project;
+        s.cached_total_tokens = cached_total_tokens;
+        s
     });
     store.sessions.insert(session_id, session.clone());
     store
@@ -58,25 +50,15 @@ fn close_session_removes_from_indices(cx: &mut TestAppContext) {
         let store = SolutionAgentStore::global(cx);
         store.update(cx, |store, cx| {
             let id = SolutionSessionId::new();
-            let entity = cx.new(|_| SolutionSession {
-                id,
-                solution_id: SolutionId("sol-a".into()),
-                agent_id: SharedString::from("claude-acp"),
-                acp_session_id: agent_client_protocol::schema::SessionId::new("acp-1"),
-                acp_thread: None,
-                title: SharedString::from("test"),
-                created_at: Utc::now(),
-                last_activity_at: Utc::now(),
-                state: SessionState::Idle,
-                context_count: 1,
-                project: None,
-                _acp_subscription: None,
-                pending_messages: std::collections::VecDeque::new(),
-                flush_after_cancel: false,
-                cwd: PathBuf::new(),
-                cold_entries: Vec::new(),
-                last_turn_duration: None,
-                cached_total_tokens: None,
+            let entity = cx.new(|_| {
+                let mut s = SolutionSession::new_idle(
+                    id,
+                    SolutionId("sol-a".into()),
+                    SharedString::from("claude-acp"),
+                    agent_client_protocol::schema::SessionId::new("acp-1"),
+                );
+                s.title = SharedString::from("test");
+                s
             });
             store.sessions.insert(id, entity);
             store
@@ -347,8 +329,8 @@ async fn create_session_with_thread(
             .session(session_id)
             .expect("session exists")
             .read(cx)
-            .acp_thread
-            .clone()
+            .acp_thread()
+            .cloned()
             .expect("acp_thread populated")
     });
 
@@ -662,7 +644,7 @@ async fn reset_context_swaps_acp_thread_without_bumping_count(cx: &mut TestAppCo
         store.update(cx, |store, cx| {
             let session = store.session(session_id).expect("session exists");
             let s = session.read(cx);
-            let new_thread = s.acp_thread.clone().expect("new acp_thread populated");
+            let new_thread = s.acp_thread().cloned().expect("new acp_thread populated");
             assert_ne!(
                 new_thread.entity_id(),
                 old_thread_id,
@@ -1174,7 +1156,7 @@ async fn reset_context_resets_token_meter(cx: &mut TestAppContext) {
                 s.last_turn_duration
             );
             // Sanity: live thread is fresh and has no usage.
-            let new_thread = s.acp_thread.clone().expect("new thread populated");
+            let new_thread = s.acp_thread().cloned().expect("new thread populated");
             assert!(
                 new_thread.read(cx).token_usage().is_none(),
                 "fresh thread has no token_usage"

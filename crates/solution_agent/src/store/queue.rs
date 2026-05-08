@@ -128,8 +128,7 @@ impl SolutionAgentStore {
         let (connection, acp_session_id) = {
             let s = session.read(cx);
             let thread = s
-                .acp_thread
-                .as_ref()
+                .acp_thread()
                 .ok_or_else(|| anyhow!("session {session_id} has no ACP thread yet"))?;
             (
                 thread.read(cx).connection().clone(),
@@ -266,7 +265,7 @@ impl SolutionAgentStore {
         cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
         cx.notify();
 
-        let Some(acp_thread) = session_entity.read(cx).acp_thread.clone() else {
+        let Some(acp_thread) = session_entity.read(cx).acp_thread().cloned() else {
             return Task::ready(Err(anyhow!("session {session_id} has no ACP thread yet")));
         };
 

@@ -215,8 +215,7 @@ impl McpServerTool for GetSessionTool {
                 .with_context(|| format!("session_not_found: {}", session_id))?;
             let session = entity.read(cx);
             let entries = session
-                .acp_thread
-                .as_ref()
+                .acp_thread()
                 .map(|thread| {
                     thread
                         .read(cx)
@@ -1134,7 +1133,7 @@ impl McpServerTool for ReadSessionHistoryTool {
                 let session = store.session(session_id)?;
                 let s = session.read(cx);
                 let title = s.title.to_string();
-                let entries = s.acp_thread.as_ref().map(|thread| {
+                let entries = s.acp_thread().map(|thread| {
                     thread
                         .read(cx)
                         .entries()

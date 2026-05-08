@@ -64,8 +64,7 @@ impl SolutionSessionsNavigator {
         // `max_tokens` from cold — fall back to `DEFAULT_CONTEXT_WINDOW`,
         // matching `render_status_row`'s meter logic.
         let usage = s
-            .acp_thread
-            .as_ref()
+            .acp_thread()
             .and_then(|thread| thread.read(cx).token_usage().cloned());
         let used = usage
             .as_ref()

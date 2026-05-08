@@ -32,8 +32,7 @@ impl SlashCommandsProvider {
         };
         session
             .read(cx)
-            .acp_thread
-            .as_ref()
+            .acp_thread()
             .map(|thread| thread.read(cx).available_commands().to_vec())
             .unwrap_or_default()
     }
