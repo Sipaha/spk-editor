@@ -1,14 +1,21 @@
 //! Tool registry: holds boxed registration callbacks until `start_server`
 //! drains them and applies to the live `McpServer`.
+use crate::tier::ToolTier;
 use context_server::listener::McpServer;
 use gpui::{App, Global};
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 type Registration = Box<dyn FnOnce(&mut McpServer) + 'static>;
 
 #[derive(Default)]
 pub(crate) struct Registry {
     pending: RefCell<Vec<Registration>>,
+    /// Wire-protocol tool name → declared tier. Tools registered via the
+    /// legacy [`register_tool`] (no tier metadata) don't appear here; lookups
+    /// against this map fall back to [`ToolTier::Destructive`] in
+    /// [`tier_for`] — fail-safe migration policy from S-BAK.
+    tool_tiers: RefCell<HashMap<&'static str, ToolTier>>,
     started: RefCell<bool>,
 }
 
@@ -37,6 +44,49 @@ where
     registry.pending.borrow_mut().push(Box::new(registration));
 }
 
+/// Register a tool with an explicit capability tier. New tools (and migrated
+/// existing tools) use this entry point. The legacy [`register_tool`] is kept
+/// for backward compatibility — its tools default to
+/// [`ToolTier::Destructive`] in [`tier_for`] and will be rejected for
+/// subagent callers until migrated.
+///
+/// `name` must be the same wire-protocol name the tool registers itself
+/// under (e.g. `"editor.git.log"`).
+pub fn register_tool_with_tier<F>(
+    cx: &mut App,
+    name: &'static str,
+    tier: ToolTier,
+    registration: F,
+) where
+    F: FnOnce(&mut McpServer) + 'static,
+{
+    init(cx);
+    let registry = cx.global::<Registry>();
+    if *registry.started.borrow() {
+        debug_assert!(false, "register_tool_with_tier called after start_server");
+        log::error!(
+            "editor_mcp: register_tool_with_tier(\"{name}\") called after start_server — tool not registered"
+        );
+        return;
+    }
+    if let Some(prev) = registry.tool_tiers.borrow_mut().insert(name, tier) {
+        debug_assert!(false, "duplicate tier registration for tool \"{name}\"");
+        log::warn!(
+            "editor_mcp: tool \"{name}\" tier overwritten ({prev:?} -> {tier:?})",
+        );
+    }
+    registry.pending.borrow_mut().push(Box::new(registration));
+}
+
+/// Look up the declared tier for `tool_name`. Returns [`ToolTier::Destructive`]
+/// for any tool that was registered without an explicit tier — fail-safe
+/// default per S-BAK migration policy.
+pub fn tier_for(cx: &App, tool_name: &str) -> ToolTier {
+    cx.try_global::<Registry>()
+        .and_then(|r| r.tool_tiers.borrow().get(tool_name).copied())
+        .unwrap_or(ToolTier::Destructive)
+}
+
 pub(crate) fn drain(cx: &mut App) -> Vec<Registration> {
     let registry = cx.global::<Registry>();
     std::mem::take(&mut *registry.pending.borrow_mut())
@@ -53,24 +103,29 @@ pub(crate) fn pending_count(cx: &App) -> usize {
 }
 
 pub(crate) fn register_builtin_tools(cx: &mut App) {
-    register_tool(cx, |server| {
+    register_tool_with_tier(cx, "editor.capabilities", ToolTier::ReadOnly, |server| {
         server.add_tool(crate::tools::capabilities::CapabilitiesTool);
     });
-    register_tool(cx, |server| {
+    register_tool_with_tier(cx, "editor.get_operation", ToolTier::ReadOnly, |server| {
         server.add_tool(crate::tools::operations::GetOperationTool);
     });
-    register_tool(cx, |server| {
+    register_tool_with_tier(cx, "editor.cancel_operation", ToolTier::Write, |server| {
         server.add_tool(crate::tools::operations::CancelOperationTool);
     });
-    register_tool(cx, |server| {
+    register_tool_with_tier(cx, "editor.subscribe", ToolTier::ReadOnly, |server| {
         server.add_tool(crate::tools::subscribe::SubscribeTool);
     });
-    register_tool(cx, |server| {
+    register_tool_with_tier(cx, "editor.unsubscribe", ToolTier::ReadOnly, |server| {
         server.add_tool(crate::tools::subscribe::UnsubscribeTool);
     });
-    register_tool(cx, |server| {
-        server.add_tool(crate::tools::subscribe::ListSubscriptionsTool);
-    });
+    register_tool_with_tier(
+        cx,
+        "editor.list_subscriptions",
+        ToolTier::ReadOnly,
+        |server| {
+            server.add_tool(crate::tools::subscribe::ListSubscriptionsTool);
+        },
+    );
 }
 
 #[cfg(test)]

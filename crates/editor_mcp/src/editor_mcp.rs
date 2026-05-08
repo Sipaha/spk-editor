@@ -11,13 +11,15 @@ mod notifications;
 mod operations;
 mod registry;
 mod subscriptions;
+mod tier;
 mod tools;
 mod window_ids;
 
 pub use handoff::{HandoffOutcome, try_handoff_to_existing_instance};
 pub use lifecycle::{set_runtime_dir_for_test, socket_path, start_server};
 pub use notifications::emit as emit_notification;
-pub use registry::{init, register_tool};
+pub use registry::{init, register_tool, register_tool_with_tier, tier_for};
+pub use tier::{BRIDGE_CAPS_ENV_VAR, CallerCapabilities, ToolTier};
 pub use window_ids::format as format_window_id;
 
 pub use operations::{

@@ -3013,11 +3013,27 @@ fn spk_editor_mcp_bridge_server() -> Option<acp::McpServer> {
         return None;
     }
     let exe = std::env::current_exe().ok()?;
+
+    // Per P-4 / S-BAK: `--nc` bridge subagents default to `Write` tier;
+    // `Destructive` requires the user opting in via the parent process env
+    // (`SPK_EDITOR_MCP_BRIDGE_CAPS=destructive`). The bridge stamps whatever
+    // value is currently set into the spawned subprocess so the editor-side
+    // `nc` mode picks it up on the connection. When the env is unset we
+    // explicitly stamp `write` so missing env vars don't accidentally
+    // inherit the editor's own (potentially `destructive`) value.
+    let caps_value = std::env::var(editor_mcp::BRIDGE_CAPS_ENV_VAR)
+        .unwrap_or_else(|_| "write".to_string());
+
     Some(acp::McpServer::Stdio(
-        acp::McpServerStdio::new("spk-editor", exe.to_string_lossy().as_ref()).args(vec![
-            "--nc".to_string(),
-            socket.to_string_lossy().into_owned(),
-        ]),
+        acp::McpServerStdio::new("spk-editor", exe.to_string_lossy().as_ref())
+            .args(vec![
+                "--nc".to_string(),
+                socket.to_string_lossy().into_owned(),
+            ])
+            .env(vec![acp::EnvVariable::new(
+                editor_mcp::BRIDGE_CAPS_ENV_VAR,
+                caps_value,
+            )]),
     ))
 }
 
