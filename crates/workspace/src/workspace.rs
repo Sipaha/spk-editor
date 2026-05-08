@@ -6006,6 +6006,19 @@ impl Workspace {
         self.last_window_title = Some(title);
     }
 
+    /// Force the platform window title to be re-set even if it matches
+    /// what this workspace last wrote. Used by `MultiWorkspace::activate`
+    /// when switching solution tabs: each tab's `Workspace` keeps its
+    /// own `last_window_title` cache, but the X11 / OS window has a
+    /// single title that the leaving tab clobbered with its own value,
+    /// and the de-duplication in `update_window_title` would otherwise
+    /// skip the re-set on tab switch and leave a stale title visible to
+    /// the OS taskbar / window switcher.
+    pub fn refresh_window_title(&mut self, window: &mut Window, cx: &mut App) {
+        self.last_window_title = None;
+        self.update_window_title(window, cx);
+    }
+
     fn update_window_edited(&mut self, window: &mut Window, cx: &mut App) {
         let is_edited = !self.project.read(cx).is_disconnected(cx) && !self.dirty_items.is_empty();
         if is_edited != self.window_edited {

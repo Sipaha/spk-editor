@@ -1482,6 +1482,13 @@ impl MultiWorkspace {
             apply_dock_state(ws.left_dock(), left_state, window, cx);
             apply_dock_state(ws.right_dock(), right_state, window, cx);
             apply_dock_state(ws.bottom_dock(), bottom_state, window, cx);
+            // Force a window-title re-set for the entering workspace.
+            // Each `Workspace` caches its `last_window_title` to avoid
+            // X event spam, but the OS window has a single title that
+            // the leaving tab last wrote — without invalidation here
+            // the dedup check skips the re-set and the OS taskbar /
+            // window switcher keeps showing the leaving tab's title.
+            ws.refresh_window_title(window, cx);
         });
 
         if !self.sidebar_open && !old_active_was_retained {
