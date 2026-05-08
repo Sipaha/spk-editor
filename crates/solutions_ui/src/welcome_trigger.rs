@@ -11,7 +11,7 @@
 //! workspace hosts any solution", which matches the user-visible
 //! intent of "the last solution in this window just closed".
 
-use gpui::{App, Context};
+use gpui::{App, Context, Window};
 use solutions::SolutionStore;
 use workspace::{MultiWorkspace, welcome::ShowWelcome};
 
@@ -19,15 +19,20 @@ use workspace::{MultiWorkspace, welcome::ShowWelcome};
 /// tasks have completed. If the window's `MultiWorkspace` no longer
 /// hosts any solution, opens the launcher (`WelcomeWindow`) via the
 /// `ShowWelcome` action — the same primitive used by the menu and by
-/// the onboarding entry point.
+/// the onboarding entry point — and retires the now-empty `MultiWorkspace`
+/// window. The fallback workspace MW spawns to keep the window alive
+/// has no solution and no path list, so leaving it on screen alongside
+/// the launcher just shows the user two windows when one would do.
 pub fn open_welcome_if_window_empty(
     multi_workspace: &MultiWorkspace,
+    window: &mut Window,
     cx: &mut Context<MultiWorkspace>,
 ) {
     if has_any_solution(multi_workspace, cx) {
         return;
     }
     cx.dispatch_action(&ShowWelcome);
+    window.remove_window();
 }
 
 fn has_any_solution(multi_workspace: &MultiWorkspace, cx: &App) -> bool {

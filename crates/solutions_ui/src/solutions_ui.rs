@@ -408,17 +408,24 @@ fn close_solution_workspaces_in(
 ) {
     use util::ResultExt as _;
 
+    // Snapshot every workspace's project-group key alongside the
+    // workspace itself. We close via `remove_project_group` (instead of
+    // `close_workspace`) so the lingering group entry doesn't survive
+    // the close — `remove_workspace`'s fallback walks neighbouring
+    // groups and cheerfully respawns a workspace from the previously-
+    // closed solution's path list, leaving the user with a "ghost" tab
+    // for a solution they explicitly closed seconds ago.
     let to_close: Vec<_> = mw
         .workspaces()
         .filter(|ws| crate::open::workspace_has_solution(ws, sol_id, cx))
-        .cloned()
+        .map(|ws| (ws.read(cx).project_group_key(cx), ws.clone()))
         .collect();
     if to_close.is_empty() {
         return;
     }
     let close_tasks: Vec<_> = to_close
         .into_iter()
-        .map(|ws| mw.close_workspace(&ws, window, cx))
+        .map(|(group_key, _)| mw.remove_project_group(&group_key, window, cx))
         .collect();
     // Spawn one coordinator that awaits every close before checking
     // whether this window still hosts any solution. Awaiting
@@ -429,8 +436,8 @@ fn close_solution_workspaces_in(
         for task in close_tasks {
             task.await.log_err();
         }
-        this.update(cx, |mw, cx| {
-            crate::welcome_trigger::open_welcome_if_window_empty(mw, cx);
+        this.update_in(cx, |mw, window, cx| {
+            crate::welcome_trigger::open_welcome_if_window_empty(mw, window, cx);
         })
         .log_err();
     })
