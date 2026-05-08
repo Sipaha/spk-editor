@@ -160,7 +160,6 @@ impl Render for AddProjectPicker {
         v_flex()
             .key_context("ActiveProjectAddPicker")
             .track_focus(&self.focus_handle)
-            .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(DismissEvent)))
             .w(rems(34.))
             .p_2()
             .gap_2()

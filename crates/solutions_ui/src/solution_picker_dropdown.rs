@@ -323,7 +323,6 @@ impl Render for SolutionPickerDropdown {
             .on_action(cx.listener(|_, _: &menu::Cancel, _, cx| {
                 cx.emit(DismissEvent);
             }))
-            .on_mouse_down_out(cx.listener(|_, _, _, cx| cx.emit(DismissEvent)))
             .min_w(px(280.0))
             .max_h(px(360.0))
             .bg(cx.theme().colors().elevated_surface_background)
