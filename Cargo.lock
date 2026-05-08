@@ -7341,8 +7341,23 @@ name = "git_conflict_ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "context_server",
+ "editor",
+ "editor_mcp",
+ "futures 0.3.32",
+ "git",
  "gpui",
+ "language",
  "log",
+ "project",
+ "schemars 1.0.4",
+ "serde",
+ "settings",
+ "tempfile",
+ "theme",
+ "ui",
+ "util",
+ "workspace",
 ]
 
 [[package]]
