@@ -14,7 +14,10 @@ pub mod clone;
 pub mod credentials;
 pub mod handlers;
 mod handlers_mcp;
+pub mod mini_graph;
 pub mod providers;
+pub mod push_dialog;
+mod push_dialog_mcp;
 pub mod undo_modal;
 
 use git::{
@@ -63,6 +66,7 @@ pub fn init(cx: &mut App) {
     commit_view::init(cx);
     backup_mcp::register(cx);
     handlers_mcp::register(cx);
+    push_dialog_mcp::register(cx);
 
     cx.observe_new(|editor: &mut Editor, _, cx| {
         conflict_view::register_editor(editor, editor.buffer().clone(), cx);
@@ -165,13 +169,14 @@ pub fn init(cx: &mut App) {
                     panel.fetch(false, window, cx);
                 });
             });
+            // S-PSH — `git::Push` opens the preview dialog instead of
+            // running an immediate push. `git::ForcePush` opens the same
+            // dialog with the force-with-lease toggle pre-set, so the
+            // command-palette path keeps working. `git::PushTo` still
+            // routes through the panel's remote-picker → immediate push
+            // flow because it's about choosing a remote, not previewing.
             workspace.register_action(|workspace, _: &git::Push, window, cx| {
-                let Some(panel) = workspace.panel::<git_panel::GitPanel>(cx) else {
-                    return;
-                };
-                panel.update(cx, |panel, cx| {
-                    panel.push(false, false, window, cx);
-                });
+                push_dialog::PushDialog::open(workspace, false, window, cx);
             });
             workspace.register_action(|workspace, _: &git::PushTo, window, cx| {
                 let Some(panel) = workspace.panel::<git_panel::GitPanel>(cx) else {
@@ -182,12 +187,7 @@ pub fn init(cx: &mut App) {
                 });
             });
             workspace.register_action(|workspace, _: &git::ForcePush, window, cx| {
-                let Some(panel) = workspace.panel::<git_panel::GitPanel>(cx) else {
-                    return;
-                };
-                panel.update(cx, |panel, cx| {
-                    panel.push(true, false, window, cx);
-                });
+                push_dialog::PushDialog::open(workspace, true, window, cx);
             });
             workspace.register_action(|workspace, _: &git::Pull, window, cx| {
                 let Some(panel) = workspace.panel::<git_panel::GitPanel>(cx) else {

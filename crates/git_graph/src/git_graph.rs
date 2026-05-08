@@ -5,6 +5,11 @@ pub mod log_toolbar;
 pub mod mcp;
 pub mod view_options;
 
+/// Re-export of the mini-graph component, owned by `git_ui` to break the
+/// `git_graph → git_ui` dep direction. Anyone in this crate that wants
+/// the small commit-chain widget should reach for [`mini::MiniGraph`].
+pub use git_ui::mini_graph as mini;
+
 use collections::{BTreeMap, HashMap};
 use editor::Editor;
 use git::{
