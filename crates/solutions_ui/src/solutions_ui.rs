@@ -209,28 +209,45 @@ fn close_solution(
             }
         });
     }
-    if let Some(mw_weak) = workspace.multi_workspace().cloned()
-        && let Some(mw) = mw_weak.upgrade()
-    {
-        mw.update(cx, |mw, cx| {
-            close_solution_workspaces_in(mw, &sol_id, window, cx);
-        });
-    }
-    let skip = window.window_handle().window_id();
-    let other_windows: Vec<_> = cx
-        .windows()
-        .into_iter()
-        .filter(|handle| handle.window_id() != skip)
-        .filter_map(|handle| handle.downcast::<MultiWorkspace>())
-        .collect();
-    for handle in other_windows {
-        let sol_id = sol_id.clone();
-        handle
-            .update(cx, move |mw, window, cx| {
+    // Workspace iteration must run AFTER the action handler's
+    // `workspace.update(...)` frame finishes — otherwise iterating
+    // `mw.workspaces()` and reading each Workspace panics on the
+    // currently-being-updated entity ("cannot read workspace::Workspace
+    // while it is already being updated"). Defer via `cx.spawn_in` so
+    // the closure runs on the next foreground turn with the lock
+    // released.
+    let mw_weak = workspace.multi_workspace().cloned();
+    let skip_window_id = window.window_handle().window_id();
+    let sol_id_for_defer = sol_id.clone();
+    cx.spawn_in(window, async move |_, cx| {
+        if let Some(mw_weak) = mw_weak
+            && let Some(mw) = cx.update(|_, _| mw_weak.upgrade()).ok().flatten()
+        {
+            let sol_id = sol_id_for_defer.clone();
+            mw.update_in(cx, |mw, window, cx| {
                 close_solution_workspaces_in(mw, &sol_id, window, cx);
             })
             .log_err();
-    }
+        }
+        let other_windows: Vec<_> = cx
+            .update(|_, cx| {
+                cx.windows()
+                    .into_iter()
+                    .filter(|handle| handle.window_id() != skip_window_id)
+                    .filter_map(|handle| handle.downcast::<MultiWorkspace>())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for handle in other_windows {
+            let sol_id = sol_id_for_defer.clone();
+            handle
+                .update(cx, move |mw, window, cx| {
+                    close_solution_workspaces_in(mw, &sol_id, window, cx);
+                })
+                .log_err();
+        }
+    })
+    .detach();
 }
 
 /// Advances or retreats the per-panel project selection for the active
