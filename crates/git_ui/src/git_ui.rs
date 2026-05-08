@@ -10,6 +10,7 @@ use workspace::{Toast, notifications::NotificationId};
 
 mod blame_ui;
 pub mod clone;
+pub mod providers;
 
 use git::{
     repository::{Branch, CommitDetails, Upstream, UpstreamTracking, UpstreamTrackingStatus},
