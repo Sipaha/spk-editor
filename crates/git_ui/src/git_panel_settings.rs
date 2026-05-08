@@ -14,6 +14,13 @@ pub struct ScrollbarSettings {
     pub show: Option<ShowScrollbar>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitViewSettings {
+    pub fetch_avatars: bool,
+    pub affected_files_lazy_threshold: usize,
+    pub parse_issue_references: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, RegisterSetting)]
 pub struct GitPanelSettings {
     pub button: bool,
@@ -31,6 +38,7 @@ pub struct GitPanelSettings {
     pub show_count_badge: bool,
     pub starts_open: bool,
     pub commit_title_max_length: usize,
+    pub commit_view: CommitViewSettings,
 }
 
 #[derive(Default)]
@@ -78,6 +86,16 @@ impl Settings for GitPanelSettings {
             show_count_badge: git_panel.show_count_badge.unwrap(),
             starts_open: git_panel.starts_open.unwrap(),
             commit_title_max_length: git_panel.commit_title_max_length.unwrap(),
+            commit_view: {
+                let raw = git_panel.commit_view.unwrap();
+                CommitViewSettings {
+                    fetch_avatars: raw.fetch_avatars.unwrap_or(false),
+                    affected_files_lazy_threshold: raw
+                        .affected_files_lazy_threshold
+                        .unwrap_or(500),
+                    parse_issue_references: raw.parse_issue_references.unwrap_or(true),
+                }
+            },
         }
     }
 }

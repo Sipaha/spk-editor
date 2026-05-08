@@ -684,6 +684,34 @@ pub struct GitPanelSettingsContent {
     ///
     /// Default: 72
     pub commit_title_max_length: Option<usize>,
+
+    /// Commit-view (S-DET) configuration: avatars, lazy-load threshold for
+    /// affected files, mention parsing.
+    pub commit_view: Option<CommitViewSettingsContent>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+pub struct CommitViewSettingsContent {
+    /// Whether to fetch Gravatar avatars for commit authors. When false, the
+    /// commit detail surface shows a placeholder character tile and never
+    /// leaks the author email hash to a third party.
+    ///
+    /// Default: false
+    pub fetch_avatars: Option<bool>,
+
+    /// File-list lazy-load threshold. Commits with more than this many
+    /// affected files render the first 100, then a "Load more" button — and
+    /// expose a fuzzy filter over the visible slice.
+    ///
+    /// Default: 500
+    pub affected_files_lazy_threshold: Option<usize>,
+
+    /// Whether to parse `#1234` issue references and `[ABC-123]` Jira-style
+    /// references in the commit subject + body. URLs are always parsed.
+    ///
+    /// Default: true
+    pub parse_issue_references: Option<bool>,
 }
 
 #[derive(

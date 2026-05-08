@@ -4924,6 +4924,87 @@ impl Repository {
         })
     }
 
+    /// Local branches that contain the given commit. Drives the S-DET
+    /// "Contains" panel. Returns an empty list for collab repos for now.
+    pub fn branches_containing(
+        &mut self,
+        sha: String,
+    ) -> oneshot::Receiver<Result<Vec<SharedString>>> {
+        self.send_job(None, move |git_repo, _cx| async move {
+            match git_repo {
+                RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                    backend.branches_containing(sha).await
+                }
+                RepositoryState::Remote(_) => Ok(Vec::new()),
+            }
+        })
+    }
+
+    /// Tags that contain the given commit. Drives the S-DET "Contains"
+    /// panel. Returns an empty list for collab repos for now.
+    pub fn tags_containing(
+        &mut self,
+        sha: String,
+    ) -> oneshot::Receiver<Result<Vec<SharedString>>> {
+        self.send_job(None, move |git_repo, _cx| async move {
+            match git_repo {
+                RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                    backend.tags_containing(sha).await
+                }
+                RepositoryState::Remote(_) => Ok(Vec::new()),
+            }
+        })
+    }
+
+    /// Merge-parent toggle: load the diff of a commit against its `parent_index`-th
+    /// parent (1-based, mirroring git's `<sha>^N` syntax). For `parent_index == 1`
+    /// this is exactly [`Self::load_commit_diff`]. Collab repos fall through to
+    /// the existing first-parent diff (no proto path defined yet).
+    pub fn load_commit_diff_against_parent(
+        &mut self,
+        commit: String,
+        parent_index: usize,
+    ) -> oneshot::Receiver<Result<CommitDiff>> {
+        if parent_index <= 1 {
+            return self.load_commit_diff(commit);
+        }
+        let id = self.id;
+        self.send_job(None, move |git_repo, cx| async move {
+            match git_repo {
+                RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                    backend.load_commit_against_parent(commit, parent_index, cx).await
+                }
+                RepositoryState::Remote(RemoteRepositoryState {
+                    client, project_id, ..
+                }) => {
+                    // Collab fallback: only the first-parent path has a wire
+                    // protocol today, so degrade gracefully rather than fail.
+                    let response = client
+                        .request(proto::LoadCommitDiff {
+                            project_id: project_id.0,
+                            repository_id: id.to_proto(),
+                            commit,
+                        })
+                        .await?;
+                    Ok(CommitDiff {
+                        files: response
+                            .files
+                            .into_iter()
+                            .map(|file| {
+                                Ok(CommitFile {
+                                    path: RepoPath::from_proto(&file.path)?,
+                                    old_text: file.old_text,
+                                    new_text: file.new_text,
+                                    is_binary: file.is_binary,
+                                })
+                            })
+                            .collect::<Result<Vec<_>>>()?,
+                    })
+                }
+            }
+        })
+    }
+
     pub fn get_graph_data(
         &self,
         log_source: LogSource,

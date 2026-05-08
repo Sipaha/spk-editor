@@ -1,3 +1,18 @@
+//! S-DET commit view — IDEA-style metadata surface (header, parents bar,
+//! refs bar, contains panel, affected files, footer) plus the existing
+//! diff editor. Decomposed into per-section modules under
+//! [`crate::commit_view::*`] so each part has a clear scope. Public API
+//! (`CommitView`, `CommitViewToolbar`, `CommitView::open`) is unchanged.
+
+mod affected_files;
+mod contains_panel;
+mod footer;
+mod header;
+pub(crate) mod mcp;
+mod mentions;
+mod parents_bar;
+mod refs_bar;
+
 use anyhow::{Context as _, Result};
 use buffer_diff::BufferDiff;
 use collections::HashMap;
@@ -10,7 +25,7 @@ use git::{
     parse_git_remote_url,
 };
 use gpui::{
-    AnyElement, App, AppContext as _, AsyncApp, AsyncWindowContext, ClipboardItem, Context, Entity,
+    AnyElement, App, AppContext as _, AsyncApp, AsyncWindowContext, Context, Entity,
     EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement,
     PromptLevel, Render, Styled, Task, WeakEntity, Window, actions,
 };
@@ -39,12 +54,25 @@ use workspace::{
     searchable::SearchableItemHandle,
 };
 
-use crate::commit_tooltip::CommitAvatar;
-use crate::git_panel::GitPanel;
+use crate::commit_view::affected_files::CommitAffectedFiles;
+use crate::commit_view::contains_panel::CommitContainsPanel;
+use crate::git_panel::{GitPanel, OpenAtCommit};
+use crate::git_panel_settings::GitPanelSettings;
+use settings::Settings as _;
 
 actions!(git, [ApplyCurrentStash, PopCurrentStash, DropCurrentStash,]);
 
+/// Action emitted by the footer's "Open in New Tab" button. The workspace
+/// handler resolves the target repository, fetches the commit, and adds a
+/// fresh `CommitView` pane item.
+#[derive(Clone, PartialEq, serde::Deserialize, schemars::JsonSchema, gpui::Action)]
+#[action(namespace = git)]
+pub struct OpenCommitInNewTab {
+    pub sha: String,
+}
+
 pub fn init(cx: &mut App) {
+    mcp::register(cx);
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
         workspace.register_action(|workspace, _: &ApplyCurrentStash, window, cx| {
             CommitView::apply_stash(workspace, window, cx);
@@ -55,6 +83,22 @@ pub fn init(cx: &mut App) {
         workspace.register_action(|workspace, _: &PopCurrentStash, window, cx| {
             CommitView::pop_stash(workspace, window, cx);
         });
+        workspace.register_action(
+            |workspace, action: &OpenCommitInNewTab, window, cx| {
+                let Some(repo) = workspace.project().read(cx).active_repository(cx) else {
+                    return;
+                };
+                CommitView::open(
+                    action.sha.clone(),
+                    repo.downgrade(),
+                    workspace.weak_handle(),
+                    None,
+                    None,
+                    window,
+                    cx,
+                );
+            },
+        );
     })
     .detach();
 }
@@ -66,6 +110,26 @@ pub struct CommitView {
     multibuffer: Entity<MultiBuffer>,
     repository: Entity<Repository>,
     remote: Option<GitRemote>,
+    /// Parents in display order. Loaded asynchronously after `new`.
+    parents: Vec<SharedString>,
+    /// Ref decorations attached to this commit (branches / tags). The
+    /// `git_graph` callers already know these from the log row; for
+    /// standalone opens we re-derive them via `git log --decorate=full`.
+    ref_names: Vec<SharedString>,
+    /// `Some((name, email))` only when the committer differs from the
+    /// author. Surfaced as a second line under the author tile.
+    extra_committer: Option<(SharedString, SharedString)>,
+    /// Currently selected merge-parent index (1-based; 1 = first parent).
+    /// Hidden in the toolbar when the commit has a single parent.
+    selected_parent_index: usize,
+    /// Cached commit diff (for the currently selected merge-parent index)
+    /// — used by the affected-files component.
+    diff_files: Vec<git::repository::CommitFile>,
+    affected_files: CommitAffectedFiles,
+    contains_panel: CommitContainsPanel,
+    /// Whether this view is the standalone-tab variant. Drives the
+    /// "Open in New Tab" footer button visibility.
+    in_pane: bool,
 }
 
 struct GitBlob {
@@ -120,7 +184,6 @@ impl CommitView {
                 let mut commit_diff = commit_diff.log_err()?.log_err()?;
                 let commit_details = commit_details.log_err()?.log_err()?;
 
-                // Filter to specific file if requested
                 if let Some(ref filter_path) = file_filter {
                     commit_diff.files.retain(|f| &f.path == filter_path);
                 }
@@ -251,6 +314,7 @@ impl CommitView {
             .map(|worktree| worktree.read(cx).id());
 
         let repository_clone = repository.clone();
+        let diff_files = commit_diff.files.iter().map(clone_commit_file).collect();
 
         cx.spawn(async move |this, cx| {
             let mut binary_buffer_ids: HashSet<language::BufferId> = HashSet::default();
@@ -390,51 +454,91 @@ impl CommitView {
             })
         });
 
-        Self {
+        let lazy_threshold = GitPanelSettings::get_global(cx)
+            .commit_view
+            .affected_files_lazy_threshold;
+        let affected_files = CommitAffectedFiles::new(lazy_threshold, window, cx);
+
+        let mut view = Self {
             commit,
             editor,
             multibuffer,
             stash,
-            repository,
+            repository: repository.clone(),
             remote,
-        }
+            parents: Vec::new(),
+            ref_names: Vec::new(),
+            extra_committer: None,
+            selected_parent_index: 1,
+            diff_files,
+            affected_files,
+            contains_panel: CommitContainsPanel::new(),
+            in_pane: true,
+        };
+        let sha_for_meta = view.commit.sha.to_string();
+        view.contains_panel
+            .load(sha_for_meta.clone(), repository.clone(), cx);
+        view.spawn_load_metadata(sha_for_meta, repository, cx);
+        view
     }
 
-    fn render_commit_avatar(
-        &self,
-        sha: &SharedString,
-        size: impl Into<gpui::AbsoluteLength>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> AnyElement {
-        CommitAvatar::new(
-            sha,
-            Some(self.commit.author_email.clone()),
-            self.remote.as_ref(),
-        )
-        .size(size)
-        .render(window, cx)
+    fn spawn_load_metadata(
+        &mut self,
+        sha: String,
+        repository: Entity<Repository>,
+        cx: &mut Context<Self>,
+    ) {
+        let work_dir = repository.read(cx).work_directory_abs_path.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    load_commit_metadata(work_dir.as_ref(), &sha).await
+                })
+                .await;
+            if let Some(metadata) = result.log_err() {
+                this.update(cx, |view, cx| {
+                    view.parents = metadata.parents;
+                    view.ref_names = metadata.ref_names;
+                    view.extra_committer = metadata.extra_committer;
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     fn calculate_changed_lines(&self, cx: &App) -> (u32, u32) {
         self.multibuffer.read(cx).snapshot(cx).total_changed_lines()
     }
 
-    fn render_header(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let commit = &self.commit;
-        let author_name = commit.author_name.clone();
-        let author_email = commit.author_email.clone();
-        let commit_sha = commit.sha.clone();
-        let commit_date = time::OffsetDateTime::from_unix_timestamp(commit.commit_timestamp)
-            .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
-        let local_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
-        let date_string = time_format::format_localized_timestamp(
-            commit_date,
-            time::OffsetDateTime::now_utc(),
-            local_offset,
-            time_format::TimestampFormat::MediumAbsolute,
-        );
+    /// Reload the diff for a different parent (1-based merge-parent toggle).
+    fn select_parent_index(&mut self, parent_index: usize, cx: &mut Context<Self>) {
+        if parent_index == self.selected_parent_index {
+            return;
+        }
+        self.selected_parent_index = parent_index;
+        let sha = self.commit.sha.to_string();
+        let task = self.repository.update(cx, |repo, _| {
+            repo.load_commit_diff_against_parent(sha, parent_index)
+        });
+        cx.spawn(async move |this, cx| {
+            if let Some(diff) = task.await.log_err().and_then(|res| res.log_err()) {
+                this.update(cx, |view, cx| {
+                    view.diff_files = diff.files.iter().map(clone_commit_file).collect();
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
 
+    fn render_metadata_panel(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let gutter_width = self.editor.update(cx, |editor, cx| {
             let snapshot = editor.snapshot(window, cx);
             let style = editor.style(cx);
@@ -445,76 +549,49 @@ impl CommitView {
                 .full_width()
         });
 
-        let clipboard_has_sha = cx
-            .read_from_clipboard()
-            .and_then(|entry| entry.text())
-            .map_or(false, |clipboard_text| {
-                clipboard_text.trim() == commit_sha.as_ref()
-            });
+        let head_branch_name = self
+            .repository
+            .read(cx)
+            .snapshot()
+            .branch
+            .as_ref()
+            .map(|branch| SharedString::from(branch.name().to_string()));
 
-        let (copy_icon, copy_icon_color) = if clipboard_has_sha {
-            (IconName::Check, Color::Success)
+        let header = header::render_header(
+            &self.commit,
+            self.remote.as_ref(),
+            self.extra_committer.clone(),
+            self.stash.is_some(),
+            gutter_width,
+            window,
+            cx,
+        );
+
+        let parents = parents_bar::render_parents_bar(&self.parents);
+        let refs = refs_bar::render_refs_bar(&self.ref_names, head_branch_name.as_ref());
+        let contains = self.contains_panel.render(cx);
+
+        let affected = if self.diff_files.is_empty() {
+            None
         } else {
-            (IconName::Copy, Color::Muted)
+            Some(affected_files::render_affected_files(
+                &self.diff_files,
+                &self.affected_files,
+                cx,
+            ))
         };
 
-        h_flex()
-            .py_2()
-            .pr_2p5()
-            .w_full()
-            .justify_between()
-            .border_b_1()
-            .border_color(cx.theme().colors().border_variant)
-            .child(
-                h_flex()
-                    .child(h_flex().w(gutter_width).justify_center().child(
-                        self.render_commit_avatar(&commit.sha, rems_from_px(40.), window, cx),
-                    ))
-                    .child(
-                        v_flex().child(Label::new(author_name)).child(
-                            h_flex()
-                                .gap_1p5()
-                                .child(
-                                    Label::new(date_string)
-                                        .color(Color::Muted)
-                                        .size(LabelSize::Small),
-                                )
-                                .child(
-                                    Label::new("•")
-                                        .size(LabelSize::Small)
-                                        .color(Color::Muted)
-                                        .alpha(0.5),
-                                )
-                                .child(
-                                    Label::new(author_email)
-                                        .color(Color::Muted)
-                                        .size(LabelSize::Small),
-                                ),
-                        ),
-                    ),
-            )
-            .when(self.stash.is_none(), |this| {
-                this.child(
-                    Button::new("sha", "Commit SHA")
-                        .start_icon(
-                            Icon::new(copy_icon)
-                                .size(IconSize::Small)
-                                .color(copy_icon_color),
-                        )
-                        .tooltip({
-                            let commit_sha = commit_sha.clone();
-                            move |_, cx| {
-                                Tooltip::with_meta("Copy Commit SHA", None, commit_sha.clone(), cx)
-                            }
-                        })
-                        .on_click(move |_, _, cx| {
-                            cx.stop_propagation();
-                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                commit_sha.to_string(),
-                            ));
-                        }),
-                )
-            })
+        v_flex()
+            .gap_1()
+            .child(header)
+            .when_some(parents, |this, el| this.child(div().px_2().pt_1p5().child(el)))
+            .when_some(refs, |this, el| this.child(div().px_2().child(el)))
+            .when_some(contains, |this, el| this.child(div().px_2().child(el)))
+            .when_some(affected, |this, el| this.child(div().px_2().pt_1p5().child(el)))
+    }
+
+    fn render_inline_footer(&self, cx: &mut App) -> impl IntoElement {
+        footer::render_footer(&self.commit.sha, self.stash.is_some(), self.in_pane, cx)
     }
 
     fn apply_stash(workspace: &mut Workspace, window: &mut Window, cx: &mut App) {
@@ -675,6 +752,82 @@ impl CommitView {
             .await?;
         anyhow::Ok(())
     }
+}
+
+fn clone_commit_file(file: &git::repository::CommitFile) -> git::repository::CommitFile {
+    git::repository::CommitFile {
+        path: file.path.clone(),
+        old_text: file.old_text.clone(),
+        new_text: file.new_text.clone(),
+        is_binary: file.is_binary,
+    }
+}
+
+struct LoadedCommitMetadata {
+    parents: Vec<SharedString>,
+    ref_names: Vec<SharedString>,
+    extra_committer: Option<(SharedString, SharedString)>,
+}
+
+async fn load_commit_metadata(
+    work_dir: &std::path::Path,
+    sha: &str,
+) -> Result<LoadedCommitMetadata> {
+    use util::command::new_command;
+    // %H<NUL>%P<NUL>%D<NUL>%an<NUL>%ae<NUL>%cn<NUL>%ce
+    let format = "--format=%H%x00%P%x00%D%x00%an%x00%ae%x00%cn%x00%ce";
+    let mut cmd = new_command("git");
+    cmd.current_dir(work_dir);
+    cmd.args(["show", "--no-patch", "--decorate=full", format, sha]);
+    let output = cmd
+        .output()
+        .await
+        .context("spawning git show for metadata")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git show --format= failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim_end()
+        );
+    }
+    let stdout = std::str::from_utf8(&output.stdout)
+        .context("git show metadata output not utf-8")?
+        .trim_end_matches('\n');
+    let mut parts = stdout.splitn(7, '\x00');
+    let _full_sha = parts.next().unwrap_or("");
+    let parents = parts
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .map(|s| SharedString::from(s.to_string()))
+        .collect();
+    let refs_raw = parts.next().unwrap_or("");
+    let ref_names: Vec<SharedString> = if refs_raw.is_empty() {
+        Vec::new()
+    } else {
+        refs_raw
+            .split(", ")
+            .map(|s| SharedString::from(s.to_string()))
+            .collect()
+    };
+    let author_name = parts.next().unwrap_or("");
+    let author_email = parts.next().unwrap_or("");
+    let committer_name = parts.next().unwrap_or("");
+    let committer_email = parts.next().unwrap_or("");
+    let extra_committer = if !committer_name.is_empty()
+        && (committer_name != author_name || committer_email != author_email)
+    {
+        Some((
+            SharedString::from(committer_name.to_string()),
+            SharedString::from(committer_email.to_string()),
+        ))
+    } else {
+        None
+    };
+    Ok(LoadedCommitMetadata {
+        parents,
+        ref_names,
+        extra_committer,
+    })
 }
 
 impl language::File for GitBlob {
@@ -933,7 +1086,12 @@ impl Item for CommitView {
             .addon::<CommitDiffAddon>()
             .map(|addon| addon.file_statuses.clone())
             .unwrap_or_default();
-        Task::ready(Some(cx.new(|cx| {
+        let parents = self.parents.clone();
+        let ref_names = self.ref_names.clone();
+        let extra_committer = self.extra_committer.clone();
+        let diff_files = self.diff_files.iter().map(clone_commit_file).collect();
+        let lazy_threshold = self.affected_files.lazy_threshold;
+        Task::ready(Some(cx.new(move |cx| {
             let editor = cx.new({
                 let file_statuses = file_statuses.clone();
                 |cx| {
@@ -945,6 +1103,7 @@ impl Item for CommitView {
                 }
             });
             let multibuffer = editor.read(cx).buffer().clone();
+            let affected_files = CommitAffectedFiles::new(lazy_threshold, window, cx);
             Self {
                 editor,
                 multibuffer,
@@ -952,6 +1111,14 @@ impl Item for CommitView {
                 stash: self.stash,
                 repository: self.repository.clone(),
                 remote: self.remote.clone(),
+                parents,
+                ref_names,
+                extra_committer,
+                selected_parent_index: self.selected_parent_index,
+                diff_files,
+                affected_files,
+                contains_panel: CommitContainsPanel::new(),
+                in_pane: true,
             }
         })))
     }
@@ -965,10 +1132,11 @@ impl Render for CommitView {
             .key_context(if is_stash { "StashDiff" } else { "CommitDiff" })
             .size_full()
             .bg(cx.theme().colors().editor_background)
-            .child(self.render_header(window, cx))
+            .child(self.render_metadata_panel(window, cx))
             .when(!self.editor.read(cx).is_empty(cx), |this| {
                 this.child(div().flex_grow().child(self.editor.clone()))
             })
+            .child(self.render_inline_footer(cx))
     }
 }
 
@@ -996,6 +1164,8 @@ impl Render for CommitViewToolbar {
         let (additions, deletions) = commit_view_ref.calculate_changed_lines(cx);
 
         let commit_sha = commit_view_ref.commit.sha.clone();
+        let parents = commit_view_ref.parents.clone();
+        let selected_parent_index = commit_view_ref.selected_parent_index;
 
         let remote_info = commit_view_ref.remote.as_ref().map(|remote| {
             let provider = remote.host.name();
@@ -1012,6 +1182,7 @@ impl Render for CommitViewToolbar {
         });
 
         let sha_for_graph = commit_sha.to_string();
+        let commit_view_for_parent = commit_view.downgrade();
 
         h_flex()
             .gap_1()
@@ -1026,6 +1197,14 @@ impl Render for CommitViewToolbar {
                         ))
                         .child(Divider::vertical()),
                 )
+            })
+            .when(parents.len() > 1, |this| {
+                this.child(render_parent_toggle(
+                    selected_parent_index,
+                    parents.len(),
+                    commit_view_for_parent.clone(),
+                ))
+                .child(Divider::vertical())
             })
             .child(
                 IconButton::new("buffer-search", IconName::MagnifyingGlass)
@@ -1051,7 +1230,7 @@ impl Render for CommitViewToolbar {
                         .tooltip(Tooltip::text("Show in Git Graph"))
                         .on_click(move |_, window, cx| {
                             window.dispatch_action(
-                                Box::new(crate::git_panel::OpenAtCommit {
+                                Box::new(OpenAtCommit {
                                     sha: sha_for_graph.clone(),
                                 }),
                                 cx,
@@ -1071,6 +1250,29 @@ impl Render for CommitViewToolbar {
                 }))
             })
     }
+}
+
+fn render_parent_toggle(
+    selected: usize,
+    parent_count: usize,
+    commit_view: WeakEntity<CommitView>,
+) -> AnyElement {
+    let label = format!("Diff vs parent: {}", selected.max(1).min(parent_count));
+    Button::new("merge-parent-toggle", label)
+        .style(ButtonStyle::Subtle)
+        .label_size(LabelSize::Small)
+        .tooltip(Tooltip::text(
+            "Cycle through merge-commit parents to diff against",
+        ))
+        .on_click(move |_, _, cx| {
+            let next = if selected >= parent_count { 1 } else { selected + 1 };
+            commit_view
+                .update(cx, |view, cx| {
+                    view.select_parent_index(next, cx);
+                })
+                .ok();
+        })
+        .into_any_element()
 }
 
 impl ToolbarItemView for CommitViewToolbar {

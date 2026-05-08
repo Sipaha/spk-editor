@@ -841,6 +841,47 @@ pub trait GitRepository: Send + Sync {
     fn show(&self, commit: String) -> BoxFuture<'_, Result<CommitDetails>>;
 
     fn load_commit(&self, commit: String, cx: AsyncApp) -> BoxFuture<'_, Result<CommitDiff>>;
+
+    /// Same as [`load_commit`] but diffs against an arbitrary parent index
+    /// (1-based to mirror git's `<sha>^N` syntax). Used by the commit-view
+    /// merge-parent toggle. The default impl delegates to [`load_commit`]
+    /// when `parent_index == 1`, which preserves the first-parent default.
+    fn load_commit_against_parent(
+        &self,
+        commit: String,
+        parent_index: usize,
+        cx: AsyncApp,
+    ) -> BoxFuture<'_, Result<CommitDiff>> {
+        if parent_index <= 1 {
+            self.load_commit(commit, cx)
+        } else {
+            future::ready(Err(anyhow!(
+                "load_commit_against_parent not supported on this backend"
+            )))
+            .boxed()
+        }
+    }
+
+    /// Local branches (and remote-tracking branches if there's no
+    /// `--list` filter) that contain the given commit. Empty when the
+    /// commit is unreachable.
+    fn branches_containing(
+        &self,
+        sha: String,
+    ) -> BoxFuture<'_, Result<Vec<SharedString>>> {
+        let _ = sha;
+        future::ready(Ok(Vec::new())).boxed()
+    }
+
+    /// Tags that contain the given commit. Empty when the commit is
+    /// unreachable from any tag.
+    fn tags_containing(
+        &self,
+        sha: String,
+    ) -> BoxFuture<'_, Result<Vec<SharedString>>> {
+        let _ = sha;
+        future::ready(Ok(Vec::new())).boxed()
+    }
     fn blame(
         &self,
         path: RepoPath,
@@ -2651,6 +2692,197 @@ impl GitRepository for RealGitRepository {
             .boxed()
     }
 
+    fn branches_containing(
+        &self,
+        sha: String,
+    ) -> BoxFuture<'_, Result<Vec<SharedString>>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let git = git_binary?;
+                let output = git
+                    .build_command(&["branch", "--list", "--contains", &sha, "--format=%(refname:short)"])
+                    .output()
+                    .await?;
+                if !output.status.success() {
+                    bail!(
+                        "git branch --contains failed: {}",
+                        String::from_utf8_lossy(&output.stderr).trim_end()
+                    );
+                }
+                Ok(parse_contains_output(&String::from_utf8_lossy(&output.stdout)))
+            })
+            .boxed()
+    }
+
+    fn tags_containing(
+        &self,
+        sha: String,
+    ) -> BoxFuture<'_, Result<Vec<SharedString>>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let git = git_binary?;
+                let output = git
+                    .build_command(&["tag", "--contains", &sha])
+                    .output()
+                    .await?;
+                if !output.status.success() {
+                    bail!(
+                        "git tag --contains failed: {}",
+                        String::from_utf8_lossy(&output.stderr).trim_end()
+                    );
+                }
+                Ok(parse_contains_output(&String::from_utf8_lossy(&output.stdout)))
+            })
+            .boxed()
+    }
+
+    fn load_commit_against_parent(
+        &self,
+        commit: String,
+        parent_index: usize,
+        cx: AsyncApp,
+    ) -> BoxFuture<'_, Result<CommitDiff>> {
+        if parent_index <= 1 {
+            return self.load_commit(commit, cx);
+        }
+        if self.repository.lock().workdir().is_none() {
+            return future::ready(Err(anyhow!("no working directory"))).boxed();
+        }
+        let git_binary = self.git_binary();
+        cx.background_spawn(async move {
+            let git = git_binary?;
+            let parent_ref = format!("{}^{}", commit, parent_index);
+            // Re-use the same `name-status -z` parsing the first-parent path
+            // already exercises, but force the comparison against `<sha>^N`.
+            let show_output = git
+                .build_command(&[
+                    "diff",
+                    "--format=",
+                    "-z",
+                    "--no-renames",
+                    "--name-status",
+                ])
+                .arg(&parent_ref)
+                .arg(&commit)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .await
+                .context("starting git diff process")?;
+            if !show_output.status.success() {
+                bail!(
+                    "git diff <sha>^{}..<sha> failed: {}",
+                    parent_index,
+                    String::from_utf8_lossy(&show_output.stderr).trim_end()
+                );
+            }
+            let show_stdout = String::from_utf8_lossy(&show_output.stdout);
+            let changes = parse_git_diff_name_status(&show_stdout);
+
+            let mut cat_file_process = git
+                .build_command(&["cat-file", "--batch=%(objectsize)"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .context("starting git cat-file process")?;
+
+            let mut files = Vec::<CommitFile>::new();
+            let mut stdin = BufWriter::with_capacity(512, cat_file_process.stdin.take().unwrap());
+            let mut stdout = BufReader::new(cat_file_process.stdout.take().unwrap());
+            let mut info_line = String::new();
+            let mut newline = [b'\0'];
+            for (path, status_code) in changes {
+                let Some(rel_path) = RelPath::unix(path).log_err() else {
+                    continue;
+                };
+
+                match status_code {
+                    StatusCode::Modified => {
+                        stdin.write_all(commit.as_bytes()).await?;
+                        stdin.write_all(b":").await?;
+                        stdin.write_all(path.as_bytes()).await?;
+                        stdin.write_all(b"\n").await?;
+                        stdin.write_all(parent_ref.as_bytes()).await?;
+                        stdin.write_all(b":").await?;
+                        stdin.write_all(path.as_bytes()).await?;
+                        stdin.write_all(b"\n").await?;
+                    }
+                    StatusCode::Added => {
+                        stdin.write_all(commit.as_bytes()).await?;
+                        stdin.write_all(b":").await?;
+                        stdin.write_all(path.as_bytes()).await?;
+                        stdin.write_all(b"\n").await?;
+                    }
+                    StatusCode::Deleted => {
+                        stdin.write_all(parent_ref.as_bytes()).await?;
+                        stdin.write_all(b":").await?;
+                        stdin.write_all(path.as_bytes()).await?;
+                        stdin.write_all(b"\n").await?;
+                    }
+                    _ => continue,
+                }
+                stdin.flush().await?;
+
+                info_line.clear();
+                stdout.read_line(&mut info_line).await?;
+
+                let len = info_line.trim_end().parse().with_context(|| {
+                    format!("invalid object size output from cat-file {info_line}")
+                })?;
+                let mut text_bytes = vec![0; len];
+                stdout.read_exact(&mut text_bytes).await?;
+                stdout.read_exact(&mut newline).await?;
+
+                let mut old_text = None;
+                let mut new_text = None;
+                let mut is_binary = is_binary_content(&text_bytes);
+                let text = if is_binary {
+                    String::new()
+                } else {
+                    String::from_utf8_lossy(&text_bytes).to_string()
+                };
+
+                match status_code {
+                    StatusCode::Modified => {
+                        info_line.clear();
+                        stdout.read_line(&mut info_line).await?;
+                        let len = info_line.trim_end().parse().with_context(|| {
+                            format!("invalid object size output from cat-file {}", info_line)
+                        })?;
+                        let mut parent_bytes = vec![0; len];
+                        stdout.read_exact(&mut parent_bytes).await?;
+                        stdout.read_exact(&mut newline).await?;
+                        is_binary = is_binary || is_binary_content(&parent_bytes);
+                        if is_binary {
+                            old_text = Some(String::new());
+                            new_text = Some(String::new());
+                        } else {
+                            old_text = Some(String::from_utf8_lossy(&parent_bytes).to_string());
+                            new_text = Some(text);
+                        }
+                    }
+                    StatusCode::Added => new_text = Some(text),
+                    StatusCode::Deleted => old_text = Some(text),
+                    _ => continue,
+                }
+
+                files.push(CommitFile {
+                    path: RepoPath(Arc::from(rel_path)),
+                    old_text,
+                    new_text,
+                    is_binary,
+                });
+            }
+
+            Ok(CommitDiff { files })
+        })
+        .boxed()
+    }
+
     fn checkpoint(&self) -> BoxFuture<'static, Result<GitRepositoryCheckpoint>> {
         let git_binary = self.git_binary();
         self.executor
@@ -3752,6 +3984,28 @@ fn parse_upstream_track(upstream_track: &str) -> Result<UpstreamTracking> {
     }))
 }
 
+/// Parse the stdout of `git branch --list --contains <sha> --format=%(refname:short)`
+/// or `git tag --contains <sha>`. Each line is one ref name; an empty line is
+/// skipped, and `git branch` may emit a leading `* ` marker on the current
+/// branch when invoked without `--format` (we pass `--format=%(refname:short)`
+/// to avoid that, but be defensive in case a backend overrides the format).
+pub(crate) fn parse_contains_output(stdout: &str) -> Vec<SharedString> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            let trimmed = trimmed.strip_prefix("* ").unwrap_or(trimmed);
+            let trimmed = trimmed.strip_prefix("+ ").unwrap_or(trimmed);
+            let trimmed = trimmed.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(SharedString::from(trimmed.to_string()))
+            }
+        })
+        .collect()
+}
+
 fn checkpoint_author_envs() -> HashMap<String, String> {
     HashMap::from_iter([
         ("GIT_AUTHOR_NAME".to_string(), "SPK Editor".to_string()),
@@ -3910,6 +4164,43 @@ mod tests {
         let entries = parse_shortlog_output(raw);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].email.as_ref(), "alice@example.com");
+    }
+
+    #[test]
+    fn test_parse_contains_output_basic() {
+        let raw = "main\nfeat/foo\n  feat/bar  \n";
+        let names = parse_contains_output(raw);
+        assert_eq!(
+            names,
+            vec![
+                SharedString::from("main"),
+                SharedString::from("feat/foo"),
+                SharedString::from("feat/bar"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_contains_output_strips_current_branch_marker() {
+        // git branch --list (without --format) emits "* current" for HEAD's
+        // branch and "+ name" for branches checked out in a worktree. The
+        // parser drops both prefixes defensively.
+        let raw = "* main\n+ feat/wt\n  feat/regular\n";
+        let names = parse_contains_output(raw);
+        assert_eq!(
+            names,
+            vec![
+                SharedString::from("main"),
+                SharedString::from("feat/wt"),
+                SharedString::from("feat/regular"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_contains_output_empty() {
+        assert!(parse_contains_output("").is_empty());
+        assert!(parse_contains_output("\n\n").is_empty());
     }
 
     #[gpui::test]

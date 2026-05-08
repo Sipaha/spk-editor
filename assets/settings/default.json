@@ -1008,6 +1008,19 @@
     //
     // Default: 72
     "commit_title_max_length": 72,
+    // Commit-view (S-DET) options.
+    "commit_view": {
+      // Fetch Gravatar avatars for commit authors. Off by default to avoid
+      // leaking the author email hash to a third party without consent.
+      "fetch_avatars": false,
+      // Threshold for lazy-loading affected files in the commit view. Commits
+      // with more files than this render the first 100 and expose a "Load
+      // more" button + fuzzy filter.
+      "affected_files_lazy_threshold": 500,
+      // Whether to parse `#1234` and `[ABC-123]` references in the commit
+      // message and render them as clickable mentions. URLs are always parsed.
+      "parse_issue_references": true,
+    },
   },
   "message_editor": {
     // Whether to automatically replace emoji shortcodes with emoji characters.
