@@ -1217,16 +1217,19 @@ impl GitGraph {
         cx: &mut Context<Self>,
     ) {
         match event {
-            RepositoryEvent::GraphEvent((source, order), event)
-                if source == &self.log_source && order == &self.log_order =>
+            RepositoryEvent::GraphEvent((source, order, extra_args), event)
+                if source == &self.log_source
+                    && order == &self.log_order
+                    && extra_args == &self.filters.to_git_args() =>
             {
+                let extra_args = extra_args.clone();
                 match event {
                     GitGraphEvent::FullyLoaded => {
                         if let Some(pending_sha_index) =
                             self.pending_select_sha.take().and_then(|oid| {
                                 repository
                                     .read(cx)
-                                    .get_graph_data(source.clone(), *order)
+                                    .get_graph_data(source.clone(), *order, &extra_args)
                                     .and_then(|data| data.commit_oid_to_index.get(&oid).copied())
                             })
                         {
@@ -1248,15 +1251,18 @@ impl GitGraph {
                                 } = repository.graph_data(
                                     source.clone(),
                                     *order,
+                                    extra_args.clone(),
                                     old_count..*commit_count,
                                     cx,
                                 );
                                 self.graph_data.add_commits(commits);
 
                                 let pending_sha_index = self.pending_select_sha.and_then(|oid| {
-                                    repository.get_graph_data(source.clone(), *order).and_then(
-                                        |data| data.commit_oid_to_index.get(&oid).copied(),
-                                    )
+                                    repository
+                                        .get_graph_data(source.clone(), *order, &extra_args)
+                                        .and_then(|data| {
+                                            data.commit_oid_to_index.get(&oid).copied()
+                                        })
                                 });
 
                                 if !is_loading && pending_sha_index.is_none() {
@@ -1297,9 +1303,16 @@ impl GitGraph {
 
     fn fetch_initial_graph_data(&mut self, cx: &mut App) {
         if let Some(repository) = self.get_repository(cx) {
+            let extra_args = self.filters.to_git_args();
             repository.update(cx, |repository, cx| {
                 let commits = repository
-                    .graph_data(self.log_source.clone(), self.log_order, 0..usize::MAX, cx)
+                    .graph_data(
+                        self.log_source.clone(),
+                        self.log_order,
+                        extra_args,
+                        0..usize::MAX,
+                        cx,
+                    )
                     .commits;
                 self.graph_data.add_commits(commits);
             });
@@ -1722,9 +1735,10 @@ impl GitGraph {
                 return;
             };
 
+            let extra_args = this.filters.to_git_args();
             let Some(index) = selected_repository
                 .read(cx)
-                .get_graph_data(this.log_source.clone(), this.log_order)
+                .get_graph_data(this.log_source.clone(), this.log_order, &extra_args)
                 .and_then(|data| data.commit_oid_to_index.get(&oid))
                 .copied()
             else {
@@ -2700,6 +2714,7 @@ impl Render for GitGraph {
         let (commit_count, is_loading) = match self.graph_data.max_commit_count {
             AllCommitCount::Loaded(count) => (count, true),
             AllCommitCount::NotLoaded => {
+                let extra_args = self.filters.to_git_args();
                 let (commit_count, is_loading) = if let Some(repository) = self.get_repository(cx) {
                     repository.update(cx, |repository, cx| {
                         // Start loading the graph data if we haven't started already
@@ -2710,6 +2725,7 @@ impl Render for GitGraph {
                         } = repository.graph_data(
                             self.log_source.clone(),
                             self.log_order,
+                            extra_args.clone(),
                             0..usize::MAX,
                             cx,
                         );
@@ -2724,9 +2740,10 @@ impl Render for GitGraph {
             }
         };
 
+        let extra_args = self.filters.to_git_args();
         let error = self.get_repository(cx).and_then(|repo| {
             repo.read(cx)
-                .get_graph_data(self.log_source.clone(), self.log_order)
+                .get_graph_data(self.log_source.clone(), self.log_order, &extra_args)
                 .and_then(|data| data.error.clone())
         });
 
@@ -4061,6 +4078,7 @@ mod tests {
             repo.graph_data(
                 crate::LogSource::default(),
                 crate::LogOrder::default(),
+                Vec::new(),
                 0..usize::MAX,
                 cx,
             );
@@ -4071,6 +4089,7 @@ mod tests {
             repo.graph_data(
                 crate::LogSource::default(),
                 crate::LogOrder::default(),
+                Vec::new(),
                 0..usize::MAX,
                 cx,
             )
@@ -4132,6 +4151,7 @@ mod tests {
             repo.graph_data(
                 crate::LogSource::default(),
                 crate::LogOrder::default(),
+                Vec::new(),
                 0..usize::MAX,
                 cx,
             );
@@ -4152,7 +4172,7 @@ mod tests {
             "initial repository scan should emit HeadChanged"
         );
         let commit_count_after = repository.read_with(cx, |repo, _| {
-            repo.get_graph_data(crate::LogSource::default(), crate::LogOrder::default())
+            repo.get_graph_data(crate::LogSource::default(), crate::LogOrder::default(), &[])
                 .map(|data| data.commit_data.len())
                 .unwrap()
         });
@@ -4194,6 +4214,7 @@ mod tests {
             repo.graph_data(
                 crate::LogSource::default(),
                 crate::LogOrder::default(),
+                Vec::new(),
                 0..usize::MAX,
                 cx,
             );
@@ -4202,7 +4223,7 @@ mod tests {
         cx.run_until_parked();
 
         let error = repository.read_with(cx, |repo, _| {
-            repo.get_graph_data(crate::LogSource::default(), crate::LogOrder::default())
+            repo.get_graph_data(crate::LogSource::default(), crate::LogOrder::default(), &[])
                 .and_then(|data| data.error.clone())
         });
 

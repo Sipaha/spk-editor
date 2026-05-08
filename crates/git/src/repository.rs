@@ -998,10 +998,16 @@ pub trait GitRepository: Send + Sync {
 
     /// Runs `git rev-list --parents` to get the commit graph structure.
     /// Returns commit SHAs and their parent SHAs for building the graph visualization.
+    ///
+    /// `extra_args` is appended to the base `git log <log-source-arg>` invocation
+    /// before any `--` path separator. Used by the chip-filter toolbar (S-FLT) to
+    /// thread `--author`, `--since`, `--grep`, and similar arguments through.
+    /// Pass an empty `Vec` for the pre-S-FLT default behavior.
     fn initial_graph_data(
         &self,
         log_source: LogSource,
         log_order: LogOrder,
+        extra_args: Vec<String>,
         request_tx: Sender<Vec<Arc<InitialGraphCommitData>>>,
     ) -> BoxFuture<'_, Result<()>>;
 
@@ -2928,6 +2934,7 @@ impl GitRepository for RealGitRepository {
         &self,
         log_source: LogSource,
         log_order: LogOrder,
+        extra_args: Vec<String>,
         request_tx: Sender<Vec<Arc<InitialGraphCommitData>>>,
     ) -> BoxFuture<'_, Result<()>> {
         let git_binary = self.git_binary();
@@ -2935,15 +2942,17 @@ impl GitRepository for RealGitRepository {
         async move {
             let git = git_binary?;
 
-            let mut git_log_command = vec![
-                "log",
-                GRAPH_COMMIT_FORMAT,
-                log_order.as_arg(),
-                log_source.get_arg()?,
+            let mut git_log_command: Vec<String> = vec![
+                "log".to_string(),
+                GRAPH_COMMIT_FORMAT.to_string(),
+                log_order.as_arg().to_string(),
+                log_source.get_arg()?.to_string(),
             ];
+            git_log_command.extend(extra_args);
 
             if let LogSource::File(file_path) = &log_source {
-                git_log_command.extend(["--", file_path.as_unix_str()]);
+                git_log_command.push("--".to_string());
+                git_log_command.push(file_path.as_unix_str().to_string());
             }
 
             let mut command = git.build_command(&git_log_command);

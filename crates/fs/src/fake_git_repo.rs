@@ -1407,6 +1407,7 @@ impl GitRepository for FakeGitRepository {
         &self,
         _log_source: LogSource,
         _log_order: LogOrder,
+        _extra_args: Vec<String>,
         request_tx: Sender<Vec<Arc<InitialGraphCommitData>>>,
     ) -> BoxFuture<'_, Result<()>> {
         let fs = self.fs.clone();

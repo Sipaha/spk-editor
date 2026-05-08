@@ -377,7 +377,10 @@ pub struct Repository {
     askpass_delegates: Arc<Mutex<HashMap<u64, AskPassDelegate>>>,
     latest_askpass_id: u64,
     repository_state: Shared<Task<Result<RepositoryState, String>>>,
-    initial_graph_data: HashMap<(LogSource, LogOrder), InitialGitGraphData>,
+    /// Cache key includes the chip-filter arg list (S-FLT) so concurrent
+    /// filter states don't collapse onto the same entry. Empty args ==
+    /// pre-S-FLT default.
+    initial_graph_data: HashMap<(LogSource, LogOrder, Vec<String>), InitialGitGraphData>,
     commit_data_handler: CommitDataHandlerState,
     commit_data: HashMap<Oid, CommitDataState>,
     refetch_repo_state: Arc<
@@ -475,7 +478,7 @@ pub enum RepositoryEvent {
     StashEntriesChanged,
     GitWorktreeListChanged,
     PendingOpsChanged { pending_ops: SumTree<PendingOps> },
-    GraphEvent((LogSource, LogOrder), GitGraphEvent),
+    GraphEvent((LogSource, LogOrder, Vec<String>), GitGraphEvent),
 }
 
 #[derive(Clone, Debug)]
@@ -4323,7 +4326,7 @@ impl Repository {
             RepositoryEvent::StashEntriesChanged => {
                 if this.scan_id > 2 {
                     this.initial_graph_data
-                        .retain(|(log_source, _), _| *log_source != LogSource::All);
+                        .retain(|(log_source, _, _), _| *log_source != LogSource::All);
                 }
             }
             _ => {}
@@ -4917,8 +4920,10 @@ impl Repository {
         &self,
         log_source: LogSource,
         log_order: LogOrder,
+        extra_args: &[String],
     ) -> Option<&InitialGitGraphData> {
-        self.initial_graph_data.get(&(log_source, log_order))
+        self.initial_graph_data
+            .get(&(log_source, log_order, extra_args.to_vec()))
     }
 
     pub fn search_commits(
@@ -4951,15 +4956,17 @@ impl Repository {
         &mut self,
         log_source: LogSource,
         log_order: LogOrder,
+        extra_args: Vec<String>,
         range: Range<usize>,
         cx: &mut Context<Self>,
     ) -> GraphDataResponse<'_> {
         let initial_commit_data = self
             .initial_graph_data
-            .entry((log_source.clone(), log_order))
+            .entry((log_source.clone(), log_order, extra_args.clone()))
             .or_insert_with(|| {
                 let state = self.repository_state.clone();
                 let log_source = log_source.clone();
+                let extra_args_for_task = extra_args.clone();
 
                 let fetch_task = cx.spawn(async move |repository, cx| {
                     let state = state.await;
@@ -4970,6 +4977,7 @@ impl Repository {
                                 backend,
                                 log_source.clone(),
                                 log_order,
+                                extra_args_for_task.clone(),
                                 cx,
                             )
                             .await
@@ -4983,10 +4991,11 @@ impl Repository {
                     if let Err(fetch_task_error) = result {
                         repository
                             .update(cx, |repository, _| {
-                                if let Some(data) = repository
-                                    .initial_graph_data
-                                    .get_mut(&(log_source, log_order))
-                                {
+                                if let Some(data) = repository.initial_graph_data.get_mut(&(
+                                    log_source,
+                                    log_order,
+                                    extra_args_for_task,
+                                )) {
                                     data.error = Some(fetch_task_error);
                                 } else {
                                     debug_panic!(
@@ -5022,6 +5031,7 @@ impl Repository {
         backend: Arc<dyn GitRepository>,
         log_source: LogSource,
         log_order: LogOrder,
+        extra_args: Vec<String>,
         cx: &mut AsyncApp,
     ) -> Result<(), SharedString> {
         let (request_tx, request_rx) =
@@ -5029,15 +5039,16 @@ impl Repository {
 
         let task = cx.background_executor().spawn({
             let log_source = log_source.clone();
+            let extra_args = extra_args.clone();
             async move {
                 backend
-                    .initial_graph_data(log_source, log_order, request_tx)
+                    .initial_graph_data(log_source, log_order, extra_args, request_tx)
                     .await
                     .map_err(|err| SharedString::from(err.to_string()))
             }
         });
 
-        let graph_data_key = (log_source, log_order);
+        let graph_data_key = (log_source, log_order, extra_args);
 
         while let Ok(initial_graph_commit_data) = request_rx.recv().await {
             this.update(cx, |repository, cx| {

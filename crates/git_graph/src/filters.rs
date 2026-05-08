@@ -76,6 +76,88 @@ impl LogFilters {
         }
         n
     }
+
+    /// Convert the filter state into a list of `git log` CLI arguments.
+    ///
+    /// The arguments are appended to the base `git log <log-source-arg>`
+    /// command in `git::repository::initial_graph_data`. Empty filters
+    /// produce an empty `Vec`, which preserves the pre-S-FLT behavior.
+    ///
+    /// Order matters for `--` separator: anything after `--` is a path,
+    /// so [`Self::paths`] is emitted last; the caller MUST keep this list
+    /// at the tail of its argv. Other args (`--author`, `--since`, etc.)
+    /// can appear in any order before paths.
+    pub fn to_git_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+
+        // --all toggle. Per plan precedence rule, ignored when `branches`
+        // is non-empty: explicit branches define the traversal set.
+        if self.all_refs && self.branches.is_empty() {
+            args.push("--all".to_string());
+        }
+
+        // Multi-author: a single `--author=<re>` with alternation. Authors
+        // are escaped against regex metachars by the caller's UI layer
+        // before they land here (chip-User input is matched against
+        // shortlog output, not raw user text).
+        if !self.authors.is_empty() {
+            let pattern = self.authors.join("|");
+            args.push(format!("--author={pattern}"));
+        }
+
+        if let Some(range) = self.date_range {
+            match range {
+                DateRange::Since(unix) => args.push(format!("--since=@{unix}")),
+                DateRange::Until(unix) => args.push(format!("--until=@{unix}")),
+                DateRange::Between { since, until } => {
+                    args.push(format!("--since=@{since}"));
+                    args.push(format!("--until=@{until}"));
+                }
+            }
+        }
+
+        if let Some(query) = &self.query {
+            if query.search_in_diffs {
+                // -G searches commit *content* (added/removed lines).
+                // Mutually exclusive with --grep at the user-facing level —
+                // chip-Query toggles control which mode is active.
+                args.push(format!("-G{}", query.text));
+            } else {
+                args.push(format!("--grep={}", query.text));
+            }
+            if query.regex {
+                args.push("--extended-regexp".to_string());
+            }
+            // git --grep is case-insensitive by default; case-sensitive
+            // requires no flag inversion — git treats `-i` as the
+            // case-insensitive opt-in, so case_sensitive=true == default.
+            if !query.case_sensitive {
+                args.push("--regexp-ignore-case".to_string());
+            }
+        }
+
+        // Branches are positional refs, so they must come before `--`.
+        // Caller appends paths after — see [`Self::paths_args`].
+        for branch in &self.branches {
+            args.push(branch.to_string());
+        }
+
+        // SHA pin is also positional — git log <sha> walks the chain.
+        if let Some(sha) = &self.sha {
+            args.push(sha.to_string());
+        }
+
+        args
+    }
+
+    /// Path filter args — must be appended *after* a `--` separator.
+    /// Returned separately so the caller controls placement.
+    pub fn paths_args(&self) -> Vec<String> {
+        self.paths
+            .iter()
+            .map(|p| p.as_unix_str().to_string())
+            .collect()
+    }
 }
 
 /// Date filter for chip-Date. Unix seconds; UI offers presets (Today /
