@@ -42,8 +42,9 @@ pub fn open_solution(
 ) {
     // Focus an already-open window for this Solution, except when the
     // user explicitly asked for a new window via middle-click.
+    let source_window_id = source_window.as_ref().map(|w| w.window_id());
     if intent == OpenIntent::SameWindow
-        && let Some(existing) = find_window_for_solution(&sol_id, cx)
+        && let Some(existing) = find_window_for_solution(&sol_id, source_window_id, cx)
     {
         existing
             .update(cx, |_, window, _| window.activate_window())
@@ -72,43 +73,60 @@ pub fn open_solution(
     //     just activate that tab — no worktree swap, no Workspace
     //     teardown. (Handles tab-strip clicks and re-opening a
     //     Solution from the picker that's still up here.)
-    //   * Else, fall through to the `OpenMode::Add` path below, which
+    //   * Else, defer-call `open_solution_as_new_workspace`, which
     //     loads a fresh `Workspace` for the target, retains the
-    //     currently-active one, and activates the new one. The
-    //     previous Solution stays available as a tab.
+    //     currently-active one, and activates the new one.
     //
-    // Defers via `cx.defer` so the activate runs AFTER the click
-    // handler's frame — reading or updating a window inline from
-    // within `Window::dispatch_event` panics with "attempted to read a
-    // window that is already on the stack."
+    // Both branches run inside `cx.defer` so the click handler's
+    // window-dispatch frame finishes first — reading or updating a
+    // window inline from within `Window::dispatch_event` panics with
+    // "attempted to read a window that is already on the stack."
     if intent == OpenIntent::SameWindow
         && let Some(src) = source_window
     {
-        let already_open_here = src
-            .read_with(cx, |multi_workspace, cx| {
-                multi_workspace
-                    .workspaces()
-                    .find(|ws| workspace_has_solution(ws, &sol_id, cx))
-                    .cloned()
-            })
-            .ok()
-            .flatten();
-        if let Some(target_workspace) = already_open_here {
-            if let Some(store) = SolutionStore::try_global(cx) {
-                store
-                    .update(cx, |s, cx| s.touch_last_opened(&sol_id, cx))
-                    .log_err();
-            }
-            cx.defer(move |cx| {
+        let target = sol_id;
+        cx.defer(move |cx| {
+            let already_open_here = src
+                .read_with(cx, |multi_workspace, cx| {
+                    multi_workspace
+                        .workspaces()
+                        .find(|ws| workspace_has_solution(ws, &target, cx))
+                        .cloned()
+                })
+                .ok()
+                .flatten();
+            if let Some(target_workspace) = already_open_here {
+                if let Some(store) = SolutionStore::try_global(cx) {
+                    store
+                        .update(cx, |s, cx| s.touch_last_opened(&target, cx))
+                        .log_err();
+                }
                 src.update(cx, |multi_workspace, window, cx| {
                     multi_workspace.activate(target_workspace, None, window, cx);
                 })
                 .log_err();
-            });
-            return;
-        }
+            } else {
+                open_solution_as_new_workspace(target, Some(src), cx);
+            }
+        });
+        return;
     }
 
+    open_solution_as_new_workspace(sol_id, source_window, cx);
+}
+
+/// Loads a fresh `Workspace` for `sol_id` via `OpenMode::Add` (when
+/// `source_window` is `Some`) or `OpenMode::NewWindow` (when it's
+/// `None`). For the `OpenMode::Add` path, retains the source MW's
+/// previously-active workspace before activating the freshly-loaded
+/// one — so the previous Solution stays available as a tab. For empty
+/// solutions, mounts an `EmptySolutionPage` placeholder and hides the
+/// solution.root worktree from the panel.
+fn open_solution_as_new_workspace(
+    sol_id: SolutionId,
+    source_window: Option<WindowHandle<MultiWorkspace>>,
+    cx: &mut App,
+) {
     let Some(store) = SolutionStore::try_global(cx) else {
         return;
     };
@@ -153,38 +171,21 @@ pub fn open_solution(
 
     let app_state = AppState::global(cx);
     let mut options = OpenOptions::default();
-    // For an "empty" solution (no member projects yet) we still need a
-    // worktree at `solution.root` so navigator code can identify the
-    // active solution by path, but it shouldn't show in the project
-    // panel — there's nothing meaningful inside, just the on-disk
-    // directory. `OpenVisible::None` keeps the worktree attached but
-    // hidden, leaving the panel clean for the EmptySolutionPage CTA.
     if info.is_empty {
         options.visible = Some(OpenVisible::None);
     }
-    match intent {
-        OpenIntent::SameWindow => {
-            // Two-stage swap: first build the new workspace silently with
-            // `OpenMode::Add` so it loads worktrees and items off-screen
-            // while the source workspace stays visible. Once the task
-            // resolves we call `multi_workspace.activate(...)` ourselves
-            // — the user sees the old workspace transition directly to a
-            // fully-populated new one, instead of an empty new workspace
-            // streaming content in.
-            options.open_mode = OpenMode::Add;
-            options.requesting_window = source_window;
-        }
-        OpenIntent::NewWindow => {
-            options.open_mode = OpenMode::NewWindow;
-            options.requesting_window = None;
-        }
+    let add_to_existing = source_window.is_some();
+    if add_to_existing {
+        options.open_mode = OpenMode::Add;
+        options.requesting_window = source_window;
+    } else {
+        options.open_mode = OpenMode::NewWindow;
+        options.requesting_window = None;
     }
     let task = workspace::open_paths(&info.paths, app_state, options, cx);
 
-    // Capture the launcher window (if any) up front so we can retire
-    // it after the new workspace window appears — otherwise the user
-    // ends up with both Welcome and the Solution window open, which
-    // is rarely what they want.
+    // Capture the launcher window (if any) so we can retire it after
+    // the new workspace window appears.
     let welcome_window = workspace::welcome::find_existing(cx);
 
     let sol_id_for_page = sol_id.clone();
@@ -193,24 +194,13 @@ pub fn open_solution(
         let Some(opened) = task.await.log_err() else {
             return;
         };
-        // Stage two of the silent-prepare swap: now that the new
-        // workspace has loaded its worktrees / items, activate it.
-        // Before activating, retain the currently-active workspace so
-        // its solution_agent sessions keep running in the background;
-        // without this, MultiWorkspace::activate drops the previous
-        // workspace and tears down its agent connections.
-        if intent == OpenIntent::SameWindow {
+        if add_to_existing {
             let new_workspace = opened.workspace.clone();
             let target_sol_id = sol_id_for_lookup;
             cx.update(|cx| {
                 opened
                     .window
                     .update(cx, |multi_workspace, window, cx| {
-                        // If a retained workspace for this Solution already
-                        // exists in this window (user clicked back to a
-                        // solution they previously had open here), prefer
-                        // that one so we don't end up with two retained
-                        // copies of the same solution.
                         let existing = multi_workspace
                             .workspaces()
                             .find(|ws| {
@@ -249,9 +239,6 @@ pub fn open_solution(
                     .log_err();
             });
         }
-        // Close the launcher window (if any) once the workspace
-        // window is up — Welcome is single-purpose, the user picked
-        // their target.
         if let Some(welcome) = welcome_window {
             cx.update(|cx| {
                 welcome
@@ -259,12 +246,6 @@ pub fn open_solution(
                     .log_err();
             });
         }
-
-        // For SameWindow we reused the source via `OpenMode::Activate`, so
-        // there is nothing to clean up. For NewWindow the user explicitly
-        // asked for a separate window — leave the source alone.
-        let _ = source_window;
-        let _ = intent;
     })
     .detach();
 }
@@ -286,10 +267,20 @@ pub(crate) fn workspace_has_solution(
     })
 }
 
-fn find_window_for_solution(sol_id: &SolutionId, cx: &App) -> Option<WindowHandle<MultiWorkspace>> {
+fn find_window_for_solution(
+    sol_id: &SolutionId,
+    skip_extra: Option<gpui::WindowId>,
+    cx: &App,
+) -> Option<WindowHandle<MultiWorkspace>> {
+    // `cx.active_window()` returns None during some dispatch frames
+    // (e.g. when called from a click handler whose window has been
+    // moved off the registry). The caller passes its source window id
+    // as a belt-and-suspenders skip so we never re-enter the window
+    // we're already inside.
     let skip = skip_window_id(cx);
     for handle in cx.windows() {
-        if Some(handle.window_id()) == skip {
+        let id = handle.window_id();
+        if Some(id) == skip || Some(id) == skip_extra {
             continue;
         }
         let Some(mw_handle) = handle.downcast::<MultiWorkspace>() else {
