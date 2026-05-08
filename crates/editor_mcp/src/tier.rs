@@ -44,7 +44,7 @@ impl ToolTier {
 
 impl PartialOrd for ToolTier {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.rank().cmp(&other.rank()))
+        Some(self.cmp(other))
     }
 }
 
