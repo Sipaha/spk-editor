@@ -1,0 +1,124 @@
+//! Log filter state for the Git Graph view (S-FLT in
+//! `docs/superpowers/plans/git-panel-plan.md`).
+//!
+//! `LogFilters` is the pure-data input that the graph passes through to
+//! `git::repository::initial_graph_data` (extended to accept it). Each
+//! optional field maps to a git CLI argument set; an empty `LogFilters`
+//! produces no extra args and matches the pre-S-FLT behavior.
+//!
+//! Skeleton — chip-by-chip wiring lands in follow-up commits as each filter
+//! UI lights up.
+
+use git::{Oid, repository::RepoPath};
+use gpui::SharedString;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LogFilters {
+    /// Multi-select branches/refs (chip-Branch). When non-empty, replaces
+    /// the implicit `--all` traversal — git log is invoked with these refs
+    /// as positional arguments.
+    pub branches: Vec<SharedString>,
+
+    /// Multi-select authors (chip-User). Combined into a single
+    /// `--author=<re>` regex (alternation). Plan: autocomplete from
+    /// `git shortlog -sne`.
+    pub authors: Vec<SharedString>,
+
+    /// Date filter (chip-Date). Maps to `--since` / `--until` CLI args.
+    pub date_range: Option<DateRange>,
+
+    /// Multi-select paths (chip-Path). Trailing `-- <paths>` after CLI args.
+    pub paths: Vec<RepoPath>,
+
+    /// Free-text query (chip-Query). Maps to `--grep` / `-G` / direct hash
+    /// lookup depending on flags.
+    pub query: Option<QueryFilter>,
+
+    /// If true and `branches` is empty, log is invoked with `--all`.
+    /// Ignored when `branches` is non-empty (per plan precedence rule).
+    pub all_refs: bool,
+
+    /// Optional pin to a specific SHA — used by Show At Revision and
+    /// commit-targeted log views. Layered orthogonally to the other
+    /// filters; converts to a positional arg.
+    pub sha: Option<Oid>,
+}
+
+impl LogFilters {
+    pub fn is_empty(&self) -> bool {
+        self.branches.is_empty()
+            && self.authors.is_empty()
+            && self.date_range.is_none()
+            && self.paths.is_empty()
+            && self.query.is_none()
+            && !self.all_refs
+            && self.sha.is_none()
+    }
+
+    /// Number of *active* filters — the chip toolbar uses this for its
+    /// "Clear filters" button visibility.
+    pub fn active_count(&self) -> usize {
+        let mut n = 0;
+        if !self.branches.is_empty() {
+            n += 1;
+        }
+        if !self.authors.is_empty() {
+            n += 1;
+        }
+        if self.date_range.is_some() {
+            n += 1;
+        }
+        if !self.paths.is_empty() {
+            n += 1;
+        }
+        if self.query.is_some() {
+            n += 1;
+        }
+        n
+    }
+}
+
+/// Date filter for chip-Date. Unix seconds; UI offers presets (Today /
+/// Yesterday / This Week / Last 30 days / All Time) plus custom range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DateRange {
+    Since(i64),
+    Until(i64),
+    Between { since: i64, until: i64 },
+}
+
+/// Free-text query filter. The toolbar's text input + toggle row populates
+/// this; `git_graph.rs` translates the flag combo into git CLI args at
+/// log-time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryFilter {
+    pub text: SharedString,
+    pub regex: bool,
+    pub case_sensitive: bool,
+    /// `-G <pat>` instead of `--grep` — searches commit *content*, not the
+    /// commit message. Slow on large histories; UI warns about it.
+    pub search_in_diffs: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_default() {
+        let f = LogFilters::default();
+        assert!(f.is_empty());
+        assert_eq!(f.active_count(), 0);
+    }
+
+    #[test]
+    fn active_count_counts_each_dimension_once() {
+        let f = LogFilters {
+            branches: vec!["main".into(), "dev".into()],
+            authors: vec!["alice@example.com".into()],
+            date_range: Some(DateRange::Since(0)),
+            ..LogFilters::default()
+        };
+        assert_eq!(f.active_count(), 3);
+    }
+}

@@ -1,3 +1,6 @@
+pub mod filters;
+pub mod highlights;
+
 use collections::{BTreeMap, HashMap, IndexSet};
 use editor::Editor;
 use git::{
@@ -982,6 +985,15 @@ pub struct GitGraph {
     graph_canvas_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     log_source: LogSource,
     log_order: LogOrder,
+    /// Chip-based log filters (Branch / User / Date / Path / Query). S-FLT
+    /// scaffolding — fields exist, chip UI + plumbing through
+    /// `repository::initial_graph_data` lands per-chip in follow-ups.
+    #[allow(dead_code)]
+    filters: filters::LogFilters,
+    /// Row-decoration toggles (My commits / New since refresh). S-FLT
+    /// scaffolding — wired when chip-Highlights toolbar lands.
+    #[allow(dead_code)]
+    highlights: highlights::HighlightSet,
     selected_commit_diff: Option<CommitDiff>,
     selected_commit_diff_stats: Option<(usize, usize)>,
     _commit_diff_task: Option<Task<()>>,
@@ -1186,6 +1198,8 @@ impl GitGraph {
             selected_commit_diff_stats: None,
             log_source,
             log_order,
+            filters: filters::LogFilters::default(),
+            highlights: highlights::HighlightSet::default(),
             commit_details_split_state: cx.new(|_cx| SplitState::new()),
             repo_id,
             changed_files_scroll_handle: UniformListScrollHandle::new(),
