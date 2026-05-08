@@ -27,7 +27,7 @@ pub use switch::switch_active_solution_in_place;
 pub use actions::{DeleteSolution, NewSolution, OpenSolution, RefreshCacheForCurrent};
 
 use gpui::{App, AppContext as _, Window};
-use solutions::{SolutionId, SolutionStore};
+use solutions::{SolutionId, SolutionStore, SolutionStoreEvent};
 use ui::SharedString;
 use workspace::Workspace;
 
@@ -41,8 +41,74 @@ pub fn init(cx: &mut App) {
     cx.observe_new(picker::OpenSolutionModal::register).detach();
     cx.observe_new(modals::register).detach();
     cx.observe_new(register_tab_actions).detach();
+    cx.observe_new(register_member_sync_observer).detach();
     welcome::init(cx);
     switch::register_mcp(cx);
+}
+
+/// Each new `Workspace` subscribes to `SolutionStore` so that adding
+/// or removing a member of an already-open solution mounts (or
+/// unmounts) the corresponding worktree without requiring a close /
+/// reopen. The `ActiveProjectSelector` keeps its own subscription
+/// for menu state; this observer's job is the workspace-level
+/// reconciliation (`Workspace::swap_worktrees_to`) that the selector
+/// can't do because it doesn't own a `Window`.
+///
+/// Both `add_member` (catalog clone) and `add_empty_member` (no
+/// clone) emit `Changed`, while `MemberAddCompleted` is fired only
+/// by the catalog-clone path. Subscribing to `Changed` covers both;
+/// `swap_worktrees_to` is idempotent when the target set already
+/// matches, so spurious fires from unrelated mutations are no-ops.
+fn register_member_sync_observer(
+    _workspace: &mut Workspace,
+    window: Option<&mut Window>,
+    cx: &mut gpui::Context<Workspace>,
+) {
+    let Some(window) = window else { return };
+    let Some(store) = SolutionStore::try_global(cx) else {
+        return;
+    };
+    cx.subscribe_in(&store, window, |workspace, store, event, window, cx| {
+        match event {
+            SolutionStoreEvent::Changed => {}
+            SolutionStoreEvent::MemberAddCompleted { error: None, .. } => {}
+            _ => return,
+        }
+        let store_read = store.read(cx);
+        let project = workspace.project().clone();
+        let hosted = project.read(cx).worktrees(cx).find_map(|tree| {
+            store_read
+                .solution_for_path(&tree.read(cx).abs_path())
+                .map(|sol| sol.id.clone())
+        });
+        let Some(sol_id) = hosted else { return };
+        let paths = match store_read.paths_for_open(&sol_id) {
+            Ok(paths) => paths,
+            Err(err) => {
+                log::error!("solutions_ui: paths_for_open({:?}): {err}", sol_id);
+                return;
+            }
+        };
+        if paths.is_empty() {
+            // Empty solutions keep their hidden placeholder worktree —
+            // tearing it down here would orphan the EmptySolutionPage.
+            return;
+        }
+        let visible: std::collections::HashSet<std::path::PathBuf> = project
+            .read(cx)
+            .visible_worktrees(cx)
+            .map(|wt| wt.read(cx).abs_path().to_path_buf())
+            .collect();
+        let target: std::collections::HashSet<std::path::PathBuf> =
+            paths.iter().cloned().collect();
+        if visible == target {
+            return;
+        }
+        workspace
+            .swap_worktrees_to(paths, window, cx)
+            .detach_and_log_err(cx);
+    })
+    .detach();
 }
 
 fn register_tab_actions(
