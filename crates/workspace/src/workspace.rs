@@ -1872,6 +1872,22 @@ impl Workspace {
             cx,
         );
 
+        // Hidden worktrees are stored as `Weak` handles by default and
+        // get dropped as soon as the strong handle returned from
+        // `find_or_create_worktree` goes out of scope (see the
+        // `(_, project_entry)` destructure in the path loop below).
+        // For Solutions UI's empty-solution placeholder — opened with
+        // `OpenVisible::None` so the panel stays clean — this killed the
+        // worktree before the workspace could even appear in the tab
+        // strip. Force-retain when the caller asked for hidden paths so
+        // the placeholder lives.
+        if !visible {
+            project_handle
+                .read(cx)
+                .worktree_store()
+                .update(cx, |store, _| store.set_retain_worktrees(true));
+        }
+
         let db = WorkspaceDb::global(cx);
         let kvp = db::kvp::KeyValueStore::global(cx);
         cx.spawn(async move |cx| {
