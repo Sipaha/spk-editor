@@ -170,11 +170,11 @@ fn register_tab_actions(
         let id = SolutionId(action.id.clone());
         crate::modals::open_rename_solution(workspace, id, window, cx);
     });
-    workspace.register_action(|_workspace, _: &SwitchToNextSolution, _, cx| {
-        crate::switch::cycle_solution(1, cx);
+    workspace.register_action(|_workspace, _: &SwitchToNextSolution, window, cx| {
+        crate::switch::cycle_solution(1, window, cx);
     });
-    workspace.register_action(|_workspace, _: &SwitchToPrevSolution, _, cx| {
-        crate::switch::cycle_solution(-1, cx);
+    workspace.register_action(|_workspace, _: &SwitchToPrevSolution, window, cx| {
+        crate::switch::cycle_solution(-1, window, cx);
     });
     workspace.register_action(|workspace, action: &SwitchToNextProjectInPanel, _, cx| {
         cycle_project_in_panel(workspace, &action.panel_kind, 1, cx);

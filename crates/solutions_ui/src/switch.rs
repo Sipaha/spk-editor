@@ -317,31 +317,49 @@ async fn close_all_editor_items(
 /// Cycle to the next or previous open Solution within the active window.
 /// Direction: `1` for next, `-1` for previous. Wraps at boundaries using
 /// modular arithmetic: `(((idx + dir) % n) + n) % n` handles negative wraps.
-pub fn cycle_solution(direction: i32, cx: &mut App) {
-    let Some(window) = cx.active_window() else { return };
-    let Some(mw_handle) = window.downcast::<MultiWorkspace>() else { return };
-
-    mw_handle
-        .update(cx, |mw, window, cx| {
-            let Some(active_id) = active_solution_id_in(mw, cx) else {
-                return;
-            };
-            let ids = open_solution_ids_in(mw, cx);
-            if ids.is_empty() {
-                return;
-            }
-            let cur_idx = ids
-                .iter()
-                .position(|id| id == &active_id)
-                .unwrap_or(0);
-            let n = ids.len() as i32;
-            let next_idx = (((cur_idx as i32 + direction) % n) + n) % n;
-            let target = ids[next_idx as usize].clone();
-            let active_workspace = mw.workspace().clone();
-            let weak = active_workspace.downgrade();
-            crate::switch::switch_active_solution_in_place(weak, target, window, cx).detach_and_log_err(cx);
-        })
-        .ok();
+///
+/// With multi-tab, each open Solution lives in its own retained
+/// `Workspace`, so cycling means activating a different existing
+/// workspace via [`MultiWorkspace::activate`] — the same primitive the
+/// title-bar tab strip uses on click. The earlier implementation called
+/// `switch_active_solution_in_place`, which swapped worktrees inside
+/// the active workspace and is now reserved for the MCP `solutions.switch`
+/// tool (autonomous-agent driving where the agent declared "switch this
+/// window's active solution to X without spawning a tab").
+pub fn cycle_solution(direction: i32, window: &mut Window, cx: &mut App) {
+    // Defer the swap so the source `Workspace::update` whose action
+    // handler reached us has released its lease. Reading workspaces
+    // inline here — even just to enumerate `(SolutionId, Workspace)`
+    // pairs — panics with "cannot read workspace::Workspace while it
+    // is already being updated" when the iteration hits the active
+    // one. By the time the deferred closure runs, the window is also
+    // off the dispatch stack so the registry-based `WindowHandle::update`
+    // works without the "window not found" error we'd otherwise hit
+    // inline.
+    let Some(mw_handle) = window.window_handle().downcast::<MultiWorkspace>() else {
+        return;
+    };
+    cx.defer(move |cx| {
+        mw_handle
+            .update(cx, |mw, window, cx| {
+                let pairs = solution_workspace_pairs(mw, cx);
+                if pairs.len() < 2 {
+                    return;
+                }
+                let Some(active_id) = active_solution_id_in(mw, cx) else {
+                    return;
+                };
+                let cur_idx = pairs
+                    .iter()
+                    .position(|(id, _)| id == &active_id)
+                    .unwrap_or(0);
+                let n = pairs.len() as i32;
+                let next_idx = (((cur_idx as i32 + direction) % n) + n) % n;
+                let target_workspace = pairs[next_idx as usize].1.clone();
+                mw.activate(target_workspace, None, window, cx);
+            })
+            .ok();
+    });
 }
 
 fn active_solution_id_in(mw: &MultiWorkspace, cx: &App) -> Option<SolutionId> {
@@ -356,10 +374,18 @@ fn active_solution_id_in(mw: &MultiWorkspace, cx: &App) -> Option<SolutionId> {
     })
 }
 
-fn open_solution_ids_in(mw: &MultiWorkspace, cx: &App) -> Vec<SolutionId> {
+/// Snapshot the open `(SolutionId, Workspace)` pairs in this window in
+/// the order they appear in the tab strip. Each solution is reported
+/// once even if it happens to be open in multiple workspaces — the
+/// first workspace mapping to a solution wins, mirroring the dedupe
+/// in `SolutionTabStrip::render`.
+fn solution_workspace_pairs(
+    mw: &MultiWorkspace,
+    cx: &App,
+) -> Vec<(SolutionId, Entity<Workspace>)> {
     let store = SolutionStore::global(cx);
     let store_read = store.read(cx);
-    let mut seen_ids = Vec::new();
+    let mut pairs: Vec<(SolutionId, Entity<Workspace>)> = Vec::new();
     for ws in mw.workspaces() {
         let project = ws.read(cx).project().clone();
         if let Some(sol_id) = project.read(cx).worktrees(cx).find_map(|tree| {
@@ -367,12 +393,10 @@ fn open_solution_ids_in(mw: &MultiWorkspace, cx: &App) -> Vec<SolutionId> {
                 .solution_for_path(&tree.read(cx).abs_path())
                 .map(|sol| sol.id.clone())
         }) {
-            // Avoid duplicates if the same solution is open in multiple
-            // workspaces (active + retained).
-            if !seen_ids.contains(&sol_id) {
-                seen_ids.push(sol_id);
+            if !pairs.iter().any(|(existing, _)| existing == &sol_id) {
+                pairs.push((sol_id, ws.clone()));
             }
         }
     }
-    seen_ids
+    pairs
 }
