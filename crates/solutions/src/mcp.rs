@@ -663,17 +663,22 @@ impl McpServerTool for OpenSolutionTool {
 
         // Open first; only stamp last_opened_at after the open actually
         // succeeds, so a failed open does not lie about recency.
-        let task = cx.update(|cx| {
+        let (task, welcome_window) = cx.update(|cx| {
             let app_state = workspace::AppState::global(cx);
             let mut options = workspace::OpenOptions::default();
             options.focus = input.focus;
-            // Solutions always open in a new window so the user keeps their
-            // welcome / current workspace context. Default OpenMode::Activate
-            // would mount the worktree into the requesting window instead,
-            // surprising users who expected a fresh shell — the plan calls
-            // this out as "Click Solution row → new window opens".
+            // Solutions always open in a new window so the autonomous
+            // agent driving via MCP doesn't accidentally swap worktrees
+            // into a window the user is actively working in.
             options.open_mode = workspace::OpenMode::NewWindow;
-            workspace::open_paths(&paths, app_state, options, cx)
+            // Capture the launcher (if any) so we can retire it once the
+            // solution window is up — matches the UI flow's behaviour
+            // when clicking a row in the launcher.
+            let welcome = workspace::welcome::find_existing(cx);
+            (
+                workspace::open_paths(&paths, app_state, options, cx),
+                welcome,
+            )
         });
         let open_result = task.await?;
         let window_id = editor_mcp::format_window_id(open_result.window.window_id());
@@ -685,6 +690,11 @@ impl McpServerTool for OpenSolutionTool {
             store
                 .update(cx, |s, cx| s.touch_last_opened(&sol_id, cx))
                 .log_err();
+            if let Some(welcome) = welcome_window {
+                welcome
+                    .update(cx, |_, window, _| window.remove_window())
+                    .log_err();
+            }
         });
 
         let focused = input.focus.unwrap_or(true);
