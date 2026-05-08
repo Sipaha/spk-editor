@@ -6,21 +6,32 @@ use collections::HashSet;
 use git::repository::Branch;
 use gpui::http_client::Url;
 use gpui::{
-    Action, App, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, Modifiers, ModifiersChangedEvent, ParentElement, Render,
-    SharedString, Styled, Subscription, Task, WeakEntity, Window, actions, rems,
+    Action, AnyElement, App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
+    Focusable, InteractiveElement, IntoElement, MouseDownEvent, Modifiers, ModifiersChangedEvent,
+    ParentElement, Render, SharedString, Styled, Subscription, Task, WeakEntity, Window, actions,
+    rems, uniform_list,
 };
+use menu::{Cancel, Confirm};
 use picker::{Picker, PickerDelegate, PickerEditorPosition};
 use project::git_store::{Repository, RepositoryEvent};
 use project::project_settings::ProjectSettings;
 use settings::Settings;
+use std::path::Path;
 use std::sync::Arc;
 use time::OffsetDateTime;
-use ui::{Divider, HighlightedLabel, KeyBinding, ListItem, ListItemSpacing, Tooltip, prelude::*};
+use ui::{
+    Divider, Headline, HeadlineSize, HighlightedLabel, KeyBinding, ListItem, ListItemSpacing,
+    Tooltip, prelude::*,
+};
 use ui_input::ErasedEditor;
 use util::ResultExt;
 use workspace::notifications::DetachAndPromptErr;
 use workspace::{ModalView, Workspace};
+
+pub mod context_menu;
+pub mod favorites;
+pub mod tabs;
+pub mod tree;
 
 use crate::{branch_picker, git_panel::show_error_toast};
 
@@ -1370,6 +1381,1180 @@ impl PickerDelegate for BranchListDelegate {
             ),
             PickerState::NewRemote => None,
         }
+    }
+}
+
+// =====================================================================
+//  S-BRP — IDEA-style tabbed branches popup.
+//
+//  Lives alongside the legacy `BranchList` so `git_picker.rs` and
+//  `commit_modal.rs` keep working unchanged. New surface, new keybinding.
+// =====================================================================
+
+actions!(
+    git_branches_popup,
+    [
+        /// Opens the IDEA-style tabbed branches popup (S-BRP).
+        Open,
+        /// Toggle favorite-status for the currently-selected branch row.
+        ToggleFavorite,
+    ]
+);
+
+#[derive(Debug, Clone)]
+struct BranchStatusEntry {
+    name: SharedString,
+    is_remote: bool,
+    is_head: bool,
+    upstream_track: Option<SharedString>,
+    subject: Option<SharedString>,
+    committer_date_relative: Option<SharedString>,
+}
+
+impl BranchStatusEntry {
+    fn from_branch(b: &Branch) -> Self {
+        let track = b
+            .upstream
+            .as_ref()
+            .and_then(|u| u.tracking.status())
+            .map(|s| {
+                let mut buf = String::new();
+                if s.ahead > 0 {
+                    use std::fmt::Write as _;
+                    let _ = write!(buf, "↑{}", s.ahead);
+                }
+                if s.behind > 0 {
+                    use std::fmt::Write as _;
+                    if !buf.is_empty() {
+                        buf.push(' ');
+                    }
+                    let _ = write!(buf, "↓{}", s.behind);
+                }
+                SharedString::from(buf)
+            })
+            .filter(|s| !s.is_empty());
+        let (subject, committer_date_relative) = b
+            .most_recent_commit
+            .as_ref()
+            .map(|c| {
+                let local_offset =
+                    time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+                let commit_time = OffsetDateTime::from_unix_timestamp(c.commit_timestamp)
+                    .unwrap_or_else(|_| OffsetDateTime::now_utc());
+                let relative = time_format::format_localized_timestamp(
+                    commit_time,
+                    OffsetDateTime::now_utc(),
+                    local_offset,
+                    time_format::TimestampFormat::Relative,
+                );
+                (
+                    Some(c.subject.clone()),
+                    Some(SharedString::from(relative)),
+                )
+            })
+            .unwrap_or((None, None));
+        Self {
+            name: SharedString::from(b.name().to_string()),
+            is_remote: b.is_remote(),
+            is_head: b.is_head,
+            upstream_track: track,
+            subject,
+            committer_date_relative,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum PopupRow {
+    Branch {
+        entry: BranchStatusEntry,
+        depth: usize,
+    },
+    Group {
+        path: SharedString,
+        depth: usize,
+        expanded: bool,
+    },
+    Tag {
+        name: SharedString,
+    },
+    Backup {
+        branch: SharedString,
+        op: SharedString,
+        before_sha: SharedString,
+    },
+    Empty {
+        message: SharedString,
+    },
+}
+
+pub struct BranchesPopup {
+    workspace: WeakEntity<Workspace>,
+    repository: Option<Entity<Repository>>,
+    work_dir: Option<Arc<Path>>,
+    tab: tabs::Tab,
+    query: Entity<Editor>,
+    rows: Vec<PopupRow>,
+    selected_index: usize,
+    branches: Vec<BranchStatusEntry>,
+    tags: Vec<SharedString>,
+    favorites_snapshot: favorites::RepoFavoritesSnapshot,
+    expanded_groups: std::collections::HashSet<String>,
+    backups: Vec<crate::backup_mcp::BackupEntry>,
+    default_branch: Option<SharedString>,
+    focus_handle: FocusHandle,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl BranchesPopup {
+    pub fn open_action(
+        workspace: &mut Workspace,
+        _: &Open,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        let repository = workspace.project().read(cx).active_repository(cx);
+        let workspace_handle = workspace.weak_handle();
+        workspace.toggle_modal(window, cx, |window, cx| {
+            BranchesPopup::new(workspace_handle, repository, window, cx)
+        });
+    }
+
+    fn new(
+        workspace: WeakEntity<Workspace>,
+        repository: Option<Entity<Repository>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let query = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("Search branches…", window, cx);
+            editor
+        });
+
+        let mut subscriptions = Vec::new();
+        subscriptions.push(cx.subscribe_in(
+            &query,
+            window,
+            |this, _editor, event: &editor::EditorEvent, _window, cx| {
+                if matches!(
+                    event,
+                    editor::EditorEvent::BufferEdited | editor::EditorEvent::Edited { .. }
+                ) {
+                    this.rebuild_rows(cx);
+                }
+            },
+        ));
+
+        let work_dir = repository
+            .as_ref()
+            .map(|r| r.read(cx).work_directory_abs_path.clone());
+
+        if let Some(repo) = &repository {
+            subscriptions.push(cx.subscribe(repo, |this, _repo, event, cx| {
+                if matches!(event, RepositoryEvent::BranchListChanged) {
+                    this.refresh_branches_from_repo(cx);
+                }
+            }));
+        }
+
+        let branches = repository
+            .as_ref()
+            .map(|r| {
+                r.read(cx)
+                    .branch_list
+                    .iter()
+                    .map(BranchStatusEntry::from_branch)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let favorites_snapshot = work_dir
+            .as_ref()
+            .and_then(|wd| favorites::load_for_repo(wd).log_err())
+            .unwrap_or_default();
+
+        let mut this = Self {
+            workspace,
+            repository: repository.clone(),
+            work_dir,
+            tab: tabs::Tab::Recent,
+            query,
+            rows: Vec::new(),
+            selected_index: 0,
+            branches,
+            tags: Vec::new(),
+            favorites_snapshot,
+            expanded_groups: std::collections::HashSet::new(),
+            backups: Vec::new(),
+            default_branch: None,
+            focus_handle: cx.focus_handle(),
+            _subscriptions: subscriptions,
+        };
+
+        // Async: load default branch + tags + initial backups list.
+        if let Some(repo) = repository {
+            let default_request = repo.update(cx, |repo, _| repo.default_branch(false));
+            let tags_request = repo.update(cx, |repo, _| repo.tags());
+            cx.spawn(async move |this, cx| {
+                let default = default_request.await.ok().and_then(Result::ok).flatten();
+                this.update(cx, |this, cx| {
+                    this.default_branch = default;
+                    cx.notify();
+                })
+                .ok();
+                if let Ok(Ok(tags)) = tags_request.await {
+                    this.update(cx, |this, cx| {
+                        this.tags = tags;
+                        this.rebuild_rows(cx);
+                    })
+                    .ok();
+                }
+            })
+            .detach();
+        }
+
+        this.rebuild_rows(cx);
+        cx.focus_self(window);
+        this
+    }
+
+    fn refresh_branches_from_repo(&mut self, cx: &mut Context<Self>) {
+        if let Some(repo) = &self.repository {
+            self.branches = repo
+                .read(cx)
+                .branch_list
+                .iter()
+                .map(BranchStatusEntry::from_branch)
+                .collect();
+            self.rebuild_rows(cx);
+        }
+    }
+
+    fn set_tab(&mut self, tab: tabs::Tab, cx: &mut Context<Self>) {
+        self.tab = tab;
+        self.selected_index = 0;
+        self.rebuild_rows(cx);
+        if matches!(tab, tabs::Tab::Backups) {
+            self.refresh_backups(cx);
+        }
+        cx.notify();
+    }
+
+    fn refresh_backups(&mut self, cx: &mut Context<Self>) {
+        let Some(work_dir) = self.work_dir.clone() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { git::backup::list(&work_dir, None, None) })
+                .await;
+            if let Ok(list) = result {
+                let backups: Vec<crate::backup_mcp::BackupEntry> = list
+                    .into_iter()
+                    .map(|b| crate::backup_mcp::BackupEntry {
+                        branch: b.branch,
+                        op: b.op,
+                        timestamp_unix: b.timestamp_unix,
+                        before_sha: b.before_sha,
+                    })
+                    .collect();
+                this.update(cx, |this, cx| {
+                    this.backups = backups;
+                    this.rebuild_rows(cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
+        let query = self.query.read(cx).text(cx);
+        let lower_query = query.to_lowercase();
+        let favorites: collections::HashSet<String> =
+            self.favorites_snapshot.favorites.iter().cloned().collect();
+        let recent_order: std::collections::HashMap<String, usize> = self
+            .favorites_snapshot
+            .recent
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.branch.clone(), i))
+            .collect();
+
+        self.rows.clear();
+        match self.tab {
+            tabs::Tab::Recent => {
+                let mut entries: Vec<&BranchStatusEntry> = self
+                    .branches
+                    .iter()
+                    .filter(|b| !b.is_remote)
+                    .filter(|b| recent_order.contains_key(b.name.as_ref()))
+                    .filter(|b| query.is_empty() || b.name.to_lowercase().contains(&lower_query))
+                    .collect();
+                entries.sort_by_key(|b| {
+                    *recent_order
+                        .get(b.name.as_ref())
+                        .unwrap_or(&usize::MAX)
+                });
+                if entries.is_empty() {
+                    self.rows.push(PopupRow::Empty {
+                        message: SharedString::from(
+                            "No recently checked-out branches yet — checkout one to populate.",
+                        ),
+                    });
+                } else {
+                    for entry in entries {
+                        self.rows.push(PopupRow::Branch {
+                            entry: entry.clone(),
+                            depth: 0,
+                        });
+                    }
+                }
+            }
+            tabs::Tab::Local | tabs::Tab::Remote => {
+                let want_remote = matches!(self.tab, tabs::Tab::Remote);
+                let mut entries: Vec<&BranchStatusEntry> = self
+                    .branches
+                    .iter()
+                    .filter(|b| b.is_remote == want_remote)
+                    .filter(|b| query.is_empty() || b.name.to_lowercase().contains(&lower_query))
+                    .collect();
+                entries.sort_by(|a, b| a.name.as_ref().cmp(b.name.as_ref()));
+                let names: Vec<String> =
+                    entries.iter().map(|e| e.name.to_string()).collect();
+                let tree = tree::BranchTree::build(&names, self.expanded_groups.clone());
+                let by_name: std::collections::HashMap<&str, &BranchStatusEntry> = entries
+                    .iter()
+                    .map(|e| (e.name.as_ref(), *e))
+                    .collect();
+                if names.is_empty() {
+                    self.rows.push(PopupRow::Empty {
+                        message: SharedString::from(if want_remote {
+                            "No remote branches"
+                        } else {
+                            "No local branches"
+                        }),
+                    });
+                } else {
+                    for row in tree.rows {
+                        match row {
+                            tree::TreeRow::Group { path, depth, expanded } => {
+                                self.rows.push(PopupRow::Group {
+                                    path: SharedString::from(path),
+                                    depth,
+                                    expanded,
+                                });
+                            }
+                            tree::TreeRow::Leaf {
+                                full_name, depth, ..
+                            } => {
+                                if let Some(entry) = by_name.get(full_name.as_str()) {
+                                    self.rows.push(PopupRow::Branch {
+                                        entry: (*entry).clone(),
+                                        depth,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            tabs::Tab::Tags => {
+                let mut tags: Vec<SharedString> = self
+                    .tags
+                    .iter()
+                    .filter(|t| query.is_empty() || t.to_lowercase().contains(&lower_query))
+                    .cloned()
+                    .collect();
+                tags.sort();
+                if tags.is_empty() {
+                    self.rows.push(PopupRow::Empty {
+                        message: SharedString::from("No tags"),
+                    });
+                } else {
+                    for tag in tags {
+                        self.rows.push(PopupRow::Tag { name: tag });
+                    }
+                }
+            }
+            tabs::Tab::Favorites => {
+                let mut entries: Vec<&BranchStatusEntry> = self
+                    .branches
+                    .iter()
+                    .filter(|b| favorites.contains(b.name.as_ref()))
+                    .filter(|b| query.is_empty() || b.name.to_lowercase().contains(&lower_query))
+                    .collect();
+                entries.sort_by(|a, b| a.name.as_ref().cmp(b.name.as_ref()));
+                if entries.is_empty() {
+                    self.rows.push(PopupRow::Empty {
+                        message: SharedString::from(
+                            "No favorites yet — star a branch to keep it here.",
+                        ),
+                    });
+                } else {
+                    for entry in entries {
+                        self.rows.push(PopupRow::Branch {
+                            entry: entry.clone(),
+                            depth: 0,
+                        });
+                    }
+                }
+            }
+            tabs::Tab::Backups => {
+                if self.backups.is_empty() {
+                    self.rows.push(PopupRow::Empty {
+                        message: SharedString::from("No backup refs."),
+                    });
+                } else {
+                    let mut backups = self.backups.clone();
+                    if !query.is_empty() {
+                        backups.retain(|b| {
+                            b.branch.to_lowercase().contains(&lower_query)
+                                || b.op.to_lowercase().contains(&lower_query)
+                        });
+                    }
+                    for backup in backups {
+                        self.rows.push(PopupRow::Backup {
+                            branch: SharedString::from(backup.branch),
+                            op: SharedString::from(backup.op),
+                            before_sha: SharedString::from(backup.before_sha),
+                        });
+                    }
+                }
+            }
+        }
+
+        if self.selected_index >= self.rows.len() {
+            self.selected_index = 0;
+        }
+        cx.notify();
+    }
+
+    fn is_favorite(&self, branch_name: &str) -> bool {
+        self.favorites_snapshot
+            .favorites
+            .iter()
+            .any(|b| b == branch_name)
+    }
+
+    fn current_head(&self) -> Option<&str> {
+        self.branches
+            .iter()
+            .find(|b| b.is_head)
+            .map(|b| b.name.as_ref())
+    }
+
+    fn dispatch_default(
+        &mut self,
+        idx: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(row) = self.rows.get(idx).cloned() else {
+            return;
+        };
+        match row {
+            PopupRow::Branch { entry, .. } => {
+                self.checkout_branch(entry.name, window, cx);
+                cx.emit(DismissEvent);
+            }
+            PopupRow::Group { path, .. } => {
+                if self.expanded_groups.contains(path.as_ref()) {
+                    self.expanded_groups.remove(path.as_ref());
+                } else {
+                    self.expanded_groups.insert(path.to_string());
+                }
+                self.rebuild_rows(cx);
+            }
+            PopupRow::Tag { name } => {
+                self.checkout_revision(name, window, cx);
+                cx.emit(DismissEvent);
+            }
+            PopupRow::Backup { branch, before_sha, .. } => {
+                self.restore_backup(branch, before_sha, window, cx);
+            }
+            PopupRow::Empty { .. } => {}
+        }
+    }
+
+    fn checkout_branch(
+        &mut self,
+        branch: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(repo) = self.repository.clone() else {
+            return;
+        };
+        let work_dir = self.work_dir.clone();
+        let workspace = self.workspace.clone();
+        let branch_for_recent = branch.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            let recv = repo.update(cx, |repo, _| repo.change_branch(branch.to_string()));
+            match recv.await {
+                Ok(Ok(())) => {
+                    if let Some(work_dir) = work_dir {
+                        favorites::record_checkout(&work_dir, branch_for_recent.as_ref())
+                            .log_err();
+                    }
+                    anyhow::Ok(())
+                }
+                Ok(Err(e)) => {
+                    if let Some(workspace) = workspace.upgrade() {
+                        cx.update(|_window, cx| {
+                            show_error_toast(
+                                workspace,
+                                format!("git switch {}", branch_for_recent),
+                                e,
+                                cx,
+                            );
+                        })?;
+                    }
+                    Ok(())
+                }
+                Err(_) => Err(anyhow::anyhow!("change_branch was canceled")),
+            }
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn checkout_revision(
+        &mut self,
+        revision: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(repo) = self.repository.clone() else {
+            return;
+        };
+        cx.spawn_in(window, async move |_, cx| {
+            let recv = repo.update(cx, |repo, _| repo.checkout_revision(revision.to_string()));
+            recv.await??;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    fn restore_backup(
+        &mut self,
+        branch: SharedString,
+        before_sha: SharedString,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(work_dir) = self.work_dir.clone() else {
+            return;
+        };
+        cx.background_spawn(async move {
+            crate::backup_mcp::create_restore_ref(&work_dir, branch.as_ref(), before_sha.as_ref())
+                .log_err();
+        })
+        .detach();
+    }
+
+    fn handle_toggle_favorite(
+        &mut self,
+        _: &ToggleFavorite,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(work_dir) = self.work_dir.clone() else {
+            return;
+        };
+        let Some(row) = self.rows.get(self.selected_index).cloned() else {
+            return;
+        };
+        let branch_name = match row {
+            PopupRow::Branch { entry, .. } => entry.name,
+            _ => return,
+        };
+        let work_dir_clone = work_dir.clone();
+        let branch_string = branch_name.to_string();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    favorites::toggle_favorite(&work_dir_clone, &branch_string)
+                })
+                .await;
+            if result.is_ok() {
+                let snapshot = cx
+                    .background_spawn(async move { favorites::load_for_repo(&work_dir) })
+                    .await
+                    .ok();
+                this.update(cx, |this, cx| {
+                    if let Some(snapshot) = snapshot {
+                        this.favorites_snapshot = snapshot;
+                    }
+                    this.rebuild_rows(cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        let idx = self.selected_index;
+        self.dispatch_default(idx, window, cx);
+    }
+
+    fn cancel(&mut self, _: &Cancel, _window: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(DismissEvent);
+    }
+
+    fn select_prev(
+        &mut self,
+        _: &menu::SelectPrevious,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_index > 0 {
+            self.selected_index -= 1;
+            cx.notify();
+        }
+    }
+
+    fn select_next(
+        &mut self,
+        _: &menu::SelectNext,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.rows.is_empty() && self.selected_index + 1 < self.rows.len() {
+            self.selected_index += 1;
+            cx.notify();
+        }
+    }
+
+    fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = self.tab;
+        h_flex()
+            .px_2()
+            .pt_2()
+            .pb_1()
+            .gap_1()
+            .border_b_1()
+            .border_color(cx.theme().colors().border_variant)
+            .children(tabs::Tab::all().into_iter().enumerate().map(|(ix, tab)| {
+                let label = tab.label();
+                let is_active = tab == active;
+                Button::new(("branches-popup-tab", ix), label)
+                    .label_size(LabelSize::Small)
+                    .toggle_state(is_active)
+                    .start_icon(Icon::new(tab.icon()).size(IconSize::XSmall))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.set_tab(tab, cx);
+                    }))
+            }))
+    }
+
+    fn render_row(
+        &self,
+        ix: usize,
+        row: &PopupRow,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selected = ix == self.selected_index;
+        match row {
+            PopupRow::Empty { message } => Label::new(message.clone())
+                .color(Color::Muted)
+                .size(LabelSize::Small)
+                .into_any_element(),
+            PopupRow::Group { path, depth, expanded } => {
+                let path = path.clone();
+                let chevron = if *expanded {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                };
+                ListItem::new(("branches-popup-group", ix))
+                    .inset(true)
+                    .spacing(ListItemSpacing::Sparse)
+                    .toggle_state(selected)
+                    .start_slot(Icon::new(chevron).size(IconSize::Small))
+                    .child(
+                        h_flex()
+                            .pl(rems(*depth as f32 * 1.0))
+                            .child(Label::new(path.clone()).color(Color::Muted)),
+                    )
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        if this.expanded_groups.contains(path.as_ref()) {
+                            this.expanded_groups.remove(path.as_ref());
+                        } else {
+                            this.expanded_groups.insert(path.to_string());
+                        }
+                        this.rebuild_rows(cx);
+                    }))
+                    .into_any_element()
+            }
+            PopupRow::Branch { entry, depth, .. } => self
+                .render_branch_row(ix, entry, *depth, selected, cx)
+                .into_any_element(),
+            PopupRow::Tag { name } => {
+                let tag_name = name.clone();
+                ListItem::new(("branches-popup-tag", ix))
+                    .inset(true)
+                    .spacing(ListItemSpacing::Sparse)
+                    .toggle_state(selected)
+                    .start_slot(Icon::new(IconName::Hash).size(IconSize::Small))
+                    .child(Label::new(tag_name.clone()))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.checkout_revision(tag_name.clone(), window, cx);
+                        cx.emit(DismissEvent);
+                    }))
+                    .on_secondary_mouse_down(cx.listener({
+                        let tag = name.clone();
+                        move |this, _: &MouseDownEvent, window, cx| {
+                            let workspace = this.workspace.clone();
+                            let Some(repository) = this.repository.clone() else {
+                                return;
+                            };
+                            let menu = context_menu::build_tag_menu(
+                                context_menu::TagContext {
+                                    workspace,
+                                    repository,
+                                    tag_name: tag.clone(),
+                                },
+                                window,
+                                cx,
+                            );
+                            window.defer(cx, move |window, cx| {
+                                menu.update(cx, |menu, cx| {
+                                    menu.focus_handle(cx).focus(window, cx);
+                                });
+                            });
+                        }
+                    }))
+                    .into_any_element()
+            }
+            PopupRow::Backup {
+                branch,
+                op,
+                before_sha,
+            } => {
+                let short_sha: String = before_sha.chars().take(7).collect();
+                let label = format!("{} ({}) — {}", branch, op, short_sha);
+                let branch_clone = branch.clone();
+                let sha_clone = before_sha.clone();
+                ListItem::new(("branches-popup-backup", ix))
+                    .inset(true)
+                    .spacing(ListItemSpacing::Sparse)
+                    .toggle_state(selected)
+                    .start_slot(Icon::new(IconName::CountdownTimer).size(IconSize::Small))
+                    .child(Label::new(label).color(Color::Muted))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.restore_backup(branch_clone.clone(), sha_clone.clone(), window, cx);
+                    }))
+                    .into_any_element()
+            }
+        }
+    }
+
+    fn render_branch_row(
+        &self,
+        ix: usize,
+        entry: &BranchStatusEntry,
+        depth: usize,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let is_default = self
+            .default_branch
+            .as_ref()
+            .is_some_and(|d| d.as_ref() == entry.name.as_ref());
+        let is_favorite = self.is_favorite(entry.name.as_ref());
+        let star_icon = if is_favorite {
+            IconName::StarFilled
+        } else {
+            IconName::Star
+        };
+        let star_color = if is_favorite { Color::Accent } else { Color::Muted };
+
+        let entry_for_click = entry.clone();
+        let entry_for_menu = entry.clone();
+        let is_head = entry.is_head;
+        let entry_label = entry.name.clone();
+        let track = entry.upstream_track.clone();
+        let subject = entry.subject.clone();
+        let date = entry.committer_date_relative.clone();
+
+        let star_branch = entry.name.to_string();
+        let star_button = IconButton::new(("branches-popup-star", ix), star_icon)
+            .icon_size(IconSize::Small)
+            .icon_color(star_color)
+            .tooltip(Tooltip::text(if is_favorite {
+                "Unfavorite Branch"
+            } else {
+                "Favorite Branch"
+            }))
+            .on_click(cx.listener(move |this, _, _window, cx| {
+                let Some(work_dir) = this.work_dir.clone() else {
+                    return;
+                };
+                let branch = star_branch.clone();
+                cx.spawn(async move |this, cx| {
+                    let _ = cx
+                        .background_spawn(async move {
+                            favorites::toggle_favorite(&work_dir, &branch)
+                        })
+                        .await;
+                    let work_dir = this
+                        .read_with(cx, |this, _| this.work_dir.clone())
+                        .ok()
+                        .flatten();
+                    if let Some(work_dir) = work_dir {
+                        let snap = cx
+                            .background_spawn(async move { favorites::load_for_repo(&work_dir) })
+                            .await
+                            .ok();
+                        this.update(cx, |this, cx| {
+                            if let Some(snap) = snap {
+                                this.favorites_snapshot = snap;
+                            }
+                            this.rebuild_rows(cx);
+                        })
+                        .ok();
+                    }
+                })
+                .detach();
+            }));
+
+        let icon_name = if is_head {
+            IconName::Check
+        } else if entry.is_remote {
+            IconName::Screen
+        } else {
+            IconName::GitBranch
+        };
+        let icon_color = if is_head { Color::Accent } else { Color::Muted };
+
+        ListItem::new(("branches-popup-branch", ix))
+            .inset(true)
+            .spacing(ListItemSpacing::Sparse)
+            .toggle_state(selected)
+            .start_slot(Icon::new(icon_name).color(icon_color).size(IconSize::Small))
+            .child(
+                h_flex()
+                    .w_full()
+                    .pl(rems(depth as f32 * 1.0))
+                    .gap_2()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .child(
+                                h_flex()
+                                    .gap_1p5()
+                                    .child(Label::new(entry_label))
+                                    .when(is_default, |this| {
+                                        this.child(
+                                            Label::new("default")
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Muted),
+                                        )
+                                    })
+                                    .when_some(track, |this, t| {
+                                        this.child(
+                                            Label::new(t)
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Muted),
+                                        )
+                                    }),
+                            )
+                            .when(subject.is_some() || date.is_some(), |this| {
+                                this.child(
+                                    h_flex()
+                                        .gap_1()
+                                        .when_some(date, |this, d| {
+                                            this.child(
+                                                Label::new(d)
+                                                    .size(LabelSize::XSmall)
+                                                    .color(Color::Muted),
+                                            )
+                                        })
+                                        .when_some(subject, |this, s| {
+                                            this.child(
+                                                Label::new(s.to_string())
+                                                    .size(LabelSize::XSmall)
+                                                    .color(Color::Muted)
+                                                    .truncate(),
+                                            )
+                                        }),
+                                )
+                            }),
+                    )
+                    .child(star_button),
+            )
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                if event.standard_click() {
+                    this.checkout_branch(entry_for_click.name.clone(), window, cx);
+                    cx.emit(DismissEvent);
+                }
+            }))
+            .on_secondary_mouse_down(cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                let workspace = this.workspace.clone();
+                let Some(repository) = this.repository.clone() else {
+                    return;
+                };
+                let is_favorite = this.is_favorite(entry_for_menu.name.as_ref());
+                let menu = context_menu::build_branch_menu(
+                    context_menu::BranchContext {
+                        workspace,
+                        repository,
+                        branch_name: entry_for_menu.name.clone(),
+                        is_remote: entry_for_menu.is_remote,
+                        is_head,
+                        is_favorite,
+                    },
+                    window,
+                    cx,
+                );
+                window.defer(cx, move |window, cx| {
+                    menu.update(cx, |menu, cx| {
+                        menu.focus_handle(cx).focus(window, cx);
+                    });
+                });
+            }))
+            .into_any_element()
+    }
+}
+
+impl ModalView for BranchesPopup {}
+impl EventEmitter<DismissEvent> for BranchesPopup {}
+
+impl Focusable for BranchesPopup {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Render for BranchesPopup {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let row_count = self.rows.len();
+        let head = self.current_head().map(|s| s.to_string());
+        let popup = v_flex()
+            .key_context("BranchesPopup")
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::confirm))
+            .on_action(cx.listener(Self::cancel))
+            .on_action(cx.listener(Self::select_prev))
+            .on_action(cx.listener(Self::select_next))
+            .on_action(cx.listener(Self::handle_toggle_favorite))
+            .elevation_2(cx)
+            .w(rems(48.))
+            .max_h(rems(36.))
+            .child(
+                h_flex()
+                    .px_3()
+                    .pt_2()
+                    .pb_1()
+                    .gap_1p5()
+                    .child(Icon::new(IconName::GitBranch).size(IconSize::XSmall))
+                    .child(Headline::new("Branches").size(HeadlineSize::XSmall))
+                    .when_some(head, |this, h| {
+                        this.child(
+                            Label::new(format!("on {}", h))
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .px_3()
+                    .pb_1()
+                    .child(self.query.clone()),
+            )
+            .child(self.render_tab_bar(cx))
+            .child(div().h_px().bg(cx.theme().colors().border_variant))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(
+                        uniform_list("branches-popup-list", row_count, cx.processor(
+                            |this, range: std::ops::Range<usize>, _window, cx| {
+                                let mut items = Vec::with_capacity(range.len());
+                                for ix in range {
+                                    if let Some(row) = this.rows.get(ix).cloned() {
+                                        items.push(this.render_row(ix, &row, cx));
+                                    }
+                                }
+                                items
+                            },
+                        ))
+                        .h_full(),
+                    ),
+            );
+
+        popup
+    }
+}
+
+// ---- modals invoked from the per-branch context menu ----
+
+pub struct SetUpstreamModal {
+    repo: Entity<Repository>,
+    branch: SharedString,
+    editor: Entity<Editor>,
+}
+
+impl SetUpstreamModal {
+    pub fn new(
+        repo: Entity<Repository>,
+        branch: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let editor = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_placeholder_text("origin/main", window, cx);
+            editor
+        });
+        Self {
+            repo,
+            branch,
+            editor,
+        }
+    }
+
+    fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(DismissEvent);
+    }
+
+    fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        let upstream = self.editor.read(cx).text(cx);
+        let upstream = upstream.trim().to_string();
+        if upstream.is_empty() {
+            cx.emit(DismissEvent);
+            return;
+        }
+        let repo = self.repo.clone();
+        let branch = self.branch.to_string();
+        cx.spawn(async move |_, cx| {
+            let recv = repo.update(cx, |repo, _| repo.set_upstream(branch, upstream));
+            recv.await??;
+            anyhow::Ok(())
+        })
+        .detach_and_prompt_err("Failed to set upstream", window, cx, |_, _, _| None);
+        cx.emit(DismissEvent);
+    }
+}
+
+impl EventEmitter<DismissEvent> for SetUpstreamModal {}
+impl ModalView for SetUpstreamModal {}
+impl Focusable for SetUpstreamModal {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.editor.focus_handle(cx)
+    }
+}
+
+impl Render for SetUpstreamModal {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .key_context("SetUpstreamModal")
+            .on_action(cx.listener(Self::cancel))
+            .on_action(cx.listener(Self::confirm))
+            .elevation_2(cx)
+            .w(rems(34.))
+            .child(
+                h_flex()
+                    .px_3()
+                    .pt_2()
+                    .pb_1()
+                    .gap_1p5()
+                    .child(Icon::new(IconName::GitBranch).size(IconSize::XSmall))
+                    .child(
+                        Headline::new(format!("Set Upstream for {}", self.branch))
+                            .size(HeadlineSize::XSmall),
+                    ),
+            )
+            .child(div().px_3().pb_3().w_full().child(self.editor.clone()))
+    }
+}
+
+pub struct RenameBranchPopupModal {
+    branch: SharedString,
+    work_dir: Arc<Path>,
+    editor: Entity<Editor>,
+}
+
+impl RenameBranchPopupModal {
+    pub fn new(
+        _repo: Entity<Repository>,
+        branch: SharedString,
+        work_dir: Arc<Path>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let editor = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_text(branch.to_string(), window, cx);
+            editor
+        });
+        Self {
+            branch,
+            work_dir,
+            editor,
+        }
+    }
+
+    fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(DismissEvent);
+    }
+
+    fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        let new_name = self.editor.read(cx).text(cx).trim().to_string();
+        if new_name.is_empty() || new_name == self.branch.as_ref() {
+            cx.emit(DismissEvent);
+            return;
+        }
+        let old = self.branch.to_string();
+        let work_dir = self.work_dir.to_path_buf();
+        cx.spawn(async move |_, cx| {
+            cx.background_spawn(async move {
+                git::operations::OpRunner::run(
+                    git::operations::RenameBranchOp { old, new: new_name },
+                    &work_dir,
+                )
+            })
+            .await
+        })
+        .detach_and_prompt_err("Failed to rename branch", window, cx, |_, _, _| None);
+        cx.emit(DismissEvent);
+    }
+}
+
+impl EventEmitter<DismissEvent> for RenameBranchPopupModal {}
+impl ModalView for RenameBranchPopupModal {}
+impl Focusable for RenameBranchPopupModal {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.editor.focus_handle(cx)
+    }
+}
+
+impl Render for RenameBranchPopupModal {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .key_context("RenameBranchPopupModal")
+            .on_action(cx.listener(Self::cancel))
+            .on_action(cx.listener(Self::confirm))
+            .elevation_2(cx)
+            .w(rems(34.))
+            .child(
+                h_flex()
+                    .px_3()
+                    .pt_2()
+                    .pb_1()
+                    .gap_1p5()
+                    .child(Icon::new(IconName::GitBranch).size(IconSize::XSmall))
+                    .child(
+                        Headline::new(format!("Rename Branch ({})", self.branch))
+                            .size(HeadlineSize::XSmall),
+                    ),
+            )
+            .child(div().px_3().pb_3().w_full().child(self.editor.clone()))
     }
 }
 

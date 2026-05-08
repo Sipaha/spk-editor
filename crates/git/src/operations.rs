@@ -10,8 +10,9 @@
 //! Concrete operations are added as their owning S-* tasks land
 //! (S-DST, S-RBL, etc.). See `docs/superpowers/plans/git-panel-plan.md`.
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use std::path::Path;
+use std::process::Command;
 use util::ResultExt as _;
 
 use crate::{backup, repo_lock, undo_registry};
@@ -129,10 +130,124 @@ impl OpRunner {
     }
 }
 
+/// S-BRP "Delete Branch" — `git branch -d <name>` (or `-D` when `force`).
+/// `force` flips both the git CLI flag and [`Self::is_destructive`], so the
+/// runner registers an undo entry only on lossy deletions.
+pub struct DeleteBranchOp {
+    pub name: String,
+    pub force: bool,
+}
+
+impl AtomicGitOp for DeleteBranchOp {
+    type Output = ();
+
+    fn op_name(&self) -> &'static str {
+        if self.force {
+            "delete_branch_force"
+        } else {
+            "delete_branch"
+        }
+    }
+
+    fn is_destructive(&self) -> bool {
+        self.force
+    }
+
+    fn affected_branches(&self, _repo_path: &Path) -> Vec<String> {
+        vec![self.name.clone()]
+    }
+
+    fn affects_branch(&self) -> Option<String> {
+        Some(self.name.clone())
+    }
+
+    fn run(&mut self, repo_path: &Path) -> Result<()> {
+        let flag = if self.force { "-D" } else { "-d" };
+        run_git_void(repo_path, &["branch", flag, &self.name])
+    }
+}
+
+/// S-BRP "Rename Branch…" — `git branch -m <old> <new>`. Reversible
+/// (the old tip is preserved by the backup ref), so `is_destructive`
+/// stays `false` even though the ref name changes.
+pub struct RenameBranchOp {
+    pub old: String,
+    pub new: String,
+}
+
+impl AtomicGitOp for RenameBranchOp {
+    type Output = ();
+
+    fn op_name(&self) -> &'static str {
+        "rename_branch"
+    }
+
+    fn affected_branches(&self, _repo_path: &Path) -> Vec<String> {
+        vec![self.old.clone()]
+    }
+
+    fn affects_branch(&self) -> Option<String> {
+        Some(self.old.clone())
+    }
+
+    fn run(&mut self, repo_path: &Path) -> Result<()> {
+        run_git_void(repo_path, &["branch", "-m", &self.old, &self.new])
+    }
+}
+
+/// S-BRP "Delete Tag" — `git tag -d <name>`. `affected_branches` is
+/// empty (tags aren't branches), so the runner doesn't create a
+/// branch-shaped backup ref. The undo registry still records the row,
+/// but recovery for an unpushed tag is reflog-only.
+pub struct DeleteTagOp {
+    pub name: String,
+}
+
+impl AtomicGitOp for DeleteTagOp {
+    type Output = ();
+
+    fn op_name(&self) -> &'static str {
+        "delete_tag"
+    }
+
+    fn is_destructive(&self) -> bool {
+        true
+    }
+
+    fn affected_branches(&self, _repo_path: &Path) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn run(&mut self, repo_path: &Path) -> Result<()> {
+        run_git_void(repo_path, &["tag", "-d", &self.name])
+    }
+}
+
+/// Synchronous `git` invocation used by [`AtomicGitOp::run`] impls.
+/// Operations execute on the caller's thread under [`OpRunner::run`]'s
+/// repo-busy guard; the runner takes care of the async hop. Allowed-list
+/// opt-out scoped to this helper.
+#[allow(clippy::disallowed_methods)]
+fn run_git_void(repo_path: &Path, args: &[&str]) -> Result<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(args)
+        .output()
+        .map_err(|err| anyhow!("spawn git: {err}"))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::tempdir;
 

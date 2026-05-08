@@ -18,7 +18,7 @@ use anyhow::{Context as _, Result, anyhow};
 use context_server::listener::{McpServerTool, ToolResponse};
 use context_server::types::ToolResponseContent;
 use editor_mcp::{ToolTier, register_typed_tool_with_tier};
-use gpui::{App, AsyncApp};
+use gpui::{App, AppContext as _, AsyncApp};
 use project::git_store::RepositoryId;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,11 @@ pub(crate) fn register(cx: &mut App) {
     register_typed_tool_with_tier(cx, ToolTier::Write, TagCreateTool);
     register_typed_tool_with_tier(cx, ToolTier::Write, CheckoutRevisionTool);
     register_typed_tool_with_tier(cx, ToolTier::ReadOnly, CompareRevisionsTool);
+    // S-BRP — Branches popup MCP surface.
+    register_typed_tool_with_tier(cx, ToolTier::ReadOnly, ListBranchesTool);
+    register_typed_tool_with_tier(cx, ToolTier::Destructive, DeleteBranchTool);
+    register_typed_tool_with_tier(cx, ToolTier::Write, RenameBranchTool);
+    register_typed_tool_with_tier(cx, ToolTier::Write, SetUpstreamTool);
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -439,6 +444,266 @@ fn resolve_work_directory(repo_id: Option<RepositoryId>, cx: &mut App) -> Result
         }
     }
     Err(anyhow!("no_active_repository"))
+}
+
+// =====================================================================
+//  S-BRP — Branches popup MCP surface.
+//
+//  Wraps `git for-each-ref` / `git branch` invocations against the active
+//  repository. Lists are read-only; mutations classify as Write or
+//  Destructive depending on whether they can lose history.
+// =====================================================================
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+/// Input for `editor.git.list_branches`.
+pub struct ListBranchesInput {
+    /// When `true`, also include remote-tracking branches.
+    pub include_remote: bool,
+    /// Substring filter applied to the branch name (case-insensitive).
+    pub pattern: Option<String>,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ListBranchesOutput {
+    pub branches: Vec<BranchEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BranchEntry {
+    pub name: String,
+    pub is_remote: bool,
+    pub is_head: bool,
+    pub upstream: Option<String>,
+    pub upstream_track: Option<String>,
+    pub subject: Option<String>,
+    pub committer_date_relative: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct ListBranchesTool;
+
+impl McpServerTool for ListBranchesTool {
+    type Input = ListBranchesInput;
+    type Output = ListBranchesOutput;
+    const NAME: &'static str = "editor.git.list_branches";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let mut args: Vec<&str> = vec![
+            "for-each-ref",
+            "--format=%(HEAD)%09%(refname:short)%09%(refname)%09%(upstream:short)%09%(upstream:track)%09%(committerdate:relative)%09%(contents:subject)",
+            "refs/heads",
+        ];
+        if input.include_remote {
+            args.push("refs/remotes");
+        }
+        let raw = run_git(&work_dir, &args).await?;
+        let pattern_lower = input
+            .pattern
+            .as_deref()
+            .map(|p| p.to_lowercase());
+        let mut branches = Vec::new();
+        for line in raw.lines() {
+            let cols: Vec<&str> = line.splitn(7, '\t').collect();
+            if cols.len() < 3 {
+                continue;
+            }
+            let head_marker = cols[0].trim();
+            let short = cols[1].trim().to_string();
+            let full_ref = cols[2].trim();
+            if let Some(p) = pattern_lower.as_deref() {
+                if !short.to_lowercase().contains(p) {
+                    continue;
+                }
+            }
+            let upstream = cols.get(3).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            let upstream_track = cols.get(4).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            let date = cols.get(5).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            let subject = cols.get(6).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            branches.push(BranchEntry {
+                name: short,
+                is_remote: full_ref.starts_with("refs/remotes/"),
+                is_head: head_marker == "*",
+                upstream,
+                upstream_track,
+                subject,
+                committer_date_relative: date,
+            });
+        }
+        let summary = format!("{} branch(es)", branches.len());
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: ListBranchesOutput { branches },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+/// Input for `editor.git.delete_branch`.
+pub struct DeleteBranchInput {
+    pub name: String,
+    /// `false` runs `git branch -d` (refuses on unmerged); `true` runs
+    /// `git branch -D` (lossy — gated as `Destructive`).
+    pub force: bool,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DeleteBranchOutput {
+    pub name: String,
+    pub forced: bool,
+}
+
+#[derive(Clone)]
+pub struct DeleteBranchTool;
+
+impl McpServerTool for DeleteBranchTool {
+    type Input = DeleteBranchInput;
+    type Output = DeleteBranchOutput;
+    const NAME: &'static str = "editor.git.delete_branch";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let work_dir_buf = PathBuf::from(work_dir.as_ref());
+        let force = input.force;
+        let name = input.name.clone();
+        cx.background_spawn(async move {
+            git::operations::OpRunner::run(
+                git::operations::DeleteBranchOp {
+                    name,
+                    force,
+                },
+                &work_dir_buf,
+            )
+        })
+        .await?;
+        let summary = format!(
+            "deleted branch {}{}",
+            input.name,
+            if input.force { " (force)" } else { "" }
+        );
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: DeleteBranchOutput {
+                name: input.name,
+                forced: input.force,
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+/// Input for `editor.git.rename_branch`.
+pub struct RenameBranchInput {
+    pub old: String,
+    pub new: String,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct RenameBranchOutput {
+    pub old: String,
+    pub new: String,
+}
+
+#[derive(Clone)]
+pub struct RenameBranchTool;
+
+impl McpServerTool for RenameBranchTool {
+    type Input = RenameBranchInput;
+    type Output = RenameBranchOutput;
+    const NAME: &'static str = "editor.git.rename_branch";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let work_dir_buf = PathBuf::from(work_dir.as_ref());
+        let old = input.old.clone();
+        let new = input.new.clone();
+        cx.background_spawn(async move {
+            git::operations::OpRunner::run(
+                git::operations::RenameBranchOp { old, new },
+                &work_dir_buf,
+            )
+        })
+        .await?;
+        let summary = format!("renamed branch {} -> {}", input.old, input.new);
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: RenameBranchOutput {
+                old: input.old,
+                new: input.new,
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+/// Input for `editor.git.set_upstream`.
+pub struct SetUpstreamInput {
+    pub branch: String,
+    /// Remote-tracking ref (e.g. `origin/main`).
+    pub upstream_ref: String,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SetUpstreamOutput {
+    pub branch: String,
+    pub upstream_ref: String,
+}
+
+#[derive(Clone)]
+pub struct SetUpstreamTool;
+
+impl McpServerTool for SetUpstreamTool {
+    type Input = SetUpstreamInput;
+    type Output = SetUpstreamOutput;
+    const NAME: &'static str = "editor.git.set_upstream";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        run_git_void(
+            &work_dir,
+            &["branch", "-u", &input.upstream_ref, &input.branch],
+        )
+        .await?;
+        let summary = format!(
+            "set upstream of {} to {}",
+            input.branch, input.upstream_ref
+        );
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: SetUpstreamOutput {
+                branch: input.branch,
+                upstream_ref: input.upstream_ref,
+            },
+        })
+    }
 }
 
 #[cfg(test)]

@@ -858,6 +858,40 @@ pub trait GitRepository: Send + Sync {
         .boxed()
     }
 
+    /// S-BRP "Set Upstream…" — `git branch -u <upstream> <branch>`.
+    /// `upstream` is a remote tracking ref like `origin/main`.
+    fn set_upstream(&self, branch: String, upstream: String) -> BoxFuture<'_, Result<()>> {
+        let _ = (branch, upstream);
+        future::ready(Err(anyhow!(
+            "set_upstream not supported on this backend"
+        )))
+        .boxed()
+    }
+
+    /// S-BRP "Delete Tag" — `git tag -d <name>`.
+    fn delete_tag(&self, name: String) -> BoxFuture<'_, Result<()>> {
+        let _ = name;
+        future::ready(Err(anyhow!(
+            "delete_tag not supported on this backend"
+        )))
+        .boxed()
+    }
+
+    /// S-BRP "Push Tag" — `git push <remote> <tag>`.
+    fn push_tag(&self, remote: String, tag: String) -> BoxFuture<'_, Result<()>> {
+        let _ = (remote, tag);
+        future::ready(Err(anyhow!(
+            "push_tag not supported on this backend"
+        )))
+        .boxed()
+    }
+
+    /// S-BRP — list tag names via `git tag`. Sorted by tagger date, newest
+    /// first.
+    fn tags(&self) -> BoxFuture<'_, Result<Vec<SharedString>>> {
+        future::ready(Ok(Vec::new())).boxed()
+    }
+
     fn worktrees(&self) -> BoxFuture<'_, Result<Vec<Worktree>>>;
 
     fn create_worktree(
@@ -2273,6 +2307,63 @@ impl GitRepository for RealGitRepository {
                     .context("`git patch-id` produced no output (empty diff?)")?
                     .to_string();
                 Ok(token)
+            })
+            .boxed()
+    }
+
+    fn set_upstream(&self, branch: String, upstream: String) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                git_binary?.run(&["branch", "-u", &upstream, &branch]).await?;
+                anyhow::Ok(())
+            })
+            .boxed()
+    }
+
+    fn delete_tag(&self, name: String) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                git_binary?.run(&["tag", "-d", &name]).await?;
+                anyhow::Ok(())
+            })
+            .boxed()
+    }
+
+    fn push_tag(&self, remote: String, tag: String) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                git_binary?.run(&["push", &remote, &tag]).await?;
+                anyhow::Ok(())
+            })
+            .boxed()
+    }
+
+    fn tags(&self) -> BoxFuture<'_, Result<Vec<SharedString>>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let git = git_binary?;
+                let output = git
+                    .build_command(&[
+                        "tag",
+                        "--sort=-taggerdate",
+                        "--format=%(refname:short)",
+                    ])
+                    .output()
+                    .await?;
+                anyhow::ensure!(
+                    output.status.success(),
+                    "Failed to run `git tag`:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                Ok(String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .map(|l| SharedString::from(l.to_string()))
+                    .collect())
             })
             .boxed()
     }

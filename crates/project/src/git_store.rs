@@ -7280,6 +7280,78 @@ impl Repository {
         )
     }
 
+    /// S-BRP "Set Upstream…" — `git branch -u <upstream> <branch>`. Local
+    /// repositories only; remote projects return an error.
+    pub fn set_upstream(
+        &mut self,
+        branch: String,
+        upstream: String,
+    ) -> oneshot::Receiver<Result<()>> {
+        self.send_job(
+            Some(format!("git branch -u {upstream} {branch}").into()),
+            move |repo, _cx| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                        backend.set_upstream(branch, upstream).await
+                    }
+                    RepositoryState::Remote(_) => {
+                        Err(anyhow!("set_upstream is not supported for remote projects"))
+                    }
+                }
+            },
+        )
+    }
+
+    /// S-BRP "Delete Tag" — `git tag -d <name>`.
+    pub fn delete_tag(&mut self, name: String) -> oneshot::Receiver<Result<()>> {
+        self.send_job(
+            Some(format!("git tag -d {name}").into()),
+            move |repo, _cx| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                        backend.delete_tag(name).await
+                    }
+                    RepositoryState::Remote(_) => {
+                        Err(anyhow!("delete_tag is not supported for remote projects"))
+                    }
+                }
+            },
+        )
+    }
+
+    /// S-BRP "Push Tag" — `git push <remote> <tag>`.
+    pub fn push_tag(
+        &mut self,
+        remote: String,
+        tag: String,
+    ) -> oneshot::Receiver<Result<()>> {
+        self.send_job(
+            Some(format!("git push {remote} {tag}").into()),
+            move |repo, _cx| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                        backend.push_tag(remote, tag).await
+                    }
+                    RepositoryState::Remote(_) => {
+                        Err(anyhow!("push_tag is not supported for remote projects"))
+                    }
+                }
+            },
+        )
+    }
+
+    /// S-BRP — list tag names sorted by tagger date (newest first).
+    pub fn tags(&mut self) -> oneshot::Receiver<Result<Vec<SharedString>>> {
+        self.send_job(None, move |repo, _cx| async move {
+            match repo {
+                RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                    backend.tags().await
+                }
+                RepositoryState::Remote(_) => Ok(Vec::new()),
+            }
+        })
+    }
+
     pub fn check_for_pushed_commits(&mut self) -> oneshot::Receiver<Result<Vec<SharedString>>> {
         let id = self.id;
         self.send_job(None, move |repo, _cx| async move {
