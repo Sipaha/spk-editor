@@ -3,9 +3,9 @@
 
 use gpui::{
     App, Context, EventEmitter, FocusHandle, Focusable, IntoElement, Render, SharedString,
-    WeakEntity, Window,
+    Subscription, WeakEntity, Window,
 };
-use solutions::SolutionId;
+use solutions::{SolutionId, SolutionStore, SolutionStoreEvent};
 use ui::ButtonLike;
 use ui::prelude::*;
 use workspace::{
@@ -20,6 +20,7 @@ pub struct EmptySolutionPage {
     solution_name: SharedString,
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
+    _store_subscription: Option<Subscription>,
 }
 
 impl EmptySolutionPage {
@@ -29,11 +30,33 @@ impl EmptySolutionPage {
         workspace: WeakEntity<Workspace>,
         cx: &mut Context<Self>,
     ) -> Self {
+        // The page is the "Solution is empty" placeholder — once the
+        // user lands a member (catalog clone OR `add_empty_member`), it
+        // has nothing to say and should close itself instead of
+        // lingering as a stale tab next to the freshly-mounted member.
+        let store_subscription = SolutionStore::try_global(cx).map(|store| {
+            cx.subscribe(&store, |this, store, event, cx| match event {
+                SolutionStoreEvent::Changed
+                | SolutionStoreEvent::MemberAddCompleted { error: None, .. } => {
+                    let still_empty = store
+                        .read(cx)
+                        .solutions()
+                        .iter()
+                        .find(|s| s.id == this.solution_id)
+                        .is_some_and(|s| s.members.is_empty());
+                    if !still_empty {
+                        cx.emit(ItemEvent::CloseItem);
+                    }
+                }
+                _ => {}
+            })
+        });
         Self {
             solution_id,
             solution_name: solution_name.into(),
             workspace,
             focus_handle: cx.focus_handle(),
+            _store_subscription: store_subscription,
         }
     }
 
