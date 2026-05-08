@@ -11,8 +11,11 @@
 
 use git::{Oid, repository::RepoPath};
 use gpui::SharedString;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
 pub struct LogFilters {
     /// Multi-select branches/refs (chip-Branch). When non-empty, replaces
     /// the implicit `--all` traversal — git log is invoked with these refs
@@ -28,6 +31,8 @@ pub struct LogFilters {
     pub date_range: Option<DateRange>,
 
     /// Multi-select paths (chip-Path). Trailing `-- <paths>` after CLI args.
+    #[serde(with = "repo_path_vec_serde")]
+    #[schemars(with = "Vec<String>")]
     pub paths: Vec<RepoPath>,
 
     /// Free-text query (chip-Query). Maps to `--grep` / `-G` / direct hash
@@ -41,6 +46,7 @@ pub struct LogFilters {
     /// Optional pin to a specific SHA — used by Show At Revision and
     /// commit-targeted log views. Layered orthogonally to the other
     /// filters; converts to a positional arg.
+    #[schemars(with = "Option<String>")]
     pub sha: Option<Oid>,
 }
 
@@ -162,7 +168,7 @@ impl LogFilters {
 
 /// Date filter for chip-Date. Unix seconds; UI offers presets (Today /
 /// Yesterday / This Week / Last 30 days / All Time) plus custom range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum DateRange {
     Since(i64),
     Until(i64),
@@ -172,7 +178,8 @@ pub enum DateRange {
 /// Free-text query filter. The toolbar's text input + toggle row populates
 /// this; `git_graph.rs` translates the flag combo into git CLI args at
 /// log-time.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
 pub struct QueryFilter {
     pub text: SharedString,
     pub regex: bool,
@@ -182,9 +189,30 @@ pub struct QueryFilter {
     pub search_in_diffs: bool,
 }
 
+/// Marshal `Vec<RepoPath>` through unix-string form. RepoPath itself has no
+/// serde impl (lives in upstream `git` crate); this shim avoids modifying
+/// it and the on-the-wire form is the same string git itself sees.
+mod repo_path_vec_serde {
+    use git::repository::RepoPath;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
+
+    pub fn serialize<S: Serializer>(paths: &[RepoPath], s: S) -> Result<S::Ok, S::Error> {
+        let strings: Vec<&str> = paths.iter().map(|p| p.as_unix_str()).collect();
+        strings.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<RepoPath>, D::Error> {
+        let raw: Vec<String> = Vec::deserialize(d)?;
+        raw.into_iter()
+            .map(|s| RepoPath::new(&s).map_err(D::Error::custom))
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     #[test]
     fn empty_default() {
@@ -202,5 +230,43 @@ mod tests {
             ..LogFilters::default()
         };
         assert_eq!(f.active_count(), 3);
+    }
+
+    #[test]
+    fn json_roundtrip_preserves_all_fields() {
+        let original = LogFilters {
+            branches: vec!["main".into(), "feat/x".into()],
+            authors: vec!["alice@example.com".into()],
+            date_range: Some(DateRange::Between {
+                since: 100,
+                until: 200,
+            }),
+            paths: vec![
+                RepoPath::new("crates/foo").expect("repo path"),
+                RepoPath::new("README.md").expect("repo path"),
+            ],
+            query: Some(QueryFilter {
+                text: "fix".into(),
+                regex: true,
+                case_sensitive: true,
+                search_in_diffs: false,
+            }),
+            all_refs: true,
+            sha: Some(
+                Oid::from_str("0123456789abcdef0123456789abcdef01234567").expect("oid"),
+            ),
+        };
+        let json = serde_json::to_string(&original).expect("serialize");
+        let parsed: LogFilters = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn json_roundtrip_empty() {
+        let original = LogFilters::default();
+        let json = serde_json::to_string(&original).expect("serialize");
+        let parsed: LogFilters = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, original);
+        assert!(parsed.is_empty());
     }
 }

@@ -1,6 +1,7 @@
 pub mod filters;
 pub mod highlights;
 pub mod log_toolbar;
+pub mod mcp;
 pub mod view_options;
 
 use collections::{BTreeMap, HashMap};
@@ -740,6 +741,7 @@ impl GraphData {
 
 pub fn init(cx: &mut App) {
     workspace::register_serializable_item::<GitGraph>(cx);
+    mcp::register(cx);
 
     cx.observe_new(|workspace: &mut workspace::Workspace, _, _| {
         workspace.register_action_renderer(|div, workspace, window, cx| {
