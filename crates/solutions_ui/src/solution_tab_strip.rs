@@ -33,7 +33,7 @@ use gpui::{
 };
 use solution_agent::store::{SolutionAgentStore, SolutionAgentStoreEvent};
 use solutions::{Solution, SolutionId, SolutionStore, SolutionStoreEvent};
-use ui::{IconButton, IconName, Tooltip, prelude::*};
+use ui::{IconButton, IconName, PopoverMenu, Tooltip, prelude::*};
 use workspace::{MultiWorkspace, Workspace};
 
 use crate::solution_picker_dropdown::SolutionPickerDropdown;
@@ -159,16 +159,15 @@ impl Render for SolutionTabStrip {
             seen_ids.push(sol_id);
         }
 
-        // The `+` button branches on whether at least one solution in the
-        // catalog is currently closed. The picker dropdown filters its
-        // rows by `is_solution_open_anywhere`, so if every solution is
-        // already open the dropdown would just show "Create new
-        // solution…" — skip the popover and dispatch `NewSolution`
-        // directly per the spec.
+        // Tooltip text reflects whether the picker has anything other
+        // than "Create new solution…" to offer. The picker itself
+        // handles the empty-list case by rendering a "No closed
+        // solutions" hint above the create row, so we don't need to
+        // skip the popover.
         let any_closed = store_read
             .solutions()
             .iter()
-            .any(|s| !is_solution_open_anywhere(&s.id, cx));
+            .any(|s| !seen_ids.contains(&s.id) && !is_solution_open_anywhere(&s.id, cx));
 
         let weak_workspace = self.workspace.clone();
         let plus_button = IconButton::new("solution-tab-strip-plus", IconName::Plus)
@@ -178,31 +177,15 @@ impl Render for SolutionTabStrip {
                 "Open or create a solution"
             } else {
                 "Create new solution"
-            }))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                // Recompute `any_closed` at click time — between render
-                // and click another window could have closed a solution
-                // and we want to honour the latest state.
-                let store = SolutionStore::global(cx);
-                let any_closed_now = store
-                    .read(cx)
-                    .solutions()
-                    .iter()
-                    .any(|s| !is_solution_open_anywhere(&s.id, cx));
-                if !any_closed_now {
-                    cx.dispatch_action(&crate::actions::NewSolution);
-                    return;
-                }
-                let Some(workspace) = this.workspace.upgrade() else {
-                    return;
-                };
-                let picker_workspace = this.workspace.clone();
-                workspace.update(cx, move |workspace, cx| {
-                    workspace.toggle_modal(window, cx, move |window, cx| {
-                        SolutionPickerDropdown::new(picker_workspace, window, cx)
-                    });
-                });
             }));
+
+        let picker_workspace = self.workspace.clone();
+        let plus_popover = PopoverMenu::new("solution-tab-strip-plus-popover")
+            .trigger(plus_button)
+            .menu(move |window, cx| {
+                let picker_workspace = picker_workspace.clone();
+                Some(cx.new(|cx| SolutionPickerDropdown::new(picker_workspace, window, cx)))
+            });
 
         h_flex()
             .id("solution-tab-strip")
@@ -220,7 +203,7 @@ impl Render for SolutionTabStrip {
                     )
                 },
             ))
-            .child(div().px_1().child(plus_button))
+            .child(div().px_1().child(plus_popover))
             .into_any_element()
     }
 }
