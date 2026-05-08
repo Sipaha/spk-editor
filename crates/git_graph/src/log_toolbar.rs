@@ -20,7 +20,7 @@ use gpui::{
     rems,
 };
 use project::git_store::Repository;
-use ui::{Divider, ListItem, ListItemSpacing, PopoverMenu, TintColor, prelude::*};
+use ui::{Divider, ListItem, ListItemSpacing, PopoverMenu, TintColor, Tooltip, prelude::*};
 
 use crate::GitGraph;
 use crate::filters::DateRange;
@@ -186,9 +186,15 @@ pub struct LogToolbar {
     authors: Vec<SharedString>,
     paths: Vec<RepoPath>,
     repository: Option<Entity<Repository>>,
+    all_refs: bool,
+    my_commits: bool,
+    new_since_refresh: bool,
+    compact_refs: bool,
+    group_by_date: bool,
 }
 
 impl LogToolbar {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         weak_graph: WeakEntity<GitGraph>,
         date_range: Option<DateRange>,
@@ -196,6 +202,11 @@ impl LogToolbar {
         authors: Vec<SharedString>,
         paths: Vec<RepoPath>,
         repository: Option<Entity<Repository>>,
+        all_refs: bool,
+        my_commits: bool,
+        new_since_refresh: bool,
+        compact_refs: bool,
+        group_by_date: bool,
     ) -> Self {
         Self {
             weak_graph,
@@ -204,6 +215,11 @@ impl LogToolbar {
             authors,
             paths,
             repository,
+            all_refs,
+            my_commits,
+            new_since_refresh,
+            compact_refs,
+            group_by_date,
         }
     }
 
@@ -213,6 +229,7 @@ impl LogToolbar {
         let user_chip = self.render_user_chip();
         let path_chip = self.render_path_chip();
         let date_chip = self.render_date_chip();
+        let toggles = self.render_toggles();
         h_flex()
             .w_full()
             .px_2()
@@ -225,6 +242,131 @@ impl LogToolbar {
             .child(user_chip)
             .child(path_chip)
             .child(date_chip)
+            .child(div().px_1().child(Divider::vertical()))
+            .child(toggles)
+    }
+
+    fn render_toggles(&self) -> impl IntoElement {
+        // Mirrors IntelliJ's git log toolbar: icon-only IconButton toggles
+        // sit to the right of the chip group. Each toggle uses a tinted
+        // accent style when active and a subtle style when inactive.
+        let weak = self.weak_graph.clone();
+        let all_refs = self.all_refs;
+        let branch_active = !self.branches.is_empty();
+        let my_commits = self.my_commits;
+        let new_since_refresh = self.new_since_refresh;
+        let compact_refs = self.compact_refs;
+        let group_by_date = self.group_by_date;
+
+        let toggle_style = |active: bool| {
+            if active {
+                ButtonStyle::Tinted(TintColor::Accent)
+            } else {
+                ButtonStyle::Subtle
+            }
+        };
+
+        // --all toggle: precedence rule says explicit branch chip selection
+        // wins, so the toggle is visually disabled while branches is non-
+        // empty (LogFilters::to_git_args also drops `--all` in that case).
+        let all_refs_button = {
+            let weak = weak.clone();
+            let tooltip_text: SharedString = if branch_active {
+                "All refs (disabled while Branch filter is active)".into()
+            } else if all_refs {
+                "Showing all refs (--all). Click to disable.".into()
+            } else {
+                "Show all refs (--all)".into()
+            };
+            IconButton::new("git-graph-toggle-all-refs", IconName::GitBranch)
+                .icon_size(IconSize::Small)
+                .style(toggle_style(all_refs && !branch_active))
+                .toggle_state(all_refs && !branch_active)
+                .disabled(branch_active)
+                .tooltip(Tooltip::text(tooltip_text))
+                .on_click(move |_, _, cx| {
+                    let weak = weak.clone();
+                    if let Some(graph) = weak.upgrade() {
+                        graph.update(cx, |graph, cx| {
+                            graph.set_all_refs(!all_refs, cx);
+                        });
+                    }
+                })
+        };
+
+        let my_commits_button = {
+            let weak = weak.clone();
+            IconButton::new("git-graph-toggle-my-commits", IconName::Person)
+                .icon_size(IconSize::Small)
+                .style(toggle_style(my_commits))
+                .toggle_state(my_commits)
+                .tooltip(Tooltip::text("Highlight my commits"))
+                .on_click(move |_, _, cx| {
+                    let weak = weak.clone();
+                    if let Some(graph) = weak.upgrade() {
+                        graph.update(cx, |graph, cx| {
+                            graph.set_my_commits(!my_commits, cx);
+                        });
+                    }
+                })
+        };
+
+        let new_since_refresh_button = {
+            let weak = weak.clone();
+            IconButton::new("git-graph-toggle-new-since-refresh", IconName::Sparkle)
+                .icon_size(IconSize::Small)
+                .style(toggle_style(new_since_refresh))
+                .toggle_state(new_since_refresh)
+                .tooltip(Tooltip::text("Highlight new commits since last refresh"))
+                .on_click(move |_, _, cx| {
+                    let weak = weak.clone();
+                    if let Some(graph) = weak.upgrade() {
+                        graph.update(cx, |graph, cx| {
+                            graph.set_new_since_refresh(!new_since_refresh, cx);
+                        });
+                    }
+                })
+        };
+
+        let compact_refs_button = {
+            let weak = weak.clone();
+            IconButton::new("git-graph-toggle-compact-refs", IconName::ListCollapse)
+                .icon_size(IconSize::Small)
+                .style(toggle_style(compact_refs))
+                .toggle_state(compact_refs)
+                .tooltip(Tooltip::text("Compact references"))
+                .on_click(move |_, _, cx| {
+                    let weak = weak.clone();
+                    if let Some(graph) = weak.upgrade() {
+                        graph.update(cx, |graph, cx| {
+                            graph.set_compact_refs(!compact_refs, cx);
+                        });
+                    }
+                })
+        };
+
+        let group_by_date_button =
+            IconButton::new("git-graph-toggle-group-by-date", IconName::Clock)
+                .icon_size(IconSize::Small)
+                .style(toggle_style(group_by_date))
+                .toggle_state(group_by_date)
+                .tooltip(Tooltip::text("Group by date"))
+                .on_click(move |_, _, cx| {
+                    let weak = weak.clone();
+                    if let Some(graph) = weak.upgrade() {
+                        graph.update(cx, |graph, cx| {
+                            graph.set_group_by_date(!group_by_date, cx);
+                        });
+                    }
+                });
+
+        h_flex()
+            .gap_0p5()
+            .child(all_refs_button)
+            .child(my_commits_button)
+            .child(new_since_refresh_button)
+            .child(compact_refs_button)
+            .child(group_by_date_button)
     }
 
     fn render_date_chip(&self) -> impl IntoElement {

@@ -1,6 +1,7 @@
 pub mod filters;
 pub mod highlights;
 pub mod log_toolbar;
+pub mod view_options;
 
 use collections::{BTreeMap, HashMap, IndexSet};
 use editor::Editor;
@@ -308,6 +309,18 @@ fn format_timestamp(timestamp: i64) -> String {
     local_datetime
         .format(timestamp_format())
         .unwrap_or_default()
+}
+
+/// Local-day label used by the "Group by date" view option to insert a
+/// header above the first commit of each day. Returns `None` when the
+/// timestamp is unparseable. Two commits whose labels are equal share a
+/// header.
+fn local_day_label(timestamp: i64) -> Option<String> {
+    let datetime = OffsetDateTime::from_unix_timestamp(timestamp).ok()?;
+    let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    let local = datetime.to_offset(local_offset);
+    let format = time::format_description::parse("[year]-[month]-[day]").ok()?;
+    local.format(&format).ok()
 }
 
 fn accent_colors_count(accents: &AccentColors) -> usize {
@@ -992,8 +1005,14 @@ pub struct GitGraph {
     filters: filters::LogFilters,
     /// Row-decoration toggles (My commits / New since refresh). S-FLT
     /// scaffolding — wired when chip-Highlights toolbar lands.
-    #[allow(dead_code)]
     highlights: highlights::HighlightSet,
+    /// Render-only toggles (Compact refs / Group by date) applied at row
+    /// rendering time without re-running `git log`.
+    view_options: view_options::ViewOptions,
+    /// Email reported by `git config user.email`, captured at view init.
+    /// Used by the My-commits highlight to compare against per-commit
+    /// `author_email`. `None` until the background fetch resolves.
+    local_user_email: Option<SharedString>,
     selected_commit_diff: Option<CommitDiff>,
     selected_commit_diff_stats: Option<(usize, usize)>,
     _commit_diff_task: Option<Task<()>>,
@@ -1065,6 +1084,60 @@ impl GitGraph {
         self.fetch_initial_graph_data(cx);
     }
 
+    pub fn set_all_refs(&mut self, all_refs: bool, cx: &mut Context<Self>) {
+        if self.filters.all_refs == all_refs {
+            return;
+        }
+        self.filters.all_refs = all_refs;
+        self.invalidate_state(cx);
+        self.fetch_initial_graph_data(cx);
+    }
+
+    pub fn set_my_commits(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.highlights.my_commits == on {
+            return;
+        }
+        self.highlights.my_commits = on;
+        cx.notify();
+    }
+
+    pub fn set_new_since_refresh(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.highlights.new_since_refresh == on {
+            return;
+        }
+        self.highlights.new_since_refresh = on;
+        // Anchor the "new" boundary at the currently-visible HEAD the first
+        // time the toggle flips on. Subsequent commits loaded above this
+        // anchor get the decoration. Anchor is in-memory only — clearing
+        // the toggle resets it so re-enabling re-anchors at HEAD.
+        if on {
+            self.highlights.last_seen_sha = self
+                .graph_data
+                .commits
+                .first()
+                .map(|c| c.data.sha);
+        } else {
+            self.highlights.last_seen_sha = None;
+        }
+        cx.notify();
+    }
+
+    pub fn set_compact_refs(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.view_options.compact_refs == on {
+            return;
+        }
+        self.view_options.compact_refs = on;
+        cx.notify();
+    }
+
+    pub fn set_group_by_date(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.view_options.group_by_date == on {
+            return;
+        }
+        self.view_options.group_by_date = on;
+        cx.notify();
+    }
+
     fn render_log_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         log_toolbar::LogToolbar::new(
             cx.weak_entity(),
@@ -1073,6 +1146,11 @@ impl GitGraph {
             self.filters.authors.clone(),
             self.filters.paths.clone(),
             self.get_repository(cx),
+            self.filters.all_refs,
+            self.highlights.my_commits,
+            self.highlights.new_since_refresh,
+            self.view_options.compact_refs,
+            self.view_options.group_by_date,
         )
         .render(cx)
     }
@@ -1264,6 +1342,8 @@ impl GitGraph {
             log_order,
             filters: filters::LogFilters::default(),
             highlights: highlights::HighlightSet::default(),
+            view_options: view_options::ViewOptions::default(),
+            local_user_email: None,
             commit_details_split_state: cx.new(|_cx| SplitState::new()),
             repo_id,
             changed_files_scroll_handle: UniformListScrollHandle::new(),
@@ -1271,7 +1351,27 @@ impl GitGraph {
         };
 
         this.fetch_initial_graph_data(cx);
+        this.fetch_local_user_email(cx);
         this
+    }
+
+    fn fetch_local_user_email(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let committer = git::repository::get_git_committer(cx).await;
+            this.update(cx, |this, cx| {
+                if let Some(email) = committer.email {
+                    let email = SharedString::from(email);
+                    if this.local_user_email.as_ref() != Some(&email) {
+                        this.local_user_email = Some(email);
+                        if this.highlights.my_commits {
+                            cx.notify();
+                        }
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn on_repository_event(
@@ -1465,6 +1565,26 @@ impl GitGraph {
             });
         }
 
+        // Index of the "new since refresh" anchor (last seen sha at the
+        // moment the toggle was first enabled). Commits at indices strictly
+        // less than this — i.e. above the anchor in the log — are "new".
+        let new_anchor_idx: Option<usize> = if self.highlights.new_since_refresh {
+            self.highlights.last_seen_sha.and_then(|anchor| {
+                self.graph_data
+                    .commits
+                    .iter()
+                    .position(|c| c.data.sha == anchor)
+            })
+        } else {
+            None
+        };
+        let local_user_email = self.local_user_email.clone();
+        let my_commits_active = self.highlights.my_commits;
+        let compact_refs = self.view_options.compact_refs;
+        let compact_threshold = view_options::COMPACT_REFS_THRESHOLD;
+        let group_by_date = self.view_options.group_by_date;
+        let highlight_color = cx.theme().colors().text_accent;
+
         range
             .map(|idx| {
                 let Some((commit, repository)) =
@@ -1488,15 +1608,50 @@ impl GitGraph {
                 let mut formatted_time = String::new();
                 let subject: SharedString;
                 let author_name: SharedString;
+                let mut author_email: SharedString = SharedString::default();
+                let mut commit_timestamp: i64 = 0;
 
                 if let CommitDataState::Loaded(data) = data {
                     subject = data.subject.clone();
                     author_name = data.author_name.clone();
-                    formatted_time = format_timestamp(data.commit_timestamp);
+                    author_email = data.author_email.clone();
+                    commit_timestamp = data.commit_timestamp;
+                    formatted_time = format_timestamp(commit_timestamp);
                 } else {
                     subject = "Loading…".into();
                     author_name = "".into();
                 }
+
+                let is_my_commit = my_commits_active
+                    && local_user_email
+                        .as_ref()
+                        .is_some_and(|me| !me.is_empty() && me.as_ref() == author_email.as_ref());
+                let is_new_commit = new_anchor_idx.is_some_and(|anchor| idx < anchor);
+                let date_header_label: Option<SharedString> = if group_by_date {
+                    let current_day = local_day_label(commit_timestamp);
+                    let prev_day: Option<String> =
+                        idx.checked_sub(1).and_then(|prev_idx| {
+                            let prev_commit = self.graph_data.commits.get(prev_idx)?;
+                            let prev_state = repository.update(cx, |repository, cx| {
+                                repository
+                                    .fetch_commit_data(prev_commit.data.sha, false, cx)
+                                    .clone()
+                            });
+                            match prev_state {
+                                CommitDataState::Loaded(prev) => {
+                                    local_day_label(prev.commit_timestamp)
+                                }
+                                _ => None,
+                            }
+                        });
+                    match (current_day, prev_day) {
+                        (Some(today), Some(prev)) if today == prev => None,
+                        (Some(today), _) => Some(SharedString::from(today)),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
 
                 let accent_colors = cx.theme().accents();
                 let accent_color = accent_colors
@@ -1552,26 +1707,78 @@ impl GitGraph {
                     column_label(subject.clone())
                 };
 
+                let ref_chips_element = (!commit.data.ref_names.is_empty()).then(|| {
+                    let total = commit.data.ref_names.len();
+                    let visible = if compact_refs && total > compact_threshold {
+                        compact_threshold
+                    } else {
+                        total
+                    };
+                    let hidden = total.saturating_sub(visible);
+                    let mut row = h_flex().gap_1();
+                    for name in commit.data.ref_names.iter().take(visible) {
+                        let is_head = Self::is_head_ref(name.as_ref(), &head_branch_name);
+                        row = row.child(self.render_chip(name, accent_color, is_head));
+                    }
+                    if hidden > 0 {
+                        let hidden_names = commit
+                            .data
+                            .ref_names
+                            .iter()
+                            .skip(visible)
+                            .map(|n| n.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        row = row.child(
+                            Chip::new(SharedString::from(format!("+{hidden}")))
+                                .label_size(LabelSize::Small)
+                                .bg_color(accent_color.opacity(0.08))
+                                .border_color(accent_color.opacity(0.25))
+                                .tooltip(Tooltip::text(SharedString::from(hidden_names))),
+                        );
+                    }
+                    row
+                });
+
+                let highlight_marker = if is_my_commit || is_new_commit {
+                    Some(
+                        div()
+                            .w(px(2.0))
+                            .h_full()
+                            .bg(highlight_color)
+                            .into_any_element(),
+                    )
+                } else {
+                    None
+                };
+
+                let description_inner = h_flex()
+                    .gap_2()
+                    .overflow_hidden()
+                    .children(highlight_marker)
+                    .children(ref_chips_element)
+                    .child(subject_label);
+
+                let description_cell = if let Some(label) = date_header_label {
+                    v_flex()
+                        .gap_0p5()
+                        .child(
+                            Label::new(label)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                        .child(description_inner)
+                        .into_any_element()
+                } else {
+                    description_inner.into_any_element()
+                };
+
                 vec![
                     div()
                         .id(ElementId::NamedInteger("commit-subject".into(), idx as u64))
                         .overflow_hidden()
                         .tooltip(Tooltip::text(subject))
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .overflow_hidden()
-                                .children((!commit.data.ref_names.is_empty()).then(|| {
-                                    h_flex().gap_1().children(commit.data.ref_names.iter().map(
-                                        |name| {
-                                            let is_head =
-                                                Self::is_head_ref(name.as_ref(), &head_branch_name);
-                                            self.render_chip(name, accent_color, is_head)
-                                        },
-                                    ))
-                                }))
-                                .child(subject_label),
-                        )
+                        .child(description_cell)
                         .into_any_element(),
                     column_label(formatted_time.into()),
                     column_label(author_name),
