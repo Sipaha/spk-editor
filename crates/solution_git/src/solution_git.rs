@@ -12,6 +12,8 @@
 //! and registers trait providers (`git_ui::providers::*`) at `init()` —
 //! `git_ui` never depends on `solution_git`.
 
+pub mod branch_protection;
+
 use gpui::App;
 
 pub fn init(_cx: &mut App) {

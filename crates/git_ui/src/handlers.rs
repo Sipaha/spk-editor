@@ -10,6 +10,16 @@
 
 pub mod branch;
 pub mod checkout;
+pub mod cherry_pick;
 pub mod compare;
 pub mod copy;
+pub mod drop;
+pub mod edit_message;
+pub mod fixup;
+pub mod merge;
+pub mod move_commit;
+pub mod rebase;
+pub mod reset;
+pub mod revert;
+pub mod squash;
 pub mod tag;

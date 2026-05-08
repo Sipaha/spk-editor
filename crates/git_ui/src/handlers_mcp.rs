@@ -34,6 +34,17 @@ pub(crate) fn register(cx: &mut App) {
     register_typed_tool_with_tier(cx, ToolTier::Destructive, DeleteBranchTool);
     register_typed_tool_with_tier(cx, ToolTier::Write, RenameBranchTool);
     register_typed_tool_with_tier(cx, ToolTier::Write, SetUpstreamTool);
+    // S-DST — Destructive commit operations.
+    register_typed_tool_with_tier(cx, ToolTier::Write, CherryPickTool);
+    register_typed_tool_with_tier(cx, ToolTier::Write, RevertTool);
+    register_typed_tool_with_tier(cx, ToolTier::Destructive, ResetTool);
+    register_typed_tool_with_tier(cx, ToolTier::Destructive, DropCommitTool);
+    register_typed_tool_with_tier(cx, ToolTier::Destructive, SquashRangeTool);
+    register_typed_tool_with_tier(cx, ToolTier::Destructive, FixupTool);
+    register_typed_tool_with_tier(cx, ToolTier::Destructive, EditCommitMessageTool);
+    register_typed_tool_with_tier(cx, ToolTier::Destructive, MoveCommitTool);
+    register_typed_tool_with_tier(cx, ToolTier::Write, MergeTool);
+    register_typed_tool_with_tier(cx, ToolTier::Destructive, RebaseTool);
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -702,6 +713,562 @@ impl McpServerTool for SetUpstreamTool {
                 branch: input.branch,
                 upstream_ref: input.upstream_ref,
             },
+        })
+    }
+}
+
+// =====================================================================
+//  S-DST — Destructive commit operations MCP surface.
+//
+//  Each tool returns the post-op state via a shared `DestructiveOutcome`
+//  shape: `outcome: "completed" | "paused_for_conflict"` plus
+//  `conflicted_files` when paused. Destructive-tier tools require
+//  `confirmed: true` in the input; the registry tier check rejects calls
+//  from a `read_only` / `write` subagent before this code runs, but the
+//  per-call confirmation is an additional opt-in.
+// =====================================================================
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct DestructiveOutcome {
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflicted_files: Option<Vec<String>>,
+}
+
+fn outcome_payload(outcome: git::operations::RunOutcome) -> DestructiveOutcome {
+    match outcome {
+        git::operations::RunOutcome::Completed => DestructiveOutcome {
+            outcome: "completed".into(),
+            conflicted_files: None,
+        },
+        git::operations::RunOutcome::PausedForConflict { conflicted_files } => DestructiveOutcome {
+            outcome: "paused_for_conflict".into(),
+            conflicted_files: Some(
+                conflicted_files
+                    .into_iter()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect(),
+            ),
+        },
+        git::operations::RunOutcome::PausedForExecFailure { command, stderr } => DestructiveOutcome {
+            outcome: "paused_for_exec_failure".into(),
+            conflicted_files: Some(vec![format!("exec {command} failed: {stderr}")]),
+        },
+    }
+}
+
+fn require_confirmed(input_confirmed: bool, op_label: &str) -> Result<()> {
+    if input_confirmed {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "{op_label} is destructive and requires confirmed=true in the call payload"
+    ))
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct CherryPickInput {
+    pub shas: Vec<String>,
+    pub no_commit: bool,
+    pub x: bool,
+    pub mainline: Option<u32>,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Clone)]
+pub struct CherryPickTool;
+
+impl McpServerTool for CherryPickTool {
+    type Input = CherryPickInput;
+    type Output = DestructiveOutcome;
+    const NAME: &'static str = "editor.git.cherry_pick";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let work_dir_buf = PathBuf::from(work_dir.as_ref());
+        let outcome = cx
+            .background_spawn(async move {
+                git::operations::OpRunner::run(
+                    git::operations::cherry_pick::CherryPickOp {
+                        shas: input.shas.clone(),
+                        no_commit: input.no_commit,
+                        mainline: input.mainline,
+                        x: input.x,
+                    },
+                    &work_dir_buf,
+                )
+            })
+            .await?;
+        let payload = outcome_payload(outcome);
+        let summary = format!("cherry-pick {} commit(s) → {}", payload.outcome, payload.outcome);
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: payload,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct RevertInput {
+    pub shas: Vec<String>,
+    pub no_commit: bool,
+    pub mainline: Option<u32>,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Clone)]
+pub struct RevertTool;
+
+impl McpServerTool for RevertTool {
+    type Input = RevertInput;
+    type Output = DestructiveOutcome;
+    const NAME: &'static str = "editor.git.revert";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let work_dir_buf = PathBuf::from(work_dir.as_ref());
+        let outcome = cx
+            .background_spawn(async move {
+                git::operations::OpRunner::run(
+                    git::operations::revert::RevertOp {
+                        shas: input.shas.clone(),
+                        no_commit: input.no_commit,
+                        mainline: input.mainline,
+                    },
+                    &work_dir_buf,
+                )
+            })
+            .await?;
+        let payload = outcome_payload(outcome);
+        let summary = format!("revert → {}", payload.outcome);
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: payload,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResetInput {
+    pub sha: String,
+    /// One of `"soft" | "mixed" | "hard" | "keep"`. Defaults to `"mixed"`.
+    pub mode: String,
+    pub confirmed: bool,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Clone)]
+pub struct ResetTool;
+
+impl McpServerTool for ResetTool {
+    type Input = ResetInput;
+    type Output = DestructiveOutcome;
+    const NAME: &'static str = "editor.git.reset";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        require_confirmed(input.confirmed, "reset")?;
+        let mode = parse_reset_mode(&input.mode)?;
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let work_dir_buf = PathBuf::from(work_dir.as_ref());
+        let sha = input.sha.clone();
+        let outcome = cx
+            .background_spawn(async move {
+                git::operations::OpRunner::run(
+                    git::operations::reset::ResetOp { sha, mode },
+                    &work_dir_buf,
+                )
+            })
+            .await?;
+        let payload = outcome_payload(outcome);
+        let summary = format!("reset --{} {} → {}", input.mode, input.sha, payload.outcome);
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: payload,
+        })
+    }
+}
+
+fn parse_reset_mode(mode: &str) -> Result<git::operations::reset::ResetMode> {
+    use git::operations::reset::ResetMode;
+    match mode.to_ascii_lowercase().as_str() {
+        "soft" => Ok(ResetMode::Soft),
+        "mixed" | "" => Ok(ResetMode::Mixed),
+        "hard" => Ok(ResetMode::Hard),
+        "keep" => Ok(ResetMode::Keep),
+        other => Err(anyhow!("unknown reset mode {other:?}; expected soft|mixed|hard|keep")),
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct DropCommitInput {
+    pub sha: String,
+    pub confirmed: bool,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Clone)]
+pub struct DropCommitTool;
+
+impl McpServerTool for DropCommitTool {
+    type Input = DropCommitInput;
+    type Output = DestructiveOutcome;
+    const NAME: &'static str = "editor.git.drop_commit";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        require_confirmed(input.confirmed, "drop_commit")?;
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let work_dir_buf = PathBuf::from(work_dir.as_ref());
+        let sha = input.sha.clone();
+        let handle = git::operations::drop_commit::run_drop(
+            &work_dir_buf,
+            &sha,
+            git::operations::rebase::RebaseCallbacks::default(),
+        )
+        .await?;
+        let payload = rebase_outcome_payload(&handle);
+        let summary = format!("drop {} → {}", input.sha, payload.outcome);
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: payload,
+        })
+    }
+}
+
+fn rebase_outcome_payload(handle: &git::operations::rebase::RebaseHandle) -> DestructiveOutcome {
+    use git::operations::rebase::RebaseState;
+    match handle.state() {
+        RebaseState::Completed => DestructiveOutcome {
+            outcome: "completed".into(),
+            conflicted_files: None,
+        },
+        RebaseState::PausedForConflict { conflicted_files } => DestructiveOutcome {
+            outcome: "paused_for_conflict".into(),
+            conflicted_files: Some(
+                conflicted_files
+                    .into_iter()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect(),
+            ),
+        },
+        RebaseState::PausedForEdit { current_sha } => DestructiveOutcome {
+            outcome: "paused_for_edit".into(),
+            conflicted_files: Some(vec![format!("paused at {current_sha}")]),
+        },
+        RebaseState::PausedForExecFailure { command, stderr } => DestructiveOutcome {
+            outcome: "paused_for_exec_failure".into(),
+            conflicted_files: Some(vec![format!("exec {command} failed: {stderr}")]),
+        },
+        RebaseState::Running => DestructiveOutcome {
+            outcome: "running".into(),
+            conflicted_files: None,
+        },
+        RebaseState::Aborted => DestructiveOutcome {
+            outcome: "aborted".into(),
+            conflicted_files: None,
+        },
+        RebaseState::Failed(err) => DestructiveOutcome {
+            outcome: "failed".into(),
+            conflicted_files: Some(vec![err]),
+        },
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct SquashRangeInput {
+    pub shas: Vec<String>,
+    pub message: String,
+    pub confirmed: bool,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Clone)]
+pub struct SquashRangeTool;
+
+impl McpServerTool for SquashRangeTool {
+    type Input = SquashRangeInput;
+    type Output = DestructiveOutcome;
+    const NAME: &'static str = "editor.git.squash_range";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        require_confirmed(input.confirmed, "squash_range")?;
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let work_dir_buf = PathBuf::from(work_dir.as_ref());
+        let handle = git::operations::squash::SquashOp {
+            shas: input.shas.clone(),
+            final_message: input.message.clone(),
+        }
+        .run(&work_dir_buf, git::operations::rebase::RebaseCallbacks::default())
+        .await?;
+        let payload = rebase_outcome_payload(&handle);
+        let summary = format!("squash {} commits → {}", input.shas.len(), payload.outcome);
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: payload,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct FixupInput {
+    pub shas: Vec<String>,
+    pub confirmed: bool,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Clone)]
+pub struct FixupTool;
+
+impl McpServerTool for FixupTool {
+    type Input = FixupInput;
+    type Output = DestructiveOutcome;
+    const NAME: &'static str = "editor.git.fixup";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        require_confirmed(input.confirmed, "fixup")?;
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let work_dir_buf = PathBuf::from(work_dir.as_ref());
+        let handle = git::operations::fixup::FixupOp {
+            shas: input.shas.clone(),
+        }
+        .run(&work_dir_buf, git::operations::rebase::RebaseCallbacks::default())
+        .await?;
+        let payload = rebase_outcome_payload(&handle);
+        let summary = format!("fixup {} commits → {}", input.shas.len(), payload.outcome);
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: payload,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct EditCommitMessageInput {
+    pub sha: String,
+    pub new_message: String,
+    pub confirmed: bool,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Clone)]
+pub struct EditCommitMessageTool;
+
+impl McpServerTool for EditCommitMessageTool {
+    type Input = EditCommitMessageInput;
+    type Output = DestructiveOutcome;
+    const NAME: &'static str = "editor.git.edit_commit_message";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        require_confirmed(input.confirmed, "edit_commit_message")?;
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let work_dir_buf = PathBuf::from(work_dir.as_ref());
+        let outcome = git::operations::edit_commit_message::EditMessageOp {
+            sha: input.sha.clone(),
+            new_message: input.new_message.clone(),
+        }
+        .run(&work_dir_buf, git::operations::rebase::RebaseCallbacks::default())
+        .await?;
+        let payload = match outcome {
+            git::operations::edit_commit_message::EditMessageOutcome::Direct(out) => {
+                outcome_payload(out)
+            }
+            git::operations::edit_commit_message::EditMessageOutcome::ViaRebase(handle) => {
+                rebase_outcome_payload(&handle)
+            }
+        };
+        let summary = format!("edit_commit_message {} → {}", input.sha, payload.outcome);
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: payload,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct MoveCommitInput {
+    pub source_sha: String,
+    pub target_sha: String,
+    /// `"before"` or `"after"`.
+    pub position: String,
+    pub confirmed: bool,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Clone)]
+pub struct MoveCommitTool;
+
+impl McpServerTool for MoveCommitTool {
+    type Input = MoveCommitInput;
+    type Output = DestructiveOutcome;
+    const NAME: &'static str = "editor.git.move_commit";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        require_confirmed(input.confirmed, "move_commit")?;
+        let position = match input.position.to_ascii_lowercase().as_str() {
+            "before" => git::operations::move_commit::BeforeOrAfter::Before,
+            "after" => git::operations::move_commit::BeforeOrAfter::After,
+            other => return Err(anyhow!("unknown position {other:?}; expected before|after")),
+        };
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let work_dir_buf = PathBuf::from(work_dir.as_ref());
+        let handle = git::operations::move_commit::MoveCommitOp {
+            source_sha: input.source_sha.clone(),
+            target_sha: input.target_sha.clone(),
+            position,
+        }
+        .run(&work_dir_buf, git::operations::rebase::RebaseCallbacks::default())
+        .await?;
+        let payload = rebase_outcome_payload(&handle);
+        let summary = format!(
+            "move {} {} {} → {}",
+            input.source_sha, input.position, input.target_sha, payload.outcome
+        );
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: payload,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct MergeInput {
+    pub target_branch: String,
+    pub no_ff: bool,
+    pub squash: bool,
+    pub message: Option<String>,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Clone)]
+pub struct MergeTool;
+
+impl McpServerTool for MergeTool {
+    type Input = MergeInput;
+    type Output = DestructiveOutcome;
+    const NAME: &'static str = "editor.git.merge";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let work_dir_buf = PathBuf::from(work_dir.as_ref());
+        let target = input.target_branch.clone();
+        let outcome = cx
+            .background_spawn(async move {
+                git::operations::OpRunner::run(
+                    git::operations::merge::MergeOp {
+                        target_branch: input.target_branch.clone(),
+                        no_ff: input.no_ff,
+                        squash: input.squash,
+                        message: input.message.clone(),
+                    },
+                    &work_dir_buf,
+                )
+            })
+            .await?;
+        let payload = outcome_payload(outcome);
+        let summary = format!("merge {} → {}", target, payload.outcome);
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: payload,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct RebaseInput {
+    pub target_branch: String,
+    pub autostash: bool,
+    pub confirmed: bool,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Clone)]
+pub struct RebaseTool;
+
+impl McpServerTool for RebaseTool {
+    type Input = RebaseInput;
+    type Output = DestructiveOutcome;
+    const NAME: &'static str = "editor.git.rebase";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        require_confirmed(input.confirmed, "rebase")?;
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let work_dir_buf = PathBuf::from(work_dir.as_ref());
+        let target = input.target_branch.clone();
+        let outcome = cx
+            .background_spawn(async move {
+                git::operations::OpRunner::run(
+                    git::operations::linear_rebase::LinearRebaseOp {
+                        target_branch: input.target_branch.clone(),
+                        autostash: input.autostash,
+                    },
+                    &work_dir_buf,
+                )
+            })
+            .await?;
+        let payload = outcome_payload(outcome);
+        let summary = format!("rebase onto {} → {}", target, payload.outcome);
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: payload,
         })
     }
 }

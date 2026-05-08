@@ -10,15 +10,45 @@
 //! Concrete operations are added as their owning S-* tasks land
 //! (S-DST, S-RBL, etc.). See `docs/superpowers/plans/git-panel-plan.md`.
 
+pub mod cherry_pick;
+pub mod direct;
+pub mod drop_commit;
+pub mod edit_commit_message;
+pub mod fixup;
 pub mod helpers;
+pub mod linear_rebase;
+pub mod merge;
+pub mod move_commit;
 pub mod rebase;
+pub mod reset;
+pub mod revert;
+pub mod reword;
+pub mod squash;
 
 use anyhow::{Result, anyhow};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use util::ResultExt as _;
 
 use crate::{backup, repo_lock, undo_registry};
+
+/// Outcome of an [`AtomicGitOp::run`] that can pause for user input.
+/// Cherry-pick / revert / merge / rebase return a variant of this; ops
+/// that are strictly atomic (delete-branch, rename-branch, reset) return
+/// `Completed` from successful runs and propagate errors via `Result`.
+#[derive(Debug, Clone)]
+pub enum RunOutcome {
+    Completed,
+    PausedForConflict {
+        /// Repo-relative paths (as reported by `git status --porcelain`)
+        /// of files with unmerged stages.
+        conflicted_files: Vec<PathBuf>,
+    },
+    PausedForExecFailure {
+        command: String,
+        stderr: String,
+    },
+}
 
 /// A single atomic git operation. Implementors describe their identity and
 /// affected branches; [`OpRunner::run`] handles the safety umbrella (lock,

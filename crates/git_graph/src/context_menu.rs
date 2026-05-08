@@ -11,7 +11,10 @@
 use std::path::PathBuf;
 
 use editor::Editor;
-use git_ui::handlers::{branch, checkout, compare, copy, tag};
+use git_ui::handlers::{
+    branch, checkout, cherry_pick, compare, copy, drop as drop_handler, edit_message, fixup,
+    reset, revert, squash, tag,
+};
 use gpui::{
     App, ClipboardItem, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Render,
     SharedString, WeakEntity, Window,
@@ -56,6 +59,7 @@ pub fn build_commit_context_menu(
         let checkout_ctx = ctx.clone();
         let compare_ctx = ctx.clone();
         let show_ctx = ctx.clone();
+        let destructive_ctx = ctx.clone();
         let external_ctx = ctx;
         let has_provider = external_ctx.provider.is_some();
 
@@ -92,9 +96,49 @@ pub fn build_commit_context_menu(
             menu
         };
 
-        // S-DST and S-SAR placeholder — kept in the menu so the shape
-        // doesn't shift when the preset-command picker lands. The handler
-        // is a no-op until then.
+        // S-DST destructive section.
+        let menu = menu
+            .separator()
+            .entry("Cherry-pick", None, {
+                let ctx = destructive_ctx.clone();
+                move |window, cx| run_cherry_pick(ctx.clone(), window, cx)
+            })
+            .entry("Revert", None, {
+                let ctx = destructive_ctx.clone();
+                move |window, cx| run_revert(ctx.clone(), window, cx)
+            })
+            .submenu("Reset Current Branch to Here", {
+                let ctx = destructive_ctx.clone();
+                move |menu, _window, _cx| build_reset_submenu(menu, ctx.clone())
+            })
+            .entry("Edit Commit Message…", None, {
+                let ctx = destructive_ctx.clone();
+                move |window, cx| open_edit_message_prompt(ctx.clone(), window, cx)
+            })
+            .entry("Drop Commit", None, {
+                let ctx = destructive_ctx.clone();
+                move |window, cx| run_drop_commit(ctx.clone(), window, cx)
+            })
+            .entry("Squash with Previous", None, {
+                let ctx = destructive_ctx.clone();
+                move |window, cx| run_squash_with_previous(ctx.clone(), window, cx)
+            })
+            .entry("Fixup with Previous", None, {
+                let ctx = destructive_ctx.clone();
+                move |window, cx| run_fixup_with_previous(ctx.clone(), window, cx)
+            })
+            .entry("Reword Commit", None, {
+                let ctx = destructive_ctx;
+                move |window, cx| open_edit_message_prompt(ctx.clone(), window, cx)
+            })
+            .entry("Move Commit", None, |_, _| {
+                // Picker UX deferred — see `git_ui::handlers::move_commit`
+                // for the underlying op. Wired up alongside S-IRB.
+            })
+            .entry("Interactive Rebase from Here", None, |_, _| {
+                // S-IRB stub — no-op until the interactive rebase view lands.
+            });
+
         menu.separator()
             .entry("Show in Terminal", None, |_, _| {})
     })
@@ -379,6 +423,309 @@ fn open_checkout_confirmation(ctx: CommitContext, window: &mut Window, cx: &mut 
             anyhow::Ok(())
         })
         .detach_and_log_err(cx);
+}
+
+// =====================================================================
+//  S-DST destructive-section drivers — invoked from the context menu.
+//
+//  Each driver collects user confirmation via `window.prompt`, looks up
+//  the repo work-dir, and dispatches the matching handler. Errors land
+//  through `detach_and_prompt_err` so the user sees a notification
+//  rather than a silent log entry.
+// =====================================================================
+
+fn repo_work_dir(ctx: &CommitContext, cx: &App) -> Option<PathBuf> {
+    if let Some(dir) = ctx.work_dir.clone() {
+        return Some(dir);
+    }
+    let repo = ctx.repository.read(cx);
+    Some(repo.work_directory_abs_path.to_path_buf())
+}
+
+fn run_cherry_pick(ctx: CommitContext, window: &mut Window, cx: &mut App) {
+    let Some(work_dir) = repo_work_dir(&ctx, cx) else {
+        return;
+    };
+    let sha = ctx.sha.to_string();
+    let task = cherry_pick::run(work_dir, vec![sha], false, None, false, cx);
+    task.detach_and_prompt_err("Cherry-pick failed", window, cx, |e, _, _| {
+        Some(format!("{e}"))
+    });
+}
+
+fn run_revert(ctx: CommitContext, window: &mut Window, cx: &mut App) {
+    let Some(work_dir) = repo_work_dir(&ctx, cx) else {
+        return;
+    };
+    let sha = ctx.sha.to_string();
+    let task = revert::run(work_dir, vec![sha], false, None, cx);
+    task.detach_and_prompt_err("Revert failed", window, cx, |e, _, _| Some(format!("{e}")));
+}
+
+fn build_reset_submenu(menu: ContextMenu, ctx: CommitContext) -> ContextMenu {
+    use git::operations::reset::ResetMode;
+    let soft_ctx = ctx.clone();
+    let mixed_ctx = ctx.clone();
+    let hard_ctx = ctx.clone();
+    let keep_ctx = ctx;
+    menu.entry("Soft (--soft)", None, move |window, cx| {
+        run_reset(soft_ctx.clone(), ResetMode::Soft, false, window, cx);
+    })
+    .entry("Mixed (--mixed)", None, move |window, cx| {
+        run_reset(mixed_ctx.clone(), ResetMode::Mixed, false, window, cx);
+    })
+    .entry("Hard (--hard)", None, move |window, cx| {
+        run_reset(hard_ctx.clone(), ResetMode::Hard, true, window, cx);
+    })
+    .entry("Keep (--keep)", None, move |window, cx| {
+        run_reset(keep_ctx.clone(), ResetMode::Keep, false, window, cx);
+    })
+}
+
+fn run_reset(
+    ctx: CommitContext,
+    mode: git::operations::reset::ResetMode,
+    require_double_confirm: bool,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    use git::operations::reset::ResetMode;
+    let Some(work_dir) = repo_work_dir(&ctx, cx) else {
+        return;
+    };
+    let sha = ctx.sha.to_string();
+    let short: String = sha.chars().take(7).collect();
+    let label = match mode {
+        ResetMode::Soft => "soft",
+        ResetMode::Mixed => "mixed",
+        ResetMode::Hard => "HARD",
+        ResetMode::Keep => "keep",
+    };
+    let level = if require_double_confirm {
+        gpui::PromptLevel::Critical
+    } else {
+        gpui::PromptLevel::Warning
+    };
+    let detail = if require_double_confirm {
+        "Hard reset DROPS commits AND working-tree changes. \
+         The branch tip will be backed up — use Undo Last Operation to \
+         recover. Working-tree edits are NOT recoverable. Confirm twice."
+            .to_string()
+    } else {
+        format!("git reset --{label} {short} on the current branch.")
+    };
+    let answer = window.prompt(
+        level,
+        &format!("Reset --{label} to {short}?"),
+        Some(&detail),
+        &["Reset", "Cancel"],
+        cx,
+    );
+    window
+        .spawn(cx, async move |cx| {
+            match answer.await.ok() {
+                Some(0) => {}
+                _ => return anyhow::Ok(()),
+            }
+            if require_double_confirm {
+                let second = cx.update(|window, cx| {
+                    window.prompt(
+                        gpui::PromptLevel::Critical,
+                        "Are you absolutely sure?",
+                        Some("This destroys uncommitted edits."),
+                        &["Yes, hard reset", "Cancel"],
+                        cx,
+                    )
+                })?;
+                if second.await.ok() != Some(0) {
+                    return anyhow::Ok(());
+                }
+            }
+            cx.update(|window, cx| {
+                let task = reset::run(work_dir, sha, mode, cx);
+                task.detach_and_prompt_err("Reset failed", window, cx, |e, _, _| {
+                    Some(format!("{e}"))
+                });
+            })?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+}
+
+fn run_drop_commit(ctx: CommitContext, window: &mut Window, cx: &mut App) {
+    let Some(work_dir) = repo_work_dir(&ctx, cx) else {
+        return;
+    };
+    let sha = ctx.sha.to_string();
+    let short: String = sha.chars().take(7).collect();
+    let answer = window.prompt(
+        gpui::PromptLevel::Warning,
+        &format!("Drop commit {short}?"),
+        Some(
+            "Rewrites history above this commit. The branch tip is \
+             backed up — use Undo Last Operation to recover.",
+        ),
+        &["Drop", "Cancel"],
+        cx,
+    );
+    window
+        .spawn(cx, async move |cx| {
+            if answer.await.ok() != Some(0) {
+                return anyhow::Ok(());
+            }
+            cx.update(|window, cx| {
+                let task = drop_handler::run(
+                    work_dir,
+                    sha,
+                    git::operations::rebase::RebaseCallbacks::default(),
+                    cx,
+                );
+                task.detach_and_prompt_err(
+                    "Drop commit failed",
+                    window,
+                    cx,
+                    |e, _, _| Some(format!("{e}")),
+                );
+            })?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+}
+
+fn run_squash_with_previous(ctx: CommitContext, window: &mut Window, cx: &mut App) {
+    let Some(work_dir) = repo_work_dir(&ctx, cx) else {
+        return;
+    };
+    let sha = ctx.sha.to_string();
+    let subject = ctx.subject.to_string();
+    // Squash <sha> onto its predecessor: the previous commit becomes
+    // the base pick, this commit becomes the squash target. Re-uses
+    // the existing commit subject as the final message; user can amend
+    // in a follow-up commit if they need different wording.
+    let prev = format!("{sha}^");
+    let task = squash::run(
+        work_dir,
+        vec![prev, sha],
+        subject,
+        git::operations::rebase::RebaseCallbacks::default(),
+        cx,
+    );
+    task.detach_and_prompt_err("Squash failed", window, cx, |e, _, _| Some(format!("{e}")));
+}
+
+fn run_fixup_with_previous(ctx: CommitContext, window: &mut Window, cx: &mut App) {
+    let Some(work_dir) = repo_work_dir(&ctx, cx) else {
+        return;
+    };
+    let sha = ctx.sha.to_string();
+    let prev = format!("{sha}^");
+    let task = fixup::run(
+        work_dir,
+        vec![prev, sha],
+        git::operations::rebase::RebaseCallbacks::default(),
+        cx,
+    );
+    task.detach_and_prompt_err("Fixup failed", window, cx, |e, _, _| Some(format!("{e}")));
+}
+
+fn open_edit_message_prompt(ctx: CommitContext, window: &mut Window, cx: &mut App) {
+    let Some(workspace) = ctx.workspace.upgrade() else {
+        return;
+    };
+    let work_dir = match repo_work_dir(&ctx, cx) {
+        Some(dir) => dir,
+        None => return,
+    };
+    let sha = ctx.sha.to_string();
+    let initial = ctx.subject.to_string();
+    workspace.update(cx, |workspace, cx| {
+        workspace.toggle_modal(window, cx, |window, cx| {
+            EditMessageModal::new(sha, initial, work_dir, window, cx)
+        });
+    });
+}
+
+struct EditMessageModal {
+    sha: String,
+    work_dir: PathBuf,
+    editor: Entity<Editor>,
+}
+
+impl EditMessageModal {
+    fn new(
+        sha: String,
+        initial: String,
+        work_dir: PathBuf,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> Self {
+        let editor = cx.new(|cx| {
+            let mut editor = Editor::single_line(window, cx);
+            editor.set_text(initial, window, cx);
+            editor
+        });
+        Self {
+            sha,
+            work_dir,
+            editor,
+        }
+    }
+
+    fn cancel(&mut self, _: &Cancel, _window: &mut Window, cx: &mut gpui::Context<Self>) {
+        cx.emit(DismissEvent);
+    }
+
+    fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut gpui::Context<Self>) {
+        let new_message = self.editor.read(cx).text(cx);
+        if new_message.trim().is_empty() {
+            return;
+        }
+        let task = edit_message::run(
+            self.work_dir.clone(),
+            self.sha.clone(),
+            new_message,
+            git::operations::rebase::RebaseCallbacks::default(),
+            cx,
+        );
+        task.detach_and_prompt_err("Edit message failed", window, cx, |e, _, _| {
+            Some(format!("{e}"))
+        });
+        cx.emit(DismissEvent);
+    }
+}
+
+impl EventEmitter<DismissEvent> for EditMessageModal {}
+impl ModalView for EditMessageModal {}
+impl Focusable for EditMessageModal {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.editor.focus_handle(cx)
+    }
+}
+
+impl Render for EditMessageModal {
+    fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+        let short: String = self.sha.chars().take(7).collect();
+        v_flex()
+            .key_context("EditMessageModal")
+            .on_action(cx.listener(Self::cancel))
+            .on_action(cx.listener(Self::confirm))
+            .elevation_2(cx)
+            .w(rems(40.))
+            .child(
+                h_flex()
+                    .px_3()
+                    .pt_2()
+                    .pb_1()
+                    .w_full()
+                    .gap_1p5()
+                    .child(Icon::new(IconName::Pencil).size(IconSize::XSmall))
+                    .child(
+                        Headline::new(format!("Edit Message ({short})"))
+                            .size(HeadlineSize::XSmall),
+                    ),
+            )
+            .child(div().px_3().pb_3().w_full().child(self.editor.clone()))
+    }
 }
 
 /// Tiny single-line input modal — gives the user a place to type a name
