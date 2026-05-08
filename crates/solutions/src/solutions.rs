@@ -17,7 +17,7 @@ mod store;
 mod tabs_snapshot;
 
 pub use add_member::{AddProgressCallback, PendingAddView};
-pub use cache::default_cache_root;
+pub use cache::{default_cache_root, refresh_cache};
 pub use event_sources::install as install_event_sources_for_test;
 pub use model::{CatalogId, CatalogProject, Solution, SolutionId, SolutionMember};
 pub use settings::SolutionsSettings;

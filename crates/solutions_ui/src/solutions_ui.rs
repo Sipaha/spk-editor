@@ -32,9 +32,9 @@ use ui::SharedString;
 use workspace::Workspace;
 
 use crate::actions::{
-    CloseSolutionFromTabBar, DeleteSolutionFromTabBar, RenameSolution, RemoveMember,
-    RevealSolutionFolder, SwitchToNextProjectInPanel, SwitchToPrevProjectInPanel,
-    SwitchToNextSolution, SwitchToPrevSolution,
+    CloseSolutionFromTabBar, DeleteSolutionFromTabBar, RemoveMember, RenameSolution,
+    RevealSolutionFolder, SwitchToNextProjectInPanel, SwitchToNextSolution,
+    SwitchToPrevProjectInPanel, SwitchToPrevSolution,
 };
 
 pub fn init(cx: &mut App) {
@@ -181,6 +181,9 @@ fn register_tab_actions(
     });
     workspace.register_action(|workspace, action: &SwitchToPrevProjectInPanel, _, cx| {
         cycle_project_in_panel(workspace, &action.panel_kind, -1, cx);
+    });
+    workspace.register_action(|workspace, _: &RefreshCacheForCurrent, _, cx| {
+        refresh_cache_for_active_solution(workspace, cx);
     });
     workspace.register_action(|workspace, action: &RemoveMember, window, cx| {
         use util::ResultExt as _;
@@ -363,6 +366,52 @@ fn cycle_project_in_panel(
             s.set_panel_member_selection(sol_id, panel, new_catalog, cx)
         })
         .log_err();
+}
+
+fn refresh_cache_for_active_solution(workspace: &Workspace, cx: &mut gpui::App) {
+    let Some(sol_id) = crate::window_helpers::active_solution_in_workspace(workspace, cx) else {
+        log::info!("RefreshCacheForCurrent: no active solution in this workspace");
+        return;
+    };
+    let store = SolutionStore::global(cx);
+    let targets: Vec<(solutions::CatalogId, String)> = store.read_with(cx, |s, _| {
+        let Some(sol) = s.solutions().iter().find(|sol| sol.id == sol_id) else {
+            return Vec::new();
+        };
+        sol.members
+            .iter()
+            .filter_map(|m| {
+                s.catalog()
+                    .iter()
+                    .find(|c| c.id == m.catalog_id)
+                    .map(|c| (c.id.clone(), c.remote_url.clone()))
+            })
+            .collect()
+    });
+    if targets.is_empty() {
+        log::info!(
+            "RefreshCacheForCurrent: solution {sol_id:?} has no members with catalog entries"
+        );
+        return;
+    }
+    let cache_root = solutions::default_cache_root();
+    log::info!(
+        "RefreshCacheForCurrent: refreshing {} catalog entr{} for solution {sol_id:?}",
+        targets.len(),
+        if targets.len() == 1 { "y" } else { "ies" },
+    );
+    for (catalog_id, remote_url) in targets {
+        let cache_root = cache_root.clone();
+        cx.background_spawn(async move {
+            match solutions::refresh_cache(&cache_root, &remote_url, |_| {}).await {
+                Ok(_) => log::info!("RefreshCacheForCurrent: refreshed {catalog_id:?}"),
+                Err(err) => {
+                    log::warn!("RefreshCacheForCurrent: refresh of {catalog_id:?} failed: {err}")
+                }
+            }
+        })
+        .detach();
+    }
 }
 
 fn cycle_index(cur: usize, len: usize, dir: isize) -> usize {
