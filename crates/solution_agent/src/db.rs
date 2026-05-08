@@ -423,9 +423,14 @@ fn select_open_tabs(
     connection: &Connection,
     solution_id: &SolutionId,
 ) -> Result<Vec<SolutionSessionId>> {
+    // `closed_at IS NULL` filters out soft-closed sessions: when the
+    // user closes a tab via `close_session`, we keep the row (and its
+    // `tab_order`) so the persisted transcript stays readable, but the
+    // restore-on-open path must not re-hydrate it as a live tab — the
+    // user closed it, they expect it to stay closed across restarts.
     let mut select = connection.select_bound::<String, String>(indoc! {"
         SELECT id FROM solution_sessions
-        WHERE solution_id = ? AND tab_order IS NOT NULL
+        WHERE solution_id = ? AND tab_order IS NOT NULL AND closed_at IS NULL
         ORDER BY tab_order ASC
     "})?;
     let rows = select(solution_id.0.clone())?;
