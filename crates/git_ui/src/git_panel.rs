@@ -262,6 +262,20 @@ pub fn register(workspace: &mut Workspace) {
             panel.update(cx, |panel, cx| panel.git_init(window, cx));
         }
     });
+    // Workspace-level shim so `git::GenerateCommitMessage` works from
+    // outside the panel — keymaps that target the commit-editor focus
+    // chain still hit `on_action` inside the panel and short-circuit
+    // here, but command-palette / MCP / global-keymap dispatches that
+    // weren't previously routed (because the panel-local handler only
+    // fires when focus is already inside the panel) now reach the
+    // panel via the registered `GitPanel` entity.
+    workspace.register_action(
+        |workspace, _: &git::GenerateCommitMessage, _window, cx| {
+            if let Some(panel) = workspace.panel::<GitPanel>(cx) {
+                panel.update(cx, |panel, cx| panel.generate_commit_message(cx));
+            }
+        },
+    );
 }
 
 #[derive(Debug, Clone)]
