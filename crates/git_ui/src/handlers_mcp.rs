@@ -142,20 +142,31 @@ impl McpServerTool for BranchCreateAtTool {
     ) -> Result<ToolResponse<Self::Output>> {
         let work_dir =
             cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
-        run_git_void(&work_dir, &["branch", &input.name, &input.sha]).await?;
+        if input.name.trim().is_empty() {
+            return Err(anyhow!("branch name must be non-empty"));
+        }
+        // Empty `sha` would otherwise become a stray argument that git
+        // rejects with "Failed to resolve '' as a valid ref" — default
+        // to `HEAD` so the tool DTRT for "branch from current commit".
+        let sha = if input.sha.trim().is_empty() {
+            "HEAD"
+        } else {
+            input.sha.as_str()
+        };
+        run_git_void(&work_dir, &["branch", &input.name, sha]).await?;
         if input.checkout {
             run_git_void(&work_dir, &["checkout", &input.name]).await?;
         }
         let summary = if input.checkout {
-            format!("created and checked out {} at {}", input.name, input.sha)
+            format!("created and checked out {} at {}", input.name, sha)
         } else {
-            format!("created {} at {}", input.name, input.sha)
+            format!("created {} at {}", input.name, sha)
         };
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text { text: summary }],
             structured_content: BranchCreateAtOutput {
                 branch: input.name,
-                sha: input.sha,
+                sha: sha.to_string(),
                 checked_out: input.checkout,
             },
         })
@@ -196,27 +207,38 @@ impl McpServerTool for TagCreateTool {
     ) -> Result<ToolResponse<Self::Output>> {
         let work_dir =
             cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        if input.name.trim().is_empty() {
+            return Err(anyhow!("tag name must be non-empty"));
+        }
         let annotated = input.message.is_some();
+        // Defaulting `sha` to an empty string makes git see a stray empty
+        // argument (`git tag <name> ""`) and abort with "Failed to resolve
+        // '' as a valid ref". Treat empty as "tag HEAD".
+        let sha = if input.sha.trim().is_empty() {
+            "HEAD"
+        } else {
+            input.sha.as_str()
+        };
         if let Some(message) = &input.message {
             run_git_void(
                 &work_dir,
-                &["tag", "-a", "-m", message, &input.name, &input.sha],
+                &["tag", "-a", "-m", message, &input.name, sha],
             )
             .await?;
         } else {
-            run_git_void(&work_dir, &["tag", &input.name, &input.sha]).await?;
+            run_git_void(&work_dir, &["tag", &input.name, sha]).await?;
         }
         let summary = format!(
             "created {}{} at {}",
             if annotated { "annotated tag " } else { "tag " },
             input.name,
-            input.sha
+            sha
         );
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text { text: summary }],
             structured_content: TagCreateOutput {
                 tag: input.name,
-                sha: input.sha,
+                sha: sha.to_string(),
                 annotated,
             },
         })
