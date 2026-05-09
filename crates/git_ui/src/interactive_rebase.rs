@@ -14,6 +14,8 @@
 //! for a reword message; reword is pre-supplied (the builder translates
 //! it internally to `pick + helper-exec`).
 
+pub mod ai_planner;
+
 use anyhow::{Context as _, Result, anyhow};
 use editor::Editor;
 use git::operations::rebase::{
@@ -25,6 +27,7 @@ use gpui::{
     InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Task,
     WeakEntity, Window, div,
 };
+use notifications::status_toast::StatusToast;
 use project::Project;
 use project::git_store::Repository;
 use std::any::TypeId;
@@ -33,13 +36,16 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use theme::ActiveTheme as _;
 use ui::{
-    Button, Clickable as _, Color, Disableable as _, FluentBuilder as _, Headline, HeadlineSize,
-    Icon, IconName, Label, LabelCommon as _, h_flex, prelude::*, v_flex,
+    Button, ButtonCommon as _, Clickable as _, Color, Disableable as _, FluentBuilder as _,
+    Headline, HeadlineSize, Icon, IconName, IconSize, Label, LabelCommon as _, Tooltip, h_flex,
+    prelude::*, v_flex,
 };
 use workspace::{
     Item, Workspace,
     item::{ItemEvent, TabContentParams},
 };
+
+use crate::interactive_rebase::ai_planner::{CommitInfo, PlannedAction, plan_rebase};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TodoAction {
@@ -133,6 +139,7 @@ pub struct InteractiveRebaseView {
     rows: Vec<TodoRow>,
     handle: Option<Arc<RebaseHandle>>,
     pending: bool,
+    ai_pending: bool,
     editing_field: Option<EditingField>,
     title: SharedString,
     focus_handle: FocusHandle,
@@ -232,6 +239,7 @@ impl InteractiveRebaseView {
             rows,
             handle: None,
             pending: false,
+            ai_pending: false,
             editing_field: None,
             title,
             focus_handle: cx.focus_handle(),
@@ -304,6 +312,219 @@ impl InteractiveRebaseView {
             }
         }
         cx.notify();
+    }
+
+    fn ai_disabled_reason(&self, cx: &App) -> Option<&'static str> {
+        if !matches!(self.state, ViewState::Editing) {
+            return Some("AI auto-organize is only available before Start Rebase");
+        }
+        if self.ai_pending || self.pending {
+            return Some("AI auto-organize already in progress");
+        }
+        let commit_rows = self
+            .rows
+            .iter()
+            .filter(|r| !r.sha.is_empty())
+            .count();
+        if commit_rows == 0 {
+            return Some("No commits to plan");
+        }
+        if commit_rows > ai_planner::MAX_COMMITS {
+            return Some("Too many commits for AI auto-organize (limit 50)");
+        }
+        if !has_active_solution(cx) {
+            return Some("AI auto-organize requires an active Solution");
+        }
+        None
+    }
+
+    /// Triggered by the "AI Auto-organize" button. Opens a confirmation
+    /// modal first, then runs the planner asynchronously and replaces
+    /// the current rows on success.
+    fn run_ai_auto_organize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.ai_disabled_reason(cx).is_some() {
+            return;
+        }
+
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            "Replace current todo with AI-organized version?",
+            Some(
+                "The AI planner will propose a fresh rebase todo (squash / reorder / \
+                 reword / drop) for the listed commits. Any edits you've made — \
+                 reorderings, custom messages, exec lines — will be lost. You can \
+                 still tweak the result before clicking Start Rebase.",
+            ),
+            &["Replace", "Cancel"],
+            cx,
+        );
+
+        cx.spawn_in(window, async move |this, cx| {
+            let choice = answer.await.ok();
+            if choice != Some(0) {
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                this.start_ai_planner(cx);
+            });
+        })
+        .detach();
+    }
+
+    fn start_ai_planner(&mut self, cx: &mut Context<Self>) {
+        let commits: Vec<CommitInfo> = self
+            .rows
+            .iter()
+            .filter(|r| !r.sha.is_empty())
+            .map(|r| CommitInfo {
+                sha: r.sha.clone(),
+                subject: r
+                    .original_message
+                    .lines()
+                    .next()
+                    .unwrap_or(&r.original_message)
+                    .to_string(),
+                body: r
+                    .original_message
+                    .split_once('\n')
+                    .map(|(_, rest)| rest)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string(),
+                diff_stat: String::new(),
+            })
+            .collect();
+        if commits.is_empty() {
+            return;
+        }
+        self.ai_pending = true;
+        cx.notify();
+
+        let project = self.project.clone();
+        let repo_work_dir = self.repo_path.clone();
+
+        cx.spawn(async move |this, cx| {
+            // Compute diff stats off the foreground; surface failures as
+            // empty stats rather than aborting the whole plan — the
+            // prompt still has the subject + body, which is enough for
+            // the agent to do something useful.
+            let with_stats = cx
+                .background_spawn({
+                    let repo_work_dir = repo_work_dir.clone();
+                    async move {
+                        let mut filled = commits;
+                        for commit in filled.iter_mut() {
+                            commit.diff_stat = git_diff_stat(&repo_work_dir, &commit.sha)
+                                .unwrap_or_default();
+                        }
+                        filled
+                    }
+                })
+                .await;
+            let result = plan_rebase(&with_stats, &project, &repo_work_dir, &mut cx.clone()).await;
+            let _ = this.update(cx, |this, cx| {
+                this.ai_pending = false;
+                match result {
+                    Ok(actions) => {
+                        this.apply_planned_actions(actions, cx);
+                    }
+                    Err(err) => {
+                        let message = format!("AI auto-organize failed: {err:#}");
+                        log::warn!("{message}");
+                        this.show_ai_failure_toast(message, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn apply_planned_actions(
+        &mut self,
+        actions: Vec<PlannedAction>,
+        cx: &mut Context<Self>,
+    ) {
+        let original_by_sha: std::collections::HashMap<String, TodoRow> = self
+            .rows
+            .iter()
+            .filter(|r| !r.sha.is_empty())
+            .map(|r| (r.sha.clone(), r.clone()))
+            .collect();
+
+        // Build the replacement sequence respecting `insert_after` when
+        // present. We start by laying out actions in the order they
+        // arrived from the planner; then any action with `insert_after`
+        // pointing at a sha earlier in the list is moved into place.
+        let mut ordered: Vec<PlannedAction> = actions;
+        let mut i = 0;
+        while i < ordered.len() {
+            let target = ordered[i].insert_after.clone();
+            if let Some(target_sha) = target {
+                let anchor = ordered
+                    .iter()
+                    .take(i)
+                    .position(|a| a.sha == target_sha);
+                if let Some(anchor_idx) = anchor
+                    && anchor_idx + 1 != i
+                {
+                    let entry = ordered.remove(i);
+                    ordered.insert(anchor_idx + 1, entry);
+                    // Re-process the slot we just filled.
+                    continue;
+                }
+            }
+            i += 1;
+        }
+
+        let mut new_rows: Vec<TodoRow> = Vec::with_capacity(ordered.len());
+        for action in ordered {
+            // Sanitization should have already rejected unknown shas;
+            // this is the second line of defense — if a sha somehow
+            // slipped through and we have no original row to clone, skip.
+            let Some(mut row) = original_by_sha.get(&action.sha).cloned() else {
+                log::warn!(
+                    "interactive rebase: planner returned sha {} not present in original rows",
+                    action.sha
+                );
+                continue;
+            };
+            row.action = action.action;
+            row.message_override = action.new_message.filter(|m| !m.trim().is_empty());
+            // exec actions can never reach this branch — sanitize_response
+            // drops them in ai_planner. The shell_command field is left
+            // as-is on the cloned row (which was always None for a
+            // commit row anyway).
+            new_rows.push(row);
+        }
+
+        if new_rows.is_empty() {
+            self.show_ai_failure_toast(
+                "AI auto-organize returned no commits to replay".into(),
+                cx,
+            );
+            return;
+        }
+        self.rows = new_rows;
+        self.editing_field = None;
+        cx.notify();
+    }
+
+    fn show_ai_failure_toast(&self, message: String, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            let toast = StatusToast::new(message, cx, |this, _cx| {
+                this.icon(
+                    Icon::new(IconName::XCircle)
+                        .size(IconSize::Small)
+                        .color(Color::Error),
+                )
+                .dismiss_button(true)
+            });
+            workspace.toggle_status_toast(toast, cx);
+        });
     }
 
     fn open_message_editor(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -779,6 +1000,26 @@ impl InteractiveRebaseView {
         );
         let has_handle = self.handle.is_some();
 
+        let ai_disabled_reason = self.ai_disabled_reason(cx);
+        let ai_disabled = ai_disabled_reason.is_some();
+        let mut ai_button = Button::new("irb-ai-auto-organize", "AI Auto-organize")
+            .start_icon(Icon::new(IconName::Sparkle).size(IconSize::Small))
+            .loading(self.ai_pending)
+            .disabled(ai_disabled || self.ai_pending)
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.run_ai_auto_organize(window, cx);
+            }));
+        ai_button = if let Some(reason) = ai_disabled_reason {
+            let reason_str: SharedString = SharedString::from(reason);
+            ai_button.tooltip(move |_, cx| Tooltip::simple(reason_str.clone(), cx))
+        } else if self.ai_pending {
+            ai_button.tooltip(Tooltip::text("AI auto-organize in progress"))
+        } else {
+            ai_button.tooltip(Tooltip::text(
+                "Ask the AI to propose a clean rebase todo (squash / reorder / reword / drop)",
+            ))
+        };
+
         let editing_buttons = h_flex()
             .gap_2()
             .child(
@@ -795,6 +1036,7 @@ impl InteractiveRebaseView {
                         this.reset_to_pick(cx);
                     })),
             )
+            .child(ai_button)
             .child(
                 Button::new("irb-preview", "Show preview")
                     .disabled(!editing)
@@ -1077,6 +1319,46 @@ pub fn base_is_ancestor_of_head(repo_path: &std::path::Path, base: &str) -> Resu
         ));
     }
     Ok(())
+}
+
+/// True when there is at least one Solution registered in the
+/// SolutionStore. Mirrors `git_conflict_ui::resolver_view::has_active_solution`
+/// — the AI Auto-organize button needs *some* Solution to host the
+/// ephemeral session.
+fn has_active_solution(cx: &App) -> bool {
+    solutions::SolutionStore::try_global(cx)
+        .map(|store| !store.read(cx).solutions().is_empty())
+        .unwrap_or(false)
+}
+
+/// Compute a short `--shortstat` for `sha` to feed the AI planner. Best
+/// effort: any failure produces an empty string and the planner runs
+/// without that commit's diff summary.
+#[allow(clippy::disallowed_methods)]
+fn git_diff_stat(repo_path: &std::path::Path, sha: &str) -> Result<String> {
+    let attempt = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["diff", "--shortstat", &format!("{sha}~..{sha}")])
+        .output()
+        .map_err(|err| anyhow!("spawn git: {err}"))?;
+    if attempt.status.success() {
+        return Ok(String::from_utf8_lossy(&attempt.stdout).trim().to_string());
+    }
+    // Root-commit fallback.
+    let fallback = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["show", "--shortstat", "--format=", sha])
+        .output()
+        .map_err(|err| anyhow!("spawn git: {err}"))?;
+    if !fallback.status.success() {
+        return Err(anyhow!(
+            "git diff/show --shortstat failed for {sha}: {}",
+            String::from_utf8_lossy(&fallback.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&fallback.stdout).trim().to_string())
 }
 
 /// Builder used by both the view and unit tests; pulled out as a
