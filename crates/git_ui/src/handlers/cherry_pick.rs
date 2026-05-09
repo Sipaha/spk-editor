@@ -11,6 +11,8 @@ use git::operations::OpRunner;
 use git::operations::RunOutcome;
 use git::operations::cherry_pick::CherryPickOp;
 
+use crate::handlers::protection;
+
 pub fn run(
     repo_path: PathBuf,
     shas: Vec<String>,
@@ -19,7 +21,24 @@ pub fn run(
     x: bool,
     cx: &mut App,
 ) -> Task<Result<RunOutcome>> {
+    run_with_confirmation(repo_path, shas, no_commit, mainline, x, false, cx)
+}
+
+/// Variant that lets callers opt into S-SOL-PRT confirmation. When
+/// `confirmed = true`, the handler skips the type-the-branch-name
+/// gate but still respects `Forbidden` decisions.
+pub fn run_with_confirmation(
+    repo_path: PathBuf,
+    shas: Vec<String>,
+    no_commit: bool,
+    mainline: Option<u32>,
+    x: bool,
+    confirmed: bool,
+    cx: &mut App,
+) -> Task<Result<RunOutcome>> {
     cx.background_spawn(async move {
+        protection::enforce_current_branch(&repo_path, "cherry_pick", confirmed)
+            .map_err(|e| anyhow!("branch protection: {e}"))?;
         OpRunner::run(
             CherryPickOp {
                 shas,

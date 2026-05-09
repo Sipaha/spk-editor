@@ -23,6 +23,7 @@ const MAX_LIMIT: usize = 5_000;
 
 pub(crate) fn register(cx: &mut App) {
     register_typed_tool_with_tier(cx, ToolTier::ReadOnly, AggregatedLogTool);
+    register_typed_tool_with_tier(cx, ToolTier::ReadOnly, BranchProtectionCheckTool);
 }
 
 /// Filter shape mirroring `git_graph::filters::LogFilters` — copied here
@@ -212,6 +213,119 @@ impl McpServerTool for AggregatedLogTool {
             },
         })
     }
+}
+
+// =====================================================================
+// S-SOL-PRT — `solution.git.branch_protection_check` ReadOnly tool.
+// Lets a subagent (or any client) query the protection decision for a
+// given (repo, branch, op) without performing the op. Useful for the
+// agent's pre-flight reasoning ("is this op going to need a confirm?")
+// and for the future Settings UI's policy preview.
+// =====================================================================
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct BranchProtectionCheckInput {
+    /// Either an absolute `repo_path` or a `member_id` from the active
+    /// Solution. Mutually exclusive — supply exactly one.
+    pub repo_path: Option<String>,
+    /// `SolutionMember::catalog_id` from the active (or specified)
+    /// Solution.
+    pub member_id: Option<String>,
+    /// Branch the op targets.
+    pub branch: String,
+    /// Op name — see `solutions::branch_protection::check` for the
+    /// recognised set (`force_push`, `reset`, `delete_branch`, …).
+    pub op: String,
+    /// Optional Solution selector. When omitted, the active Solution
+    /// is used (most-recently-opened heuristic).
+    pub solution_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BranchProtectionCheckOutput {
+    /// One of `"allowed" | "requires_confirmation" | "forbidden"`.
+    pub decision: &'static str,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct BranchProtectionCheckTool;
+
+impl McpServerTool for BranchProtectionCheckTool {
+    type Input = BranchProtectionCheckInput;
+    type Output = BranchProtectionCheckOutput;
+    const NAME: &'static str = "solution.git.branch_protection_check";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        if input.branch.trim().is_empty() {
+            return Err(anyhow!("branch must be non-empty"));
+        }
+        if input.op.trim().is_empty() {
+            return Err(anyhow!("op must be non-empty"));
+        }
+        let repo_path = if let Some(p) = input.repo_path.clone() {
+            std::path::PathBuf::from(p)
+        } else if let Some(member_id) = input.member_id.clone() {
+            let solution_id = input.solution_id;
+            cx.update(|cx| resolve_member_path(cx, solution_id.as_deref(), &member_id))
+                .ok_or_else(|| {
+                    anyhow!("member '{member_id}' not found in the active Solution")
+                })?
+        } else {
+            return Err(anyhow!("either repo_path or member_id is required"));
+        };
+
+        let decision = solutions::branch_protection::check(&repo_path, &input.branch, &input.op);
+        let (label, reason) = match decision {
+            solutions::branch_protection::Decision::Allowed => ("allowed", None),
+            solutions::branch_protection::Decision::RequiresConfirmation { reason } => {
+                ("requires_confirmation", Some(reason))
+            }
+            solutions::branch_protection::Decision::Forbidden { reason } => {
+                ("forbidden", Some(reason))
+            }
+        };
+        let summary = match &reason {
+            Some(r) => format!("{label}: {r}"),
+            None => label.to_string(),
+        };
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: BranchProtectionCheckOutput {
+                decision: label,
+                reason,
+            },
+        })
+    }
+}
+
+fn resolve_member_path(
+    cx: &gpui::App,
+    solution_id: Option<&str>,
+    member_id: &str,
+) -> Option<std::path::PathBuf> {
+    let store = solutions::SolutionStore::try_global(cx)?;
+    let store = store.read(cx);
+    let solution = match solution_id {
+        Some(id) => store.solutions().iter().find(|s| s.id.as_str() == id)?,
+        None => store
+            .solutions()
+            .iter()
+            .filter(|s| s.last_opened_at.is_some())
+            .max_by_key(|s| s.last_opened_at)
+            .or_else(|| store.solutions().first())?,
+    };
+    solution
+        .members
+        .iter()
+        .find(|m| m.catalog_id.as_str() == member_id)
+        .map(|m| m.local_path.clone())
 }
 
 #[cfg(test)]

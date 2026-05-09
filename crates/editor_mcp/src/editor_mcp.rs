@@ -20,10 +20,15 @@ pub use handoff::{HandoffOutcome, try_handoff_to_existing_instance};
 pub use lifecycle::{set_runtime_dir_for_test, socket_path, start_server};
 pub use notifications::emit as emit_notification;
 pub use registry::{
-    init, register_tool, register_tool_with_tier, register_typed_tool_with_tier, tier_for,
+    init, register_tool, register_tool_with_tier, register_typed_tool_with_protection,
+    register_typed_tool_with_tier, tier_for,
 };
 pub use tier::{BRIDGE_CAPS_ENV_VAR, CallerCapabilities, ToolTier};
-pub use tier_guard::{TierGuardTool, current_caps};
+pub use tier_guard::{
+    BranchProtectionChecker, BranchProtectionDecision, BranchProtectionHint,
+    BranchProtectionTarget, RepoPathResolver, TierGuardTool, current_caps,
+    set_branch_protection_checker, set_repo_path_resolver,
+};
 pub use tools::is_confirmed;
 pub use window_ids::format as format_window_id;
 

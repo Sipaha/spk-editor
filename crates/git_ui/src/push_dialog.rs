@@ -294,6 +294,23 @@ impl PushDialog {
             log::warn!("PushDialog: remote/remote_branch empty, refusing to push");
             return;
         }
+        // S-SOL-PRT — refuse force-push if the policy says `Forbidden`.
+        // The dialog's `force_locked_reason` already disabled the
+        // toggle in this case, but a stale snapshot or a settings
+        // change between dialog-open and push-confirm could still let
+        // the toggle stay on; double-check at the press boundary.
+        if !matches!(self.force_mode, ForceMode::None) {
+            let op = "force_push";
+            if let solutions::branch_protection::Decision::Forbidden { reason } =
+                solutions::branch_protection::check(&work_dir, &branch, op)
+            {
+                log::warn!("PushDialog: force-push refused by branch protection: {reason}");
+                self.force_locked_reason = Some(SharedString::from(reason));
+                self.force_mode = ForceMode::None;
+                cx.notify();
+                return;
+            }
+        }
         let opts = PushInvocation {
             force_mode: self.force_mode,
             tags: self.push_tags,
@@ -971,10 +988,21 @@ impl Render for RewordPromptModal {
 //  Helpers — git CLI wrappers used by the dialog and the MCP tools.
 // =====================================================================
 
-fn check_branch_protection(_work_dir: &Path, _branch: &str, _op_name: &str) -> Option<SharedString> {
-    // Stub — mirrors `solution_git::branch_protection::check`. Returns
-    // `None` (Allowed) today; lands real policy lookup in S-SOL-PRT.
-    None
+fn check_branch_protection(work_dir: &Path, branch: &str, op_name: &str) -> Option<SharedString> {
+    // Real S-SOL-PRT lookup. Maps `Forbidden` to a locked-with-reason
+    // string the dialog renders next to the disabled force-push toggle.
+    // `RequiresConfirmation` does NOT lock the toggle here — confirming
+    // a force-push happens via the dialog's own "type the branch name"
+    // modal flow (deferred polish; the toggle is enabled and the actual
+    // push goes through the same handler-level check). `Allowed`
+    // returns `None`.
+    match solutions::branch_protection::check(work_dir, branch, op_name) {
+        solutions::branch_protection::Decision::Forbidden { reason } => {
+            Some(SharedString::from(reason))
+        }
+        solutions::branch_protection::Decision::RequiresConfirmation { .. }
+        | solutions::branch_protection::Decision::Allowed => None,
+    }
 }
 
 /// Build a `PushPreview` for the given branch by invoking git directly.

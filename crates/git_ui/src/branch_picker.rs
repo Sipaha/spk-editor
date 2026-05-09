@@ -2164,6 +2164,26 @@ impl BranchesPopup {
             .as_ref()
             .is_some_and(|d| d.as_ref() == entry.name.as_ref());
         let is_favorite = self.is_favorite(entry.name.as_ref());
+
+        // S-SOL-PRT — surface a lock indicator next to protected
+        // branches. We key off `delete_branch` because it's the op
+        // most users associate with "is this branch protected?" and
+        // the policy maps protected branches to `Forbidden` for
+        // delete. Cheap glob-match — the snapshot is cached.
+        let is_protected = self
+            .work_dir
+            .as_ref()
+            .map(|wd| {
+                matches!(
+                    solutions::branch_protection::check(
+                        wd,
+                        entry.name.as_ref(),
+                        "delete_branch"
+                    ),
+                    solutions::branch_protection::Decision::Forbidden { .. }
+                )
+            })
+            .unwrap_or(false);
         let star_icon = if is_favorite {
             IconName::StarFilled
         } else {
@@ -2245,6 +2265,13 @@ impl BranchesPopup {
                             .child(
                                 h_flex()
                                     .gap_1p5()
+                                    .when(is_protected, |this| {
+                                        this.child(
+                                            Icon::new(IconName::LockOutlined)
+                                                .color(Color::Muted)
+                                                .size(IconSize::XSmall),
+                                        )
+                                    })
                                     .child(Label::new(entry_label))
                                     .when(is_default, |this| {
                                         this.child(

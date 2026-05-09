@@ -17,7 +17,10 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result, anyhow};
 use context_server::listener::{McpServerTool, ToolResponse};
 use context_server::types::ToolResponseContent;
-use editor_mcp::{ToolTier, register_typed_tool_with_tier};
+use editor_mcp::{
+    BranchProtectionHint, ToolTier, register_typed_tool_with_protection,
+    register_typed_tool_with_tier,
+};
 use gpui::{App, AppContext as _, AsyncApp};
 use project::git_store::RepositoryId;
 use schemars::JsonSchema;
@@ -31,8 +34,24 @@ pub(crate) fn register(cx: &mut App) {
     register_typed_tool_with_tier(cx, ToolTier::ReadOnly, CompareRevisionsTool);
     // S-BRP — Branches popup MCP surface.
     register_typed_tool_with_tier(cx, ToolTier::ReadOnly, ListBranchesTool);
-    register_typed_tool_with_tier(cx, ToolTier::Destructive, DeleteBranchTool);
-    register_typed_tool_with_tier(cx, ToolTier::Write, RenameBranchTool);
+    // S-SOL-PRT — Branch-protection hooks: ops that operate on a
+    // payload-supplied branch wire up an extractor; ops that operate on
+    // the *current* HEAD branch can't pre-flight via the registry hook
+    // (would need synchronous git-CLI access) and rely on the
+    // in-process handler check + their existing `confirmed: true`
+    // requirement.
+    register_typed_tool_with_protection(
+        cx,
+        ToolTier::Destructive,
+        DeleteBranchTool,
+        delete_branch_extractor,
+    );
+    register_typed_tool_with_protection(
+        cx,
+        ToolTier::Write,
+        RenameBranchTool,
+        rename_branch_extractor,
+    );
     register_typed_tool_with_tier(cx, ToolTier::Write, SetUpstreamTool);
     // S-DST — Destructive commit operations.
     register_typed_tool_with_tier(cx, ToolTier::Write, CherryPickTool);
@@ -43,8 +62,18 @@ pub(crate) fn register(cx: &mut App) {
     register_typed_tool_with_tier(cx, ToolTier::Destructive, FixupTool);
     register_typed_tool_with_tier(cx, ToolTier::Destructive, EditCommitMessageTool);
     register_typed_tool_with_tier(cx, ToolTier::Destructive, MoveCommitTool);
-    register_typed_tool_with_tier(cx, ToolTier::Write, MergeTool);
-    register_typed_tool_with_tier(cx, ToolTier::Destructive, RebaseTool);
+    register_typed_tool_with_protection(
+        cx,
+        ToolTier::Write,
+        MergeTool,
+        merge_extractor,
+    );
+    register_typed_tool_with_protection(
+        cx,
+        ToolTier::Destructive,
+        RebaseTool,
+        rebase_extractor,
+    );
     // S-IRB — Interactive rebase + state-machine continuation tools.
     register_typed_tool_with_tier(cx, ToolTier::Destructive, InteractiveRebaseTool);
     register_typed_tool_with_tier(cx, ToolTier::Write, RebaseContinueTool);
@@ -427,6 +456,102 @@ async fn run_git(work_dir: &Path, args: &[&str]) -> Result<String> {
 
 async fn run_git_void(work_dir: &Path, args: &[&str]) -> Result<()> {
     run_git(work_dir, args).await.map(|_| ())
+}
+
+/// Synchronous repo-id-to-path resolver, used by the registry-level
+/// branch-protection hook. Mirrors [`resolve_work_directory`] but
+/// targets a specific id (no "active repo" fallback) and returns
+/// `Option<PathBuf>` instead of `Result<Arc<Path>>` because the hook
+/// silently skips when the id can't be resolved (the inner tool will
+/// surface the error via its own `resolve_work_directory` call).
+pub fn resolve_repo_path_by_id(repo_id: u64, cx: &mut App) -> Option<std::path::PathBuf> {
+    let want = RepositoryId(repo_id);
+    for handle in cx.windows() {
+        let Some(multi) = handle.downcast::<workspace::MultiWorkspace>() else {
+            continue;
+        };
+        let found = multi
+            .update(cx, |multi, _window, cx| {
+                for ws in multi.workspaces() {
+                    let project = ws.read(cx).project();
+                    let git_store = project.read(cx).git_store().clone();
+                    let repo = git_store.read(cx).repositories().get(&want).cloned();
+                    if let Some(repo) = repo {
+                        return Some(
+                            repo.read(cx).work_directory_abs_path.to_path_buf(),
+                        );
+                    }
+                }
+                None
+            })
+            .ok()
+            .flatten();
+        if let Some(dir) = found {
+            return Some(dir);
+        }
+    }
+    None
+}
+
+// ====================================================================
+// S-SOL-PRT — `affects_branch` extractors for tools that surface a
+// target branch in their typed input. Tools whose target branch is
+// "the current HEAD" can't extract anything synchronously (would
+// require a git CLI invocation off the dispatcher), so they don't
+// register here and rely on the in-process handler check at the UI
+// layer plus their `confirmed: true` payload requirement.
+// ====================================================================
+
+fn delete_branch_extractor(input: &DeleteBranchInput) -> Option<BranchProtectionHint> {
+    if input.name.trim().is_empty() {
+        return None;
+    }
+    Some(BranchProtectionHint {
+        repo_path: None,
+        repo_id: input.repo_id,
+        branch: input.name.clone(),
+        op_name: if input.force { "delete_branch_force" } else { "delete_branch" },
+        confirmed: false,
+    })
+}
+
+fn rename_branch_extractor(input: &RenameBranchInput) -> Option<BranchProtectionHint> {
+    if input.old.trim().is_empty() {
+        return None;
+    }
+    Some(BranchProtectionHint {
+        repo_path: None,
+        repo_id: input.repo_id,
+        branch: input.old.clone(),
+        op_name: "rename_branch",
+        confirmed: false,
+    })
+}
+
+fn merge_extractor(input: &MergeInput) -> Option<BranchProtectionHint> {
+    if input.target_branch.trim().is_empty() {
+        return None;
+    }
+    Some(BranchProtectionHint {
+        repo_path: None,
+        repo_id: input.repo_id,
+        branch: input.target_branch.clone(),
+        op_name: "merge",
+        confirmed: false,
+    })
+}
+
+fn rebase_extractor(input: &RebaseInput) -> Option<BranchProtectionHint> {
+    if input.target_branch.trim().is_empty() {
+        return None;
+    }
+    Some(BranchProtectionHint {
+        repo_path: None,
+        repo_id: input.repo_id,
+        branch: input.target_branch.clone(),
+        op_name: "rebase",
+        confirmed: input.confirmed,
+    })
 }
 
 fn resolve_work_directory(repo_id: Option<RepositoryId>, cx: &mut App) -> Result<Arc<Path>> {

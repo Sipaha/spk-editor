@@ -308,6 +308,34 @@ pub enum GraphMode {
     FileHistory,
 }
 
+/// Strip the prefixes git can emit in `%D` decorations
+/// (`HEAD -> `, `tag: `, `refs/heads/`, `refs/remotes/<remote>/`) so
+/// the bare branch name is what reaches downstream callers — matters
+/// for branch-protection glob matching, where `release/*` should
+/// match the branch `release/v1` regardless of upstream-tracking
+/// shape.
+fn strip_ref_namespace(name: &str) -> &str {
+    let s = name.trim();
+    if let Some(after) = s.strip_prefix("HEAD -> ") {
+        return strip_ref_namespace(after);
+    }
+    if let Some(after) = s.strip_prefix("tag: ") {
+        return after;
+    }
+    if let Some(after) = s.strip_prefix("refs/heads/") {
+        return after;
+    }
+    if let Some(after) = s.strip_prefix("refs/remotes/") {
+        // refs/remotes/<remote>/<branch> — drop the remote segment so
+        // the policy match is on the branch portion alone.
+        if let Some((_remote, rest)) = after.split_once('/') {
+            return rest;
+        }
+        return after;
+    }
+    s
+}
+
 fn timestamp_format() -> &'static [BorrowedFormatItem<'static>] {
     static FORMAT: OnceLock<Vec<BorrowedFormatItem<'static>>> = OnceLock::new();
     FORMAT.get_or_init(|| {
@@ -1683,12 +1711,35 @@ impl GitGraph {
         })
     }
 
+    /// Resolve the active repository's working-directory path. Reads
+    /// once per render pass — the result is fed into [`render_chip`]
+    /// for the protected-branch indicator.
+    fn current_work_dir(&self, cx: &App) -> Option<std::path::PathBuf> {
+        self.get_repository(cx)
+            .map(|repo| repo.read(cx).work_directory_abs_path.to_path_buf())
+    }
+
     fn render_chip(
         &self,
         name: &SharedString,
         accent_color: gpui::Hsla,
         is_head: bool,
+        work_dir: Option<&std::path::Path>,
     ) -> impl IntoElement {
+        // S-SOL-PRT — render protected refs with a lock glyph in
+        // place of the standard chip icon. We strip the ref-namespace
+        // prefix git emits in `%D` decorations (`refs/heads/`,
+        // `HEAD -> `, `refs/remotes/origin/`, etc.) before consulting
+        // the policy so the glob patterns match the bare branch name.
+        let bare = strip_ref_namespace(name.as_ref());
+        let is_protected = work_dir
+            .map(|wd| {
+                matches!(
+                    solutions::branch_protection::check(wd, bare, "delete_branch"),
+                    solutions::branch_protection::Decision::Forbidden { .. }
+                )
+            })
+            .unwrap_or(false);
         Chip::new(name.clone())
             .label_size(LabelSize::Small)
             .truncate()
@@ -1696,6 +1747,10 @@ impl GitGraph {
                 if is_head {
                     chip.icon(IconName::Check)
                         .bg_color(accent_color.opacity(0.25))
+                        .border_color(accent_color.opacity(0.5))
+                } else if is_protected {
+                    chip.icon(IconName::LockOutlined)
+                        .bg_color(accent_color.opacity(0.12))
                         .border_color(accent_color.opacity(0.5))
                 } else {
                     chip.bg_color(accent_color.opacity(0.08))
@@ -1719,6 +1774,8 @@ impl GitGraph {
                 .as_ref()
                 .map(|branch| SharedString::from(branch.name().to_string()))
         });
+
+        let work_dir = self.current_work_dir(cx);
 
         let row_height = Self::row_height(window, cx);
         // The synthetic "local changes" row, when active, occupies row 0 in
@@ -1891,7 +1948,12 @@ impl GitGraph {
                     let mut row = h_flex().gap_1();
                     for name in commit.data.ref_names.iter().take(visible) {
                         let is_head = Self::is_head_ref(name.as_ref(), &head_branch_name);
-                        row = row.child(self.render_chip(name, accent_color, is_head));
+                        row = row.child(self.render_chip(
+                            name,
+                            accent_color,
+                            is_head,
+                            work_dir.as_deref(),
+                        ));
                     }
                     if hidden > 0 {
                         let hidden_names = commit
@@ -2383,6 +2445,8 @@ impl GitGraph {
             .as_ref()
             .map(|branch| SharedString::from(branch.name().to_string()));
 
+        let work_dir = repository.read(cx).work_directory_abs_path.to_path_buf();
+
         let accent_colors = cx.theme().accents();
         let accent_color = accent_colors
             .0
@@ -2499,7 +2563,12 @@ impl GitGraph {
                         h_flex().gap_1().flex_wrap().justify_center().children(
                             ref_names.iter().map(|name| {
                                 let is_head = Self::is_head_ref(name.as_ref(), &head_branch_name);
-                                self.render_chip(name, accent_color, is_head)
+                                self.render_chip(
+                                    name,
+                                    accent_color,
+                                    is_head,
+                                    Some(work_dir.as_path()),
+                                )
                             }),
                         )
                     }))

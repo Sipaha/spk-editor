@@ -72,6 +72,16 @@ pub fn init(cx: &mut App) {
     backup_mcp::register(cx);
     handlers_mcp::register(cx);
     push_dialog_mcp::register(cx);
+
+    // S-SOL-PRT — install the repo-id resolver so the registry-level
+    // branch-protection hook can map wire-format `repo_id`s back to
+    // working directories. The resolver mirrors
+    // `handlers_mcp::resolve_work_directory` for tools that can pin a
+    // specific repo by id; tools without `repo_id` payload fields
+    // continue to fall back on the in-process handler check.
+    editor_mcp::set_repo_path_resolver(Some(Box::new(|repo_id, cx| {
+        handlers_mcp::resolve_repo_path_by_id(repo_id, cx)
+    })));
     // S-SHL — auto-shelve background snapshotter. A no-op when
     // `git_panel.auto_shelve.interval_minutes = 0`; the runner reads the
     // setting on each tick so toggling the value re-arms it without a

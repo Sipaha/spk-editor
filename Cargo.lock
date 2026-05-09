@@ -7393,6 +7393,7 @@ dependencies = [
  "settings",
  "smallvec",
  "smol",
+ "solutions",
  "theme",
  "theme_settings",
  "time",

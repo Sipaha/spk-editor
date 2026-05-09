@@ -1,4 +1,5 @@
 use settings::{RegisterSetting, Settings};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, RegisterSetting)]
@@ -6,6 +7,9 @@ pub struct SolutionsSettings {
     pub root: PathBuf,
     /// S-SOL-LOG aggregated-log configuration.
     pub aggregated_log: AggregatedLogSettings,
+    /// S-SOL-PRT branch-protection rules. Solution-wide defaults plus
+    /// per-member overrides keyed by `SolutionMember::catalog_id`.
+    pub branch_protection: BranchProtectionSettings,
 }
 
 #[derive(Clone, Debug)]
@@ -25,11 +29,49 @@ impl Default for AggregatedLogSettings {
     }
 }
 
+/// Solution-wide branch-protection policy. See
+/// [`crate::branch_protection`] for the matching semantics.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchProtectionSettings {
+    /// Glob patterns matched against branch names. Applied to every
+    /// member of the Solution unless a per-member override extends or
+    /// supersedes them.
+    pub default_protected: Vec<String>,
+    /// Per-member overrides keyed by `SolutionMember::catalog_id`.
+    pub members: HashMap<String, BranchProtectionMember>,
+}
+
+impl Default for BranchProtectionSettings {
+    fn default() -> Self {
+        Self {
+            default_protected: vec!["main".into(), "master".into(), "release/*".into()],
+            members: HashMap::new(),
+        }
+    }
+}
+
+/// Per-member tightening of [`BranchProtectionSettings`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BranchProtectionMember {
+    /// Additional glob patterns to treat as protected for this member
+    /// (in addition to `default_protected`).
+    pub protected: Vec<String>,
+    /// Forbid force-push to protected branches (rather than just
+    /// requiring confirmation).
+    pub no_force_push: bool,
+    /// Forbid `reset --hard` against protected branches.
+    pub no_force_reset: bool,
+    /// Forbid drop-commit (rebase --interactive with `drop`) on
+    /// protected branches.
+    pub no_drop_commit: bool,
+}
+
 impl Default for SolutionsSettings {
     fn default() -> Self {
         Self {
             root: default_root(),
             aggregated_log: AggregatedLogSettings::default(),
+            branch_protection: BranchProtectionSettings::default(),
         }
     }
 }
@@ -61,10 +103,50 @@ impl Settings for SolutionsSettings {
                     .unwrap_or(defaults.max_total_commits),
             })
             .unwrap_or(defaults);
-        Self {
+        let branch_protection = solutions
+            .and_then(|s| s.branch_protection.as_ref())
+            .map(branch_protection_from_content)
+            .unwrap_or_default();
+        let result = Self {
             root,
             aggregated_log,
-        }
+            branch_protection,
+        };
+        crate::store::set_branch_protection_settings(result.branch_protection.clone());
+        result
+    }
+}
+
+fn branch_protection_from_content(
+    content: &settings::SolutionBranchProtectionSettingsContent,
+) -> BranchProtectionSettings {
+    let default_protected = content
+        .default_protected
+        .clone()
+        .unwrap_or_else(|| BranchProtectionSettings::default().default_protected);
+    let members = content
+        .members
+        .as_ref()
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.clone(), member_from_content(v)))
+                .collect()
+        })
+        .unwrap_or_default();
+    BranchProtectionSettings {
+        default_protected,
+        members,
+    }
+}
+
+fn member_from_content(
+    content: &settings::SolutionBranchProtectionMemberContent,
+) -> BranchProtectionMember {
+    BranchProtectionMember {
+        protected: content.protected.clone().unwrap_or_default(),
+        no_force_push: content.no_force_push.unwrap_or_default(),
+        no_force_reset: content.no_force_reset.unwrap_or_default(),
+        no_drop_commit: content.no_drop_commit.unwrap_or_default(),
     }
 }
 
@@ -92,5 +174,15 @@ mod tests {
         let s = SolutionsSettings::default();
         assert!(s.aggregated_log.background_load);
         assert_eq!(s.aggregated_log.max_total_commits, 50_000);
+    }
+
+    #[test]
+    fn branch_protection_defaults_cover_main_master_release() {
+        let s = SolutionsSettings::default();
+        let patterns: Vec<&str> =
+            s.branch_protection.default_protected.iter().map(|s| s.as_str()).collect();
+        assert!(patterns.contains(&"main"));
+        assert!(patterns.contains(&"master"));
+        assert!(patterns.contains(&"release/*"));
     }
 }

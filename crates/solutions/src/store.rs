@@ -735,6 +735,77 @@ pub fn install_global_for_test(entity: Entity<SolutionStore>, cx: &mut App) {
     cx.set_global(GlobalSolutionStore(entity));
 }
 
+// =====================================================================
+// S-SOL-PRT — process-global cache of the active branch-protection
+// snapshot. Background tasks holding only `&Path` (e.g. handler paths
+// in `git_ui`, MCP tool dispatch) can call
+// [`active_branch_protection_snapshot`] without entering GPUI. The
+// settings half is refreshed by `SolutionsSettings::from_settings`
+// (called by the settings store on every reload); the active-Solution
+// half is maintained by [`refresh_active_solution_for_branch_protection`].
+// =====================================================================
+
+use crate::settings::BranchProtectionSettings;
+use std::sync::Mutex;
+
+static BRANCH_PROTECTION_CACHE: Mutex<Option<BranchProtectionCache>> = Mutex::new(None);
+
+#[derive(Clone, Default)]
+struct BranchProtectionCache {
+    settings: BranchProtectionSettings,
+    active_solution: Option<Solution>,
+}
+
+pub(crate) fn set_branch_protection_settings(settings: BranchProtectionSettings) {
+    let Ok(mut guard) = BRANCH_PROTECTION_CACHE.lock() else {
+        log::warn!("solutions::store: branch-protection cache mutex poisoned");
+        return;
+    };
+    let entry = guard.get_or_insert_with(BranchProtectionCache::default);
+    entry.settings = settings;
+}
+
+pub(crate) fn set_active_solution_for_branch_protection(solution: Option<Solution>) {
+    let Ok(mut guard) = BRANCH_PROTECTION_CACHE.lock() else {
+        log::warn!("solutions::store: branch-protection cache mutex poisoned");
+        return;
+    };
+    let entry = guard.get_or_insert_with(BranchProtectionCache::default);
+    entry.active_solution = solution;
+}
+
+/// Returns `(settings, active_solution)` for non-GPUI callers (the
+/// branch-protection check). `None` when the settings half hasn't been
+/// installed yet (e.g. during early init or in unit tests outside
+/// `TestAppContext`).
+pub(crate) fn active_branch_protection_snapshot()
+-> Option<(BranchProtectionSettings, Option<Solution>)> {
+    let guard = BRANCH_PROTECTION_CACHE.lock().ok()?;
+    let entry = guard.as_ref()?;
+    Some((entry.settings.clone(), entry.active_solution.clone()))
+}
+
+/// Refresh the active Solution stored in the global branch-protection
+/// cache. Called by `solutions::init` whenever `ActiveSolutionChanged`
+/// fires. Idempotent and side-effect-free apart from the Mutex write.
+pub fn refresh_active_solution_for_branch_protection(cx: &App) {
+    let Some(store) = SolutionStore::try_global(cx) else {
+        set_active_solution_for_branch_protection(None);
+        return;
+    };
+    let store = store.read(cx);
+    // Pick the most-recently-opened Solution as "active", matching the
+    // heuristic used by the title bar / aggregated log MCP tool.
+    let active = store
+        .solutions()
+        .iter()
+        .filter(|s| s.last_opened_at.is_some())
+        .max_by_key(|s| s.last_opened_at)
+        .or_else(|| store.solutions().first())
+        .cloned();
+    set_active_solution_for_branch_protection(active);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

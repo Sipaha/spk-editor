@@ -1,7 +1,7 @@
 //! Tool registry: holds boxed registration callbacks until `start_server`
 //! drains them and applies to the live `McpServer`.
 use crate::tier::ToolTier;
-use crate::tier_guard::TierGuardTool;
+use crate::tier_guard::{BranchProtectionHint, TierGuardTool};
 use context_server::listener::{McpServer, McpServerTool};
 use gpui::{App, Global};
 use std::cell::RefCell;
@@ -111,6 +111,49 @@ where
     }
     let registration: Registration = Box::new(move |server: &mut McpServer| {
         server.add_tool(TierGuardTool::new(tool, tier));
+    });
+    registry.pending.borrow_mut().push(registration);
+}
+
+/// Register a typed tool with both tier enforcement (S-BAK) and a
+/// branch-protection extractor (S-SOL-PRT). The extractor runs against
+/// the JSON-serialised input on each call; if it returns
+/// `Some(target)`, the registry consults the global branch-protection
+/// checker (installed by `solutions::init`) and rejects the call when
+/// the decision is `Forbidden` or `RequiresConfirmation` without
+/// `confirmed: true`. Tools that don't operate on a single branch use
+/// the simpler [`register_typed_tool_with_tier`] entry point.
+pub fn register_typed_tool_with_protection<T, F>(
+    cx: &mut App,
+    tier: ToolTier,
+    tool: T,
+    extractor: F,
+) where
+    T: context_server::listener::McpServerTool + Clone + 'static,
+    F: Fn(&T::Input) -> Option<BranchProtectionHint> + Send + Sync + 'static,
+{
+    init(cx);
+    let registry = cx.global::<Registry>();
+    if *registry.started.borrow() {
+        debug_assert!(
+            false,
+            "register_typed_tool_with_protection called after start_server"
+        );
+        log::error!(
+            "editor_mcp: register_typed_tool_with_protection(\"{}\") called after start_server — tool not registered",
+            T::NAME
+        );
+        return;
+    }
+    if let Some(prev) = registry.tool_tiers.borrow_mut().insert(T::NAME, tier) {
+        debug_assert!(false, "duplicate tier registration for tool \"{}\"", T::NAME);
+        log::warn!(
+            "editor_mcp: tool \"{}\" tier overwritten ({prev:?} -> {tier:?})",
+            T::NAME,
+        );
+    }
+    let registration: Registration = Box::new(move |server: &mut McpServer| {
+        server.add_tool(TierGuardTool::new_with_protection(tool, tier, extractor));
     });
     registry.pending.borrow_mut().push(registration);
 }

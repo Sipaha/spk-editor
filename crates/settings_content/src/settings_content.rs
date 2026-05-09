@@ -1168,6 +1168,10 @@ pub struct SolutionsSettingsContent {
 
     /// Solution-wide git settings (S-SOL-LOG and follow-ups).
     pub git: Option<SolutionGitSettingsContent>,
+
+    /// Branch-protection rules (S-SOL-PRT). Solution-wide defaults plus
+    /// per-member overrides keyed by `SolutionMember::catalog_id`.
+    pub branch_protection: Option<SolutionBranchProtectionSettingsContent>,
 }
 
 #[with_fallible_options]
@@ -1175,6 +1179,37 @@ pub struct SolutionsSettingsContent {
 pub struct SolutionGitSettingsContent {
     /// Aggregated-log knobs (S-SOL-LOG).
     pub aggregated_log: Option<SolutionGitAggregatedLogSettingsContent>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, Default, PartialEq)]
+pub struct SolutionBranchProtectionSettingsContent {
+    /// Glob patterns matched against branch names (gitignore-style).
+    /// `release/*` matches `release/v1` but not `release/v2/hotfix`;
+    /// use `release/**` for recursive matches. When omitted, defaults
+    /// to `["main", "master", "release/*"]`.
+    pub default_protected: Option<Vec<String>>,
+
+    /// Per-member overrides keyed by `SolutionMember::catalog_id`. Each
+    /// entry can extend `default_protected` and tighten the policy
+    /// (forbid force-push / hard reset / drop-commit instead of
+    /// requiring confirmation).
+    pub members: Option<BTreeMap<String, SolutionBranchProtectionMemberContent>>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, Default, PartialEq)]
+pub struct SolutionBranchProtectionMemberContent {
+    /// Additional glob patterns to treat as protected for this member
+    /// (in addition to `default_protected`).
+    pub protected: Option<Vec<String>>,
+    /// Forbid force-push to protected branches outright (default:
+    /// require confirmation).
+    pub no_force_push: Option<bool>,
+    /// Forbid `reset --hard` against protected branches outright.
+    pub no_force_reset: Option<bool>,
+    /// Forbid drop-commit on protected branches outright.
+    pub no_drop_commit: Option<bool>,
 }
 
 #[with_fallible_options]

@@ -139,18 +139,28 @@ async fn cross_cherry_pick_inner(
     let source_path = member_work_dir(solution, &request.source_member)?;
     let target_path = member_work_dir(solution, &request.target_member)?;
 
-    // Branch-protection check on the target. Stub returns `Allowed`
-    // today; S-SOL-PRT fills in the real policy. Reading the branch
-    // synchronously here matches the rest of the orchestrator's pattern.
+    // Branch-protection check on the target. We treat both Forbidden
+    // and unconfirmed RequiresConfirmation as a refusal here — the
+    // cross-member orchestrator is invoked from a UI gesture that
+    // already presented its own confirmation step (the modal), so the
+    // background-task layer is conservatively fail-closed. Surface
+    // sites that want a confirm-then-retry flow check the decision
+    // ahead of calling this entry point.
     let target_branch = current_branch(&target_path)
         .await
         .with_context(|| format!("resolving HEAD in {}", target_path.display()))?;
-    if let branch_protection::Decision::Denied { reason } =
-        branch_protection::check(&target_path, &target_branch, OP_NAME)
-    {
-        return Ok(CrossCherryPickOutcome::failed(format!(
-            "branch protection denied cherry-pick into `{target_branch}`: {reason}"
-        )));
+    match branch_protection::check(&target_path, &target_branch, OP_NAME) {
+        branch_protection::Decision::Allowed => {}
+        branch_protection::Decision::Forbidden { reason } => {
+            return Ok(CrossCherryPickOutcome::failed(format!(
+                "branch protection forbids cherry-pick into `{target_branch}`: {reason}"
+            )));
+        }
+        branch_protection::Decision::RequiresConfirmation { reason } => {
+            return Ok(CrossCherryPickOutcome::failed(format!(
+                "branch protection requires confirmation for cherry-pick into `{target_branch}`: {reason}"
+            )));
+        }
     }
 
     // 1. format-patch in the source.
