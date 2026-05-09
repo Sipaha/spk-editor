@@ -70,6 +70,11 @@ actions!(
         StashApply,
         /// Opens the Stashes pane item (S-STH).
         Stashes,
+        /// Opens the Shelf pane item (S-SHL).
+        Shelf,
+        /// S-SHL — discard every auto-shelve recovery snapshot for the
+        /// active repository.
+        DiscardAutoShelves,
         /// Restores all tracked files to their last committed state.
         RestoreTrackedFiles,
         /// Moves all untracked files to trash.

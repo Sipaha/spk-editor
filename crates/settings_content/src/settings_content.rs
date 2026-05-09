@@ -695,6 +695,25 @@ pub struct GitPanelSettingsContent {
 
     /// Show-at-revision (S-SAR) configuration: orphan-worktree TTL.
     pub show_at_revision: Option<ShowAtRevisionSettingsContent>,
+
+    /// Auto-shelve (S-SHL) configuration: snapshot interval + retention.
+    pub auto_shelve: Option<AutoShelveSettingsContent>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+pub struct AutoShelveSettingsContent {
+    /// Interval in minutes between auto-shelve snapshots. `0` disables
+    /// the background task entirely.
+    ///
+    /// Default: 15
+    pub interval_minutes: Option<u32>,
+
+    /// Number of snapshots retained per repository. Older entries are
+    /// removed after a fresh snapshot is written.
+    ///
+    /// Default: 5
+    pub max_snapshots: Option<u32>,
 }
 
 #[with_fallible_options]

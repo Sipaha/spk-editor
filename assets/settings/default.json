@@ -1040,6 +1040,23 @@
       // Default: 24
       "cleanup_orphans_older_than_h": 24,
     },
+    // Auto-shelve (S-SHL) — periodic `git diff HEAD` snapshots written
+    // under `<temp_dir>/spk-editor-auto-shelve/<repo-hash>/<unix>.diff`
+    // so a later run can offer to recover working-tree state if the
+    // editor died with uncommitted changes. Independent of named shelf
+    // (`git: shelf`), which uses the git stash store.
+    "auto_shelve": {
+      // Interval in minutes between snapshots. 0 disables auto-shelve
+      // entirely (no background task is spawned).
+      //
+      // Default: 15
+      "interval_minutes": 15,
+      // Number of snapshots retained per repository. Older entries are
+      // removed after a fresh snapshot is written.
+      //
+      // Default: 5
+      "max_snapshots": 5,
+    },
   },
   "message_editor": {
     // Whether to automatically replace emoji shortcodes with emoji characters.

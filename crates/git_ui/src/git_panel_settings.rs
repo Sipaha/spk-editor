@@ -31,6 +31,31 @@ pub struct ShowAtRevisionSettings {
     pub cleanup_orphans_older_than_h: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoShelveSettings {
+    pub interval_minutes: u32,
+    pub max_snapshots: u32,
+}
+
+impl AutoShelveSettings {
+    pub const DEFAULT_INTERVAL_MINUTES: u32 = 15;
+    pub const DEFAULT_MAX_SNAPSHOTS: u32 = 5;
+
+    #[allow(dead_code)]
+    pub fn enabled(&self) -> bool {
+        self.interval_minutes > 0
+    }
+}
+
+impl Default for AutoShelveSettings {
+    fn default() -> Self {
+        Self {
+            interval_minutes: Self::DEFAULT_INTERVAL_MINUTES,
+            max_snapshots: Self::DEFAULT_MAX_SNAPSHOTS,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, RegisterSetting)]
 pub struct GitPanelSettings {
     pub button: bool,
@@ -51,6 +76,7 @@ pub struct GitPanelSettings {
     pub commit_view: CommitViewSettings,
     pub interactive_rebase: InteractiveRebaseSettings,
     pub show_at_revision: ShowAtRevisionSettings,
+    pub auto_shelve: AutoShelveSettings,
 }
 
 #[derive(Default)]
@@ -120,6 +146,17 @@ impl Settings for GitPanelSettings {
                     cleanup_orphans_older_than_h: raw
                         .cleanup_orphans_older_than_h
                         .unwrap_or(crate::handlers::show_at_revision::DEFAULT_CLEANUP_ORPHANS_OLDER_THAN_H),
+                }
+            },
+            auto_shelve: {
+                let raw = git_panel.auto_shelve.unwrap_or_default();
+                AutoShelveSettings {
+                    interval_minutes: raw
+                        .interval_minutes
+                        .unwrap_or(AutoShelveSettings::DEFAULT_INTERVAL_MINUTES),
+                    max_snapshots: raw
+                        .max_snapshots
+                        .unwrap_or(AutoShelveSettings::DEFAULT_MAX_SNAPSHOTS),
                 }
             },
         }

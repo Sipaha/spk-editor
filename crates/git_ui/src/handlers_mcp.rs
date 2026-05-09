@@ -63,6 +63,11 @@ pub(crate) fn register(cx: &mut App) {
     register_typed_tool_with_tier(cx, ToolTier::Write, StashPopTool);
     register_typed_tool_with_tier(cx, ToolTier::Destructive, StashDropTool);
     register_typed_tool_with_tier(cx, ToolTier::Write, StashBranchTool);
+    // S-SHL — Shelf MCP surface.
+    register_typed_tool_with_tier(cx, ToolTier::Write, ShelfSaveTool);
+    register_typed_tool_with_tier(cx, ToolTier::ReadOnly, ShelfListTool);
+    register_typed_tool_with_tier(cx, ToolTier::Write, ShelfApplyTool);
+    register_typed_tool_with_tier(cx, ToolTier::Destructive, ShelfDropTool);
     // S-ANN — read-only blame.
     register_typed_tool_with_tier(cx, ToolTier::ReadOnly, BlameTool);
 }
@@ -2350,6 +2355,277 @@ fn require_stash_ref(stash_ref: &str, op: &str) -> Result<()> {
         return Err(anyhow!("{op} requires a non-empty stash_ref"));
     }
     Ok(())
+}
+
+// ====================================================================
+//  S-SHL — Shelf MCP surface.
+//
+//  Bridges the in-process `git::operations::shelf` API to MCP. The on-disk
+//  shelf store is shared across the editor process and any subagent over
+//  the `--nc` bridge: subagents read/write through these typed tools, the
+//  UI uses the API direct. `shelf_drop` is destructive and gated through
+//  `require_confirmed`.
+// ====================================================================
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ShelfSaveInput {
+    pub name: String,
+    pub description: Option<String>,
+    /// Repo-relative paths. When `None` or empty, the entire working-tree
+    /// diff is shelved.
+    pub paths: Option<Vec<String>>,
+    /// Default `true` — `git stash push` removes shelved changes from the
+    /// working tree. Set to `false` to retain them after the entry is
+    /// captured (the stash itself still exists).
+    pub remove_after: Option<bool>,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ShelfEntryPayload {
+    pub name: String,
+    pub stash_sha: String,
+    pub created_at_unix: i64,
+    pub source_branch: Option<String>,
+    pub description: Option<String>,
+    pub count_added: u32,
+    pub count_modified: u32,
+    pub count_deleted: u32,
+    pub total_lines_added: u32,
+    pub total_lines_removed: u32,
+    pub top_paths: Vec<String>,
+    pub orphaned: bool,
+}
+
+impl ShelfEntryPayload {
+    fn from_entry(entry: &git::operations::shelf::ShelfEntry, orphaned: bool) -> Self {
+        Self {
+            name: entry.name.clone(),
+            stash_sha: entry.stash_sha.clone(),
+            created_at_unix: entry.created_at_unix,
+            source_branch: entry.source_branch.clone(),
+            description: entry.description.clone(),
+            count_added: entry.files_summary.count_added,
+            count_modified: entry.files_summary.count_modified,
+            count_deleted: entry.files_summary.count_deleted,
+            total_lines_added: entry.files_summary.total_lines_added,
+            total_lines_removed: entry.files_summary.total_lines_removed,
+            top_paths: entry.files_summary.top_paths.clone(),
+            orphaned,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ShelfSaveOutput {
+    pub entry: ShelfEntryPayload,
+}
+
+#[derive(Clone)]
+pub struct ShelfSaveTool;
+
+impl McpServerTool for ShelfSaveTool {
+    type Input = ShelfSaveInput;
+    type Output = ShelfSaveOutput;
+    const NAME: &'static str = "editor.git.shelf_save";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        if input.name.trim().is_empty() {
+            return Err(anyhow!("shelf_save requires a non-empty name"));
+        }
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let path_bufs: Option<Vec<PathBuf>> = input
+            .paths
+            .as_ref()
+            .filter(|paths| !paths.is_empty())
+            .map(|paths| paths.iter().map(PathBuf::from).collect());
+        let name = input.name.clone();
+        let description = input.description.clone();
+        let remove_after = input.remove_after.unwrap_or(true);
+        let work_dir_inner = work_dir.clone();
+        let entry = cx
+            .background_spawn(async move {
+                git::operations::shelf::shelve(
+                    &work_dir_inner,
+                    &name,
+                    description,
+                    path_bufs,
+                    remove_after,
+                )
+            })
+            .await?;
+        let payload = ShelfEntryPayload::from_entry(&entry, false);
+        let summary = format!("shelved {:?} ({})", entry.name, entry.stash_sha);
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: ShelfSaveOutput { entry: payload },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ShelfListInput {
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ShelfListOutput {
+    pub entries: Vec<ShelfEntryPayload>,
+}
+
+#[derive(Clone)]
+pub struct ShelfListTool;
+
+impl McpServerTool for ShelfListTool {
+    type Input = ShelfListInput;
+    type Output = ShelfListOutput;
+    const NAME: &'static str = "editor.git.shelf_list";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let work_dir_inner = work_dir.clone();
+        let entries: Vec<ShelfEntryPayload> = cx
+            .background_spawn(async move {
+                let store = git::operations::shelf::ShelfStore::load(&work_dir_inner)?;
+                let orphans = store.lookup_orphaned(&work_dir_inner);
+                let payload: Vec<ShelfEntryPayload> = store
+                    .entries()
+                    .iter()
+                    .map(|entry| {
+                        let orphaned = orphans.iter().any(|name| name == &entry.name);
+                        ShelfEntryPayload::from_entry(entry, orphaned)
+                    })
+                    .collect();
+                anyhow::Ok(payload)
+            })
+            .await?;
+        let summary = format!(
+            "{} shelf entr{}",
+            entries.len(),
+            if entries.len() == 1 { "y" } else { "ies" }
+        );
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: ShelfListOutput { entries },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ShelfApplyInput {
+    pub name: String,
+    /// When `true`, drop the underlying stash and remove the shelf entry
+    /// after a successful apply. Defaults to `false`.
+    pub remove_from_shelf: Option<bool>,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ShelfApplyOutput {
+    pub name: String,
+    pub removed: bool,
+}
+
+#[derive(Clone)]
+pub struct ShelfApplyTool;
+
+impl McpServerTool for ShelfApplyTool {
+    type Input = ShelfApplyInput;
+    type Output = ShelfApplyOutput;
+    const NAME: &'static str = "editor.git.shelf_apply";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        if input.name.trim().is_empty() {
+            return Err(anyhow!("shelf_apply requires a non-empty name"));
+        }
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let name = input.name.clone();
+        let remove = input.remove_from_shelf.unwrap_or(false);
+        let work_dir_inner = work_dir.clone();
+        let name_inner = name.clone();
+        cx.background_spawn(async move {
+            git::operations::shelf::apply(&work_dir_inner, &name_inner, remove)
+        })
+        .await?;
+        let summary = if remove {
+            format!("applied {:?} and removed from shelf", name)
+        } else {
+            format!("applied {:?}", name)
+        };
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: ShelfApplyOutput {
+                name,
+                removed: remove,
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ShelfDropInput {
+    pub name: String,
+    pub confirmed: bool,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ShelfDropOutput {
+    pub name: String,
+}
+
+#[derive(Clone)]
+pub struct ShelfDropTool;
+
+impl McpServerTool for ShelfDropTool {
+    type Input = ShelfDropInput;
+    type Output = ShelfDropOutput;
+    const NAME: &'static str = "editor.git.shelf_drop";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        require_confirmed(input.confirmed, "shelf_drop")?;
+        if input.name.trim().is_empty() {
+            return Err(anyhow!("shelf_drop requires a non-empty name"));
+        }
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let name = input.name.clone();
+        let work_dir_inner = work_dir.clone();
+        let name_inner = name.clone();
+        cx.background_spawn(async move {
+            git::operations::shelf::drop(&work_dir_inner, &name_inner)
+        })
+        .await?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("dropped shelf entry {:?}", name),
+            }],
+            structured_content: ShelfDropOutput { name },
+        })
+    }
 }
 
 // ====================================================================

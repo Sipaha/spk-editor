@@ -10,6 +10,7 @@
 //! Concrete operations are added as their owning S-* tasks land
 //! (S-DST, S-RBL, etc.). See `docs/superpowers/plans/git-panel-plan.md`.
 
+pub mod auto_shelve;
 pub mod cherry_pick;
 pub mod direct;
 pub mod drop_commit;
@@ -24,6 +25,7 @@ pub mod rebase;
 pub mod reset;
 pub mod revert;
 pub mod reword;
+pub mod shelf;
 pub mod squash;
 
 use anyhow::{Result, anyhow};
