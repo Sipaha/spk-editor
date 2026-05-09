@@ -17,6 +17,7 @@ anyhow.workspace = true
 collections.workspace = true
 context_server.workspace = true
 editor_mcp.workspace = true
+fs.workspace = true
 futures.workspace = true
 git.workspace = true
 git_ui.workspace = true

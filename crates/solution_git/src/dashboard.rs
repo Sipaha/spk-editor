@@ -181,6 +181,7 @@ impl SolutionStatusDashboard {
     pub fn new(
         solution: Solution,
         workspace: WeakEntity<Workspace>,
+        fs: Arc<dyn fs::Fs>,
         cx: &mut Context<Self>,
     ) -> Self {
         let rows: Vec<MemberRow> = solution
@@ -199,7 +200,7 @@ impl SolutionStatusDashboard {
             solution,
             rows,
             sort_by: SortColumn::DirtyDesc,
-            _workspace: workspace.clone(),
+            _workspace: workspace,
             focus_handle: cx.focus_handle(),
             _subscriptions: Vec::new(),
             pending_loads: HashMap::default(),
@@ -211,27 +212,25 @@ impl SolutionStatusDashboard {
             this.reload_row(row.member_id.clone(), row.path.clone(), cx);
         }
 
-        this.spawn_fs_watchers(workspace, cx);
+        this.spawn_fs_watchers(fs, cx);
         this
     }
 
     /// Spawn one debounced FS watcher per member working directory.
     /// Events on `<member>/.git/{HEAD,refs,packed-refs}` or any working
     /// tree path trigger a debounced re-fetch of that member's row.
+    ///
+    /// `fs` is taken as an argument (rather than re-resolved from the
+    /// workspace handle) because this runs inside `cx.new(...)` invoked
+    /// from a `workspace.register_action` callback — at that moment the
+    /// workspace entity is mid-update, so any `workspace.read(cx)` here
+    /// panics with "cannot read workspace::Workspace while it is already
+    /// being updated".
     fn spawn_fs_watchers(
         &mut self,
-        workspace: WeakEntity<Workspace>,
+        fs: Arc<dyn fs::Fs>,
         cx: &mut Context<Self>,
     ) {
-        let Some(workspace_handle) = workspace.upgrade() else {
-            return;
-        };
-        let fs = workspace_handle
-            .read(cx)
-            .project()
-            .read(cx)
-            .fs()
-            .clone();
 
         for row in self.rows.clone() {
             let path = row.path.clone();
@@ -1061,7 +1060,11 @@ fn open_or_reuse_dashboard(
     }
 
     let weak = workspace.weak_handle();
-    let dashboard = cx.new(|cx| SolutionStatusDashboard::new(solution, weak, cx));
+    // Resolve `fs` here, *before* `cx.new`. Inside the constructor the
+    // workspace is mid-update (we're in its `register_action` callback)
+    // and any `workspace.read(cx)` would panic with a double-lease.
+    let fs = workspace.project().read(cx).fs().clone();
+    let dashboard = cx.new(|cx| SolutionStatusDashboard::new(solution, weak, fs, cx));
     workspace.add_item_to_active_pane(Box::new(dashboard), None, true, window, cx);
 }
 
