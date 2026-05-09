@@ -22,5 +22,6 @@ pub mod patch;
 pub mod rebase;
 pub mod reset;
 pub mod revert;
+pub mod show_at_revision;
 pub mod squash;
 pub mod tag;

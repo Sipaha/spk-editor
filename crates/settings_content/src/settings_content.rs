@@ -692,6 +692,23 @@ pub struct GitPanelSettingsContent {
     /// Interactive-rebase (S-IRB) configuration. Currently exposes the
     /// MCP exec gate.
     pub interactive_rebase: Option<InteractiveRebaseSettingsContent>,
+
+    /// Show-at-revision (S-SAR) configuration: orphan-worktree TTL.
+    pub show_at_revision: Option<ShowAtRevisionSettingsContent>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+pub struct ShowAtRevisionSettingsContent {
+    /// Snapshot worktrees created by `git: show repository at revision`
+    /// live under `<paths::temp_dir()>/worktrees/`. At editor startup
+    /// any worktree whose marker file is older than this many hours
+    /// gets `git worktree remove --force`'d. Default 24h covers the
+    /// "I crashed yesterday and never closed the snapshot window"
+    /// case without nuking long-lived investigations.
+    ///
+    /// Default: 24
+    pub cleanup_orphans_older_than_h: Option<u32>,
 }
 
 #[with_fallible_options]

@@ -312,6 +312,18 @@ fn main() {
     // older than an hour belongs to a crashed previous run.
     git::operations::rebase::cleanup_orphan_sessions();
 
+    // Best-effort cleanup of stale snapshot worktrees from previous
+    // editor runs that crashed before the on-close handler could run
+    // (S-SAR § orphan cleanup). The TTL is configurable via
+    // `git_panel.show_at_revision.cleanup_orphans_older_than_h` —
+    // we use the default here because the settings store isn't
+    // initialised yet at this point in main; the user-facing setting
+    // applies on the *next* startup after the user changes it, which
+    // matches the existing pattern for the rebase helper cleanup.
+    git_ui::handlers::show_at_revision::cleanup_orphan_worktrees(
+        git_ui::handlers::show_at_revision::DEFAULT_CLEANUP_ORPHANS_OLDER_THAN_H,
+    );
+
     if stdout_is_a_pty() {
         zlog::init_output_stdout();
     } else {

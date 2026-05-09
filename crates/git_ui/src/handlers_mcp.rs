@@ -53,6 +53,8 @@ pub(crate) fn register(cx: &mut App) {
     // S-PCH — Patches: create / apply.
     register_typed_tool_with_tier(cx, ToolTier::ReadOnly, CreatePatchTool);
     register_typed_tool_with_tier(cx, ToolTier::Write, ApplyPatchTool);
+    // S-SAR — open a snapshot worktree at a specific commit in a new window.
+    register_typed_tool_with_tier(cx, ToolTier::Write, ShowAtRevisionTool);
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -1724,6 +1726,156 @@ impl McpServerTool for ApplyPatchTool {
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text { text: summary }],
             structured_content: payload,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+/// Input for `editor.git.show_at_revision`. Opens a read-only snapshot
+/// worktree of the active (or `repo_id`-selected) repository at `sha`
+/// in a brand-new top-level workspace window. The new window does not
+/// inherit Solution membership.
+pub struct ShowAtRevisionInput {
+    /// Commit SHA to snapshot. Resolved by `git worktree add --detach`,
+    /// so any rev-parseable expression (full / short SHA, `HEAD~3`,
+    /// tag, branch name) is accepted by git itself.
+    pub sha: String,
+    /// Repository to snapshot. Defaults to the focused window's
+    /// active repository.
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ShowAtRevisionOutput {
+    /// `WindowId` of the new top-level workspace window. Use it with
+    /// `windows.focus` / `windows.dump_visual_structure` from a
+    /// driving harness.
+    pub window_id: u64,
+    /// Absolute path of the snapshot worktree. The on-close hook
+    /// removes it via `git worktree remove --force`; orphan cleanup
+    /// at next startup catches leftovers if the editor crashed first.
+    pub worktree_path: String,
+}
+
+#[derive(Clone)]
+pub struct ShowAtRevisionTool;
+
+impl McpServerTool for ShowAtRevisionTool {
+    type Input = ShowAtRevisionInput;
+    type Output = ShowAtRevisionOutput;
+    const NAME: &'static str = "editor.git.show_at_revision";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        let want_repo = input.repo_id.map(RepositoryId);
+        let sha = input.sha.clone();
+
+        // Find a workspace + repository to snapshot. We can't dispatch
+        // through the workspace action directly because we want to
+        // hand back the new WindowId, so we replicate the inner shape
+        // of `show_at_revision_action` here against the resolved
+        // workspace handle.
+        let resolved: Result<(
+            gpui::WindowHandle<workspace::MultiWorkspace>,
+            gpui::Entity<workspace::Workspace>,
+            gpui::Entity<project::git_store::Repository>,
+        )> = cx.update(|cx| {
+            let active_window_id = cx.active_window().map(|h| h.window_id());
+            let mut found: Option<(
+                gpui::WindowHandle<workspace::MultiWorkspace>,
+                gpui::Entity<workspace::Workspace>,
+                gpui::Entity<project::git_store::Repository>,
+            )> = None;
+            for handle in cx.windows() {
+                if want_repo.is_none() && active_window_id != Some(handle.window_id()) {
+                    continue;
+                }
+                let Some(multi) = handle.downcast::<workspace::MultiWorkspace>() else {
+                    continue;
+                };
+                let result = multi
+                    .update(cx, |multi, _window, cx| {
+                        for ws in multi.workspaces() {
+                            let project = ws.read(cx).project().clone();
+                            let repo = match want_repo {
+                                Some(id) => project
+                                    .read(cx)
+                                    .git_store()
+                                    .read(cx)
+                                    .repositories()
+                                    .get(&id)
+                                    .cloned(),
+                                None => project.read(cx).active_repository(cx),
+                            };
+                            if let Some(repo) = repo {
+                                return Some((ws.clone(), repo));
+                            }
+                        }
+                        None
+                    })
+                    .ok()
+                    .flatten();
+                if let Some((ws, repo)) = result {
+                    found = Some((multi, ws, repo));
+                    break;
+                }
+            }
+            found.ok_or_else(|| {
+                anyhow!(
+                    "show_at_revision: no workspace with {} repository",
+                    if want_repo.is_some() {
+                        "the requested"
+                    } else {
+                        "an active"
+                    }
+                )
+            })
+        });
+        let (multi_handle, workspace_entity, repo) = resolved?;
+
+        // Dispatch through a window update so we have both a
+        // `&mut Window` and a `Context<Workspace>` for the handler.
+        let task = multi_handle.update(cx, |_multi, window, cx| {
+            workspace_entity.update(cx, |workspace, cx| {
+                crate::handlers::show_at_revision::show_at_revision(
+                    workspace, repo, sha, window, cx,
+                )
+            })
+        })?;
+        let new_window: gpui::WindowHandle<workspace::MultiWorkspace> = task.await?;
+
+        let path_str: String = cx.update(|cx| {
+            let path: Option<std::path::PathBuf> = new_window
+                .read(cx)
+                .ok()
+                .and_then(|multi: &workspace::MultiWorkspace| {
+                    let ws = multi.workspace().clone();
+                    let project = ws.read(cx).project().clone();
+                    project
+                        .read(cx)
+                        .visible_worktrees(cx)
+                        .next()
+                        .map(|w| w.read(cx).abs_path().to_path_buf())
+                });
+            path.map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        });
+
+        let summary = format!(
+            "show_at_revision({}) → window {}",
+            input.sha,
+            new_window.window_id().as_u64()
+        );
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: ShowAtRevisionOutput {
+                window_id: new_window.window_id().as_u64(),
+                worktree_path: path_str,
+            },
         })
     }
 }

@@ -187,6 +187,80 @@ async fn test_default_session_work_dirs_falls_back_to_home_for_empty_project(
     assert_eq!(ordered_paths, vec![paths::home_dir().to_path_buf()]);
 }
 
+/// S-SAR — verifies that a worktree containing a `.spke-readonly.json`
+/// marker is recognised as read-only and that
+/// `Project::is_path_read_only` returns true for paths under it.
+#[gpui::test]
+async fn test_read_only_marker_recognition(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/snapshot"),
+        json!({
+            ".spke-readonly.json": "{\"base_sha\":\"deadbeef\",\"branch_template\":\"snapshot/dead\",\"created_at_unix\":1700000000,\"source_repo\":\"/src\"}",
+            "src": {
+                "main.rs": "fn main() {}"
+            }
+        }),
+    )
+    .await;
+
+    let project = Project::test(fs, [Path::new(path!("/snapshot"))], cx).await;
+
+    // The marker recognition is async (fs.is_file → cx.spawn). Drive
+    // the executor until the read-only registration task completes.
+    cx.run_until_parked();
+
+    project.read_with(cx, |project, _| {
+        assert!(
+            project.has_read_only_root(),
+            "snapshot worktree should register a read-only root"
+        );
+        assert!(
+            project.is_path_read_only(Path::new(path!("/snapshot/src/main.rs"))),
+            "files under snapshot should be flagged read-only"
+        );
+        assert!(
+            !project.is_path_read_only(Path::new(path!("/elsewhere/file.rs"))),
+            "files outside any registered root must not be flagged"
+        );
+    });
+}
+
+/// S-SAR — verifies that a worktree without the marker file is *not*
+/// flagged read-only. Guard rail against a path-prefix bug that would
+/// silently freeze every workspace.
+#[gpui::test]
+async fn test_no_marker_means_no_read_only_root(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/normal"),
+        json!({
+            "src": {
+                "main.rs": "fn main() {}"
+            }
+        }),
+    )
+    .await;
+
+    let project = Project::test(fs, [Path::new(path!("/normal"))], cx).await;
+    cx.run_until_parked();
+
+    project.read_with(cx, |project, _| {
+        assert!(
+            !project.has_read_only_root(),
+            "normal worktree must not be flagged read-only"
+        );
+        assert!(
+            !project.is_path_read_only(Path::new(path!("/normal/src/main.rs"))),
+            "files in a normal worktree must remain editable"
+        );
+    });
+}
+
 // NOTE:
 // While POSIX symbolic links are somewhat supported on Windows, they are an opt in by the user, and thus
 // we assume that they are not supported out of the box.

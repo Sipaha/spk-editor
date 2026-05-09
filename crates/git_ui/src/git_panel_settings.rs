@@ -26,6 +26,11 @@ pub struct InteractiveRebaseSettings {
     pub allow_exec_via_mcp: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShowAtRevisionSettings {
+    pub cleanup_orphans_older_than_h: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, RegisterSetting)]
 pub struct GitPanelSettings {
     pub button: bool,
@@ -45,6 +50,7 @@ pub struct GitPanelSettings {
     pub commit_title_max_length: usize,
     pub commit_view: CommitViewSettings,
     pub interactive_rebase: InteractiveRebaseSettings,
+    pub show_at_revision: ShowAtRevisionSettings,
 }
 
 #[derive(Default)]
@@ -106,6 +112,14 @@ impl Settings for GitPanelSettings {
                 let raw = git_panel.interactive_rebase.unwrap_or_default();
                 InteractiveRebaseSettings {
                     allow_exec_via_mcp: raw.allow_exec_via_mcp.unwrap_or(false),
+                }
+            },
+            show_at_revision: {
+                let raw = git_panel.show_at_revision.unwrap_or_default();
+                ShowAtRevisionSettings {
+                    cleanup_orphans_older_than_h: raw
+                        .cleanup_orphans_older_than_h
+                        .unwrap_or(crate::handlers::show_at_revision::DEFAULT_CLEANUP_ORPHANS_OLDER_THAN_H),
                 }
             },
         }

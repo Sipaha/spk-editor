@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use editor::Editor;
 use git_ui::handlers::{
     branch, checkout, cherry_pick, compare, copy, drop as drop_handler, edit_message, fixup,
-    patch as patch_handler, reset, revert, squash, tag,
+    patch as patch_handler, reset, revert, show_at_revision, squash, tag,
 };
 use gpui::{
     App, ClipboardItem, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Render,
@@ -230,6 +230,12 @@ fn build_compare_submenu(menu: ContextMenu, ctx: CommitContext) -> ContextMenu {
 }
 
 fn build_show_submenu(menu: ContextMenu, ctx: CommitContext) -> ContextMenu {
+    // S-SAR — capture before destructuring; the bare-repo pre-check
+    // wants `work_dir` and the dispatch wants `sha`, both of which are
+    // moved out below.
+    let work_dir_for_sar = ctx.work_dir.clone();
+    let sha_for_sar = ctx.sha.to_string();
+
     let CommitContext {
         sha,
         repository,
@@ -268,10 +274,29 @@ fn build_show_submenu(menu: ContextMenu, ctx: CommitContext) -> ContextMenu {
             })
             .detach_and_log_err(cx);
     });
-    let menu = menu.entry("Show Repository at Revision", None, |_, _| {
-        // Deferred: S-SAR (Show At Revision) builds a virtual file tree
-        // backed by `git ls-tree <sha>`. Wired here when that lands.
-    });
+    // S-SAR — open the repo state at this commit in a read-only
+    // snapshot window. Disabled (with a clarifying label) when the
+    // source is a bare clone — `git worktree add` semantics on bare
+    // repos differ enough that v1 refuses up front rather than
+    // letting the user discover the failure mid-operation.
+    let is_bare_source = work_dir_for_sar
+        .as_ref()
+        .map(|p| !show_at_revision::source_repo_is_normal(p))
+        .unwrap_or(true);
+    let menu = if is_bare_source {
+        menu.item(
+            ui::ContextMenuEntry::new("Show Repository at Revision (bare repo)").disabled(true),
+        )
+    } else {
+        menu.entry("Show Repository at Revision", None, move |window, cx| {
+            window.dispatch_action(
+                Box::new(git::ShowAtRevision {
+                    sha: sha_for_sar.clone(),
+                }),
+                cx,
+            );
+        })
+    };
     if let Some(work_dir) = work_dir {
         menu.entry("Show in File Manager", None, move |_, cx| {
             cx.reveal_path(&work_dir);

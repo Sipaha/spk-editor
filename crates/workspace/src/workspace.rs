@@ -5987,6 +5987,13 @@ impl Workspace {
             title.push_str(" ↗");
         }
 
+        // S-SAR — flag snapshot worktrees in the OS title so the user
+        // can tell at a glance that this window is read-only and that
+        // edits will be refused at the buffer layer.
+        if project.has_read_only_root() {
+            title.push_str(" [READ-ONLY]");
+        }
+
         let document_path = active_project_path
             .as_ref()
             .and_then(|path| project.absolute_path(path, cx));

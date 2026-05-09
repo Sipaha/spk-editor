@@ -157,6 +157,18 @@ pub struct InteractiveRebaseFromHere {
     pub sha: String,
 }
 
+/// S-SAR — open a read-only snapshot of the current repository at `sha`
+/// in a brand-new top-level workspace window. The snapshot is backed by
+/// a temporary `git worktree add --detach` checkout under
+/// `paths::temp_dir()/worktrees/`, marked with a `.spke-readonly.json`
+/// file so the new Project flips its root into the read-only set.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = git)]
+#[serde(deny_unknown_fields)]
+pub struct ShowAtRevision {
+    pub sha: String,
+}
+
 /// Renames a git branch.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = git)]

@@ -1029,6 +1029,17 @@
       // shell commands through `git rebase exec`.
       "allow_exec_via_mcp": false,
     },
+    // Show-at-revision (S-SAR) options.
+    "show_at_revision": {
+      // Snapshot worktrees created by `git: show repository at revision`
+      // live under `<temp_dir>/worktrees/`. Anything older than this
+      // many hours is removed at editor startup with
+      // `git worktree remove --force`. Covers the case where spk-editor
+      // crashed before the on-close cleanup could run.
+      //
+      // Default: 24
+      "cleanup_orphans_older_than_h": 24,
+    },
   },
   "message_editor": {
     // Whether to automatically replace emoji shortcodes with emoji characters.
