@@ -99,14 +99,22 @@ impl CrossCherryPickOutcome {
 }
 
 /// Resolve a member's working directory against `solution`. Returns an
-/// error if the member id isn't a Solution member.
+/// error if the member id isn't a Solution member, or if its path isn't
+/// a git repo (the cherry-pick would fail with "fatal: not a git
+/// repository" downstream — better to surface the reason up front).
 fn member_work_dir(solution: &Solution, member_id: &str) -> Result<PathBuf> {
-    solution
+    let member = solution
         .members
         .iter()
         .find(|m| m.catalog_id.0 == member_id)
-        .map(|m| m.local_path.clone())
-        .ok_or_else(|| anyhow!("`{member_id}` is not a member of solution `{}`", solution.name))
+        .ok_or_else(|| anyhow!("`{member_id}` is not a member of solution `{}`", solution.name))?;
+    if !member.local_path.join(".git").exists() {
+        return Err(anyhow!(
+            "`{member_id}` is not a git repository (path: {})",
+            member.local_path.display()
+        ));
+    }
+    Ok(member.local_path.clone())
 }
 
 /// Run `cross_cherry_pick` end-to-end. The `&mut AsyncApp` parameter is

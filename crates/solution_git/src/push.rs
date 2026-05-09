@@ -1270,6 +1270,12 @@ pub mod mcp {
             {
                 continue;
             }
+            // Drop non-git members so `push_all` doesn't fail every push
+            // with "fatal: not a git repository". Mirrors the same gate
+            // in dashboard / commit / aggregator.
+            if !member.local_path.join(".git").exists() {
+                continue;
+            }
             let opts = per_member.get(id_str).cloned().unwrap_or_default();
             if opts.skip.unwrap_or(false) {
                 continue;

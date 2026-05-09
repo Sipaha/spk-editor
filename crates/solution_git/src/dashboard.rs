@@ -683,6 +683,11 @@ fn resolve_targets(
                 .map(|set| set.contains(m.catalog_id.0.as_str()))
                 .unwrap_or(true)
         })
+        // Drop non-git members so `batch_fetch` / `batch_pull` /
+        // `checkout_pattern` don't surface "fatal: not a git repository"
+        // for paths that aren't repos to begin with. Mirrors
+        // `aggregator::plan_session` and `commit::build_plan`.
+        .filter(|m| m.local_path.join(".git").exists())
         .map(|m| (SharedString::from(m.catalog_id.0.clone()), m.local_path.clone()))
         .collect();
     if pairs.is_empty() {

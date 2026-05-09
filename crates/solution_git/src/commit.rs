@@ -154,7 +154,11 @@ impl SolutionPanelProvider for SolutionCommitOrchestrator {
 }
 
 /// Filter Solution members down to `members` (catalog ids) — `None`
-/// keeps every member.
+/// keeps every member. Members whose `local_path` isn't a git repo are
+/// dropped silently so they don't show up as `pre_commit_failed` with
+/// confusing "fatal: not a git repository" errors. This mirrors how
+/// `aggregator::plan_session` and `dashboard::fetch_status` handle
+/// non-git members.
 fn build_plan(solution: &Solution, members: Option<&[SharedString]>) -> Vec<MemberPlan> {
     let allowed: Option<std::collections::HashSet<&str>> =
         members.map(|ids| ids.iter().map(|s| s.as_ref()).collect());
@@ -167,6 +171,7 @@ fn build_plan(solution: &Solution, members: Option<&[SharedString]>) -> Vec<Memb
                 .map(|set| set.contains(m.catalog_id.0.as_str()))
                 .unwrap_or(true)
         })
+        .filter(|m| m.local_path.join(".git").exists())
         .map(|m| MemberPlan {
             member_id: SharedString::from(m.catalog_id.0.clone()),
             work_dir: m.local_path.clone(),
@@ -195,7 +200,7 @@ async fn run_orchestration(
                 outcome.member_results.push(MemberCommitResult {
                     member_id: member.member_id.clone(),
                     status: CommitStatus::Skipped,
-                    error: None,
+                    error: Some("no staged changes".into()),
                     backup_ref: None,
                 });
             }
@@ -1086,9 +1091,13 @@ mod tests {
         assert!(augmented.starts_with("Implement S-SOL-CMT"), "preamble preserved");
     }
 
-    /// Helper: ensure `build_plan` honours the optional members filter.
+    /// Helper: ensure `build_plan` honours the optional members filter
+    /// AND drops members whose `local_path` isn't a git repo.
     #[test]
     fn build_plan_filters_members() {
+        let a = init_repo();
+        let b = init_repo();
+        let no_git = tempfile::tempdir().expect("tempdir for non-git path");
         let solution = Solution {
             id: solutions::SolutionId("s1".into()),
             name: "S".into(),
@@ -1096,20 +1105,29 @@ mod tests {
             members: vec![
                 solutions::SolutionMember {
                     catalog_id: solutions::CatalogId("a".into()),
-                    local_path: PathBuf::from("/tmp/a"),
+                    local_path: a.path().to_path_buf(),
                 },
                 solutions::SolutionMember {
                     catalog_id: solutions::CatalogId("b".into()),
-                    local_path: PathBuf::from("/tmp/b"),
+                    local_path: b.path().to_path_buf(),
+                },
+                // Non-git member — must be filtered out.
+                solutions::SolutionMember {
+                    catalog_id: solutions::CatalogId("nogit".into()),
+                    local_path: no_git.path().to_path_buf(),
                 },
             ],
             last_opened_at: None,
         };
         let all = build_plan(&solution, None);
-        assert_eq!(all.len(), 2);
+        assert_eq!(all.len(), 2, "non-git member should be dropped");
+        assert!(all.iter().all(|m| m.member_id.as_ref() != "nogit"));
         let only_a = build_plan(&solution, Some(&["a".into()]));
         assert_eq!(only_a.len(), 1);
         assert_eq!(only_a[0].member_id.as_ref(), "a");
+        // Asking for the non-git member should produce an empty plan.
+        let only_nogit = build_plan(&solution, Some(&["nogit".into()]));
+        assert_eq!(only_nogit.len(), 0);
     }
 
     /// Members without staged changes are reported as `Skipped` and not
