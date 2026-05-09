@@ -16751,9 +16751,19 @@ name = "solution_git"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "collections",
+ "context_server",
+ "editor_mcp",
+ "futures 0.3.32",
  "git_ui",
  "gpui",
  "log",
+ "parking_lot",
+ "schemars 1.0.4",
+ "serde",
+ "settings",
+ "solutions",
+ "util",
 ]
 
 [[package]]

@@ -1165,6 +1165,34 @@ pub struct SolutionsSettingsContent {
     ///
     /// Default: "~/spk-editor/solutions"
     pub root: Option<String>,
+
+    /// Solution-wide git settings (S-SOL-LOG and follow-ups).
+    pub git: Option<SolutionGitSettingsContent>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, Default, PartialEq)]
+pub struct SolutionGitSettingsContent {
+    /// Aggregated-log knobs (S-SOL-LOG).
+    pub aggregated_log: Option<SolutionGitAggregatedLogSettingsContent>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, Default, PartialEq)]
+pub struct SolutionGitAggregatedLogSettingsContent {
+    /// Pre-warm member buffers in the background on Solution open so the
+    /// first time the user toggles to Solution-wide log, the initial
+    /// 200-commit batch per member is already cached.
+    ///
+    /// Default: true
+    pub background_load: Option<bool>,
+
+    /// Hard cap on commits served from a single aggregated-log session.
+    /// Above this the UI shows "Showing first N commits, narrow filters
+    /// to see older history" and stops paginating.
+    ///
+    /// Default: 50000
+    pub max_total_commits: Option<u32>,
 }
 
 /// The settings for the image viewer.

@@ -4,12 +4,32 @@ use std::path::PathBuf;
 #[derive(Clone, Debug, RegisterSetting)]
 pub struct SolutionsSettings {
     pub root: PathBuf,
+    /// S-SOL-LOG aggregated-log configuration.
+    pub aggregated_log: AggregatedLogSettings,
+}
+
+#[derive(Clone, Debug)]
+pub struct AggregatedLogSettings {
+    /// Pre-warm member buffers when a Solution is opened.
+    pub background_load: bool,
+    /// Hard cap on commits served per aggregated-log session.
+    pub max_total_commits: u32,
+}
+
+impl Default for AggregatedLogSettings {
+    fn default() -> Self {
+        Self {
+            background_load: true,
+            max_total_commits: 50_000,
+        }
+    }
 }
 
 impl Default for SolutionsSettings {
     fn default() -> Self {
         Self {
             root: default_root(),
+            aggregated_log: AggregatedLogSettings::default(),
         }
     }
 }
@@ -25,11 +45,26 @@ fn default_root() -> PathBuf {
 
 impl Settings for SolutionsSettings {
     fn from_settings(content: &settings::SettingsContent) -> Self {
-        let root = match content.solutions.as_ref().and_then(|s| s.root.clone()) {
+        let solutions = content.solutions.as_ref();
+        let root = match solutions.and_then(|s| s.root.clone()) {
             Some(raw) => PathBuf::from(shellexpand::tilde(&raw).into_owned()),
             None => default_root(),
         };
-        Self { root }
+        let defaults = AggregatedLogSettings::default();
+        let aggregated_log = solutions
+            .and_then(|s| s.git.as_ref())
+            .and_then(|g| g.aggregated_log.as_ref())
+            .map(|a| AggregatedLogSettings {
+                background_load: a.background_load.unwrap_or(defaults.background_load),
+                max_total_commits: a
+                    .max_total_commits
+                    .unwrap_or(defaults.max_total_commits),
+            })
+            .unwrap_or(defaults);
+        Self {
+            root,
+            aggregated_log,
+        }
     }
 }
 
@@ -50,5 +85,12 @@ mod tests {
         // segment is `solutions` and the parent matches the active
         // base directory name.
         assert!(s.root.ends_with("solutions"));
+    }
+
+    #[test]
+    fn aggregated_log_defaults() {
+        let s = SolutionsSettings::default();
+        assert!(s.aggregated_log.background_load);
+        assert_eq!(s.aggregated_log.max_total_commits, 50_000);
     }
 }

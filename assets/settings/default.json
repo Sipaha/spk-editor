@@ -939,6 +939,25 @@
     // in debug. Set this to override (existing Solutions store
     // absolute paths and are unaffected by changes to this setting).
     // "root": "~/spk-editor/solutions",
+    "git": {
+      "aggregated_log": {
+        // Pre-warm per-member git-log buffers in the background on
+        // Solution open, so toggling the Git Graph view to
+        // "Solution-wide" shows results immediately instead of waiting
+        // for the first batch of commits per member.
+        //
+        // Default: true
+        "background_load": true,
+        // Hard cap on the number of commits served from a single
+        // aggregated-log session. Above this the UI shows
+        // "Showing first N commits, narrow filters to see older history"
+        // and stops paginating. Protects against pathological scrolls
+        // when one member has 100k+ commits.
+        //
+        // Default: 50000
+        "max_total_commits": 50000,
+      },
+    },
   },
   "collaboration_panel": {
     // Whether to show the collaboration panel button in the status bar.

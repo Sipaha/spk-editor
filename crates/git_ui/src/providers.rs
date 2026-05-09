@@ -15,7 +15,7 @@ pub mod solution_panel;
 
 use std::sync::OnceLock;
 
-pub use log_data_source::LogDataSource;
+pub use log_data_source::{AggregatedCommit, LogDataSource, LogQuery};
 pub use push::SolutionPushProvider;
 pub use solution_panel::SolutionPanelProvider;
 
