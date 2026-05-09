@@ -50,6 +50,9 @@ pub(crate) fn register(cx: &mut App) {
     register_typed_tool_with_tier(cx, ToolTier::Write, RebaseContinueTool);
     register_typed_tool_with_tier(cx, ToolTier::Destructive, RebaseAbortTool);
     register_typed_tool_with_tier(cx, ToolTier::Write, RebaseSkipTool);
+    // S-PCH — Patches: create / apply.
+    register_typed_tool_with_tier(cx, ToolTier::ReadOnly, CreatePatchTool);
+    register_typed_tool_with_tier(cx, ToolTier::Write, ApplyPatchTool);
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -1517,6 +1520,212 @@ async fn run_rebase_state_command(
         content: vec![ToolResponseContent::Text { text: summary }],
         structured_content: RebaseContinuationOutput { op, completed: true },
     })
+}
+
+// =====================================================================
+//  S-PCH — Patches: create / apply MCP surface.
+//
+//  `editor.git.create_patch` returns the patch bytes inline so the
+//  subagent can decide where to write them; the tool itself doesn't
+//  touch the filesystem outside of `git format-patch --stdout`.
+//
+//  `editor.git.apply_patch` writes the supplied text to a tempfile,
+//  detects the format, and shells out to `git am` / `git apply`. The
+//  tempfile is deleted after the operation regardless of outcome.
+// =====================================================================
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct CreatePatchInput {
+    pub sha_from: String,
+    /// When `Some`, format-patch the range `sha_from..sha_to`. When `None`,
+    /// produces a single-commit patch for `sha_from`.
+    pub sha_to: Option<String>,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CreatePatchOutput {
+    pub patches: Vec<PatchEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct PatchEntry {
+    pub content: String,
+    pub suggested_filename: String,
+}
+
+#[derive(Clone)]
+pub struct CreatePatchTool;
+
+impl McpServerTool for CreatePatchTool {
+    type Input = CreatePatchInput;
+    type Output = CreatePatchOutput;
+    const NAME: &'static str = "editor.git.create_patch";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let work_dir_buf = PathBuf::from(work_dir.as_ref());
+        let sha_from = input.sha_from.clone();
+        let sha_to = input.sha_to.clone();
+        let patches = cx
+            .background_spawn(async move {
+                let temp = tempfile::tempdir()
+                    .map_err(|err| anyhow!("create_patch tempdir: {err}"))?;
+                let paths = git::operations::patch::create_patch(
+                    &work_dir_buf,
+                    &sha_from,
+                    sha_to.as_deref(),
+                    Some(temp.path()),
+                )?;
+                let mut entries = Vec::with_capacity(paths.len());
+                for path in &paths {
+                    let bytes = std::fs::read(path)
+                        .map_err(|err| anyhow!("read patch {}: {err}", path.display()))?;
+                    let content = String::from_utf8_lossy(&bytes).to_string();
+                    let filename = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "patch".into());
+                    entries.push(PatchEntry {
+                        content,
+                        suggested_filename: filename,
+                    });
+                }
+                Ok::<Vec<PatchEntry>, anyhow::Error>(entries)
+            })
+            .await?;
+        let summary = format!("create_patch → {} file(s)", patches.len());
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: CreatePatchOutput { patches },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ApplyPatchInput {
+    /// Raw patch / mbox / diff text. The tool detects the format and
+    /// picks `git am` vs. `git apply --3way` vs. `git apply` accordingly.
+    pub patch_text: String,
+    /// When `false`, disable 3-way merge (overrides the format default).
+    pub three_way: Option<bool>,
+    /// When `true`, pass `--keep-cr` to `git am` (mbox flow).
+    pub keep_cr: Option<bool>,
+    /// On apply failure, retry with `git apply --reject` (writes `.rej`
+    /// files for failed hunks instead of failing).
+    pub apply_with_reject: Option<bool>,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ApplyPatchOutput {
+    /// One of `"clean" | "conflict" | "rejected_hunks"`.
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflicted_files: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reject_files: Option<Vec<String>>,
+    pub format: String,
+}
+
+#[derive(Clone)]
+pub struct ApplyPatchTool;
+
+impl McpServerTool for ApplyPatchTool {
+    type Input = ApplyPatchInput;
+    type Output = ApplyPatchOutput;
+    const NAME: &'static str = "editor.git.apply_patch";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let work_dir_buf = PathBuf::from(work_dir.as_ref());
+        let bytes = input.patch_text.into_bytes();
+        let format = git::operations::patch::detect_patch_format(&bytes)?;
+        let format_label = format.label().to_string();
+        let three_way_default = matches!(
+            format,
+            git::operations::patch::PatchFormat::UnifiedWithIndex
+                | git::operations::patch::PatchFormat::Mbox
+        );
+        let keep_cr_default = matches!(
+            format,
+            git::operations::patch::PatchFormat::Mbox
+        );
+        let three_way = input.three_way.unwrap_or(three_way_default);
+        let keep_cr = input.keep_cr.unwrap_or(keep_cr_default);
+        let apply_with_reject = input.apply_with_reject.unwrap_or(false);
+
+        let outcome = cx
+            .background_spawn(async move {
+                let temp = tempfile::NamedTempFile::with_suffix(".patch")
+                    .map_err(|err| anyhow!("apply_patch tempfile: {err}"))?;
+                std::fs::write(temp.path(), &bytes)
+                    .map_err(|err| anyhow!("write patch tempfile: {err}"))?;
+                let outcome = git::operations::patch::apply_patch(
+                    &work_dir_buf,
+                    temp.path(),
+                    git::operations::patch::ApplyOptions {
+                        three_way,
+                        keep_cr,
+                        apply_with_reject,
+                    },
+                );
+                drop(temp);
+                outcome
+            })
+            .await?;
+        let payload = match outcome {
+            git::operations::patch::ApplyOutcome::Clean => ApplyPatchOutput {
+                outcome: "clean".into(),
+                conflicted_files: None,
+                reject_files: None,
+                format: format_label.clone(),
+            },
+            git::operations::patch::ApplyOutcome::Conflict { conflicted_files } => {
+                ApplyPatchOutput {
+                    outcome: "conflict".into(),
+                    conflicted_files: Some(
+                        conflicted_files
+                            .into_iter()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .collect(),
+                    ),
+                    reject_files: None,
+                    format: format_label.clone(),
+                }
+            }
+            git::operations::patch::ApplyOutcome::RejectedHunks { reject_files } => {
+                ApplyPatchOutput {
+                    outcome: "rejected_hunks".into(),
+                    conflicted_files: None,
+                    reject_files: Some(
+                        reject_files
+                            .into_iter()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .collect(),
+                    ),
+                    format: format_label.clone(),
+                }
+            }
+        };
+        let summary = format!("apply_patch ({format_label}) → {}", payload.outcome);
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: payload,
+        })
+    }
 }
 
 #[cfg(test)]

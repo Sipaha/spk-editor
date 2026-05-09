@@ -19,6 +19,7 @@ pub mod helpers;
 pub mod linear_rebase;
 pub mod merge;
 pub mod move_commit;
+pub mod patch;
 pub mod rebase;
 pub mod reset;
 pub mod revert;

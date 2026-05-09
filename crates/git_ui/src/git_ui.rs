@@ -88,6 +88,16 @@ pub fn init(cx: &mut App) {
             },
         );
         workspace.register_action(
+            |workspace, _: &git::ApplyPatchFromFile, window, cx| {
+                handlers::patch::apply_patch_from_file_action(workspace, window, cx);
+            },
+        );
+        workspace.register_action(
+            |workspace, _: &git::ApplyPatchFromClipboard, window, cx| {
+                handlers::patch::apply_patch_from_clipboard_action(workspace, window, cx);
+            },
+        );
+        workspace.register_action(
             |workspace, action: &zed_actions::CreateWorktree, window, cx| {
                 worktree_service::handle_create_worktree(workspace, action, window, None, cx);
             },

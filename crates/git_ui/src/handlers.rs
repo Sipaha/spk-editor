@@ -18,6 +18,7 @@ pub mod edit_message;
 pub mod fixup;
 pub mod merge;
 pub mod move_commit;
+pub mod patch;
 pub mod rebase;
 pub mod reset;
 pub mod revert;

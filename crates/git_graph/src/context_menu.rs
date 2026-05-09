@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use editor::Editor;
 use git_ui::handlers::{
     branch, checkout, cherry_pick, compare, copy, drop as drop_handler, edit_message, fixup,
-    reset, revert, squash, tag,
+    patch as patch_handler, reset, revert, squash, tag,
 };
 use gpui::{
     App, ClipboardItem, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Render,
@@ -61,6 +61,7 @@ pub fn build_commit_context_menu(
         let show_ctx = ctx.clone();
         let destructive_ctx = ctx.clone();
         let irb_ctx = ctx.clone();
+        let patch_ctx = ctx.clone();
         let external_ctx = ctx;
         let has_provider = external_ctx.provider.is_some();
 
@@ -140,6 +141,11 @@ pub fn build_commit_context_menu(
                 let ctx = irb_ctx;
                 move |window, cx| open_interactive_rebase(ctx.clone(), window, cx)
             });
+
+        let menu = menu.separator().submenu("Patch", {
+            let ctx = patch_ctx;
+            move |menu, _window, _cx| build_patch_submenu(menu, ctx.clone())
+        });
 
         menu.separator()
             .entry("Show in Terminal", None, |_, _| {})
@@ -821,4 +827,37 @@ impl Render for NameInputModal {
             )
             .child(div().px_3().pb_3().w_full().child(self.editor.clone()))
     }
+}
+
+// =====================================================================
+//  S-PCH — Patch submenu (create patch from a commit row).
+// =====================================================================
+
+fn build_patch_submenu(menu: ContextMenu, ctx: CommitContext) -> ContextMenu {
+    let single_ctx = ctx.clone();
+    let range_ctx = ctx;
+    menu.entry("Create Patch from Here…", None, move |window, cx| {
+        run_create_patch(single_ctx.clone(), /*range_to_head*/ false, window, cx);
+    })
+    .entry(
+        "Create Patch (range to HEAD)…",
+        None,
+        move |window, cx| {
+            run_create_patch(range_ctx.clone(), /*range_to_head*/ true, window, cx);
+        },
+    )
+}
+
+fn run_create_patch(
+    ctx: CommitContext,
+    range_to_head: bool,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(work_dir) = repo_work_dir(&ctx, cx) else {
+        return;
+    };
+    let sha = ctx.sha.to_string();
+    let sha_to = if range_to_head { Some("HEAD".to_string()) } else { None };
+    patch_handler::create_patch_action(ctx.workspace, work_dir, sha, sha_to, window, cx);
 }

@@ -111,6 +111,10 @@ actions!(
         AddToGitignore,
         /// Copies the current branch name to the clipboard.
         CopyBranchName,
+        /// Applies a patch / mbox / diff file via a file picker.
+        ApplyPatchFromFile,
+        /// Applies a patch / mbox / diff stored in the system clipboard.
+        ApplyPatchFromClipboard,
     ]
 );
 
