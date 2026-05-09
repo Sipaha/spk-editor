@@ -10,7 +10,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result, anyhow};
 use context_server::listener::{McpServerTool, ToolResponse};
 use context_server::types::ToolResponseContent;
-use editor_mcp::{ToolTier, register_tool_with_tier};
+use editor_mcp::{ToolTier, register_typed_tool_with_tier};
 use futures::AsyncBufReadExt as _;
 use gpui::{App, AsyncApp};
 use project::git_store::RepositoryId;
@@ -19,9 +19,7 @@ use serde::{Deserialize, Serialize};
 use util::command::new_command;
 
 pub(crate) fn register(cx: &mut App) {
-    register_tool_with_tier(cx, "editor.git.commit_show", ToolTier::ReadOnly, |server| {
-        server.add_tool(CommitShowTool);
-    });
+    register_typed_tool_with_tier(cx, ToolTier::ReadOnly, CommitShowTool);
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]

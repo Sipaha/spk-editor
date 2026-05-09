@@ -215,6 +215,24 @@ Why: GPUI auto-notify gets dropped silently when a nested `session_entity.update
 
 How to apply: never assign to `s.acp_thread` directly outside `set_acp_thread` — it's enforced at compile time. The field is **private**; reads go through `s.acp_thread()` (returns `Option<&Entity<AcpThread>>`), writes only through the setter. Direct struct-literal construction is also blocked (private field), so all `SolutionSession` instances are built via `SolutionSession::new_idle(id, solution_id, agent_id, acp_session_id)` followed by `s.<other_pub_field> = ...` for any defaults that need overriding, then `s.set_acp_thread(thread, cx)` as the *last* mutation if a live thread is being attached so observers wake up to a fully populated session struct. Tests for any new thread-swap path must include the same `cx.subscribe(&session, ThreadReplaced)` + `cx.observe(&session)` probe pair as `model::tests::set_acp_thread_emits_thread_replaced_and_notifies`.
 
+### 19. SQLite `Domain` for cx-less state stores; `OnceLock` cache + `gpui::block_on` for sync API
+
+Why: state stores called from background tasks (`OpRunner` from S-BAK; pre-commit check pipeline; favorites toggles fired from a list-row click; shelf saves) don't have `cx: &App` available. The fork's prevailing persistence convention is SQLite via `db::sqlez::Domain` (`GitGraphsDb`, `SolutionsDb`, `WorkspaceDb`, `solution_agent::db`). `query!` macros generate async functions; `static_connection!` provides the `Domain::open_test_db` helper for tests.
+
+How to apply: per state store, declare a `mod persistence` (or `<name>_db.rs`) inside the owning crate. Define a `Domain` impl + `MIGRATIONS` array. Cache the connection in a module-local `OnceLock<Domain>` populated by `<module>::init(cx)` at app startup right after `cx.set_global(app_db)`. Public sync methods use `gpui::block_on(domain.async_method())` for writes; the connection's executor pool guarantees no deadlock against the calling thread.
+
+Tests use a per-thread `Mutex<HashMap<ThreadId, Domain>>` registry (each parallel test gets its own UUID-named in-memory DB) to sidestep `SQLITE_LOCKED_SHAREDCACHE` under `cargo test`'s parallel runner. The pattern is duplicated across four modules today (`undo_registry`, `branch_picker::favorites`, `shelf`, `pre_commit`); consolidating into a `db::test_registry<T>` helper is a low-priority follow-up — the duplication is `#[cfg(test|test-support)]`-only.
+
+Stores that should NOT use this pattern: caches living in `paths::temp_dir()` (`commit_explanations/`, `ai_cherry_pick_cache/`, `auto-shelve/*.diff`) — direct file IO is fine for write-once / read-once / age-out shapes. Per-worktree filesystem markers (`.spke-readonly.json` from S-SAR) similarly stay as files because their detection runs at worktree-load time before any DB connection is available.
+
+### 20. Cross-crate dynamic action dispatch via `cx.build_action(name, params)`
+
+Why: `git_ui` is the central git-UI crate; `git_graph` and `solution_git` depend on it (downward). When `git_ui::commit_context_menu` needs to fire an action owned by `git_graph` (`ShowAffectedPathsInLog`) or `solution_git` (`CrossCherryPick`), a direct `Box::new(action)` would invert the dep graph. Each downward crate `pub` declares the action and registers a workspace handler at `init`; `git_ui` discovers it dynamically via `cx.build_action("crate::ActionName", Some(params_json))` which silently no-ops when the action isn't registered.
+
+How to apply: when an upward crate needs to fire a downward-crate action, use the dynamic dispatch path. The action must be JSON-deserializable and take its full payload through the `params` argument. Document the upward call site with the action's owner crate so future contributors can find the registration point. Don't add the upward dep just to call the action statically — the silent no-op behavior is the right semantic for "feature available only when its owning crate is initialized."
+
+Don't use this pattern for tightly-coupled action sequences where a missing handler is a bug. Examples in tree: `commit_context_menu::build_commit_context_menu` for ShowAffectedPathsInLog and CrossCherryPick; the menu entries are gated on whether the relevant crate state is available (e.g. CrossCherryPick entry is hidden when no `member_id` is set on the CommitContext).
+
 ## Where specs and plans live
 
 `docs/superpowers/{specs,plans}/` is in `.gitignore` — these are personal working notes, not committed. Each major fork feature has a design spec + step-by-step implementation plan there. They're append-only history; the canonical state of the code lives in code + this file + `.rules`.

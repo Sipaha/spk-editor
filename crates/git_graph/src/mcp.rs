@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result, anyhow};
 use context_server::listener::{McpServerTool, ToolResponse};
 use context_server::types::ToolResponseContent;
-use editor_mcp::{ToolTier, register_tool_with_tier};
+use editor_mcp::{ToolTier, register_typed_tool_with_tier};
 use futures::AsyncBufReadExt as _;
 use gpui::{App, AsyncApp};
 use project::git_store::RepositoryId;
@@ -26,17 +26,8 @@ const DEFAULT_LIMIT: usize = 200;
 const MAX_LIMIT: usize = 5000;
 
 pub fn register(cx: &mut App) {
-    register_tool_with_tier(cx, "editor.git.log", ToolTier::ReadOnly, |server| {
-        server.add_tool(LogTool);
-    });
-    register_tool_with_tier(
-        cx,
-        "editor.git.file_history",
-        ToolTier::ReadOnly,
-        |server| {
-            server.add_tool(FileHistoryTool);
-        },
-    );
+    register_typed_tool_with_tier(cx, ToolTier::ReadOnly, LogTool);
+    register_typed_tool_with_tier(cx, ToolTier::ReadOnly, FileHistoryTool);
 }
 
 /// Input for `editor.git.log`. The `repo_id` selects which open repository

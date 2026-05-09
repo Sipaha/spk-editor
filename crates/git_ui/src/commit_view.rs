@@ -996,7 +996,12 @@ impl language::File for GitBlob {
     }
 
     fn to_proto(&self, _cx: &App) -> language::proto::File {
-        unimplemented!()
+        // Synthetic CommitView buffers never travel over the collab wire —
+        // collab is disabled in this fork (.rules § "What's disabled"), so
+        // `to_proto` is unreachable. If collab is ever re-enabled,
+        // CommitView's read-only synthetic blobs would need a real
+        // serialization shape; until then `unreachable!` is correct.
+        unreachable!("CommitView synthetic File never serializes — collab disabled")
     }
 
     fn is_private(&self) -> bool {

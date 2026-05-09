@@ -462,6 +462,15 @@ pub struct GitSettings {
     ///
     /// Default: ../worktrees
     pub worktree_directory: String,
+    /// Git Log graph view settings.
+    pub log: GitLogSettings,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct GitLogSettings {
+    /// When a commit has more refs than this threshold, the trailing chips
+    /// collapse into a `+N` badge.
+    pub compact_refs_threshold: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -655,6 +664,13 @@ impl Settings for ProjectSettings {
                 .worktree_directory
                 .clone()
                 .unwrap_or_else(|| DEFAULT_WORKTREE_DIRECTORY.to_string()),
+            log: GitLogSettings {
+                compact_refs_threshold: git
+                    .log
+                    .as_ref()
+                    .and_then(|log| log.compact_refs_threshold)
+                    .unwrap_or(2),
+            },
         };
         Self {
             context_servers: project

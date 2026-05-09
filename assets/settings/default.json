@@ -1749,6 +1749,15 @@
     //
     // Trailing slashes are ignored.
     "worktree_directory": "../worktrees",
+    // Git Log graph view settings.
+    "log": {
+      // When a commit has more refs than this threshold, the trailing
+      // chips collapse into a "+N" badge. Set to a high number (e.g.
+      // 1000) to effectively disable compaction.
+      //
+      // Default: 2
+      "compact_refs_threshold": 2
+    }
   },
   // The list of custom Git hosting providers.
   "git_hosting_providers": [

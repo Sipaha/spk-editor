@@ -1814,7 +1814,7 @@ impl GitGraph {
         let local_user_email = self.local_user_email.clone();
         let my_commits_active = self.highlights.my_commits;
         let compact_refs = self.view_options.compact_refs;
-        let compact_threshold = view_options::COMPACT_REFS_THRESHOLD;
+        let compact_threshold = view_options::compact_refs_threshold(cx);
         let group_by_date = self.view_options.group_by_date;
         let highlight_color = cx.theme().colors().text_accent;
 
