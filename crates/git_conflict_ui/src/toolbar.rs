@@ -9,8 +9,8 @@ use gpui::{
 };
 use theme::ActiveTheme as _;
 use ui::{
-    Button, ButtonCommon, Clickable, Color, Icon, IconButton, IconName, IconSize, Label,
-    LabelCommon as _, LabelSize, Tooltip, h_flex,
+    Button, ButtonCommon, Clickable, Color, Disableable, Icon, IconButton, IconName, IconSize,
+    Label, LabelCommon as _, LabelSize, Tooltip, h_flex,
 };
 
 use crate::resolver_view::ConflictResolverView;
@@ -80,6 +80,34 @@ pub(crate) fn render_toolbar(
                 })),
         );
     }
+
+    let ai_pending = this.ai_suggest_pending();
+    let ai_disabled_reason = this.ai_suggest_disabled_reason(cx);
+    let ai_eligible = this.ai_suggest_eligible(cx);
+    let ai_button = {
+        let label = if ai_pending {
+            "Suggesting…"
+        } else {
+            "Suggest AI Merge"
+        };
+        let mut button = Button::new("cfl-ai-suggest", label)
+            .start_icon(Icon::new(IconName::ZedAssistant).size(IconSize::Small))
+            .loading(ai_pending)
+            .disabled(!ai_eligible || ai_pending);
+        if let Some(reason) = ai_disabled_reason {
+            button = button.tooltip(Tooltip::text(reason));
+        } else if ai_pending {
+            button = button.tooltip(Tooltip::text("AI merge in progress"));
+        } else {
+            button = button.tooltip(Tooltip::text(
+                "Generate a 3-way merge suggestion via the active Solution's AI agent",
+            ));
+        }
+        button.on_click(cx.listener(|this, _, window, cx| {
+            this.request_ai_suggest(window, cx);
+        }))
+    };
+    row = row.child(ai_button);
 
     row.child(
         Button::new("cfl-apply-non-conflicting", "Apply Non-Conflicting")

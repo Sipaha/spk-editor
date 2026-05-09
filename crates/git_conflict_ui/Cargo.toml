@@ -22,14 +22,23 @@ git.workspace = true
 gpui.workspace = true
 language.workspace = true
 log.workspace = true
+menu.workspace = true
 project.workspace = true
 schemars.workspace = true
 serde.workspace = true
 settings.workspace = true
+solution_agent.workspace = true
+solutions.workspace = true
 theme.workspace = true
 ui.workspace = true
 util.workspace = true
 workspace.workspace = true
 
 [dev-dependencies]
+fs.workspace = true
+gpui = { workspace = true, features = ["test-support"] }
+project = { workspace = true, features = ["test-support"] }
+serde_json.workspace = true
+settings.workspace = true
 tempfile.workspace = true
+workspace = { workspace = true, features = ["test-support"] }

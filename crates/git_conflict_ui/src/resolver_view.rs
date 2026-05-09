@@ -141,6 +141,17 @@ pub struct ConflictResolverView {
     chunks: Vec<ConflictChunk>,
     current_chunk: Option<usize>,
 
+    /// The three-way content for the currently active file. Cached so
+    /// the toolbar can compute the AI-suggest button's enabled state
+    /// (size cap, presence of base/ours/theirs) without re-spawning
+    /// `git show :N:<path>` on every render. Cleared when the active
+    /// file changes or is binary.
+    last_three_way_content: Option<ThreeWayContent>,
+    /// True while an AI merge suggestion is in flight. Used to render
+    /// the toolbar button as a spinner and to suppress duplicate clicks.
+    ai_suggest_pending: bool,
+    _ai_suggest_task: Option<Task<()>>,
+
     split_state: ThreeWaySplitState,
     title: SharedString,
     _subscriptions: Vec<Subscription>,
@@ -255,6 +266,9 @@ impl ConflictResolverView {
             op,
             chunks: Vec::new(),
             current_chunk: None,
+            last_three_way_content: None,
+            ai_suggest_pending: false,
+            _ai_suggest_task: None,
             split_state: ThreeWaySplitState::new(false),
             title,
             _subscriptions: subscriptions,
@@ -296,6 +310,7 @@ impl ConflictResolverView {
 
         if entry.is_binary {
             self.text_state = None;
+            self.last_three_way_content = None;
             self.binary_view = Some(cx.new(|_| {
                 BinaryConflictView::new(entry.path.clone(), self.work_dir.clone())
             }));
@@ -304,6 +319,7 @@ impl ConflictResolverView {
         }
 
         self.binary_view = None;
+        self.last_three_way_content = None;
         let work_dir = self.work_dir.clone();
         let path = entry.path.clone();
         let task = cx.background_spawn(async move {
@@ -330,6 +346,9 @@ impl ConflictResolverView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Cache the unmodified ThreeWayContent for downstream consumers
+        // (AI suggest, eventual chunk-by-chunk re-merge tooling).
+        self.last_three_way_content = Some(content.clone());
         let local_text = content.ours.unwrap_or_default();
         let their_text = content.theirs.unwrap_or_default();
         let base_text = content.base.unwrap_or_default();
@@ -675,6 +694,157 @@ impl ConflictResolverView {
         .detach();
     }
 
+    /// Three-way content for the active file, cached at file-open time.
+    /// Used by the AI suggest button to compute size/binary eligibility
+    /// without re-running `git show`.
+    pub fn current_three_way_content(&self) -> Option<&ThreeWayContent> {
+        self.last_three_way_content.as_ref()
+    }
+
+    /// True when the AI merge button should currently be in its
+    /// "spinner" state (i.e. a suggestion is being generated). The
+    /// toolbar reads this to disable the button during the in-flight
+    /// turn.
+    pub fn ai_suggest_pending(&self) -> bool {
+        self.ai_suggest_pending
+    }
+
+    /// Whether an AI merge suggestion is feasible for the active file
+    /// right now: text (not binary), under the size cap, and there is
+    /// an active Solution to host the ephemeral session. The toolbar
+    /// uses this for the button's `disabled` state.
+    pub fn ai_suggest_eligible(&self, cx: &App) -> bool {
+        let Some(entry) = self
+            .active_file
+            .and_then(|i| self.conflicts.get(i))
+        else {
+            return false;
+        };
+        let Some(content) = self.last_three_way_content.as_ref() else {
+            return false;
+        };
+        crate::ai_suggest::is_eligible(content, entry.is_binary)
+            && has_active_solution(cx)
+    }
+
+    /// Tooltip text explaining why the AI merge button is disabled, or
+    /// `None` when it would be enabled.
+    pub fn ai_suggest_disabled_reason(&self, cx: &App) -> Option<&'static str> {
+        let entry = self.active_file.and_then(|i| self.conflicts.get(i))?;
+        let content = self.last_three_way_content.as_ref()?;
+        crate::ai_suggest::ineligibility_reason(content, entry.is_binary, has_active_solution(cx))
+    }
+
+    /// Replace the entire Result buffer with `text`. Called by the AI
+    /// suggest modal when the user clicks Apply. Does NOT save to disk
+    /// — `mark_resolved` still has to be triggered explicitly.
+    pub fn replace_result_with(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.text_state.as_ref() else {
+            return;
+        };
+        let editor = state.result_editor.clone();
+        editor.update(cx, |editor, cx| {
+            editor.set_text(text.to_string(), window, cx);
+        });
+        self.recompute_current_chunk(cx);
+    }
+
+    /// Toolbar action: kick off an AI merge suggestion for the active
+    /// file. On success, opens [`crate::ai_suggest_modal::AiSuggestModal`]
+    /// with the proposed content; the user explicitly Applies or
+    /// Cancels. On failure, shows a toast via the workspace.
+    pub fn request_ai_suggest(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.ai_suggest_pending {
+            return;
+        }
+        let Some(state) = self.text_state.as_ref() else {
+            return;
+        };
+        let Some(content) = self.last_three_way_content.clone() else {
+            return;
+        };
+        let path = state.path.clone();
+        let result_text = state.result_editor.read(cx).text(cx);
+        let project = self.project.clone();
+        let work_dir = self.work_dir.clone();
+        let workspace = self.workspace.clone();
+        let resolver_weak = cx.weak_entity();
+
+        self.ai_suggest_pending = true;
+        cx.notify();
+
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let outcome = crate::ai_suggest::suggest_merge(
+                &path,
+                &content,
+                &project,
+                work_dir.as_ref(),
+                &mut cx.clone(),
+            )
+            .await;
+
+            this.update(cx, |this, cx| {
+                this.ai_suggest_pending = false;
+                cx.notify();
+            })
+            .ok();
+
+            match outcome {
+                Ok(suggestion) => {
+                    let Some(workspace) = workspace.upgrade() else {
+                        return;
+                    };
+                    workspace
+                        .update_in(cx, |workspace, window, cx| {
+                            let resolver = resolver_weak.clone();
+                            workspace.toggle_modal(window, cx, move |window, cx| {
+                                crate::ai_suggest_modal::AiSuggestModal::new(
+                                    resolver,
+                                    result_text,
+                                    suggestion,
+                                    window,
+                                    cx,
+                                )
+                            });
+                        })
+                        .ok();
+                }
+                Err(err) => {
+                    log::warn!("AI merge suggestion failed: {err:#}");
+                    let Some(workspace) = workspace.upgrade() else {
+                        return;
+                    };
+                    let message = format!("AI merge unavailable: {err}");
+                    cx.update(|_window, cx| {
+                        workspace.update(cx, |workspace, cx| {
+                            workspace.show_notification(
+                                workspace::notifications::NotificationId::unique::<
+                                    AiMergeFailureNotification,
+                                >(),
+                                cx,
+                                |cx| {
+                                    cx.new(|cx| {
+                                        workspace::notifications::simple_message_notification::MessageNotification::new(
+                                            message,
+                                            cx,
+                                        )
+                                    })
+                                },
+                            );
+                        });
+                    })
+                    .ok();
+                }
+            }
+        });
+        self._ai_suggest_task = Some(task);
+    }
+
     pub fn work_dir(&self) -> &Arc<Path> {
         &self.work_dir
     }
@@ -774,6 +944,23 @@ fn make_readonly_editor(
         editor.set_minimap_visibility(MinimapVisibility::Disabled, window, cx);
         editor
     })
+}
+
+/// Marker type for the failure notification produced when an AI merge
+/// suggestion fails. `NotificationId::unique::<T>()` keys notifications
+/// by type, so each fork-local notification needs a distinct empty
+/// struct. The marker is private — only this file produces these.
+struct AiMergeFailureNotification;
+
+/// Returns true when there is at least one Solution registered in the
+/// SolutionStore (regardless of whether one is currently focused). The
+/// AI suggest button needs *some* Solution to host the ephemeral
+/// session — without one, `pick_active_solution` errors and the toast
+/// path fires anyway, but disabling the button up front is friendlier.
+fn has_active_solution(cx: &App) -> bool {
+    solutions::SolutionStore::try_global(cx)
+        .map(|store| !store.read(cx).solutions().is_empty())
+        .unwrap_or(false)
 }
 
 /// Resolve the .git directory for `work_dir`. For a regular checkout this

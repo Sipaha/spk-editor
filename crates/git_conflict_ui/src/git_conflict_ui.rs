@@ -11,6 +11,8 @@
 //! mirroring the structural pattern from `editor::SplittableEditor` (see
 //! `docs/superpowers/specs/git-panel/cfl-spike.md` for the rationale).
 
+pub mod ai_suggest;
+mod ai_suggest_modal;
 pub mod binary_view;
 pub mod chunks;
 pub mod conflict_parser;
