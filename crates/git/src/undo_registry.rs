@@ -1,23 +1,27 @@
 //! Persistent undo registry — every destructive operation records a row so
 //! the user can rewind with `editor.git.undo_last`.
 //!
-//! Persistence lives at `<config_dir>/git_undo.json` as a JSON array of
-//! [`UndoEntry`]. Concurrent writers from multiple processes are serialized
-//! via an exclusive `fs2` advisory lock on the file plus the
-//! write-to-tmp + atomic-rename pattern, so a kill -9 mid-write can never
-//! produce a half-written JSON file (the rename is atomic on POSIX and
-//! Windows replaces the destination).
+//! Persistence lives in the shared SQLite `AppDatabase` under the
+//! `UndoRegistryDb` Domain (table `undo_entries`). Concurrent writers
+//! across threads are serialized by sqlez's write queue. Multi-process
+//! coordination on the same DB file uses SQLite's WAL mode + busy_timeout
+//! (configured globally for `AppDatabase`).
 
-use anyhow::{Context as _, Result};
-use serde::{Deserialize, Serialize};
-use std::fs::OpenOptions;
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-const REGISTRY_FILE: &str = "git_undo.json";
+pub use self::persistence::UndoRegistryDb;
+
+/// Initialise the module-level connection cache. Called from
+/// `crates/zed/src/main.rs` after `cx.set_global(app_db)`. Idempotent —
+/// re-init replaces the cached handle (the underlying `ThreadSafeConnection`
+/// is `Arc`-cloned, so no resource leak).
+pub fn init(cx: &gpui::App) {
+    persistence::set_global(UndoRegistryDb::global(cx));
+}
 
 /// One undo row.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct UndoEntry {
     pub id: u64,
     pub repo_path: PathBuf,
@@ -29,192 +33,60 @@ pub struct UndoEntry {
     pub failed: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct RegistryFile {
-    /// Monotonic counter for the next-assigned `id`. Outlives entry deletion
-    /// so re-using IDs is impossible even if entries are pruned.
-    #[serde(default)]
-    next_id: u64,
-    #[serde(default)]
-    entries: Vec<UndoEntry>,
-}
-
 /// Append a fresh entry. Returns the assigned id.
 pub fn record(repo_path: &Path, op: &str, branch: &str, before_sha: &str) -> Result<u64> {
-    with_registry(|registry| {
-        registry.next_id = registry.next_id.saturating_add(1);
-        let id = registry.next_id;
-        registry.entries.push(UndoEntry {
-            id,
-            repo_path: repo_path.to_path_buf(),
-            op: op.to_string(),
-            timestamp_unix: current_unix_seconds(),
-            branch: branch.to_string(),
-            before_sha: before_sha.to_string(),
-            after_sha: None,
-            failed: false,
-        });
-        Ok(id)
-    })
+    let db = persistence::db()?;
+    let now = current_unix_seconds();
+    let repo_path_str = repo_path.to_string_lossy().into_owned();
+    let op = op.to_string();
+    let branch = branch.to_string();
+    let before_sha = before_sha.to_string();
+    let id = gpui::block_on(db.insert_entry(repo_path_str, op, now, branch, before_sha))?
+        .ok_or_else(|| anyhow::anyhow!("INSERT INTO undo_entries returned no id"))?;
+    Ok(id as u64)
 }
 
 /// Mark `id` as completed with the resulting `after_sha`.
 pub fn complete(id: u64, after_sha: &str) -> Result<()> {
-    with_registry(|registry| {
-        if let Some(entry) = registry.entries.iter_mut().find(|e| e.id == id) {
-            entry.after_sha = Some(after_sha.to_string());
-        }
-        Ok(())
-    })
+    let db = persistence::db()?;
+    gpui::block_on(db.set_after_sha(id as i64, after_sha.to_string()))
 }
 
 /// Mark `id` as failed.
 pub fn mark_failed(id: u64) -> Result<()> {
-    with_registry(|registry| {
-        if let Some(entry) = registry.entries.iter_mut().find(|e| e.id == id) {
-            entry.failed = true;
-        }
-        Ok(())
-    })
+    let db = persistence::db()?;
+    gpui::block_on(db.set_failed(id as i64))
 }
 
 /// List entries newer than `since_unix` (inclusive lower bound), most recent first.
 pub fn list(since_unix: i64) -> Result<Vec<UndoEntry>> {
-    let registry = read_registry()?;
-    let mut entries: Vec<UndoEntry> = registry
-        .entries
+    let db = persistence::db()?;
+    let rows = db.select_since(since_unix)?;
+    let entries = rows
         .into_iter()
-        .filter(|e| e.timestamp_unix >= since_unix)
+        .map(
+            |(id, repo_path, op, timestamp_unix, branch, before_sha, after_sha, failed)| {
+                UndoEntry {
+                    id: id as u64,
+                    repo_path: PathBuf::from(repo_path),
+                    op,
+                    timestamp_unix,
+                    branch,
+                    before_sha,
+                    after_sha,
+                    failed: failed != 0,
+                }
+            },
+        )
         .collect();
-    entries.sort_by(|a, b| b.timestamp_unix.cmp(&a.timestamp_unix));
     Ok(entries)
 }
 
 /// Remove the entry with `id` from the registry. The corresponding
 /// backup-ref (if any) is **not** touched — it follows its own retention.
 pub fn forget(id: u64) -> Result<()> {
-    with_registry(|registry| {
-        registry.entries.retain(|e| e.id != id);
-        Ok(())
-    })
-}
-
-fn registry_path() -> PathBuf {
-    if let Some(custom) = test_override::current() {
-        return custom.join(REGISTRY_FILE);
-    }
-    paths::config_dir().join(REGISTRY_FILE)
-}
-
-#[cfg(any(test, feature = "test-support"))]
-pub mod test_override {
-    use std::cell::RefCell;
-    use std::path::PathBuf;
-
-    thread_local! {
-        static OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
-    }
-
-    pub fn set(path: PathBuf) {
-        OVERRIDE.with(|cell| *cell.borrow_mut() = Some(path));
-    }
-
-    pub fn clear() {
-        OVERRIDE.with(|cell| *cell.borrow_mut() = None);
-    }
-
-    pub fn current() -> Option<PathBuf> {
-        OVERRIDE.with(|cell| cell.borrow().clone())
-    }
-}
-
-#[cfg(not(any(test, feature = "test-support")))]
-mod test_override {
-    use std::path::PathBuf;
-    pub fn current() -> Option<PathBuf> {
-        None
-    }
-}
-
-fn read_registry() -> Result<RegistryFile> {
-    let path = registry_path();
-    if !path.exists() {
-        return Ok(RegistryFile::default());
-    }
-    let mut file = OpenOptions::new()
-        .read(true)
-        .open(&path)
-        .with_context(|| format!("opening {}", path.display()))?;
-    fs2::FileExt::lock_shared(&file)
-        .with_context(|| format!("locking {}", path.display()))?;
-    let mut body = String::new();
-    file.read_to_string(&mut body)
-        .with_context(|| format!("reading {}", path.display()))?;
-    fs2::FileExt::unlock(&file).ok();
-    if body.trim().is_empty() {
-        return Ok(RegistryFile::default());
-    }
-    serde_json::from_str(&body)
-        .with_context(|| format!("parsing {}", path.display()))
-}
-
-/// Open the registry under exclusive lock, run `f`, write back atomically.
-/// `f` mutates the in-memory representation; persistence is handled here so
-/// callers can't forget to flush.
-fn with_registry<R>(f: impl FnOnce(&mut RegistryFile) -> Result<R>) -> Result<R> {
-    let path = registry_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    let mut lock_file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path)
-        .with_context(|| format!("opening {}", path.display()))?;
-    fs2::FileExt::lock_exclusive(&lock_file)
-        .with_context(|| format!("locking {}", path.display()))?;
-
-    let mut body = String::new();
-    lock_file
-        .read_to_string(&mut body)
-        .with_context(|| format!("reading {}", path.display()))?;
-
-    let mut registry: RegistryFile = if body.trim().is_empty() {
-        RegistryFile::default()
-    } else {
-        serde_json::from_str(&body)
-            .with_context(|| format!("parsing {}", path.display()))?
-    };
-
-    let result = f(&mut registry)?;
-
-    let serialized =
-        serde_json::to_vec_pretty(&registry).context("serializing undo registry")?;
-
-    let tmp_path = path.with_extension("json.tmp");
-    {
-        let mut tmp = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp_path)
-            .with_context(|| format!("opening {}", tmp_path.display()))?;
-        tmp.write_all(&serialized)
-            .with_context(|| format!("writing {}", tmp_path.display()))?;
-        tmp.sync_all().ok();
-    }
-    std::fs::rename(&tmp_path, &path)
-        .with_context(|| format!("renaming {} -> {}", tmp_path.display(), path.display()))?;
-
-    // Truncate the lock-file handle (which now points at the *replaced* inode
-    // on Unix anyway) so subsequent reads via this fd return nothing — but
-    // the actual persisted file is the renamed one.
-    lock_file.seek(SeekFrom::Start(0)).ok();
-    fs2::FileExt::unlock(&lock_file).ok();
-    Ok(result)
+    let db = persistence::db()?;
+    gpui::block_on(db.delete_by_id(id as i64))
 }
 
 fn current_unix_seconds() -> i64 {
@@ -224,87 +96,233 @@ fn current_unix_seconds() -> i64 {
         .unwrap_or(0)
 }
 
+mod persistence {
+    #[cfg(not(any(test, feature = "test-support")))]
+    use anyhow::anyhow;
+    use anyhow::Result;
+    use db::{
+        query,
+        sqlez::{domain::Domain, thread_safe_connection::ThreadSafeConnection},
+        sqlez_macros::sql,
+    };
+    use std::sync::OnceLock;
+
+    pub struct UndoRegistryDb(ThreadSafeConnection);
+
+    impl Domain for UndoRegistryDb {
+        const NAME: &str = stringify!(UndoRegistryDb);
+
+        const MIGRATIONS: &[&str] = &[sql!(
+            CREATE TABLE undo_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_path TEXT NOT NULL,
+                op TEXT NOT NULL,
+                timestamp_unix INTEGER NOT NULL,
+                branch TEXT NOT NULL,
+                before_sha TEXT NOT NULL,
+                after_sha TEXT,
+                failed INTEGER NOT NULL DEFAULT 0
+            ) STRICT;
+        )];
+    }
+
+    db::static_connection!(UndoRegistryDb, []);
+
+    static GLOBAL: OnceLock<UndoRegistryDb> = OnceLock::new();
+
+    /// Replace the cached connection handle. The `OnceLock` keeps only the
+    /// first-set value, which is intended: production startup wires this
+    /// once via [`super::init`].
+    pub(super) fn set_global(handle: UndoRegistryDb) {
+        let _ = GLOBAL.set(handle);
+    }
+
+    /// Per-thread test connection. Tests that share a process-wide
+    /// in-memory DB hit shared-cache table locks (code 262 /
+    /// `SQLITE_LOCKED_SHAREDCACHE`) when several threads write
+    /// concurrently. A per-thread DB keyed by `ThreadId` sidesteps that —
+    /// every test thread gets its own DB and no inter-test interference.
+    #[cfg(any(test, feature = "test-support"))]
+    fn thread_local_test_db() -> UndoRegistryDb {
+        use parking_lot::Mutex;
+        use std::collections::HashMap;
+        use std::thread::ThreadId;
+        static REGISTRY: OnceLock<Mutex<HashMap<ThreadId, UndoRegistryDb>>> = OnceLock::new();
+        let registry = REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut guard = registry.lock();
+        if let Some(existing) = guard.get(&std::thread::current().id()) {
+            return existing.clone();
+        }
+        let name = format!(
+            "undo_registry_test_db_{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        // Leak the name to obtain a `&'static str` — this is test-only,
+        // and the leak is bounded by `RUST_TEST_THREADS` (typically the
+        // CPU count), so total memory growth is trivial.
+        let leaked: &'static str = Box::leak(name.into_boxed_str());
+        let db = gpui::block_on(UndoRegistryDb::open_test_db(leaked));
+        guard.insert(std::thread::current().id(), db.clone());
+        db
+    }
+
+    pub(super) fn db() -> Result<UndoRegistryDb> {
+        if let Some(db) = GLOBAL.get() {
+            return Ok(db.clone());
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            return Ok(thread_local_test_db());
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        {
+            Err(anyhow!(
+                "undo_registry::init has not been called — UndoRegistryDb connection unavailable"
+            ))
+        }
+    }
+
+    impl UndoRegistryDb {
+        query! {
+            pub async fn insert_entry(
+                repo_path: String,
+                op: String,
+                timestamp_unix: i64,
+                branch: String,
+                before_sha: String
+            ) -> Result<Option<i64>> {
+                INSERT INTO undo_entries (repo_path, op, timestamp_unix, branch, before_sha)
+                VALUES (?, ?, ?, ?, ?)
+                RETURNING id
+            }
+        }
+
+        query! {
+            pub async fn set_after_sha(id: i64, after_sha: String) -> Result<()> {
+                UPDATE undo_entries SET after_sha = ?2 WHERE id = ?1
+            }
+        }
+
+        query! {
+            pub async fn set_failed(id: i64) -> Result<()> {
+                UPDATE undo_entries SET failed = 1 WHERE id = ?
+            }
+        }
+
+        query! {
+            pub fn select_since(since_unix: i64) -> Result<Vec<(
+                i64,
+                String,
+                String,
+                i64,
+                String,
+                String,
+                Option<String>,
+                i64
+            )>> {
+                SELECT id, repo_path, op, timestamp_unix, branch, before_sha, after_sha, failed
+                FROM undo_entries
+                WHERE timestamp_unix >= ?
+                ORDER BY timestamp_unix DESC, id DESC
+            }
+        }
+
+        query! {
+            pub async fn delete_by_id(id: i64) -> Result<()> {
+                DELETE FROM undo_entries WHERE id = ?
+            }
+        }
+    }
+
+}
+
+/// Test scaffolding kept under the original `test_override` name so existing
+/// callers (`operations.rs`, `cherry_pick.rs`, etc.) keep compiling. The
+/// migration from JSON to SQLite means a per-test directory no longer makes
+/// sense — every test now shares a single in-memory `UndoRegistryDb` that's
+/// installed lazily on first use. `set` and `clear` are accepted as no-ops
+/// so existing call sites need no changes; tests that need isolation should
+/// rely on unique repo paths / timestamps to avoid cross-test collisions.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_override {
+    use std::path::PathBuf;
+
+    /// No-op: kept for source compatibility with the prior JSON-backed
+    /// implementation. The shared in-memory DB is set up lazily on first
+    /// API call.
+    pub fn set(_path: PathBuf) {}
+
+    /// No-op: see [`set`].
+    pub fn clear() {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use std::path::Path;
 
-    /// Each test pins the registry path to a private tempdir.
-    fn pin(dir: &Path) {
-        test_override::set(dir.to_path_buf());
+    /// Each test inserts under a unique repo path / op label so rows from
+    /// other tests sharing the in-memory DB don't collide on filtering.
+    #[gpui::test]
+    async fn record_and_list_round_trips() {
+        let id1 =
+            record(Path::new("/repo/r1"), "drop_test_a", "main", "deadbeef").expect("record");
+        let id2 = record(Path::new("/repo/r1"), "squash_test_a", "main", "feedface")
+            .expect("record");
+        assert!(id2 > id1);
+
+        let entries = list(0).expect("list");
+        let mine: Vec<_> = entries
+            .iter()
+            .filter(|e| e.op == "drop_test_a" || e.op == "squash_test_a")
+            .collect();
+        assert_eq!(mine.len(), 2);
     }
 
-    #[test]
-    fn record_assigns_monotonic_ids() {
-        let dir = tempdir().expect("tempdir");
-        pin(dir.path());
-        let id1 = record(Path::new("/repo"), "drop", "main", "deadbeef").expect("record");
-        let id2 = record(Path::new("/repo"), "squash", "main", "feedface").expect("record");
-        assert_eq!(id1, 1);
-        assert_eq!(id2, 2);
-        test_override::clear();
-    }
-
-    #[test]
-    fn complete_sets_after_sha() {
-        let dir = tempdir().expect("tempdir");
-        pin(dir.path());
-        let id = record(Path::new("/r"), "rebase", "main", "aaaa").expect("record");
+    #[gpui::test]
+    async fn complete_sets_after_sha() {
+        let id = record(Path::new("/r/complete"), "rebase_test_b", "main", "aaaa")
+            .expect("record");
         complete(id, "bbbb").expect("complete");
         let entries = list(0).expect("list");
-        let entry = entries.iter().find(|e| e.id == id).expect("entry exists");
+        let entry = entries
+            .iter()
+            .find(|e| e.id == id)
+            .expect("entry exists");
         assert_eq!(entry.after_sha.as_deref(), Some("bbbb"));
         assert!(!entry.failed);
-        test_override::clear();
     }
 
-    #[test]
-    fn mark_failed_flips_flag() {
-        let dir = tempdir().expect("tempdir");
-        pin(dir.path());
-        let id = record(Path::new("/r"), "drop", "main", "ccc").expect("record");
+    #[gpui::test]
+    async fn mark_failed_flips_flag() {
+        let id =
+            record(Path::new("/r/failed"), "drop_test_c", "main", "ccc").expect("record");
         mark_failed(id).expect("mark_failed");
         let entries = list(0).expect("list");
-        let entry = entries.iter().find(|e| e.id == id).expect("entry exists");
+        let entry = entries
+            .iter()
+            .find(|e| e.id == id)
+            .expect("entry exists");
         assert!(entry.failed);
-        test_override::clear();
     }
 
-    #[test]
-    fn list_filters_by_timestamp() {
-        let dir = tempdir().expect("tempdir");
-        pin(dir.path());
-        let id = record(Path::new("/r"), "drop", "main", "aa").expect("record");
+    #[gpui::test]
+    async fn list_filters_by_timestamp() {
+        let id = record(Path::new("/r/ts"), "drop_test_d", "main", "aa").expect("record");
         let entries = list(0).expect("list");
         assert!(entries.iter().any(|e| e.id == id));
         // Cutoff in the future: empty.
         let future = current_unix_seconds() + 10_000;
         let entries = list(future).expect("list");
         assert!(entries.is_empty());
-        test_override::clear();
     }
 
-    #[test]
-    fn forget_removes_entry() {
-        let dir = tempdir().expect("tempdir");
-        pin(dir.path());
-        let id = record(Path::new("/r"), "drop", "main", "aa").expect("record");
+    #[gpui::test]
+    async fn forget_removes_entry() {
+        let id =
+            record(Path::new("/r/forget"), "drop_test_e", "main", "aa").expect("record");
         forget(id).expect("forget");
         let entries = list(0).expect("list");
         assert!(entries.iter().all(|e| e.id != id));
-        test_override::clear();
-    }
-
-    #[test]
-    fn persistence_roundtrip_through_fs() {
-        let dir = tempdir().expect("tempdir");
-        pin(dir.path());
-        let _ = record(Path::new("/r"), "drop", "main", "aa").expect("record");
-        // Read raw file and parse — confirms file shape is round-trippable.
-        let body = std::fs::read_to_string(dir.path().join(REGISTRY_FILE)).expect("read");
-        let parsed: RegistryFile = serde_json::from_str(&body).expect("parse");
-        assert_eq!(parsed.entries.len(), 1);
-        assert_eq!(parsed.next_id, 1);
-        test_override::clear();
     }
 }

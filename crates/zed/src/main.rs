@@ -540,6 +540,16 @@ fn main() {
 
     app.run(move |cx| {
         cx.set_global(app_db);
+        // Cache `ThreadSafeConnection` handles for sync stores that don't have
+        // `cx` at their call sites (background-thread git operations,
+        // pre-commit checks, etc.). Each call clones an `Arc`-backed handle
+        // out of the per-App `AppDatabase` global into a module-local
+        // `OnceLock` so the public sync APIs (`record`, `list`, etc.) can
+        // resolve a connection without taking `&App`.
+        git::undo_registry::init(cx);
+        git::operations::shelf::init(cx);
+        git_ui::branch_picker::favorites::init(cx);
+        git_ui::pre_commit::init(cx);
         let db_trusted_paths = match workspace::WorkspaceDb::global(cx).fetch_trusted_worktrees() {
             Ok(trusted_paths) => trusted_paths,
             Err(e) => {

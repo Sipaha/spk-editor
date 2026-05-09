@@ -3,13 +3,15 @@
 //! A shelf entry pairs a stable `stash_sha` (the commit hash of a real git
 //! stash entry, NOT `stash@{N}` — positional indices shift on every push /
 //! drop and can't be used as a long-term key) with editor-local metadata
-//! (name, description, source branch, file summary) persisted at
-//! `<config_dir>/shelf.json`.
+//! (name, description, source branch, file summary) persisted in the
+//! shared SQLite `AppDatabase` under the `ShelfDb` Domain.
 //!
-//! Persistence mirrors `crate::undo_registry` and
-//! `git_ui::branch_picker::favorites`: an `fs2` advisory exclusive lock on
-//! the file plus a write-to-tmp + atomic-rename, so concurrent writers
-//! across processes can't produce a half-written JSON file.
+//! Persistence: rows live in `shelf_entries` keyed by
+//! `(repo_hash(work_dir), name)`. `files_summary` is stored as a JSON
+//! TEXT column inside the row (small structured value, not worth a
+//! separate table). Concurrent writers across threads are serialized by
+//! sqlez's write queue; multi-process coordination uses SQLite's WAL +
+//! busy_timeout configured globally for `AppDatabase`.
 //!
 //! Auto-shelve (the crash-recovery `.diff` snapshots under
 //! `<temp_dir>/spk-editor-auto-shelve/`) is a separate mechanism and lives
@@ -17,14 +19,19 @@
 
 use anyhow::{Context as _, Result, anyhow};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, hash_map::DefaultHasher};
-use std::fs::OpenOptions;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const STORE_FILE: &str = "shelf.json";
+pub use self::persistence::ShelfDb;
+
+/// Initialise the module-level connection cache. Called from
+/// `crates/zed/src/main.rs` after `cx.set_global(app_db)`. See the
+/// matching helper in `git::undo_registry::init` for the rationale.
+pub fn init(cx: &gpui::App) {
+    persistence::set_global(ShelfDb::global(cx));
+}
 
 /// One named shelf entry. The `stash_sha` is the stable identifier — git
 /// stash positions (`stash@{N}`) shift on push/drop and would silently
@@ -53,14 +60,11 @@ pub struct FilesSummary {
     pub top_paths: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct StoreFile {
-    /// Map of `repo_hash(work_dir)` -> entries for that repo.
-    #[serde(default)]
-    repos: HashMap<String, Vec<ShelfEntry>>,
-}
-
-/// In-memory snapshot of one repo's shelf, owned by callers.
+/// In-memory snapshot of one repo's shelf, owned by callers. The `entries`
+/// vector is a cache of the persisted rows for `repo_path`. Mutations
+/// (add/remove/rename/update_description) update the cache and are then
+/// flushed to the DB by [`Self::save`], which writes the full slice as a
+/// transactional REPLACE for the repo bucket.
 #[derive(Debug, Clone)]
 pub struct ShelfStore {
     repo_path: PathBuf,
@@ -69,12 +73,11 @@ pub struct ShelfStore {
 }
 
 impl ShelfStore {
-    /// Load the slice of the store relevant to `repo_path`. Other repos'
-    /// entries are not held in memory.
+    /// Load this repo's slice from the persisted store. Other repos' rows
+    /// are not held in memory.
     pub fn load(repo_path: &Path) -> Result<Self> {
-        let store = read_store()?;
         let repo_key = repo_hash(repo_path);
-        let entries = store.repos.get(&repo_key).cloned().unwrap_or_default();
+        let entries = persistence::load_entries_for_repo(&repo_key)?;
         Ok(Self {
             repo_path: repo_path.to_path_buf(),
             repo_key,
@@ -82,19 +85,12 @@ impl ShelfStore {
         })
     }
 
-    /// Persist this repo's slice back into the on-disk store, leaving
-    /// other repos' entries untouched.
+    /// Persist this repo's slice back into the store, leaving other repos'
+    /// entries untouched. Replaces all rows for `repo_key`: simpler than
+    /// diffing the in-memory cache against the DB and the row count per
+    /// repo is small (handful of entries).
     pub fn save(&self) -> Result<()> {
-        let key = self.repo_key.clone();
-        let entries = self.entries.clone();
-        with_store(|store| {
-            if entries.is_empty() {
-                store.repos.remove(&key);
-            } else {
-                store.repos.insert(key, entries);
-            }
-            Ok(())
-        })
+        persistence::replace_entries_for_repo(&self.repo_key, &self.entries)
     }
 
     /// Append a fresh entry. Errors if `name` already exists for this repo.
@@ -181,118 +177,196 @@ impl ShelfStore {
 }
 
 /// Stable identifier for a repository, hashed from the absolute path of
-/// its working directory. Hex-encoded so JSON round-trips cleanly.
+/// its working directory. Hex-encoded so it survives any text format.
 pub fn repo_hash(work_dir: &Path) -> String {
     let mut hasher = DefaultHasher::new();
     work_dir.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 
-fn store_path() -> PathBuf {
-    if let Some(custom) = test_override::current() {
-        return custom.join(STORE_FILE);
-    }
-    paths::config_dir().join(STORE_FILE)
-}
-
+/// Test scaffolding kept under the original `test_override` name so existing
+/// callers keep compiling. `set` / `clear` are no-ops; the SQLite-backed
+/// store now uses a single shared in-memory DB for all tests within a
+/// process (tests rely on unique repo paths to stay isolated).
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_override {
-    use std::cell::RefCell;
     use std::path::PathBuf;
 
-    thread_local! {
-        static OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
-    }
-
-    pub fn set(path: PathBuf) {
-        OVERRIDE.with(|cell| *cell.borrow_mut() = Some(path));
-    }
-
-    pub fn clear() {
-        OVERRIDE.with(|cell| *cell.borrow_mut() = None);
-    }
-
-    pub fn current() -> Option<PathBuf> {
-        OVERRIDE.with(|cell| cell.borrow().clone())
-    }
+    pub fn set(_path: PathBuf) {}
+    pub fn clear() {}
 }
 
-#[cfg(not(any(test, feature = "test-support")))]
-mod test_override {
-    use std::path::PathBuf;
-    pub fn current() -> Option<PathBuf> {
-        None
-    }
-}
-
-fn read_store() -> Result<StoreFile> {
-    let path = store_path();
-    if !path.exists() {
-        return Ok(StoreFile::default());
-    }
-    let mut file = OpenOptions::new()
-        .read(true)
-        .open(&path)
-        .with_context(|| format!("opening {}", path.display()))?;
-    fs2::FileExt::lock_shared(&file)
-        .with_context(|| format!("locking {}", path.display()))?;
-    let mut body = String::new();
-    file.read_to_string(&mut body)
-        .with_context(|| format!("reading {}", path.display()))?;
-    fs2::FileExt::unlock(&file).ok();
-    if body.trim().is_empty() {
-        return Ok(StoreFile::default());
-    }
-    serde_json::from_str(&body).with_context(|| format!("parsing {}", path.display()))
-}
-
-fn with_store<R>(f: impl FnOnce(&mut StoreFile) -> Result<R>) -> Result<R> {
-    let path = store_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    let mut lock_file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path)
-        .with_context(|| format!("opening {}", path.display()))?;
-    fs2::FileExt::lock_exclusive(&lock_file)
-        .with_context(|| format!("locking {}", path.display()))?;
-
-    let mut body = String::new();
-    lock_file
-        .read_to_string(&mut body)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let mut store: StoreFile = if body.trim().is_empty() {
-        StoreFile::default()
-    } else {
-        serde_json::from_str(&body)
-            .with_context(|| format!("parsing {}", path.display()))?
+mod persistence {
+    use super::ShelfEntry;
+    #[cfg(not(any(test, feature = "test-support")))]
+    use anyhow::anyhow;
+    use anyhow::{Context as _, Result};
+    use db::{
+        query,
+        sqlez::{domain::Domain, thread_safe_connection::ThreadSafeConnection},
+        sqlez_macros::sql,
     };
+    use std::sync::OnceLock;
 
-    let result = f(&mut store)?;
+    pub struct ShelfDb(ThreadSafeConnection);
 
-    let serialized = serde_json::to_vec_pretty(&store).context("serializing shelf store")?;
-    let tmp_path = path.with_extension("json.tmp");
-    {
-        let mut tmp = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp_path)
-            .with_context(|| format!("opening {}", tmp_path.display()))?;
-        tmp.write_all(&serialized)
-            .with_context(|| format!("writing {}", tmp_path.display()))?;
-        tmp.sync_all().ok();
+    impl Domain for ShelfDb {
+        const NAME: &str = stringify!(ShelfDb);
+
+        const MIGRATIONS: &[&str] = &[sql!(
+            CREATE TABLE shelf_entries (
+                repo_hash TEXT NOT NULL,
+                name TEXT NOT NULL,
+                stash_sha TEXT NOT NULL,
+                created_at_unix INTEGER NOT NULL,
+                source_branch TEXT,
+                description TEXT,
+                files_summary_json TEXT NOT NULL,
+                PRIMARY KEY (repo_hash, name)
+            ) STRICT;
+        )];
     }
-    std::fs::rename(&tmp_path, &path)
-        .with_context(|| format!("renaming {} -> {}", tmp_path.display(), path.display()))?;
-    lock_file.seek(SeekFrom::Start(0)).ok();
-    fs2::FileExt::unlock(&lock_file).ok();
-    Ok(result)
+
+    db::static_connection!(ShelfDb, []);
+
+    static GLOBAL: OnceLock<ShelfDb> = OnceLock::new();
+
+    pub(super) fn set_global(handle: ShelfDb) {
+        let _ = GLOBAL.set(handle);
+    }
+
+    /// Per-thread test connection. See `undo_registry::persistence::thread_local_test_db`
+    /// for the rationale (shared-cache lock contention when many test
+    /// threads target a single in-memory DB).
+    #[cfg(any(test, feature = "test-support"))]
+    fn thread_local_test_db() -> ShelfDb {
+        use parking_lot::Mutex;
+        use std::collections::HashMap;
+        use std::thread::ThreadId;
+        static REGISTRY: OnceLock<Mutex<HashMap<ThreadId, ShelfDb>>> = OnceLock::new();
+        let registry = REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut guard = registry.lock();
+        if let Some(existing) = guard.get(&std::thread::current().id()) {
+            return existing.clone();
+        }
+        let name = format!("shelf_test_db_{}", uuid::Uuid::new_v4().simple());
+        let leaked: &'static str = Box::leak(name.into_boxed_str());
+        let db = gpui::block_on(ShelfDb::open_test_db(leaked));
+        guard.insert(std::thread::current().id(), db.clone());
+        db
+    }
+
+    fn db() -> Result<ShelfDb> {
+        if let Some(db) = GLOBAL.get() {
+            return Ok(db.clone());
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            return Ok(thread_local_test_db());
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        {
+            Err(anyhow!(
+                "shelf::init has not been called — ShelfDb connection unavailable"
+            ))
+        }
+    }
+
+    pub(super) fn load_entries_for_repo(repo_key: &str) -> Result<Vec<ShelfEntry>> {
+        let db = db()?;
+        let rows = db.select_for_repo(repo_key.to_string())?;
+        rows.into_iter()
+            .map(|(name, stash_sha, created_at_unix, source_branch, description, files_summary_json)| {
+                let files_summary = serde_json::from_str(&files_summary_json)
+                    .with_context(|| format!("parsing files_summary for {name:?}"))?;
+                Ok(ShelfEntry {
+                    name,
+                    stash_sha,
+                    created_at_unix,
+                    source_branch,
+                    description,
+                    files_summary,
+                })
+            })
+            .collect()
+    }
+
+    pub(super) fn replace_entries_for_repo(
+        repo_key: &str,
+        entries: &[ShelfEntry],
+    ) -> Result<()> {
+        let db = db()?;
+        let key = repo_key.to_string();
+
+        let serialized: Vec<(String, String, String, i64, Option<String>, Option<String>, String)> =
+            entries
+                .iter()
+                .map(|entry| {
+                    let files_summary_json = serde_json::to_string(&entry.files_summary)
+                        .with_context(|| {
+                            format!("serializing files_summary for {:?}", entry.name)
+                        })?;
+                    Ok::<_, anyhow::Error>((
+                        key.clone(),
+                        entry.name.clone(),
+                        entry.stash_sha.clone(),
+                        entry.created_at_unix,
+                        entry.source_branch.clone(),
+                        entry.description.clone(),
+                        files_summary_json,
+                    ))
+                })
+                .collect::<Result<_>>()?;
+
+        gpui::block_on(db.delete_for_repo(key))?;
+        for row in serialized {
+            gpui::block_on(db.insert_entry(
+                row.0, row.1, row.2, row.3, row.4, row.5, row.6,
+            ))?;
+        }
+        Ok(())
+    }
+
+    impl ShelfDb {
+        query! {
+            pub fn select_for_repo(repo_hash: String) -> Result<Vec<(
+                String,
+                String,
+                i64,
+                Option<String>,
+                Option<String>,
+                String
+            )>> {
+                SELECT name, stash_sha, created_at_unix, source_branch, description, files_summary_json
+                FROM shelf_entries
+                WHERE repo_hash = ?
+                ORDER BY created_at_unix ASC, name ASC
+            }
+        }
+
+        query! {
+            pub async fn delete_for_repo(repo_hash: String) -> Result<()> {
+                DELETE FROM shelf_entries WHERE repo_hash = ?
+            }
+        }
+
+        query! {
+            pub async fn insert_entry(
+                repo_hash: String,
+                name: String,
+                stash_sha: String,
+                created_at_unix: i64,
+                source_branch: Option<String>,
+                description: Option<String>,
+                files_summary_json: String
+            ) -> Result<()> {
+                INSERT INTO shelf_entries (
+                    repo_hash, name, stash_sha, created_at_unix,
+                    source_branch, description, files_summary_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            }
+        }
+    }
 }
 
 fn current_unix_seconds() -> i64 {
@@ -534,19 +608,17 @@ fn run_git(repo_path: &Path, args: &[&str]) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use tempfile::tempdir;
+    // Avoid `use super::*;` because our local `drop` free function would
+    // shadow the prelude's `Drop`/`drop` vocabulary used by `#[gpui::test]`'s
+    // generated scaffolding (the macro emits cleanup code that calls `drop`).
+    use super::{FilesSummary, ShelfEntry, ShelfStore, parse_numstat};
+    use std::path::Path;
 
-    fn pin(dir: &Path) {
-        test_override::set(dir.to_path_buf());
-    }
-
-    #[test]
-    fn store_roundtrips_through_disk() {
-        let dir = tempdir().expect("tempdir");
-        pin(dir.path());
-
-        let repo = Path::new("/tmp/example-repo");
+    /// Tests within this module share one in-memory `ShelfDb`. Use unique
+    /// repo paths per test so rows don't collide across tests.
+    #[gpui::test]
+    async fn store_roundtrips_through_db() {
+        let repo = Path::new("/tmp/example-repo-db-roundtrip");
         let mut store = ShelfStore::load(repo).expect("load empty");
         assert!(store.entries.is_empty());
 
@@ -571,17 +643,13 @@ mod tests {
         assert_eq!(store2.entries[0], entry);
 
         // Different repo path, separate slot.
-        let other = ShelfStore::load(Path::new("/tmp/other")).expect("load other");
+        let other = ShelfStore::load(Path::new("/tmp/other-db-roundtrip")).expect("load other");
         assert!(other.entries.is_empty());
-
-        test_override::clear();
     }
 
-    #[test]
-    fn add_rejects_duplicate_name() {
-        let dir = tempdir().expect("tempdir");
-        pin(dir.path());
-        let mut store = ShelfStore::load(Path::new("/r")).expect("load");
+    #[gpui::test]
+    async fn add_rejects_duplicate_name() {
+        let mut store = ShelfStore::load(Path::new("/r-db-add-dup")).expect("load");
         let entry = ShelfEntry {
             name: "wip".into(),
             stash_sha: "a".into(),
@@ -593,14 +661,11 @@ mod tests {
         store.add(entry.clone()).expect("add");
         let err = store.add(entry).expect_err("must reject duplicate");
         assert!(err.to_string().contains("already exists"));
-        test_override::clear();
     }
 
-    #[test]
-    fn rename_and_update_description_mutate_in_place() {
-        let dir = tempdir().expect("tempdir");
-        pin(dir.path());
-        let mut store = ShelfStore::load(Path::new("/r")).expect("load");
+    #[gpui::test]
+    async fn rename_and_update_description_mutate_in_place() {
+        let mut store = ShelfStore::load(Path::new("/r-db-rename")).expect("load");
         store
             .add(ShelfEntry {
                 name: "old".into(),
@@ -615,21 +680,18 @@ mod tests {
         store
             .update_description("new", Some("desc".into()))
             .expect("desc");
-        let reloaded = ShelfStore::load(Path::new("/r")).expect("reload");
+        let reloaded = ShelfStore::load(Path::new("/r-db-rename")).expect("reload");
         assert_eq!(reloaded.entries[0].name, "new");
         assert_eq!(reloaded.entries[0].description.as_deref(), Some("desc"));
-        test_override::clear();
     }
 
-    #[test]
-    fn lookup_orphaned_flags_missing_sha() {
-        let dir = tempdir().expect("tempdir");
-        pin(dir.path());
+    #[gpui::test]
+    async fn lookup_orphaned_flags_missing_sha() {
         // We can't easily run real `git stash list` against a tempdir
         // here, so just verify the in-memory plumbing — the live-list
         // helper falls through to "empty" on failure, so every entry is
         // reported as orphaned.
-        let mut store = ShelfStore::load(Path::new("/no-such-repo")).expect("load");
+        let mut store = ShelfStore::load(Path::new("/no-such-repo-db")).expect("load");
         store
             .add(ShelfEntry {
                 name: "ghost".into(),
@@ -640,9 +702,8 @@ mod tests {
                 files_summary: FilesSummary::default(),
             })
             .expect("add");
-        let orphans = store.lookup_orphaned(Path::new("/no-such-repo"));
+        let orphans = store.lookup_orphaned(Path::new("/no-such-repo-db"));
         assert_eq!(orphans, vec!["ghost".to_string()]);
-        test_override::clear();
     }
 
     #[test]
@@ -658,11 +719,9 @@ mod tests {
         assert_eq!(summary.top_paths.len(), 4);
     }
 
-    #[test]
-    fn store_save_clears_repo_when_empty() {
-        let dir = tempdir().expect("tempdir");
-        pin(dir.path());
-        let mut store = ShelfStore::load(Path::new("/r")).expect("load");
+    #[gpui::test]
+    async fn store_save_clears_repo_when_empty() {
+        let mut store = ShelfStore::load(Path::new("/r-db-empty-clear")).expect("load");
         store
             .add(ShelfEntry {
                 name: "tmp".into(),
@@ -674,9 +733,8 @@ mod tests {
             })
             .expect("add");
         store.remove("tmp").expect("remove");
-        let raw = std::fs::read_to_string(dir.path().join(STORE_FILE)).expect("read");
-        // No `repos` entry left for `/r`.
-        assert!(!raw.contains("\"/r\""));
-        test_override::clear();
+        // Reload — should be empty.
+        let reloaded = ShelfStore::load(Path::new("/r-db-empty-clear")).expect("reload");
+        assert!(reloaded.entries.is_empty());
     }
 }

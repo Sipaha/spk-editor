@@ -19,8 +19,8 @@ anyhow.workspace = true
 askpass.workspace = true
 async-trait.workspace = true
 collections.workspace = true
+db.workspace = true
 derive_more.workspace = true
-fs2.workspace = true
 git2.workspace = true
 gpui.workspace = true
 http_client.workspace = true
@@ -52,6 +52,7 @@ ztracing.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+db = { workspace = true, features = ["test-support"] }
 pretty_assertions.workspace = true
 serde_json.workspace = true
 text = { workspace = true, features = ["test-support"] }

@@ -6,9 +6,9 @@
 //! is aborted and the user gets a modal pointing at the failed check.
 //!
 //! Persistence: per-repo configuration is keyed by the work-tree hash and
-//! stored at `<config_dir>/git_pre_commit.json`. Mirrors the `fs2` +
-//! atomic-rename pattern used by `branch_picker::favorites` and
-//! `git::undo_registry`.
+//! stored in the shared SQLite `AppDatabase` under the `PreCommitConfigDb`
+//! Domain (table `pre_commit_configs`). Concurrent writers across threads
+//! are serialized by sqlez's write queue.
 //!
 //! `--no-verify` short-circuit: if the user toggles `--no-verify` in the
 //! commit panel, `CheckRunner::run` skips every check and returns
@@ -23,11 +23,9 @@ use project::Project;
 use project::lsp_store::{FormatTrigger, LspFormatTarget};
 use serde::{Deserialize, Serialize};
 use collections::HashSet;
-use std::collections::{HashMap, hash_map::DefaultHasher};
-use std::fs::OpenOptions;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use language::Buffer;
@@ -35,11 +33,17 @@ use project::git_store::Repository;
 use task::{TaskContext, TaskTemplate, VariableName};
 use workspace::Workspace;
 
-const STORE_FILE: &str = "git_pre_commit.json";
+pub use self::persistence::PreCommitConfigDb;
+
+/// Initialise the module-level connection cache. Called from
+/// `crates/zed/src/main.rs` after `cx.set_global(app_db)`.
+pub fn init(cx: &gpui::App) {
+    persistence::set_global(PreCommitConfigDb::global(cx));
+}
 
 /// Stable identifier for a repository, derived from the absolute path of its
-/// working directory. Hex-encoded `u64` so it round-trips through JSON
-/// without serialization quirks.
+/// working directory. Hex-encoded `u64` so it round-trips through any
+/// text format without serialization quirks.
 pub fn repo_hash(work_dir: &Path) -> String {
     let mut hasher = DefaultHasher::new();
     work_dir.hash(&mut hasher);
@@ -67,140 +71,158 @@ pub struct PreCommitConfig {
     pub run_hook: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct StoreFile {
-    #[serde(default)]
-    repos: HashMap<String, PreCommitConfig>,
-}
-
 /// Load the persisted config for `work_dir`, or `Default::default` if no
-/// file or no entry exists.
+/// row exists.
 pub fn load_for_repo(work_dir: &Path) -> Result<PreCommitConfig> {
     let key = repo_hash(work_dir);
-    let store = read_store()?;
-    Ok(store.repos.get(&key).cloned().unwrap_or_default())
+    let db = persistence::db()?;
+    match db.select_for_repo(key)? {
+        Some((format, organize_imports, run_hook, tasks_json)) => {
+            let tasks: Vec<String> = serde_json::from_str(&tasks_json)
+                .with_context(|| "parsing tasks_json from pre_commit_configs")?;
+            Ok(PreCommitConfig {
+                format: format != 0,
+                organize_imports: organize_imports != 0,
+                run_hook: run_hook != 0,
+                tasks,
+            })
+        }
+        None => Ok(PreCommitConfig::default()),
+    }
 }
 
-/// Replace the config for `work_dir`. Idempotent — a no-op when `config`
-/// equals the existing entry — to avoid pointless disk writes when the
-/// panel re-renders.
+/// Replace the config for `work_dir`. Idempotent: a no-op when `config`
+/// equals the existing row — to avoid pointless writes when the panel
+/// re-renders.
 pub fn save_for_repo(work_dir: &Path, config: PreCommitConfig) -> Result<()> {
     let key = repo_hash(work_dir);
-    with_store(|store| {
-        if store.repos.get(&key) == Some(&config) {
-            return Ok(());
-        }
-        store.repos.insert(key.clone(), config);
-        Ok(())
-    })
-}
-
-fn store_path() -> PathBuf {
-    if let Some(custom) = test_override::current() {
-        return custom.join(STORE_FILE);
+    if load_for_repo(work_dir)? == config {
+        return Ok(());
     }
-    paths::config_dir().join(STORE_FILE)
+    let db = persistence::db()?;
+    let tasks_json = serde_json::to_string(&config.tasks)
+        .context("serializing tasks list for pre_commit_configs")?;
+    gpui::block_on(db.upsert(
+        key,
+        config.format as i32,
+        config.organize_imports as i32,
+        config.run_hook as i32,
+        tasks_json,
+    ))
 }
 
+/// Test scaffolding kept under the original `test_override` name so
+/// existing test fixtures keep compiling.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_override {
-    use std::cell::RefCell;
     use std::path::PathBuf;
 
-    thread_local! {
-        static OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
-    }
-
-    pub fn set(path: PathBuf) {
-        OVERRIDE.with(|cell| *cell.borrow_mut() = Some(path));
-    }
-
-    pub fn clear() {
-        OVERRIDE.with(|cell| *cell.borrow_mut() = None);
-    }
-
-    pub fn current() -> Option<PathBuf> {
-        OVERRIDE.with(|cell| cell.borrow().clone())
-    }
+    pub fn set(_path: PathBuf) {}
+    pub fn clear() {}
 }
 
-#[cfg(not(any(test, feature = "test-support")))]
-mod test_override {
-    use std::path::PathBuf;
-    pub fn current() -> Option<PathBuf> {
-        None
-    }
-}
-
-fn read_store() -> Result<StoreFile> {
-    let path = store_path();
-    if !path.exists() {
-        return Ok(StoreFile::default());
-    }
-    let mut file = OpenOptions::new()
-        .read(true)
-        .open(&path)
-        .with_context(|| format!("opening {}", path.display()))?;
-    fs2::FileExt::lock_shared(&file)
-        .with_context(|| format!("locking {}", path.display()))?;
-    let mut body = String::new();
-    file.read_to_string(&mut body)
-        .with_context(|| format!("reading {}", path.display()))?;
-    fs2::FileExt::unlock(&file).ok();
-    if body.trim().is_empty() {
-        return Ok(StoreFile::default());
-    }
-    serde_json::from_str(&body).with_context(|| format!("parsing {}", path.display()))
-}
-
-fn with_store<R>(f: impl FnOnce(&mut StoreFile) -> Result<R>) -> Result<R> {
-    let path = store_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    let mut lock_file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path)
-        .with_context(|| format!("opening {}", path.display()))?;
-    fs2::FileExt::lock_exclusive(&lock_file)
-        .with_context(|| format!("locking {}", path.display()))?;
-
-    let mut body = String::new();
-    lock_file
-        .read_to_string(&mut body)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let mut store: StoreFile = if body.trim().is_empty() {
-        StoreFile::default()
-    } else {
-        serde_json::from_str(&body)
-            .with_context(|| format!("parsing {}", path.display()))?
+mod persistence {
+    #[cfg(not(any(test, feature = "test-support")))]
+    use anyhow::anyhow;
+    use anyhow::Result;
+    use db::{
+        query,
+        sqlez::{domain::Domain, thread_safe_connection::ThreadSafeConnection},
+        sqlez_macros::sql,
     };
+    use std::sync::OnceLock;
 
-    let result = f(&mut store)?;
+    pub struct PreCommitConfigDb(ThreadSafeConnection);
 
-    let serialized =
-        serde_json::to_vec_pretty(&store).context("serializing pre-commit store")?;
-    let tmp_path = path.with_extension("json.tmp");
-    {
-        let mut tmp = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp_path)
-            .with_context(|| format!("opening {}", tmp_path.display()))?;
-        tmp.write_all(&serialized)
-            .with_context(|| format!("writing {}", tmp_path.display()))?;
-        tmp.sync_all().ok();
+    impl Domain for PreCommitConfigDb {
+        const NAME: &str = stringify!(PreCommitConfigDb);
+
+        const MIGRATIONS: &[&str] = &[sql!(
+            CREATE TABLE pre_commit_configs (
+                repo_hash        TEXT PRIMARY KEY,
+                format           INTEGER NOT NULL DEFAULT 0,
+                organize_imports INTEGER NOT NULL DEFAULT 0,
+                run_hook         INTEGER NOT NULL DEFAULT 0,
+                tasks_json       TEXT    NOT NULL
+            ) STRICT;
+        )];
     }
-    std::fs::rename(&tmp_path, &path)
-        .with_context(|| format!("renaming {} -> {}", tmp_path.display(), path.display()))?;
-    lock_file.seek(SeekFrom::Start(0)).ok();
-    fs2::FileExt::unlock(&lock_file).ok();
-    Ok(result)
+
+    db::static_connection!(PreCommitConfigDb, []);
+
+    static GLOBAL: OnceLock<PreCommitConfigDb> = OnceLock::new();
+
+    pub(super) fn set_global(handle: PreCommitConfigDb) {
+        let _ = GLOBAL.set(handle);
+    }
+
+    /// Per-thread test connection — see
+    /// `git::undo_registry::persistence::thread_local_test_db` for why
+    /// each test thread needs its own DB rather than sharing one
+    /// in-memory DB process-wide.
+    #[cfg(any(test, feature = "test-support"))]
+    fn thread_local_test_db() -> PreCommitConfigDb {
+        use parking_lot::Mutex;
+        use std::collections::HashMap;
+        use std::thread::ThreadId;
+        static REGISTRY: OnceLock<Mutex<HashMap<ThreadId, PreCommitConfigDb>>> =
+            OnceLock::new();
+        let registry = REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut guard = registry.lock();
+        if let Some(existing) = guard.get(&std::thread::current().id()) {
+            return existing.clone();
+        }
+        let name = format!(
+            "pre_commit_test_db_{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let leaked: &'static str = Box::leak(name.into_boxed_str());
+        let db = gpui::block_on(PreCommitConfigDb::open_test_db(leaked));
+        guard.insert(std::thread::current().id(), db.clone());
+        db
+    }
+
+    pub(super) fn db() -> Result<PreCommitConfigDb> {
+        if let Some(db) = GLOBAL.get() {
+            return Ok(db.clone());
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            return Ok(thread_local_test_db());
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        {
+            Err(anyhow!(
+                "pre_commit::init has not been called — PreCommitConfigDb connection unavailable"
+            ))
+        }
+    }
+
+    impl PreCommitConfigDb {
+        query! {
+            pub fn select_for_repo(repo_hash: String)
+                -> Result<Option<(i32, i32, i32, String)>>
+            {
+                SELECT format, organize_imports, run_hook, tasks_json
+                FROM pre_commit_configs
+                WHERE repo_hash = ?
+            }
+        }
+
+        query! {
+            pub async fn upsert(
+                repo_hash: String,
+                format: i32,
+                organize_imports: i32,
+                run_hook: i32,
+                tasks_json: String
+            ) -> Result<()> {
+                INSERT OR REPLACE INTO pre_commit_configs
+                    (repo_hash, format, organize_imports, run_hook, tasks_json)
+                VALUES (?, ?, ?, ?, ?)
+            }
+        }
+    }
 }
 
 /// Return value of [`CheckRunner::run`]. The runner stops at the first
@@ -396,7 +418,7 @@ async fn run_task(template: &TaskTemplate, work_dir: &Path) -> Result<()> {
 
     let mut command = util::command::new_command(&program);
     command.args(&spawn.args);
-    let cwd: PathBuf = spawn
+    let cwd: std::path::PathBuf = spawn
         .cwd
         .clone()
         .unwrap_or_else(|| work_dir.to_path_buf());
@@ -515,15 +537,11 @@ mod tests {
     use std::collections::HashSet;
     use tempfile::tempdir;
 
-    fn pin(dir: &Path) {
-        test_override::set(dir.to_path_buf());
-    }
-
-    #[test]
-    fn save_and_load_round_trips() {
-        let dir = tempdir().expect("tempdir");
-        pin(dir.path());
-        let repo = Path::new("/tmp/pcr1");
+    /// Tests share a single in-memory `PreCommitConfigDb`. Use unique
+    /// repo paths per test to avoid cross-test row collisions.
+    #[gpui::test]
+    async fn save_and_load_round_trips() {
+        let repo = Path::new("/tmp/pcr1-db");
         let cfg = PreCommitConfig {
             format: true,
             organize_imports: false,
@@ -533,35 +551,25 @@ mod tests {
         save_for_repo(repo, cfg.clone()).expect("save");
         let loaded = load_for_repo(repo).expect("load");
         assert_eq!(loaded, cfg);
-        test_override::clear();
     }
 
-    #[test]
-    fn load_returns_default_when_no_entry() {
-        let dir = tempdir().expect("tempdir");
-        pin(dir.path());
-        let loaded = load_for_repo(Path::new("/tmp/pcr2")).expect("load");
+    #[gpui::test]
+    async fn load_returns_default_when_no_entry() {
+        let loaded = load_for_repo(Path::new("/tmp/pcr2-db-default")).expect("load");
         assert_eq!(loaded, PreCommitConfig::default());
-        test_override::clear();
     }
 
     #[test]
     fn no_verify_bypasses_everything() {
-        // Build a `CheckRunner` minus the GPUI-bound fields and exercise
-        // the short-circuit. We don't construct a real `Project` /
-        // `Repository` here — `no_verify = true` returns before any
-        // entity access.
-        let dir = tempdir().expect("tempdir");
-        pin(dir.path());
+        // Direct test of the short-circuit predicate the runner uses.
+        // Full GPUI integration is covered in `tests/pre_commit_runner_test.rs`
+        // via the `--no-verify` toggle path.
         let cfg = PreCommitConfig {
             format: true,
             organize_imports: true,
             tasks: vec!["a".to_string(), "b".to_string()],
             run_hook: true,
         };
-        // Direct test of the short-circuit predicate the runner uses.
-        // Full GPUI integration is covered in `tests/pre_commit_runner_test.rs`
-        // via the `--no-verify` toggle path.
         assert!(cfg.format);
         assert!(cfg.run_hook);
         let argv = no_verify_argv(true, true);
@@ -572,7 +580,6 @@ mod tests {
         assert_eq!(argv_their_hook, vec!["--no-verify"]);
         let argv_no_hook = no_verify_argv(false, true);
         assert_eq!(argv_no_hook, vec!["--no-verify"]);
-        test_override::clear();
     }
 
     #[test]

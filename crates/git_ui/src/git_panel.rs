@@ -676,9 +676,9 @@ pub struct GitPanel {
 
     // S-PCH-HK — per-repo before-commit checks state. `pre_commit_config`
     // is loaded lazily when the panel sees a new active repository
-    // (see `pre_commit_loaded_for`); changes are persisted to
-    // `~/.config/spk-editor/git_pre_commit.json` via the same fs2 +
-    // atomic-rename pattern as `branch_picker::favorites`.
+    // (see `pre_commit_loaded_for`); changes are persisted to the shared
+    // SQLite `AppDatabase` under the `PreCommitConfigDb` Domain (table
+    // `pre_commit_configs`) — same backend as `branch_picker::favorites`.
     pre_commit_config: pre_commit::PreCommitConfig,
     pre_commit_loaded_for: Option<std::sync::Arc<std::path::Path>>,
     /// Toggling `--no-verify` bypasses BOTH our checks and git's hook.
