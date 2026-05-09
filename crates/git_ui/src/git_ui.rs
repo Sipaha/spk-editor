@@ -17,6 +17,7 @@ pub mod handlers;
 mod handlers_mcp;
 pub mod interactive_rebase;
 pub mod mini_graph;
+pub mod pre_commit;
 pub mod providers;
 pub mod push_dialog;
 mod push_dialog_mcp;

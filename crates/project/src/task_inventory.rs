@@ -661,6 +661,19 @@ impl Inventory {
             .collect()
     }
 
+    /// SPK Editor fork (S-PCH-HK): returns task templates flagged with
+    /// `before_commit: true` from the worktree-scoped + global settings.
+    /// Used by the git panel to render pre-commit check rows.
+    pub fn before_commit_templates(
+        &self,
+        worktree: WorktreeId,
+    ) -> Vec<(TaskSourceKind, TaskTemplate)> {
+        self.worktree_templates_from_settings(worktree)
+            .chain(self.global_templates_from_settings())
+            .filter(|(_, template)| template.before_commit)
+            .collect()
+    }
+
     fn global_templates_from_settings(
         &self,
     ) -> impl '_ + Iterator<Item = (TaskSourceKind, TaskTemplate)> {

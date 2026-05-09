@@ -1057,6 +1057,15 @@
       // Default: 5
       "max_snapshots": 5,
     },
+    // Pre-commit checks (S-PCH-HK). When true, the commit panel exposes
+    // the "Run pre-commit hook" checkbox; when ticked, spk-editor runs
+    // `<repo>/.git/hooks/pre-commit` itself and then issues
+    // `git commit --no-verify` to avoid double-execution. When false the
+    // checkbox is hidden and git itself runs the hook (same behavior as
+    // without our UI).
+    //
+    // Default: true
+    "run_pre_commit_hooks_in_panel": true,
   },
   "message_editor": {
     // Whether to automatically replace emoji shortcodes with emoji characters.

@@ -77,6 +77,7 @@ pub struct GitPanelSettings {
     pub interactive_rebase: InteractiveRebaseSettings,
     pub show_at_revision: ShowAtRevisionSettings,
     pub auto_shelve: AutoShelveSettings,
+    pub run_pre_commit_hooks_in_panel: bool,
 }
 
 #[derive(Default)]
@@ -159,6 +160,9 @@ impl Settings for GitPanelSettings {
                         .unwrap_or(AutoShelveSettings::DEFAULT_MAX_SNAPSHOTS),
                 }
             },
+            run_pre_commit_hooks_in_panel: git_panel
+                .run_pre_commit_hooks_in_panel
+                .unwrap_or(true),
         }
     }
 }

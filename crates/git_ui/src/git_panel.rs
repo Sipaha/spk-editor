@@ -2,6 +2,7 @@ use crate::askpass_modal::AskPassModal;
 use crate::commit_modal::CommitModal;
 use crate::commit_tooltip::CommitTooltip;
 use crate::commit_view::CommitView;
+use crate::pre_commit;
 use crate::git_panel_settings::GitPanelScrollbarAccessor;
 use crate::project_diff::{self, BranchDiff, Diff, ProjectDiff};
 use crate::remote_output::{self, RemoteAction, SuccessMessage};
@@ -161,6 +162,10 @@ enum TrashCancel {
 /// instance covers all credential-warning toasts so re-firing replaces the
 /// previous notification rather than stacking.
 struct CredentialsWarningId;
+
+/// Marker type for the S-PCH-HK pre-commit failure toast. Distinct from
+/// `CredentialsWarningId` so the two notifications can coexist.
+struct PreCommitFailureId;
 
 struct GitMenuState {
     has_tracked_changes: bool,
@@ -670,6 +675,16 @@ pub struct GitPanel {
     // Phase 3: per-member project selector at the top of the panel
     solution_selector: gpui::Entity<solutions_ui::ActiveProjectSelector>,
     _selector_subscription: Subscription,
+
+    // S-PCH-HK — per-repo before-commit checks state. `pre_commit_config`
+    // is loaded lazily when the panel sees a new active repository
+    // (see `pre_commit_loaded_for`); changes are persisted to
+    // `~/.config/spk-editor/git_pre_commit.json` via the same fs2 +
+    // atomic-rename pattern as `branch_picker::favorites`.
+    pre_commit_config: pre_commit::PreCommitConfig,
+    pre_commit_loaded_for: Option<std::sync::Arc<std::path::Path>>,
+    /// Toggling `--no-verify` bypasses BOTH our checks and git's hook.
+    pre_commit_no_verify: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -873,6 +888,9 @@ impl GitPanel {
                 git_access: GitAccess::Yes,
                 solution_selector,
                 _selector_subscription,
+                pre_commit_config: pre_commit::PreCommitConfig::default(),
+                pre_commit_loaded_for: None,
+                pre_commit_no_verify: false,
             };
 
             this.schedule_update(window, cx);
@@ -2313,6 +2331,13 @@ impl GitPanel {
             return;
         }
 
+        // S-PCH-HK — build the pre-commit runner (lazy: only spends work
+        // when the user has actually configured a check). The runner is
+        // awaited inside the same `pending_commit` task so the commit
+        // button stays disabled until checks finish.
+        self.ensure_pre_commit_config_loaded(cx);
+        let pre_commit_runner = self.build_pre_commit_runner(&active_repository, cx);
+
         let askpass = self.askpass_delegate("git commit", window, cx);
         let commit_message = self.custom_or_suggested_commit_message(window, cx);
 
@@ -2399,6 +2424,31 @@ impl GitPanel {
             })
         };
         let task = cx.spawn_in(window, async move |this, cx| {
+            // S-PCH-HK — first run the configured pre-commit checks; on
+            // failure, surface a modal and abort the commit. The runner
+            // short-circuits when `--no-verify` is on, so the configured
+            // check set is irrelevant in that case.
+            if let Some(runner) = pre_commit_runner {
+                match runner.run(cx).await {
+                    pre_commit::CheckResult::Passed => {}
+                    pre_commit::CheckResult::Aborted => {
+                        this.update(cx, |this, _| {
+                            this.pending_commit.take();
+                        })
+                        .ok();
+                        return;
+                    }
+                    pre_commit::CheckResult::Failed { which, output } => {
+                        this.update_in(cx, |this, window, cx| {
+                            this.pending_commit.take();
+                            this.show_pre_commit_failure_modal(&which, &output, window, cx);
+                        })
+                        .ok();
+                        return;
+                    }
+                }
+            }
+
             let result = task.await;
             this.update_in(cx, |this, window, cx| {
                 this.pending_commit.take();
@@ -2420,6 +2470,129 @@ impl GitPanel {
         });
 
         self.pending_commit = Some(task);
+    }
+
+    /// S-PCH-HK — collect everything the [`pre_commit::CheckRunner`] needs
+    /// from the panel state and the project task inventory. Returns
+    /// `None` when no check is configured (or the user toggled
+    /// `--no-verify` AND no panel-side check is on; we still run the
+    /// runner for `--no-verify` so it can short-circuit deterministically).
+    fn build_pre_commit_runner(
+        &self,
+        active_repository: &Entity<Repository>,
+        cx: &Context<Self>,
+    ) -> Option<pre_commit::CheckRunner> {
+        let cfg = &self.pre_commit_config;
+        let nothing_configured = !cfg.format
+            && !cfg.organize_imports
+            && cfg.tasks.is_empty()
+            && !cfg.run_hook;
+        if nothing_configured && !self.pre_commit_no_verify {
+            return None;
+        }
+
+        let task_templates = self.pre_commit_resolve_task_templates(cx);
+        Some(pre_commit::CheckRunner {
+            repo: active_repository.clone(),
+            project: self.project.clone(),
+            workspace: self.workspace.clone(),
+            config: cfg.clone(),
+            task_templates,
+            no_verify: self.pre_commit_no_verify,
+        })
+    }
+
+    /// Resolve `pre_commit_config.tasks` (label list) against the project
+    /// task inventory. Tasks that no longer exist or have lost their
+    /// `before_commit: true` flag are silently skipped — the runner only
+    /// invokes templates we still know about.
+    fn pre_commit_resolve_task_templates(
+        &self,
+        cx: &Context<Self>,
+    ) -> Vec<(String, task::TaskTemplate)> {
+        let labels = self.pre_commit_config.tasks.clone();
+        if labels.is_empty() {
+            return Vec::new();
+        }
+        let templates = self.collect_before_commit_templates(cx);
+        labels
+            .into_iter()
+            .filter_map(|label| {
+                templates
+                    .iter()
+                    .find(|(_, t)| t.label == label && t.before_commit)
+                    .map(|(_, t)| (label, t.clone()))
+            })
+            .collect()
+    }
+
+    /// Walk the project's worktrees and surface every TaskTemplate flagged
+    /// `before_commit: true`. Used by both the runner (to resolve label →
+    /// template) and the panel (to render `Run task: <label>` rows).
+    pub(crate) fn collect_before_commit_templates(
+        &self,
+        cx: &Context<Self>,
+    ) -> Vec<(project::TaskSourceKind, task::TaskTemplate)> {
+        let project = self.project.read(cx);
+        let Some(inventory) = project.task_store().read(cx).task_inventory().cloned() else {
+            return Vec::new();
+        };
+        let inventory = inventory.read(cx);
+        let mut out: Vec<(project::TaskSourceKind, task::TaskTemplate)> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for worktree in project.worktrees(cx) {
+            let id = worktree.read(cx).id();
+            for (kind, template) in inventory.before_commit_templates(id) {
+                if seen.insert(template.label.clone()) {
+                    out.push((kind, template));
+                }
+            }
+        }
+        out
+    }
+
+    fn show_pre_commit_failure_modal(
+        &mut self,
+        which: &str,
+        output: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = format!("Pre-commit check failed: {which}.");
+        let detail = if output.trim().is_empty() {
+            "The check produced no output.".to_string()
+        } else {
+            output.to_string()
+        };
+        let prompt = window.prompt(
+            PromptLevel::Warning,
+            &title,
+            Some(&detail),
+            &["View Output", "Cancel"],
+            cx,
+        );
+        let workspace = self.workspace.clone();
+        let which_owned = which.to_string();
+        let which_for_async = which_owned.clone();
+        cx.spawn(async move |_, cx| {
+            if let Ok(0) = prompt.await {
+                workspace
+                    .update(cx, |workspace, cx| {
+                        let toast = workspace::Toast::new(
+                            workspace::notifications::NotificationId::unique::<
+                                PreCommitFailureId,
+                            >(),
+                            format!(
+                                "Pre-commit check `{which_for_async}` output captured to log"
+                            ),
+                        );
+                        workspace.show_toast(toast, cx);
+                    })
+                    .ok();
+            }
+        })
+        .detach();
+        log::warn!("pre-commit check `{which_owned}` failed:\n{output}");
     }
 
     pub(crate) fn uncommit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3662,6 +3835,9 @@ impl GitPanel {
         self.active_repository = self.project.read(cx).active_repository(cx);
         // Phase 3: let the solution selector override the active repo.
         self.refresh_active_repository_for_selector(cx);
+        // S-PCH-HK — pick up the per-repo pre-commit config when the
+        // active repository changes (cheap no-op when unchanged).
+        self.ensure_pre_commit_config_loaded(cx);
         self.entries.clear();
         self.entries_indices.clear();
         self.single_staged_entry.take();
@@ -4491,6 +4667,121 @@ impl GitPanel {
                 })
                 .into_any_element(),
         )
+    }
+
+    /// S-PCH-HK — render the "Before commit" section under the commit
+    /// editor when at least one check is available. Format /
+    /// Organize-imports rows are always offered; `Run task: <label>`
+    /// rows appear once per task flagged `before_commit: true`; the
+    /// `Run pre-commit hook` row is gated behind both
+    /// `git_panel.run_pre_commit_hooks_in_panel` and the existence of
+    /// an executable `<repo>/.git/hooks/pre-commit`.
+    pub(crate) fn render_pre_commit_section(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let active_repository = self.active_repository.clone()?;
+        let setting_enables_hook_row = GitPanelSettings::get_global(cx)
+            .run_pre_commit_hooks_in_panel;
+        let work_dir = active_repository.read(cx).work_directory_abs_path.clone();
+        let hook_runnable = pre_commit::pre_commit_hook_runnable(&work_dir);
+        let show_hook_row = setting_enables_hook_row && hook_runnable;
+        let task_rows = self.collect_before_commit_templates(cx);
+
+        let cfg = self.pre_commit_config.clone();
+        let no_verify = self.pre_commit_no_verify;
+
+        let to_state = |on: bool| {
+            if on {
+                ui::ToggleState::Selected
+            } else {
+                ui::ToggleState::Unselected
+            }
+        };
+
+        let format_row = Checkbox::new("pre-commit-format", to_state(cfg.format))
+            .label("Format")
+            .disabled(no_verify)
+            .on_click(cx.listener(|this, state: &ui::ToggleState, _, cx| {
+                this.set_pre_commit_format(matches!(state, ui::ToggleState::Selected), cx);
+            }));
+        let organize_row =
+            Checkbox::new("pre-commit-organize-imports", to_state(cfg.organize_imports))
+                .label("Organize imports")
+                .disabled(no_verify)
+                .on_click(cx.listener(|this, state: &ui::ToggleState, _, cx| {
+                    this.set_pre_commit_organize_imports(
+                        matches!(state, ui::ToggleState::Selected),
+                        cx,
+                    );
+                }));
+
+        let mut rows = v_flex()
+            .px_2()
+            .gap_0p5()
+            .child(format_row)
+            .child(organize_row);
+
+        for (_, template) in &task_rows {
+            let label = template.label.clone();
+            let label_for_listener = label.clone();
+            let id = ElementId::Name(format!("pre-commit-task-{label}").into());
+            let checked = cfg.tasks.iter().any(|l| l == &label);
+            let row_label: SharedString = format!("Run task: {label}").into();
+            rows = rows.child(
+                Checkbox::new(id, to_state(checked))
+                    .label(row_label)
+                    .disabled(no_verify)
+                    .on_click(cx.listener(move |this, _state: &ui::ToggleState, _, cx| {
+                        this.toggle_pre_commit_task(&label_for_listener, cx);
+                    })),
+            );
+        }
+
+        if show_hook_row {
+            rows = rows.child(
+                Checkbox::new("pre-commit-hook", to_state(cfg.run_hook))
+                    .label("Run pre-commit hook (.git/hooks/pre-commit)")
+                    .disabled(no_verify)
+                    .on_click(cx.listener(|this, state: &ui::ToggleState, _, cx| {
+                        this.set_pre_commit_run_hook(
+                            matches!(state, ui::ToggleState::Selected),
+                            cx,
+                        );
+                    })),
+            );
+        }
+
+        let no_verify_row = h_flex()
+            .px_2()
+            .py_0p5()
+            .gap_2()
+            .border_t_1()
+            .border_color(cx.theme().colors().border_variant)
+            .child(
+                Checkbox::new("pre-commit-no-verify", to_state(no_verify))
+                    .label("--no-verify (skip all checks)")
+                    .on_click(cx.listener(|this, state: &ui::ToggleState, _, cx| {
+                        this.set_pre_commit_no_verify(
+                            matches!(state, ui::ToggleState::Selected),
+                            cx,
+                        );
+                    })),
+            );
+
+        let header = h_flex().px_2().py_1().gap_1().child(
+            Label::new("Before commit")
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+        );
+
+        let section = v_flex()
+            .border_t_1()
+            .border_color(cx.theme().colors().border)
+            .child(header)
+            .child(rows)
+            .child(no_verify_row);
+        Some(section)
     }
 
     pub fn render_footer(
@@ -5864,6 +6155,104 @@ impl GitPanel {
         cx.notify();
     }
 
+    /// S-PCH-HK — load the persisted per-repo config when the active
+    /// repo changes. Cheap (file read + JSON parse) but only re-runs when
+    /// the work-dir path actually differs from `pre_commit_loaded_for`.
+    pub(crate) fn ensure_pre_commit_config_loaded(&mut self, cx: &mut Context<Self>) {
+        let Some(repo) = self.active_repository.as_ref() else {
+            self.pre_commit_loaded_for = None;
+            self.pre_commit_config = pre_commit::PreCommitConfig::default();
+            return;
+        };
+        let work_dir = repo.read(cx).work_directory_abs_path.clone();
+        if self.pre_commit_loaded_for.as_deref() == Some(&*work_dir) {
+            return;
+        }
+        match pre_commit::load_for_repo(&work_dir) {
+            Ok(cfg) => {
+                self.pre_commit_config = cfg;
+            }
+            Err(e) => {
+                log::warn!("loading pre-commit config: {e:#}");
+                self.pre_commit_config = pre_commit::PreCommitConfig::default();
+            }
+        }
+        self.pre_commit_loaded_for = Some(work_dir);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn pre_commit_config(&self) -> &pre_commit::PreCommitConfig {
+        &self.pre_commit_config
+    }
+
+    pub(crate) fn set_pre_commit_format(&mut self, value: bool, cx: &mut Context<Self>) {
+        if self.pre_commit_config.format == value {
+            return;
+        }
+        self.pre_commit_config.format = value;
+        self.persist_pre_commit_config(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn set_pre_commit_organize_imports(
+        &mut self,
+        value: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pre_commit_config.organize_imports == value {
+            return;
+        }
+        self.pre_commit_config.organize_imports = value;
+        self.persist_pre_commit_config(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_pre_commit_task(&mut self, label: &str, cx: &mut Context<Self>) {
+        let cfg = &mut self.pre_commit_config;
+        if let Some(pos) = cfg.tasks.iter().position(|l| l == label) {
+            cfg.tasks.remove(pos);
+        } else {
+            cfg.tasks.push(label.to_string());
+        }
+        self.persist_pre_commit_config(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn set_pre_commit_run_hook(&mut self, value: bool, cx: &mut Context<Self>) {
+        if self.pre_commit_config.run_hook == value {
+            return;
+        }
+        self.pre_commit_config.run_hook = value;
+        self.persist_pre_commit_config(cx);
+        cx.notify();
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn pre_commit_no_verify(&self) -> bool {
+        self.pre_commit_no_verify
+    }
+
+    pub(crate) fn set_pre_commit_no_verify(&mut self, value: bool, cx: &mut Context<Self>) {
+        if self.pre_commit_no_verify == value {
+            return;
+        }
+        self.pre_commit_no_verify = value;
+        cx.notify();
+    }
+
+    fn persist_pre_commit_config(&self, cx: &mut Context<Self>) {
+        let Some(work_dir) = self.pre_commit_loaded_for.clone() else {
+            return;
+        };
+        let cfg = self.pre_commit_config.clone();
+        cx.background_spawn(async move {
+            if let Err(e) = pre_commit::save_for_repo(&work_dir, cfg) {
+                log::warn!("persisting pre-commit config: {e:#}");
+            }
+        })
+        .detach();
+    }
+
     pub fn signoff_enabled(&self) -> bool {
         self.signoff_enabled
     }
@@ -6070,6 +6459,7 @@ impl Render for GitPanel {
                         }
                     })
                     .children(self.render_footer(window, cx))
+                    .children(self.render_pre_commit_section(cx))
                     .when(self.amend_pending, |this| {
                         this.child(self.render_pending_amend(cx))
                     })

@@ -698,6 +698,16 @@ pub struct GitPanelSettingsContent {
 
     /// Auto-shelve (S-SHL) configuration: snapshot interval + retention.
     pub auto_shelve: Option<AutoShelveSettingsContent>,
+
+    /// Pre-commit checks (S-PCH-HK): when `true`, the commit panel offers a
+    /// `Run pre-commit hook` checkbox that, when ticked, executes
+    /// `<repo>/.git/hooks/pre-commit` from spk-editor and then issues
+    /// `git commit --no-verify` to suppress git's own hook re-run. When
+    /// `false`, the checkbox is hidden and git itself runs the hook (same
+    /// as without our UI).
+    ///
+    /// Default: true
+    pub run_pre_commit_hooks_in_panel: Option<bool>,
 }
 
 #[with_fallible_options]

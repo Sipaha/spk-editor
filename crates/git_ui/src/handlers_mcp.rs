@@ -70,6 +70,8 @@ pub(crate) fn register(cx: &mut App) {
     register_typed_tool_with_tier(cx, ToolTier::Destructive, ShelfDropTool);
     // S-ANN — read-only blame.
     register_typed_tool_with_tier(cx, ToolTier::ReadOnly, BlameTool);
+    // S-PCH-HK — run pre-commit checks against the active repository.
+    register_typed_tool_with_tier(cx, ToolTier::Write, RunPreCommitChecksTool);
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -2819,6 +2821,151 @@ fn parse_line_porcelain(out: &str) -> Vec<McpBlameEntry> {
         current_final_line = final_line;
     }
     entries
+}
+
+// =====================================================================
+//  S-PCH-HK — Before-commit checks (`editor.git.run_pre_commit_checks`).
+//
+//  Drives the same `pre_commit::CheckRunner` pipeline the commit panel
+//  uses, but exposes a one-shot input so a subagent can ask "would my
+//  current staged state pass the configured checks?" without round-
+//  tripping through the panel UI. Result mirrors `CheckResult`: passed
+//  / failed-with-output / aborted (the latter only on cancellation by
+//  the host process and currently unreachable from the MCP path).
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+/// Input for `editor.git.run_pre_commit_checks`. The full set of
+/// supported `Check` shapes is encoded as a struct rather than a tagged
+/// enum so the MCP schema stays JSON-RPC-friendly.
+pub struct RunPreCommitChecksInput {
+    /// Sequence of checks to run in order. Empty list returns
+    /// immediately with `passed = true`.
+    pub checks: Vec<RunPreCommitCheck>,
+    /// Optional repo to operate on. Defaults to the focused window's
+    /// active repository.
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct RunPreCommitCheck {
+    /// One of `format` / `organize_imports` / `task` / `hook`. Other
+    /// values produce a per-check failure outcome rather than a
+    /// top-level error.
+    pub kind: String,
+    /// `tasks.json` `label` to run when `kind = "task"`. Ignored for
+    /// other kinds.
+    pub task_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct RunPreCommitChecksOutput {
+    pub all_passed: bool,
+    pub outcomes: Vec<PreCommitOutcomeWire>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct PreCommitOutcomeWire {
+    pub which: String,
+    pub passed: bool,
+    pub output: String,
+}
+
+#[derive(Clone)]
+pub struct RunPreCommitChecksTool;
+
+impl McpServerTool for RunPreCommitChecksTool {
+    type Input = RunPreCommitChecksInput;
+    type Output = RunPreCommitChecksOutput;
+    const NAME: &'static str = "editor.git.run_pre_commit_checks";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+
+        let mut outcomes = Vec::with_capacity(input.checks.len());
+        let mut all_passed = true;
+
+        for check in &input.checks {
+            let outcome = run_one_check(check, &work_dir).await;
+            if !outcome.passed {
+                all_passed = false;
+                outcomes.push(outcome);
+                // Mirror panel behavior: stop at the first failure.
+                break;
+            }
+            outcomes.push(outcome);
+        }
+
+        let summary = if all_passed {
+            format!("ran {} pre-commit check(s); all passed", outcomes.len())
+        } else {
+            let failed = outcomes
+                .last()
+                .map(|o| o.which.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            format!("pre-commit check failed: {failed}")
+        };
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: RunPreCommitChecksOutput {
+                all_passed,
+                outcomes,
+            },
+        })
+    }
+}
+
+async fn run_one_check(check: &RunPreCommitCheck, work_dir: &Path) -> PreCommitOutcomeWire {
+    match check.kind.as_str() {
+        "hook" => match crate::pre_commit::run_pre_commit_hook(work_dir).await {
+            Ok(()) => PreCommitOutcomeWire {
+                which: "Run pre-commit hook".to_string(),
+                passed: true,
+                output: String::new(),
+            },
+            Err(e) => PreCommitOutcomeWire {
+                which: "Run pre-commit hook".to_string(),
+                passed: false,
+                output: format!("{e:#}"),
+            },
+        },
+        "format" | "organize_imports" => PreCommitOutcomeWire {
+            which: match check.kind.as_str() {
+                "format" => "Format".to_string(),
+                _ => "Organize imports".to_string(),
+            },
+            passed: false,
+            output: format!(
+                "{} requires an editor session and is not available via MCP yet",
+                check.kind
+            ),
+        },
+        "task" => {
+            let label = check
+                .task_name
+                .clone()
+                .unwrap_or_else(|| "<missing>".to_string());
+            PreCommitOutcomeWire {
+                which: format!("Run task: {label}"),
+                passed: false,
+                output:
+                    "task-based checks require the project task inventory; not yet supported via MCP"
+                        .to_string(),
+            }
+        }
+        other => PreCommitOutcomeWire {
+            which: format!("<unknown:{other}>"),
+            passed: false,
+            output: format!("unsupported check kind `{other}`"),
+        },
+    }
 }
 
 #[cfg(test)]

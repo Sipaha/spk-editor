@@ -51,6 +51,8 @@ This fork no longer constrains itself to additive-only modifications of upstream
 | `crates/git/src/repository.rs` | Adds `branches_containing` / `tags_containing` / `load_commit_against_parent` methods on `GitRepository` (default no-op impls + real impls in `RealGitRepository`) for the S-DET commit-view metadata surface. Adds module-level `parse_contains_output` parser. | `git_ui` (S-DET) |
 | `crates/project/src/git_store.rs` | Adds `Repository::branches_containing` / `tags_containing` / `load_commit_diff_against_parent` job-dispatch helpers. | `git_ui` (S-DET) |
 | `crates/settings_content/src/settings_content.rs` | Adds `CommitViewSettingsContent` (avatars, lazy threshold, mention parsing) + nested field on `GitPanelSettingsContent`. | `git_ui` (S-DET) |
+| `crates/task/src/task_template.rs` | Adds `before_commit: bool` field on `TaskTemplate` (default `false`). Read by `git_ui::pre_commit` to surface a task as a before-commit check row in the commit panel. | `git_ui` (S-PCH-HK) |
+| `crates/project/src/task_inventory.rs` | Adds `Inventory::before_commit_templates(worktree)` accessor (mirrors `templates_with_hooks` shape) so the git panel can enumerate pre-commit-flagged tasks without touching `templates_from_settings`. | `git_ui` (S-PCH-HK) |
 | `crates/workspace/src/welcome.rs` | `render_agent_card` gated off via `false &&` — fork uses `solution_agent`, not upstream agent panel. | `solution_agent` |
 | `crates/paths/src/paths.rs` | `.zed` → `.spke` rename for per-worktree config dir. | rebrand |
 | `assets/keymaps/default-*.json` | Default shortcuts for Solutions / sessions. | `solutions_ui` |
