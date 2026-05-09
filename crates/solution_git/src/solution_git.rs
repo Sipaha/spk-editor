@@ -12,6 +12,7 @@ pub mod branch_protection;
 pub mod commit;
 pub mod dashboard;
 pub mod mcp;
+pub mod push;
 
 use gpui::App;
 use settings::Settings as _;
@@ -57,15 +58,33 @@ pub fn init(cx: &mut App) {
         );
     }
 
+    // S-SOL-PSH: register the solution-wide push orchestrator as the
+    // `SolutionPushProvider`. `git_panel` (and the command-palette
+    // `solution_git::PushAll` action) reach in through the trait when
+    // the user triggers Push All. Idempotent (`OnceLock`-backed).
+    if let Some(orchestrator) = push::build_global_orchestrator(cx) {
+        let boxed: Box<dyn git_ui::providers::SolutionPushProvider> = Box::new(orchestrator);
+        git_ui::providers::set_solution_push_provider(boxed);
+    } else {
+        log::debug!(
+            "solution_git::init: SolutionStore global not installed — \
+             SolutionPushProvider not registered (likely a non-solution test context)"
+        );
+    }
+
     // Register MCP tools owned by this crate (`solution.git.*`).
     mcp::register(cx);
     commit::mcp::register(cx);
     dashboard::register_mcp(cx);
+    push::mcp::register(cx);
 
     // S-SOL-DSH — wire the `solution_git::OpenStatusDashboard` workspace
     // action so the command palette can open the dashboard pane item.
+    // S-SOL-PSH — wire `solution_git::PushAll` for the same surface plus
+    // the dashboard's Push All toolbar button.
     cx.observe_new(|workspace: &mut workspace::Workspace, _, _| {
         dashboard::register(workspace);
+        push::register(workspace);
     })
     .detach();
 }

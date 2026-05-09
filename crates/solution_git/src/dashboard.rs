@@ -1046,8 +1046,8 @@ impl SolutionStatusDashboard {
             )
             .child(
                 IconButton::new("dsh-push-all", IconName::ArrowUp)
-                    .tooltip(Tooltip::text("Push All — Not yet implemented (S-SOL-PSH)"))
-                    .disabled(true),
+                    .tooltip(Tooltip::text("Push All (S-SOL-PSH)"))
+                    .on_click(cx.listener(|this, _, _, cx| this.open_push_dialog(cx))),
             )
             .child(
                 IconButton::new("dsh-cancel", IconName::Close)
@@ -1226,6 +1226,17 @@ impl SolutionStatusDashboard {
             });
         })
         .detach();
+    }
+
+    fn open_push_dialog(&mut self, cx: &mut Context<Self>) {
+        let Some(provider) = git_ui::providers::solution_push_provider() else {
+            log::info!(
+                "solution_git::dashboard: Push All clicked but no SolutionPushProvider registered"
+            );
+            return;
+        };
+        let workspace = self._workspace.clone();
+        provider.open_solution_push_dialog(workspace, cx);
     }
 
     fn pull_one(&mut self, path: PathBuf, cx: &mut Context<Self>) {
