@@ -185,8 +185,13 @@ impl AtomicGitOp for DeleteBranchOp {
         }
     }
 
+    /// Always undoable: even a non-force `git branch -d` (which only
+    /// succeeds when the branch is fully merged, so no commits are lost)
+    /// still loses the *ref name*. The backup ref preserves the tip; the
+    /// undo entry is what `editor.git.undo_last` walks to surface a
+    /// "Restore branch" action.
     fn is_destructive(&self) -> bool {
-        self.force
+        true
     }
 
     fn affected_branches(&self, _repo_path: &Path) -> Vec<String> {
@@ -216,6 +221,12 @@ impl AtomicGitOp for RenameBranchOp {
 
     fn op_name(&self) -> &'static str {
         "rename_branch"
+    }
+
+    /// Renames keep the tip but lose the old ref name. Mark as undoable so
+    /// `undo_last` can restore the original ref pointing at the same SHA.
+    fn is_destructive(&self) -> bool {
+        true
     }
 
     fn affected_branches(&self, _repo_path: &Path) -> Vec<String> {

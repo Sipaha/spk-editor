@@ -40,8 +40,17 @@ impl SquashOp {
         let base_sha = rev_parse(repo_path, &parent)?;
         let history = list_commits_to_pick(repo_path, &base_sha)?;
 
-        // Pick the oldest commit; squash the rest of `shas`. After all
-        // squash entries, `reword` the resulting tip with `final_message`.
+        // Strategy: reword the *first* selected commit (pick + exec that
+        // rewrites the message to `final_message`), then fixup each
+        // remaining selected commit. `fixup` folds content but keeps the
+        // current tip's message, so the rewritten message survives all the
+        // way to the final combined commit.
+        //
+        // The previous version used `reword` on the *last* commit and
+        // `squash` for the middle, but for the common 2-commit case
+        // [A, B] the last-sha branch fired *instead of* squash and the
+        // commits were never folded — log ended up with two commits, the
+        // newer one just having a renamed subject.
         let mut builder = RebaseTodoBuilder::new();
         let mut shas_iter = shas.iter();
         let first = shas_iter
@@ -51,33 +60,24 @@ impl SquashOp {
         for s in shas_iter {
             squash_targets.insert(s.to_lowercase());
         }
-        let last_sha = shas
-            .last()
-            .ok_or_else(|| anyhow!("squash: no commits supplied"))?;
 
         let mut emitted_first = false;
-        let mut emitted_last_step = false;
+        let mut squashes_emitted = 0usize;
         for commit in history {
-            if !emitted_first && shas_equal(&commit, first) {
-                builder = builder.pick(commit.clone());
-                emitted_first = true;
-                continue;
-            }
             if !emitted_first {
-                // History before the oldest squash target is part of
-                // base; nothing to do (rev-list excludes anything <= base).
-                builder = builder.pick(commit);
-                continue;
-            }
-            if shas_equal(&commit, last_sha) {
-                // Use reword(commit, final_message): expanded to
-                // pick + exec helper that rewrites the message.
-                builder = builder.reword(commit, final_message.clone());
-                emitted_last_step = true;
+                if shas_equal(&commit, first) {
+                    builder = builder.reword(commit.clone(), final_message.clone());
+                    emitted_first = true;
+                } else {
+                    // History before the oldest squash target is part of
+                    // base; nothing to do (rev-list excludes anything <= base).
+                    builder = builder.pick(commit);
+                }
                 continue;
             }
             if squash_targets.iter().any(|s| shas_equal(&commit, s)) {
-                builder = builder.squash(commit);
+                builder = builder.fixup(commit);
+                squashes_emitted += 1;
             } else {
                 // A commit between squash targets that wasn't selected:
                 // contiguity violation.
@@ -87,8 +87,15 @@ impl SquashOp {
                 );
             }
         }
-        if !emitted_last_step {
-            bail!("squash: not all selected commits found in history");
+        if !emitted_first {
+            bail!("squash: oldest selected commit not found in history");
+        }
+        if squashes_emitted != squash_targets.len() {
+            bail!(
+                "squash: only {} of {} extra commits found in history (contiguity violation)",
+                squashes_emitted,
+                squash_targets.len()
+            );
         }
         let todo = builder.build();
         run_rebase_with_op_name(repo_path, &base_sha, todo, callbacks, "squash").await
