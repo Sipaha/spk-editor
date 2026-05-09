@@ -16759,6 +16759,8 @@ dependencies = [
  "git_ui",
  "gpui",
  "log",
+ "menu",
+ "notifications",
  "parking_lot",
  "schemars 1.0.4",
  "serde",

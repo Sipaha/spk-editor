@@ -2254,6 +2254,11 @@ impl GitGraph {
             subject,
             provider,
             work_dir,
+            // S-SOL-CHP: the GraphView consumes per-repo data, not the
+            // Solution-wide aggregated log, so member_id is always None
+            // here. The Solution-aggregated log view (S-SOL-LOG) sets
+            // this when constructing its own context.
+            member_id: None,
         };
         let menu = context_menu::build_commit_context_menu(ctx, window, cx);
         let subscription = cx.subscribe_in(

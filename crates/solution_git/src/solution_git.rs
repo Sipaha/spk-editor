@@ -10,6 +10,7 @@
 pub mod aggregator;
 pub mod branch_protection;
 pub mod commit;
+pub mod cross_cherry_pick;
 pub mod dashboard;
 pub mod mcp;
 pub mod push;
@@ -77,14 +78,20 @@ pub fn init(cx: &mut App) {
     commit::mcp::register(cx);
     dashboard::register_mcp(cx);
     push::mcp::register(cx);
+    cross_cherry_pick::mcp::register(cx);
 
     // S-SOL-DSH — wire the `solution_git::OpenStatusDashboard` workspace
     // action so the command palette can open the dashboard pane item.
     // S-SOL-PSH — wire `solution_git::PushAll` for the same surface plus
     // the dashboard's Push All toolbar button.
+    // S-SOL-CHP — wire `solution_git::CrossCherryPick` so the command
+    // palette and the git-graph context menu can dispatch it (the
+    // context menu builds the action dynamically by name to avoid
+    // adding a build-time dep from `git_ui` to `solution_git`).
     cx.observe_new(|workspace: &mut workspace::Workspace, _, _| {
         dashboard::register(workspace);
         push::register(workspace);
+        cross_cherry_pick::register(workspace);
     })
     .detach();
 }

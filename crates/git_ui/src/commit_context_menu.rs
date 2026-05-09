@@ -52,6 +52,11 @@ pub struct CommitContext {
     /// Working directory of the active repository, for "Show in File
     /// Manager" entries.
     pub work_dir: Option<PathBuf>,
+    /// `Some(<catalog id>)` when this row was sourced from a Solution-wide
+    /// aggregated log (S-SOL-LOG). Drives the "Cherry-pick to Other
+    /// Member…" entry (S-SOL-CHP). `None` for plain single-repo log rows
+    /// — no cross-member entry is shown.
+    pub member_id: Option<SharedString>,
 }
 
 pub fn build_commit_context_menu(
@@ -111,7 +116,32 @@ pub fn build_commit_context_menu(
             .entry("Cherry-pick", None, {
                 let ctx = destructive_ctx.clone();
                 move |window, cx| run_cherry_pick(ctx.clone(), window, cx)
+            });
+
+        // S-SOL-CHP — show "Cherry-pick to Other Member…" only for rows
+        // that came from the Solution-wide aggregated log (i.e.
+        // `member_id` is set). Builds the action dynamically by name so
+        // this module doesn't pull in a build-time dep on `solution_git`
+        // (mirrors the `Show Affected Paths in Log` pattern). When the
+        // action isn't registered the dispatch is silently skipped.
+        let menu = if let Some(member_id) = destructive_ctx.member_id.clone() {
+            let sha = destructive_ctx.sha.clone();
+            menu.entry("Cherry-pick to Other Member…", None, move |window, cx| {
+                if let Ok(action) = cx.build_action(
+                    "solution_git::CrossCherryPick",
+                    Some(json!({
+                        "source_member": member_id.to_string(),
+                        "source_sha": sha.to_string(),
+                    })),
+                ) {
+                    window.dispatch_action(action, cx);
+                }
             })
+        } else {
+            menu
+        };
+
+        let menu = menu
             .entry("Revert", None, {
                 let ctx = destructive_ctx.clone();
                 move |window, cx| run_revert(ctx.clone(), window, cx)

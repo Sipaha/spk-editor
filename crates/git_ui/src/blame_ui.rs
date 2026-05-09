@@ -526,6 +526,7 @@ fn deploy_blame_entry_context_menu(
         subject,
         provider,
         work_dir,
+        member_id: None,
     };
     let context_menu = build_commit_context_menu(ctx, window, cx);
 
