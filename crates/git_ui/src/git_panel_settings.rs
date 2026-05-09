@@ -21,6 +21,11 @@ pub struct CommitViewSettings {
     pub parse_issue_references: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InteractiveRebaseSettings {
+    pub allow_exec_via_mcp: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, RegisterSetting)]
 pub struct GitPanelSettings {
     pub button: bool,
@@ -39,6 +44,7 @@ pub struct GitPanelSettings {
     pub starts_open: bool,
     pub commit_title_max_length: usize,
     pub commit_view: CommitViewSettings,
+    pub interactive_rebase: InteractiveRebaseSettings,
 }
 
 #[derive(Default)]
@@ -94,6 +100,12 @@ impl Settings for GitPanelSettings {
                         .affected_files_lazy_threshold
                         .unwrap_or(500),
                     parse_issue_references: raw.parse_issue_references.unwrap_or(true),
+                }
+            },
+            interactive_rebase: {
+                let raw = git_panel.interactive_rebase.unwrap_or_default();
+                InteractiveRebaseSettings {
+                    allow_exec_via_mcp: raw.allow_exec_via_mcp.unwrap_or(false),
                 }
             },
         }

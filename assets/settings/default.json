@@ -1021,6 +1021,14 @@
       // message and render them as clickable mentions. URLs are always parsed.
       "parse_issue_references": true,
     },
+    // Interactive-rebase (S-IRB) options.
+    "interactive_rebase": {
+      // When true, the `editor.git.interactive_rebase` MCP tool accepts
+      // `exec` actions in the todo list. Off by default — prevents a
+      // subagent with the `Destructive` capability from running arbitrary
+      // shell commands through `git rebase exec`.
+      "allow_exec_via_mcp": false,
+    },
   },
   "message_editor": {
     // Whether to automatically replace emoji shortcodes with emoji characters.

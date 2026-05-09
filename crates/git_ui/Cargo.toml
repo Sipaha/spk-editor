@@ -36,6 +36,7 @@ futures-lite.workspace = true
 fuzzy.workspace = true
 fuzzy_nucleo.workspace = true
 git.workspace = true
+git_conflict_ui.workspace = true
 paths.workspace = true
 gpui.workspace = true
 itertools.workspace = true

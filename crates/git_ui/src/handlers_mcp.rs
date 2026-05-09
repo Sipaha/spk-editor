@@ -45,6 +45,11 @@ pub(crate) fn register(cx: &mut App) {
     register_typed_tool_with_tier(cx, ToolTier::Destructive, MoveCommitTool);
     register_typed_tool_with_tier(cx, ToolTier::Write, MergeTool);
     register_typed_tool_with_tier(cx, ToolTier::Destructive, RebaseTool);
+    // S-IRB — Interactive rebase + state-machine continuation tools.
+    register_typed_tool_with_tier(cx, ToolTier::Destructive, InteractiveRebaseTool);
+    register_typed_tool_with_tier(cx, ToolTier::Write, RebaseContinueTool);
+    register_typed_tool_with_tier(cx, ToolTier::Destructive, RebaseAbortTool);
+    register_typed_tool_with_tier(cx, ToolTier::Write, RebaseSkipTool);
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -1273,6 +1278,247 @@ impl McpServerTool for RebaseTool {
     }
 }
 
+// =====================================================================
+//  S-IRB Interactive rebase MCP surface.
+//
+//  Delegates to the shared run_rebase engine the UI uses. Shell-command
+//  steps in the supplied todo are gated behind the
+//  git_panel.interactive_rebase.allow_exec_via_mcp setting (default
+//  off): a Destructive subagent cannot ask git to spawn arbitrary shell
+//  commands without the user opting in via settings.
+//
+//  rebase_{continue,abort,skip} wrap the matching git rebase verbs
+//  against the active repo. Useful when a rebase was paused via the CLI
+//  and the agent should resume it.
+// =====================================================================
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct InteractiveRebaseInput {
+    pub base_sha: String,
+    pub todo: Vec<RebaseActionInput>,
+    pub confirmed: bool,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct RebaseActionInput {
+    /// One of pick, reword, edit, squash, fixup, drop, exec.
+    pub action: String,
+    /// Commit SHA. Ignored for the exec action.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sha: String,
+    /// Replacement message (required for reword, optional for squash).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_message: Option<String>,
+    /// Shell command (required for the exec action).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_command: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct InteractiveRebaseTool;
+
+impl McpServerTool for InteractiveRebaseTool {
+    type Input = InteractiveRebaseInput;
+    type Output = DestructiveOutcome;
+    const NAME: &'static str = "editor.git.interactive_rebase";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        require_confirmed(input.confirmed, "interactive_rebase")?;
+
+        let allow_shell_via_mcp = cx.update(|cx| {
+            use settings::Settings as _;
+            crate::git_panel_settings::GitPanelSettings::get_global(cx)
+                .interactive_rebase
+                .allow_exec_via_mcp
+        });
+
+        let todo = build_mcp_todo(&input.todo, allow_shell_via_mcp)?;
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let work_dir_buf = PathBuf::from(work_dir.as_ref());
+        let base = input.base_sha.clone();
+        let handle = cx
+            .background_spawn(async move {
+                git::operations::rebase::run_rebase(
+                    &work_dir_buf,
+                    &base,
+                    todo,
+                    git::operations::rebase::RebaseCallbacks::default(),
+                )
+                .await
+            })
+            .await?;
+        let payload = rebase_outcome_payload(&handle);
+        let summary = format!(
+            "interactive rebase from {} ({} steps) → {}",
+            input.base_sha,
+            input.todo.len(),
+            payload.outcome
+        );
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: payload,
+        })
+    }
+}
+
+pub(crate) fn build_mcp_todo(
+    actions: &[RebaseActionInput],
+    allow_shell_via_mcp: bool,
+) -> Result<git::operations::rebase::RebaseTodo> {
+    use git::operations::rebase::RebaseTodoBuilder;
+    let mut builder = RebaseTodoBuilder::new();
+    for action in actions {
+        match action.action.to_ascii_lowercase().as_str() {
+            "pick" => {
+                require_sha(&action.sha, "pick")?;
+                builder = builder.pick(action.sha.clone());
+            }
+            "reword" => {
+                require_sha(&action.sha, "reword")?;
+                let message = action.new_message.clone().ok_or_else(|| {
+                    anyhow!("reword action requires new_message in payload")
+                })?;
+                builder = builder.reword(action.sha.clone(), message);
+            }
+            "edit" => {
+                require_sha(&action.sha, "edit")?;
+                builder = builder.edit(action.sha.clone());
+            }
+            "squash" => {
+                require_sha(&action.sha, "squash")?;
+                builder = builder.squash(action.sha.clone());
+            }
+            "fixup" => {
+                require_sha(&action.sha, "fixup")?;
+                builder = builder.fixup(action.sha.clone());
+            }
+            "drop" => {
+                require_sha(&action.sha, "drop")?;
+                builder = builder.drop(action.sha.clone());
+            }
+            "exec" => {
+                if !allow_shell_via_mcp {
+                    return Err(anyhow!(
+                        "exec actions are blocked via MCP; enable git_panel.interactive_rebase.allow_exec_via_mcp to permit them"
+                    ));
+                }
+                let cmd = action.exec_command.clone().ok_or_else(|| {
+                    anyhow!("exec action requires exec_command in payload")
+                })?;
+                if cmd.trim().is_empty() {
+                    return Err(anyhow!("exec_command must be non-empty"));
+                }
+                builder = builder.exec(cmd);
+            }
+            other => {
+                return Err(anyhow!(
+                    "unknown rebase action {other:?}; expected one of pick|reword|edit|squash|fixup|drop|exec"
+                ));
+            }
+        }
+    }
+    Ok(builder.build())
+}
+
+fn require_sha(sha: &str, action: &str) -> Result<()> {
+    if sha.trim().is_empty() {
+        Err(anyhow!("{action} action requires a non-empty sha"))
+    } else {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct RebaseContinuationInput {
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct RebaseContinuationOutput {
+    pub op: &'static str,
+    pub completed: bool,
+}
+
+#[derive(Clone)]
+pub struct RebaseContinueTool;
+
+impl McpServerTool for RebaseContinueTool {
+    type Input = RebaseContinuationInput;
+    type Output = RebaseContinuationOutput;
+    const NAME: &'static str = "editor.git.rebase_continue";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        run_rebase_state_command("continue", input.repo_id, cx).await
+    }
+}
+
+#[derive(Clone)]
+pub struct RebaseAbortTool;
+
+impl McpServerTool for RebaseAbortTool {
+    type Input = RebaseContinuationInput;
+    type Output = RebaseContinuationOutput;
+    const NAME: &'static str = "editor.git.rebase_abort";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        run_rebase_state_command("abort", input.repo_id, cx).await
+    }
+}
+
+#[derive(Clone)]
+pub struct RebaseSkipTool;
+
+impl McpServerTool for RebaseSkipTool {
+    type Input = RebaseContinuationInput;
+    type Output = RebaseContinuationOutput;
+    const NAME: &'static str = "editor.git.rebase_skip";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        run_rebase_state_command("skip", input.repo_id, cx).await
+    }
+}
+
+async fn run_rebase_state_command(
+    op: &'static str,
+    repo_id: Option<u64>,
+    cx: &mut AsyncApp,
+) -> Result<ToolResponse<RebaseContinuationOutput>> {
+    let work_dir = cx.update(|cx| resolve_work_directory(repo_id.map(RepositoryId), cx))?;
+    let arg = match op {
+        "continue" => "--continue",
+        "abort" => "--abort",
+        "skip" => "--skip",
+        other => return Err(anyhow!("unknown rebase op {other:?}")),
+    };
+    run_git_void(&work_dir, &["rebase", arg]).await?;
+    let summary = format!("git rebase {arg} → ok");
+    Ok(ToolResponse {
+        content: vec![ToolResponseContent::Text { text: summary }],
+        structured_content: RebaseContinuationOutput { op, completed: true },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1304,5 +1550,75 @@ mod tests {
                 Some("src/old.rs".into())
             )
         );
+    }
+
+    #[test]
+    fn build_mcp_todo_translates_reword() {
+        let actions = vec![
+            RebaseActionInput {
+                action: "pick".into(),
+                sha: "aaaa".into(),
+                ..Default::default()
+            },
+            RebaseActionInput {
+                action: "reword".into(),
+                sha: "bbbb".into(),
+                new_message: Some("rewritten".into()),
+                ..Default::default()
+            },
+        ];
+        let todo = build_mcp_todo(&actions, false).expect("build");
+        let body = todo.serialize_with_helper("/h --git-message-set");
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "pick aaaa");
+        assert_eq!(lines[1], "pick bbbb");
+        assert!(lines[2].starts_with("exec /h --git-message-set "));
+    }
+
+    #[test]
+    fn build_mcp_todo_blocks_exec_when_setting_off() {
+        let actions = vec![RebaseActionInput {
+            action: "exec".into(),
+            exec_command: Some("rm -rf /".into()),
+            ..Default::default()
+        }];
+        let result = build_mcp_todo(&actions, false);
+        match result {
+            Ok(_) => panic!("expected exec to be rejected when setting is off"),
+            Err(err) => {
+                let msg = format!("{err}");
+                assert!(
+                    msg.contains("allow_exec_via_mcp"),
+                    "expected setting reference in error, got {msg}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn build_mcp_todo_allows_exec_when_setting_on() {
+        let actions = vec![RebaseActionInput {
+            action: "exec".into(),
+            exec_command: Some("make test".into()),
+            ..Default::default()
+        }];
+        let todo = build_mcp_todo(&actions, true).expect("build");
+        let body = todo.serialize_with_helper("/x");
+        assert_eq!(body, "exec make test\n");
+    }
+
+    #[test]
+    fn build_mcp_todo_rejects_unknown_action() {
+        let actions = vec![RebaseActionInput {
+            action: "nope".into(),
+            sha: "aaaa".into(),
+            ..Default::default()
+        }];
+        let result = build_mcp_todo(&actions, true);
+        match result {
+            Ok(_) => panic!("expected unknown action to be rejected"),
+            Err(err) => assert!(format!("{err}").contains("unknown rebase action")),
+        }
     }
 }

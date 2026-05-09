@@ -60,6 +60,7 @@ pub fn build_commit_context_menu(
         let compare_ctx = ctx.clone();
         let show_ctx = ctx.clone();
         let destructive_ctx = ctx.clone();
+        let irb_ctx = ctx.clone();
         let external_ctx = ctx;
         let has_provider = external_ctx.provider.is_some();
 
@@ -135,8 +136,9 @@ pub fn build_commit_context_menu(
                 // Picker UX deferred — see `git_ui::handlers::move_commit`
                 // for the underlying op. Wired up alongside S-IRB.
             })
-            .entry("Interactive Rebase from Here", None, |_, _| {
-                // S-IRB stub — no-op until the interactive rebase view lands.
+            .entry("Interactive Rebase from Here", None, {
+                let ctx = irb_ctx;
+                move |window, cx| open_interactive_rebase(ctx.clone(), window, cx)
             });
 
         menu.separator()
@@ -626,6 +628,11 @@ fn run_fixup_with_previous(ctx: CommitContext, window: &mut Window, cx: &mut App
         cx,
     );
     task.detach_and_prompt_err("Fixup failed", window, cx, |e, _, _| Some(format!("{e}")));
+}
+
+fn open_interactive_rebase(ctx: CommitContext, window: &mut Window, cx: &mut App) {
+    let sha = ctx.sha.to_string();
+    window.dispatch_action(Box::new(git::InteractiveRebaseFromHere { sha }), cx);
 }
 
 fn open_edit_message_prompt(ctx: CommitContext, window: &mut Window, cx: &mut App) {

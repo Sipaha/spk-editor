@@ -7448,6 +7448,7 @@ dependencies = [
  "fuzzy",
  "fuzzy_nucleo",
  "git",
+ "git_conflict_ui",
  "git_hosting_providers",
  "gpui",
  "indoc",

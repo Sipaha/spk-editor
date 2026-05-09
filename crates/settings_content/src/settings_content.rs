@@ -688,6 +688,23 @@ pub struct GitPanelSettingsContent {
     /// Commit-view (S-DET) configuration: avatars, lazy-load threshold for
     /// affected files, mention parsing.
     pub commit_view: Option<CommitViewSettingsContent>,
+
+    /// Interactive-rebase (S-IRB) configuration. Currently exposes the
+    /// MCP exec gate.
+    pub interactive_rebase: Option<InteractiveRebaseSettingsContent>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+pub struct InteractiveRebaseSettingsContent {
+    /// When `true`, the `editor.git.interactive_rebase` MCP tool accepts
+    /// `RebaseAction::Exec` entries in the todo. When `false` (default),
+    /// exec actions submitted via MCP are rejected, even for callers
+    /// holding the `Destructive` capability — preventing a subagent from
+    /// running arbitrary shell commands through `git rebase exec`.
+    ///
+    /// Default: false
+    pub allow_exec_via_mcp: Option<bool>,
 }
 
 #[with_fallible_options]

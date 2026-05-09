@@ -14,6 +14,7 @@ pub mod clone;
 pub mod credentials;
 pub mod handlers;
 mod handlers_mcp;
+pub mod interactive_rebase;
 pub mod mini_graph;
 pub mod providers;
 pub mod push_dialog;
@@ -81,6 +82,11 @@ pub fn init(cx: &mut App) {
         git_picker::register(workspace);
         undo_modal::register(workspace);
 
+        workspace.register_action(
+            |workspace, action: &git::InteractiveRebaseFromHere, window, cx| {
+                interactive_rebase_action(workspace, action.sha.clone(), window, cx);
+            },
+        );
         workspace.register_action(
             |workspace, action: &zed_actions::CreateWorktree, window, cx| {
                 worktree_service::handle_create_worktree(workspace, action, window, None, cx);
@@ -291,6 +297,49 @@ pub fn init(cx: &mut App) {
         );
     })
     .detach();
+}
+
+/// S-IRB action handler — open the Interactive Rebase view starting at
+/// `sha`. Refuses if `sha` isn't an ancestor of HEAD on the current
+/// branch.
+fn interactive_rebase_action(
+    workspace: &mut Workspace,
+    sha: String,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let project = workspace.project().clone();
+    let Some(repo) = project.read(cx).active_repository(cx) else {
+        log::warn!("git::InteractiveRebaseFromHere: no active repository");
+        return;
+    };
+    let workspace_handle = cx.entity();
+    let repo_path = repo.read(cx).work_directory_abs_path.to_path_buf();
+    let sha_for_check = sha.clone();
+    cx.spawn_in(window, async move |_workspace, cx| {
+        let ancestry = cx
+            .background_spawn(async move {
+                interactive_rebase::base_is_ancestor_of_head(&repo_path, &sha_for_check)
+            })
+            .await;
+        if let Err(err) = ancestry {
+            log::warn!("git::InteractiveRebaseFromHere: refused — {err}");
+            return Ok(());
+        }
+        cx.update(|window, cx| {
+            interactive_rebase::InteractiveRebaseView::open(
+                workspace_handle,
+                repo,
+                project,
+                sha,
+                window,
+                cx,
+            )
+            .detach_and_log_err(cx);
+        })?;
+        anyhow::Ok(())
+    })
+    .detach_and_log_err(cx);
 }
 
 fn open_modified_files(

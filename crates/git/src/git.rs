@@ -144,6 +144,15 @@ fn default_cleanup_days() -> u32 {
     30
 }
 
+/// Open the Interactive Rebase view starting at `sha`. Requires `sha` to
+/// be reachable from HEAD on the current branch.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = git)]
+#[serde(deny_unknown_fields)]
+pub struct InteractiveRebaseFromHere {
+    pub sha: String,
+}
+
 /// Renames a git branch.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = git)]
