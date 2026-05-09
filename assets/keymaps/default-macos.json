@@ -149,6 +149,11 @@
       "cmd-'": "editor::ToggleSelectedDiffHunks",
       "cmd-\"": "editor::ExpandAllDiffHunks",
       "cmd-alt-g b": "git::Blame",
+      // S-ANN — second binding, IDEA-style. The `cmd-alt-a` chord is
+      // also bound to `agent::OpenPermissionDropdown` but only inside
+      // the `AgentPanel` context, so the editor-level binding here
+      // doesn't shadow anything practical.
+      "cmd-alt-a": "git::Blame",
       "cmd-alt-g m": "git::OpenModifiedFiles",
       "cmd-alt-g r": "git::ReviewDiff",
       "cmd-k cmd-h": "git::FileHistory",

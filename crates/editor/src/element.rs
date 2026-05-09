@@ -462,6 +462,11 @@ impl EditorElement {
         register_action(editor, window, Editor::toggle_git_blame);
         register_action(editor, window, Editor::toggle_git_blame_inline);
         register_action(editor, window, Editor::open_git_blame_commit);
+        register_action(editor, window, Editor::toggle_blame_ignore_whitespace);
+        register_action(editor, window, Editor::toggle_blame_follow_renames);
+        register_action(editor, window, Editor::toggle_blame_absolute_dates);
+        register_action(editor, window, Editor::cycle_blame_color_mode);
+        register_action(editor, window, Editor::clear_blame_author_filter);
         register_action(editor, window, Editor::toggle_selected_diff_hunks);
         register_action(editor, window, Editor::toggle_staged_selected_diff_hunks);
         register_action(editor, window, Editor::stage_and_next);
@@ -2999,8 +3004,9 @@ impl EditorElement {
 
         let blame = self.editor.read(cx).blame.clone()?;
         let workspace = self.editor.read(cx).workspace()?;
-        let blamed_rows: Vec<_> = blame.update(cx, |blame, cx| {
-            blame.blame_for_rows(buffer_rows, cx).collect()
+        let (blamed_rows, blame_options, blame_date_range) = blame.update(cx, |blame, cx| {
+            let entries: Vec<_> = blame.blame_for_rows(buffer_rows, cx).collect();
+            (entries, blame.options().clone(), blame.date_range())
         });
 
         let width = if let Some(max_width) = max_width {
@@ -3028,6 +3034,8 @@ impl EditorElement {
                     workspace.clone(),
                     buffer_id,
                     &*blame_renderer,
+                    &blame_options,
+                    blame_date_range,
                     window,
                     cx,
                 )?;
@@ -8871,6 +8879,7 @@ fn render_blame_entry_popover(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_blame_entry(
     ix: usize,
     blame: &Entity<GitBlame>,
@@ -8881,6 +8890,8 @@ fn render_blame_entry(
     workspace: Entity<Workspace>,
     buffer: BufferId,
     renderer: &dyn BlameRenderer,
+    options: &crate::git::blame::BlameOptions,
+    date_range: Option<(i64, i64)>,
     window: &mut Window,
     cx: &mut App,
 ) -> Option<AnyElement> {
@@ -8900,7 +8911,7 @@ fn render_blame_entry(
     let blame = blame.read(cx);
     let details = blame.details_for_entry(buffer, &blame_entry);
     let repository = blame.repository(cx, buffer)?;
-    renderer.render_blame_entry(
+    renderer.render_blame_entry_with_options(
         &style.text,
         blame_entry,
         details,
@@ -8909,6 +8920,8 @@ fn render_blame_entry(
         editor,
         ix,
         sha_color,
+        options,
+        date_range,
         window,
         cx,
     )

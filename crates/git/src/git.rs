@@ -117,6 +117,18 @@ actions!(
         ApplyPatchFromFile,
         /// Applies a patch / mbox / diff stored in the system clipboard.
         ApplyPatchFromClipboard,
+        /// S-ANN — toggles the blame gutter `ignore whitespace` flag.
+        ToggleBlameIgnoreWhitespace,
+        /// S-ANN — toggles the blame gutter `follow renames` flag.
+        ToggleBlameFollowRenames,
+        /// S-ANN — toggles between absolute and relative date display in
+        /// the blame gutter.
+        ToggleBlameAbsoluteDates,
+        /// S-ANN — cycles through blame gutter color modes (None →
+        /// Color by Date → Color by Author → None).
+        CycleBlameColorMode,
+        /// S-ANN — clears the active blame author filter.
+        ClearBlameAuthorFilter,
     ]
 );
 

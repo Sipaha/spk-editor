@@ -126,6 +126,10 @@
       "ctrl-\"": "editor::ExpandAllDiffHunks",
       "ctrl-i": "editor::ShowSignatureHelp",
       "alt-g b": "git::Blame",
+      // S-ANN — IDEA-style binding. `ctrl-alt-a` is also bound to
+      // `agent::OpenPermissionDropdown` inside `AgentPanel`, so it
+      // doesn't conflict in the Editor context.
+      "ctrl-alt-a": "git::Blame",
       "alt-g m": "git::OpenModifiedFiles",
       "alt-g r": "git::ReviewDiff",
       "ctrl-k ctrl-h": "git::FileHistory",

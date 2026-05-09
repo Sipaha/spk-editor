@@ -11,6 +11,7 @@ use workspace::{Toast, notifications::NotificationId};
 mod backup_mcp;
 mod blame_ui;
 pub mod clone;
+pub mod commit_context_menu;
 pub mod credentials;
 pub mod handlers;
 mod handlers_mcp;

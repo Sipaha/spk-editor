@@ -23,7 +23,7 @@ mod document_symbols;
 mod editor_settings;
 mod element;
 mod folding_ranges;
-mod git;
+pub mod git;
 mod highlight_matching_bracket;
 mod hover_links;
 pub mod hover_popover;
@@ -23914,6 +23914,98 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         self.open_git_blame_commit_internal(window, cx);
+    }
+
+    /// S-ANN — toggle blame `ignore whitespace`. Re-runs blame
+    /// generation since the underlying `git blame` invocation needs to
+    /// be redone with `-w`.
+    pub fn toggle_blame_ignore_whitespace(
+        &mut self,
+        _: &::git::ToggleBlameIgnoreWhitespace,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(blame) = self.blame.as_ref() else {
+            return;
+        };
+        blame.update(cx, |blame, cx| {
+            let mut options = blame.options().clone();
+            options.ignore_whitespace = !options.ignore_whitespace;
+            blame.set_options(options, cx);
+        });
+        cx.notify();
+    }
+
+    /// S-ANN — toggle blame `follow renames` (`-M -C`).
+    pub fn toggle_blame_follow_renames(
+        &mut self,
+        _: &::git::ToggleBlameFollowRenames,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(blame) = self.blame.as_ref() else {
+            return;
+        };
+        blame.update(cx, |blame, cx| {
+            let mut options = blame.options().clone();
+            options.follow_renames = !options.follow_renames;
+            blame.set_options(options, cx);
+        });
+        cx.notify();
+    }
+
+    /// S-ANN — toggle absolute vs relative dates in the blame gutter.
+    pub fn toggle_blame_absolute_dates(
+        &mut self,
+        _: &::git::ToggleBlameAbsoluteDates,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(blame) = self.blame.as_ref() else {
+            return;
+        };
+        blame.update(cx, |blame, cx| {
+            let mut options = blame.options().clone();
+            options.absolute_dates = !options.absolute_dates;
+            blame.set_options(options, cx);
+        });
+        cx.notify();
+    }
+
+    /// S-ANN — cycle through color modes (None / ByDate / ByAuthor).
+    pub fn cycle_blame_color_mode(
+        &mut self,
+        _: &::git::CycleBlameColorMode,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(blame) = self.blame.as_ref() else {
+            return;
+        };
+        blame.update(cx, |blame, cx| {
+            let mut options = blame.options().clone();
+            options.color_mode = options.color_mode.next();
+            blame.set_options(options, cx);
+        });
+        cx.notify();
+    }
+
+    /// S-ANN — clear an active blame author filter.
+    pub fn clear_blame_author_filter(
+        &mut self,
+        _: &::git::ClearBlameAuthorFilter,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(blame) = self.blame.as_ref() else {
+            return;
+        };
+        blame.update(cx, |blame, cx| {
+            let mut options = blame.options().clone();
+            options.author_filter.clear();
+            blame.set_options(options, cx);
+        });
+        cx.notify();
     }
 
     fn open_git_blame_commit_internal(

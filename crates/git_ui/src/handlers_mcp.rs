@@ -63,6 +63,8 @@ pub(crate) fn register(cx: &mut App) {
     register_typed_tool_with_tier(cx, ToolTier::Write, StashPopTool);
     register_typed_tool_with_tier(cx, ToolTier::Destructive, StashDropTool);
     register_typed_tool_with_tier(cx, ToolTier::Write, StashBranchTool);
+    // S-ANN — read-only blame.
+    register_typed_tool_with_tier(cx, ToolTier::ReadOnly, BlameTool);
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -2348,4 +2350,257 @@ fn require_stash_ref(stash_ref: &str, op: &str) -> Result<()> {
         return Err(anyhow!("{op} requires a non-empty stash_ref"));
     }
     Ok(())
+}
+
+// ====================================================================
+//  S-ANN — `editor.git.blame`
+//
+//  Read-only blame for a path inside the active repository. Wraps
+//  `git blame --line-porcelain` so callers see the same output the
+//  editor's gutter would render, plus optional toggles for the IDEA-
+//  style `ignore_whitespace` and `follow_renames` flags.
+// ====================================================================
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+/// Input for `editor.git.blame`. `path` is interpreted relative to the
+/// repository's working directory.
+pub struct BlameInput {
+    pub path: String,
+    pub ignore_whitespace: bool,
+    /// When `true`, follow file renames + copy-detection (`-M -C`).
+    pub follow_renames: bool,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct McpBlameEntry {
+    pub sha: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub author: Option<String>,
+    pub author_email: Option<String>,
+    pub author_time: Option<i64>,
+    pub author_tz: Option<String>,
+    pub committer: Option<String>,
+    pub committer_email: Option<String>,
+    pub committer_time: Option<i64>,
+    pub summary: Option<String>,
+    pub previous: Option<String>,
+    pub filename: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BlameOutput {
+    pub entries: Vec<McpBlameEntry>,
+}
+
+#[derive(Clone)]
+pub struct BlameTool;
+
+impl McpServerTool for BlameTool {
+    type Input = BlameInput;
+    type Output = BlameOutput;
+    const NAME: &'static str = "editor.git.blame";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        if input.path.trim().is_empty() {
+            return Err(anyhow!("blame: path is required"));
+        }
+        let mut args: Vec<&str> = vec!["blame", "--line-porcelain"];
+        if input.ignore_whitespace {
+            args.push("-w");
+        }
+        if input.follow_renames {
+            args.push("-M");
+            args.push("-C");
+        }
+        args.push("--");
+        args.push(&input.path);
+        let raw = run_git(&work_dir, &args).await?;
+        let entries = parse_line_porcelain(&raw);
+        let summary = format!(
+            "blame {} returned {} entries",
+            input.path,
+            entries.len()
+        );
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: BlameOutput { entries },
+        })
+    }
+}
+
+/// Parse `git blame --line-porcelain` output. Each line block starts
+/// with a header `<sha> <orig_line> <final_line> <count?>` followed by
+/// metadata lines (`author`, `author-mail`, etc.) and ends with a
+/// `\t<source-line>` content line.
+///
+/// We coalesce consecutive lines pointing at the same commit into a
+/// single entry covering the full final-line range.
+fn parse_line_porcelain(out: &str) -> Vec<McpBlameEntry> {
+    let mut entries: Vec<McpBlameEntry> = Vec::new();
+    let mut author_cache: collections::HashMap<String, McpBlameEntry> =
+        collections::HashMap::default();
+    let mut current: Option<McpBlameEntry> = None;
+    let mut current_final_line: Option<u32> = None;
+
+    for line in out.lines() {
+        if let Some(entry) = current.as_mut() {
+            if let Some(content_after_tab) = line.strip_prefix('\t') {
+                let _ = content_after_tab;
+                if let Some(final_line) = current_final_line.take() {
+                    let mut entry = current.take().expect("current set");
+                    let sha = entry.sha.clone();
+                    if let Some(seed) = author_cache.get(&sha) {
+                        if entry.author.is_none() {
+                            entry.author = seed.author.clone();
+                        }
+                        if entry.author_email.is_none() {
+                            entry.author_email = seed.author_email.clone();
+                        }
+                        if entry.author_time.is_none() {
+                            entry.author_time = seed.author_time;
+                        }
+                        if entry.author_tz.is_none() {
+                            entry.author_tz = seed.author_tz.clone();
+                        }
+                        if entry.committer.is_none() {
+                            entry.committer = seed.committer.clone();
+                        }
+                        if entry.committer_email.is_none() {
+                            entry.committer_email = seed.committer_email.clone();
+                        }
+                        if entry.committer_time.is_none() {
+                            entry.committer_time = seed.committer_time;
+                        }
+                        if entry.summary.is_none() {
+                            entry.summary = seed.summary.clone();
+                        }
+                    } else {
+                        author_cache.insert(sha, entry.clone());
+                    }
+                    entry.start_line = final_line;
+                    entry.end_line = final_line;
+                    if let Some(prev) = entries.last_mut() {
+                        if prev.sha == entry.sha && prev.end_line + 1 == entry.start_line {
+                            prev.end_line = entry.end_line;
+                            continue;
+                        }
+                    }
+                    entries.push(entry);
+                }
+                continue;
+            }
+            if let Some((key, value)) = line.split_once(' ') {
+                match key {
+                    "author" => entry.author = Some(value.to_string()),
+                    "author-mail" => entry.author_email = Some(value.to_string()),
+                    "author-time" => entry.author_time = value.parse().ok(),
+                    "author-tz" => entry.author_tz = Some(value.to_string()),
+                    "committer" => entry.committer = Some(value.to_string()),
+                    "committer-mail" => entry.committer_email = Some(value.to_string()),
+                    "committer-time" => entry.committer_time = value.parse().ok(),
+                    "summary" => entry.summary = Some(value.to_string()),
+                    "previous" => entry.previous = Some(value.to_string()),
+                    "filename" => entry.filename = Some(value.to_string()),
+                    _ => {}
+                }
+            } else if line == "boundary" {
+                // ignored — boundary commits are still real commits we
+                // want to surface to the caller.
+            }
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let sha = match parts.next() {
+            Some(s) if s.len() == 40 => s.to_string(),
+            _ => continue,
+        };
+        let _orig_line: Option<u32> = parts.next().and_then(|s| s.parse().ok());
+        let final_line: Option<u32> = parts.next().and_then(|s| s.parse().ok());
+        current = Some(McpBlameEntry {
+            sha,
+            start_line: final_line.unwrap_or(0),
+            end_line: final_line.unwrap_or(0),
+            author: None,
+            author_email: None,
+            author_time: None,
+            author_tz: None,
+            committer: None,
+            committer_email: None,
+            committer_time: None,
+            summary: None,
+            previous: None,
+            filename: None,
+        });
+        current_final_line = final_line;
+    }
+    entries
+}
+
+#[cfg(test)]
+mod blame_tests {
+    use super::*;
+
+    #[test]
+    fn parses_line_porcelain_simple() {
+        let raw = "1234567890123456789012345678901234567890 1 1 1\n\
+            author Alice\n\
+            author-mail <alice@example.com>\n\
+            author-time 1700000000\n\
+            author-tz +0100\n\
+            committer Alice\n\
+            committer-mail <alice@example.com>\n\
+            committer-time 1700000000\n\
+            committer-tz +0100\n\
+            summary Initial commit\n\
+            filename foo.txt\n\
+            \tHello\n";
+        let entries = parse_line_porcelain(raw);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].sha, "1234567890123456789012345678901234567890");
+        assert_eq!(entries[0].author.as_deref(), Some("Alice"));
+        assert_eq!(entries[0].author_time, Some(1700000000));
+        assert_eq!(entries[0].summary.as_deref(), Some("Initial commit"));
+        assert_eq!(entries[0].filename.as_deref(), Some("foo.txt"));
+        assert_eq!(entries[0].start_line, 1);
+        assert_eq!(entries[0].end_line, 1);
+    }
+
+    #[test]
+    fn coalesces_consecutive_lines_from_same_commit() {
+        let mut raw = String::new();
+        raw.push_str(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 1 1 2\n\
+            author Bob\n\
+            author-mail <bob@example.com>\n\
+            author-time 1700000000\n\
+            summary Add foo\n\
+            filename foo.txt\n\
+            \tline 1\n",
+        );
+        // Second line, same SHA, no header metadata repeated.
+        raw.push_str(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 2 2\n\
+            filename foo.txt\n\
+            \tline 2\n",
+        );
+        let entries = parse_line_porcelain(&raw);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].start_line, 1);
+        assert_eq!(entries[0].end_line, 2);
+        assert_eq!(entries[0].author.as_deref(), Some("Bob"));
+    }
+
+    #[test]
+    fn empty_output_returns_empty_vec() {
+        assert!(parse_line_porcelain("").is_empty());
+    }
 }
