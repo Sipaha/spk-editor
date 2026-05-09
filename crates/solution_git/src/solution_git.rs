@@ -9,6 +9,7 @@
 
 pub mod aggregator;
 pub mod branch_protection;
+pub mod dashboard;
 pub mod mcp;
 
 use gpui::App;
@@ -18,6 +19,7 @@ use solutions::SolutionsSettings;
 pub use aggregator::{
     DEFAULT_MAX_TOTAL_COMMITS, MEMBER_PALETTE_LEN, SolutionGitAggregator, member_color,
 };
+pub use dashboard::{OpenStatusDashboard, SolutionStatusDashboard};
 
 pub fn init(cx: &mut App) {
     // S-SOL-LOG: build an aggregator wired to the global `SolutionStore`
@@ -42,4 +44,12 @@ pub fn init(cx: &mut App) {
 
     // Register MCP tools owned by this crate (`solution.git.*`).
     mcp::register(cx);
+    dashboard::register_mcp(cx);
+
+    // S-SOL-DSH — wire the `solution_git::OpenStatusDashboard` workspace
+    // action so the command palette can open the dashboard pane item.
+    cx.observe_new(|workspace: &mut workspace::Workspace, _, _| {
+        dashboard::register(workspace);
+    })
+    .detach();
 }

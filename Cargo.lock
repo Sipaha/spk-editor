@@ -16762,8 +16762,12 @@ dependencies = [
  "schemars 1.0.4",
  "serde",
  "settings",
+ "smol",
  "solutions",
+ "theme",
+ "ui",
  "util",
+ "workspace",
 ]
 
 [[package]]
