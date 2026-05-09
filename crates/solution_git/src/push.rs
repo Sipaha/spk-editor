@@ -1209,6 +1209,7 @@ pub mod mcp {
         pub expected_remote_sha: Option<String>,
     }
 
+    /// Input parameters for the push all tool.
     #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
     #[serde(default, deny_unknown_fields)]
     pub struct PushAllInput {
@@ -1229,6 +1230,7 @@ pub mod mcp {
         pub error: Option<String>,
     }
 
+    /// Output of the push all tool.
     #[derive(Debug, Clone, Serialize, JsonSchema)]
     pub struct PushAllOutput {
         pub outcomes: Vec<PushAllResultEntry>,

@@ -691,12 +691,14 @@ fn resolve_targets(
     Ok(pairs)
 }
 
+/// Input parameters for the status dashboard tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct StatusDashboardInput {
     pub solution_id: Option<String>,
 }
 
+/// Output of the status dashboard tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct StatusDashboardOutput {
     pub rows: Vec<MemberRow>,
@@ -757,6 +759,7 @@ impl McpServerTool for StatusDashboardTool {
     }
 }
 
+/// Input parameters for the batch op tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct BatchOpInput {
@@ -775,6 +778,7 @@ pub struct BatchOpOutcome {
     pub skipped: bool,
 }
 
+/// Output of the batch op tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct BatchOpOutput {
     pub outcomes: Vec<BatchOpOutcome>,
@@ -881,6 +885,7 @@ impl McpServerTool for BatchPullTool {
     }
 }
 
+/// Input parameters for the checkout pattern tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct CheckoutPatternInput {
@@ -889,6 +894,7 @@ pub struct CheckoutPatternInput {
     pub solution_id: Option<String>,
 }
 
+/// Output of the checkout pattern tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CheckoutPatternOutput {
     pub matched: Vec<String>,

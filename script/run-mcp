@@ -118,7 +118,13 @@ if [[ -n "$runtime_dir" ]]; then
     export XDG_CACHE_HOME="$runtime_dir"
     socket_dir="$runtime_dir/spk-editor"
 else
-    socket_dir="${XDG_CONFIG_HOME:-$HOME/.config}/spk-editor"
+    # SPK Editor uses ~/.spk/spk-editor[-dev]/config/ (see crates/paths) —
+    # NOT XDG_CONFIG_HOME. The dev binary suffixes with `-dev`.
+    if [[ "$profile" == "dev" ]]; then
+        socket_dir="$HOME/.spk/spk-editor-dev/config"
+    else
+        socket_dir="$HOME/.spk/spk-editor/config"
+    fi
 fi
 socket_path="$socket_dir/mcp.sock"
 mkdir -p "$socket_dir"

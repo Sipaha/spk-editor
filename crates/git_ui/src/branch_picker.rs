@@ -1392,12 +1392,12 @@ impl PickerDelegate for BranchListDelegate {
 // =====================================================================
 
 actions!(
-    git_branches_popup,
+    git,
     [
         /// Opens the IDEA-style tabbed branches popup (S-BRP).
-        Open,
+        BranchesPopupOpen,
         /// Toggle favorite-status for the currently-selected branch row.
-        ToggleFavorite,
+        BranchesPopupToggleFavorite,
     ]
 );
 
@@ -1509,7 +1509,7 @@ pub struct BranchesPopup {
 impl BranchesPopup {
     pub fn open_action(
         workspace: &mut Workspace,
-        _: &Open,
+        _: &BranchesPopupOpen,
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
@@ -1955,7 +1955,7 @@ impl BranchesPopup {
 
     fn handle_toggle_favorite(
         &mut self,
-        _: &ToggleFavorite,
+        _: &BranchesPopupToggleFavorite,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {

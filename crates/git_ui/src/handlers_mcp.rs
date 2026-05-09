@@ -119,6 +119,7 @@ pub struct BranchCreateAtInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the branch create at tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct BranchCreateAtOutput {
     pub branch: String,
@@ -172,6 +173,7 @@ pub struct TagCreateInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the tag create tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct TagCreateOutput {
     pub tag: String,
@@ -223,9 +225,10 @@ impl McpServerTool for TagCreateTool {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
-/// Input for `editor.git.checkout_revision`. Leaves HEAD detached on
-/// success — the result includes the prior branch name so callers can
-/// surface "you left $branch — switch back?" UX.
+/// Input for `editor.git.checkout_revision`. Accepts a branch name, tag,
+/// or commit SHA. The result includes the prior branch name and reports
+/// whether HEAD ended up detached (true for raw SHAs, false when the
+/// argument resolved to a branch).
 pub struct CheckoutRevisionInput {
     pub sha: String,
     pub repo_id: Option<u64>,
@@ -235,6 +238,7 @@ pub struct CheckoutRevisionInput {
     pub force_dirty: bool,
 }
 
+/// Output of the checkout revision tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CheckoutRevisionOutput {
     pub sha: String,
@@ -276,13 +280,25 @@ impl McpServerTool for CheckoutRevisionTool {
                     Some(trimmed.to_string())
                 }
             });
-        run_git_void(&work_dir, &["checkout", &input.sha]).await?;
-        let summary = format!("checked out {} (detached HEAD)", input.sha);
+        // `--` disambiguates the argument as a ref, not a pathspec — without
+        // it, `HEAD~1` and similar relative refs that don't match a tracked
+        // file path silently fail with `pathspec did not match`.
+        run_git_void(&work_dir, &["checkout", &input.sha, "--"]).await?;
+        let detached_head = run_git(&work_dir, &["symbolic-ref", "--short", "-q", "HEAD"])
+            .await
+            .ok()
+            .map(|out| out.trim().is_empty())
+            .unwrap_or(true);
+        let summary = if detached_head {
+            format!("checked out {} (detached HEAD)", input.sha)
+        } else {
+            format!("checked out {}", input.sha)
+        };
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text { text: summary }],
             structured_content: CheckoutRevisionOutput {
                 sha: input.sha,
-                detached_head: true,
+                detached_head,
                 prior_branch,
             },
         })
@@ -301,6 +317,7 @@ pub struct CompareRevisionsInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the compare revisions tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CompareRevisionsOutput {
     pub rev_a: String,
@@ -628,6 +645,7 @@ pub struct ListBranchesInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the list branches tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ListBranchesOutput {
     pub branches: Vec<BranchEntry>,
@@ -719,6 +737,7 @@ pub struct DeleteBranchInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the delete branch tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DeleteBranchOutput {
     pub name: String,
@@ -777,6 +796,7 @@ pub struct RenameBranchInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the rename branch tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct RenameBranchOutput {
     pub old: String,
@@ -829,6 +849,7 @@ pub struct SetUpstreamInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the set upstream tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SetUpstreamOutput {
     pub branch: String,
@@ -918,6 +939,7 @@ fn require_confirmed(input_confirmed: bool, op_label: &str) -> Result<()> {
     ))
 }
 
+/// Input parameters for the cherry pick tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct CherryPickInput {
@@ -966,6 +988,7 @@ impl McpServerTool for CherryPickTool {
     }
 }
 
+/// Input parameters for the revert tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct RevertInput {
@@ -1012,6 +1035,7 @@ impl McpServerTool for RevertTool {
     }
 }
 
+/// Input parameters for the reset tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ResetInput {
@@ -1069,6 +1093,7 @@ fn parse_reset_mode(mode: &str) -> Result<git::operations::reset::ResetMode> {
     }
 }
 
+/// Input parameters for the drop commit tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct DropCommitInput {
@@ -1149,6 +1174,7 @@ fn rebase_outcome_payload(handle: &git::operations::rebase::RebaseHandle) -> Des
     }
 }
 
+/// Input parameters for the squash range tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct SquashRangeInput {
@@ -1190,6 +1216,7 @@ impl McpServerTool for SquashRangeTool {
     }
 }
 
+/// Input parameters for the fixup tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct FixupInput {
@@ -1229,6 +1256,7 @@ impl McpServerTool for FixupTool {
     }
 }
 
+/// Input parameters for the edit commit message tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct EditCommitMessageInput {
@@ -1277,6 +1305,7 @@ impl McpServerTool for EditCommitMessageTool {
     }
 }
 
+/// Input parameters for the move commit tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct MoveCommitInput {
@@ -1329,6 +1358,7 @@ impl McpServerTool for MoveCommitTool {
     }
 }
 
+/// Input parameters for the merge tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct MergeInput {
@@ -1378,6 +1408,7 @@ impl McpServerTool for MergeTool {
     }
 }
 
+/// Input parameters for the rebase tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct RebaseInput {
@@ -1439,6 +1470,7 @@ impl McpServerTool for RebaseTool {
 //  and the agent should resume it.
 // =====================================================================
 
+/// Input parameters for the interactive rebase tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct InteractiveRebaseInput {
@@ -1448,6 +1480,7 @@ pub struct InteractiveRebaseInput {
     pub repo_id: Option<u64>,
 }
 
+/// Input parameters for the rebase action tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct RebaseActionInput {
@@ -1583,12 +1616,14 @@ fn require_sha(sha: &str, action: &str) -> Result<()> {
     }
 }
 
+/// Input parameters for the rebase continuation tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct RebaseContinuationInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the rebase continuation tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct RebaseContinuationOutput {
     pub op: &'static str,
@@ -1678,6 +1713,7 @@ async fn run_rebase_state_command(
 //  tempfile is deleted after the operation regardless of outcome.
 // =====================================================================
 
+/// Input parameters for the create patch tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct CreatePatchInput {
@@ -1688,6 +1724,7 @@ pub struct CreatePatchInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the create patch tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CreatePatchOutput {
     pub patches: Vec<PatchEntry>,
@@ -1752,6 +1789,7 @@ impl McpServerTool for CreatePatchTool {
     }
 }
 
+/// Input parameters for the apply patch tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ApplyPatchInput {
@@ -1768,6 +1806,7 @@ pub struct ApplyPatchInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the apply patch tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ApplyPatchOutput {
     /// One of `"clean" | "conflict" | "rejected_hunks"`.
@@ -1888,6 +1927,7 @@ pub struct ShowAtRevisionInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the show at revision tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ShowAtRevisionOutput {
     /// `WindowId` of the new top-level workspace window. Use it with
@@ -2135,6 +2175,7 @@ mod tests {
 //  tool requires `confirmed: true` per `require_confirmed`.
 // =====================================================================
 
+/// Input parameters for the stash save tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct StashSaveInput {
@@ -2149,6 +2190,7 @@ pub struct StashSaveInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the stash save tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct StashSaveOutput {
     pub created: bool,
@@ -2203,12 +2245,14 @@ impl McpServerTool for StashSaveTool {
     }
 }
 
+/// Input parameters for the stash list tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct StashListInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the stash list tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct StashListOutput {
     pub entries: Vec<StashEntryPayload>,
@@ -2269,6 +2313,7 @@ impl McpServerTool for StashListTool {
     }
 }
 
+/// Input parameters for the stash show tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct StashShowInput {
@@ -2277,6 +2322,7 @@ pub struct StashShowInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the stash show tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct StashShowOutput {
     pub stash_ref: String,
@@ -2315,6 +2361,7 @@ impl McpServerTool for StashShowTool {
     }
 }
 
+/// Input parameters for the stash apply tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct StashApplyInput {
@@ -2322,6 +2369,7 @@ pub struct StashApplyInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the stash mutation tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct StashMutationOutput {
     pub stash_ref: String,
@@ -2355,6 +2403,7 @@ impl McpServerTool for StashApplyTool {
     }
 }
 
+/// Input parameters for the stash pop tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct StashPopInput {
@@ -2390,6 +2439,7 @@ impl McpServerTool for StashPopTool {
     }
 }
 
+/// Input parameters for the stash drop tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct StashDropInput {
@@ -2427,6 +2477,7 @@ impl McpServerTool for StashDropTool {
     }
 }
 
+/// Input parameters for the stash branch tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct StashBranchInput {
@@ -2435,6 +2486,7 @@ pub struct StashBranchInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the stash branch tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct StashBranchOutput {
     pub name: String,
@@ -2494,6 +2546,7 @@ fn require_stash_ref(stash_ref: &str, op: &str) -> Result<()> {
 //  `require_confirmed`.
 // ====================================================================
 
+/// Input parameters for the shelf save tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ShelfSaveInput {
@@ -2544,6 +2597,7 @@ impl ShelfEntryPayload {
     }
 }
 
+/// Output of the shelf save tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ShelfSaveOutput {
     pub entry: ShelfEntryPayload,
@@ -2596,12 +2650,14 @@ impl McpServerTool for ShelfSaveTool {
     }
 }
 
+/// Input parameters for the shelf list tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ShelfListInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the shelf list tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ShelfListOutput {
     pub entries: Vec<ShelfEntryPayload>,
@@ -2650,6 +2706,7 @@ impl McpServerTool for ShelfListTool {
     }
 }
 
+/// Input parameters for the shelf apply tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ShelfApplyInput {
@@ -2660,6 +2717,7 @@ pub struct ShelfApplyInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the shelf apply tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ShelfApplyOutput {
     pub name: String,
@@ -2707,6 +2765,7 @@ impl McpServerTool for ShelfApplyTool {
     }
 }
 
+/// Input parameters for the shelf drop tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ShelfDropInput {
@@ -2715,6 +2774,7 @@ pub struct ShelfDropInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the shelf drop tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ShelfDropOutput {
     pub name: String,
@@ -2793,6 +2853,7 @@ pub struct McpBlameEntry {
     pub filename: Option<String>,
 }
 
+/// Output of the blame tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct BlameOutput {
     pub entries: Vec<McpBlameEntry>,
@@ -2984,6 +3045,7 @@ pub struct RunPreCommitCheck {
     pub task_name: Option<String>,
 }
 
+/// Output of the run pre commit checks tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct RunPreCommitChecksOutput {
     pub all_passed: bool,

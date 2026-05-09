@@ -233,6 +233,12 @@ impl SolutionGitAggregator {
                     .map(|set| set.contains(&m.catalog_id.0))
                     .unwrap_or(true)
             })
+            // Skip members that aren't git repos. Without this, a single
+            // non-repo member makes `git log` exit 128 and the whole
+            // aggregation fails — see dashboard.rs which soft-skips the
+            // same way via `fetch_status(...).log_err()`. `.git` covers
+            // both real directories and gitfile redirects (worktrees).
+            .filter(|m| m.local_path.join(".git").exists())
             .map(|m| (SharedString::from(m.catalog_id.0.clone()), m.local_path.clone()))
             .collect();
 

@@ -51,6 +51,7 @@ pub struct LogToolInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the log tool tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct LogToolOutput {
     pub commits: Vec<LogCommit>,

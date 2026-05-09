@@ -52,6 +52,7 @@ pub struct MiniCommitPayload {
     pub committer_date_unix: i64,
 }
 
+/// Output of the preview push tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct PreviewPushOutput {
     pub branch: String,
@@ -144,6 +145,7 @@ pub struct PushInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the push tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct PushOutput {
     pub branch: String,

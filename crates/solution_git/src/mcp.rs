@@ -58,6 +58,7 @@ pub struct AggregatedLogFilters {
     pub sha: Option<String>,
 }
 
+/// Input parameters for the aggregated log tool tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct AggregatedLogToolInput {
@@ -122,6 +123,7 @@ impl AggregatedLogToolInput {
     }
 }
 
+/// Output of the aggregated log tool tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct AggregatedLogToolOutput {
     pub commits: Vec<AggregatedLogCommit>,
@@ -223,6 +225,7 @@ impl McpServerTool for AggregatedLogTool {
 // and for the future Settings UI's policy preview.
 // =====================================================================
 
+/// Input parameters for the branch protection check tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct BranchProtectionCheckInput {
@@ -242,6 +245,7 @@ pub struct BranchProtectionCheckInput {
     pub solution_id: Option<String>,
 }
 
+/// Output of the branch protection check tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct BranchProtectionCheckOutput {
     /// One of `"allowed" | "requires_confirmation" | "forbidden"`.

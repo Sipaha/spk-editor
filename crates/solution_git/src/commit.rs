@@ -657,6 +657,7 @@ pub mod mcp {
     use schemars::JsonSchema;
     use serde::{Deserialize, Serialize};
 
+    /// Input parameters for the commit all tool.
     #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
     #[serde(default, deny_unknown_fields)]
     pub struct CommitAllInput {
@@ -675,6 +676,7 @@ pub mod mcp {
         pub backup_ref: Option<String>,
     }
 
+    /// Output of the commit all tool.
     #[derive(Debug, Clone, Serialize, JsonSchema)]
     pub struct CommitAllOutput {
         pub member_results: Vec<CommitAllResultEntry>,

@@ -22,6 +22,7 @@ pub(crate) fn register(cx: &mut App) {
     register_typed_tool_with_tier(cx, ToolTier::ReadOnly, CommitShowTool);
 }
 
+/// Input parameters for the commit show tool tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct CommitShowToolInput {
@@ -32,6 +33,7 @@ pub struct CommitShowToolInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the commit show tool tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CommitShowToolOutput {
     pub sha: String,

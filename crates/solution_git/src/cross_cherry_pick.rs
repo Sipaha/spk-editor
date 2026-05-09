@@ -1116,6 +1116,7 @@ pub mod mcp {
         pub new: String,
     }
 
+    /// Input parameters for the cherry pick to member tool.
     #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
     #[serde(default, deny_unknown_fields)]
     pub struct CherryPickToMemberInput {
@@ -1127,6 +1128,7 @@ pub mod mcp {
         pub solution_id: Option<String>,
     }
 
+    /// Output of the cherry pick to member tool.
     #[derive(Debug, Clone, Serialize, JsonSchema)]
     pub struct CherryPickToMemberOutput {
         pub status: String,

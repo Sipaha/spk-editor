@@ -37,6 +37,7 @@ pub struct ListBackupsInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the list backups tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ListBackupsOutput {
     pub backups: Vec<BackupEntry>,
@@ -144,6 +145,7 @@ pub struct UndoLastInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the undo last tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct UndoLastOutput {
     pub created_ref: String,
@@ -207,6 +209,7 @@ pub struct CleanupBackupsInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the cleanup backups tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CleanupBackupsOutput {
     pub removed_count: usize,

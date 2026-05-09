@@ -30,12 +30,14 @@ pub(crate) fn register(cx: &mut App) {
     register_typed_tool_with_tier(cx, ToolTier::Destructive, AbortMergeTool);
 }
 
+/// Input parameters for the list conflicts tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ListConflictsInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the list conflicts tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ListConflictsOutput {
     pub files: Vec<ConflictFileWire>,
@@ -88,6 +90,7 @@ impl McpServerTool for ListConflictsTool {
     }
 }
 
+/// Input parameters for the resolve conflict tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ResolveConflictInput {
@@ -98,6 +101,7 @@ pub struct ResolveConflictInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the resolve conflict tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ResolveConflictOutput {
     pub path: String,
@@ -158,6 +162,7 @@ impl McpServerTool for ResolveConflictTool {
     }
 }
 
+/// Input parameters for the mark resolved tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct MarkResolvedInput {
@@ -165,6 +170,7 @@ pub struct MarkResolvedInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the mark resolved tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct MarkResolvedOutput {
     pub path: String,
@@ -194,12 +200,14 @@ impl McpServerTool for MarkResolvedTool {
     }
 }
 
+/// Input parameters for the continue merge tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct ContinueMergeInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the continue merge tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ContinueMergeOutput {
     pub op: String,
@@ -235,12 +243,14 @@ impl McpServerTool for ContinueMergeTool {
     }
 }
 
+/// Input parameters for the abort merge tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct AbortMergeInput {
     pub repo_id: Option<u64>,
 }
 
+/// Output of the abort merge tool.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct AbortMergeOutput {
     pub op: String,
