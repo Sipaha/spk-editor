@@ -1,4 +1,5 @@
 pub mod context_menu;
+pub mod file_history;
 pub mod filters;
 pub mod highlights;
 pub mod log_toolbar;
@@ -294,6 +295,17 @@ actions!(
 #[action(namespace = git_graph)]
 pub struct ShowAffectedPathsInLog {
     pub paths: Vec<String>,
+}
+
+/// View-level mode for the [`GitGraph`] surface. Derived from `log_source` —
+/// `LogSource::File(_)` projects to [`GraphMode::FileHistory`], everything
+/// else projects to [`GraphMode::Full`]. Code that needs to switch behavior
+/// based on the preset (e.g. toolbar toggle visibility) calls
+/// [`GitGraph::mode`] instead of pattern-matching `log_source` directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphMode {
+    Full,
+    FileHistory,
 }
 
 fn timestamp_format() -> &'static [BorrowedFormatItem<'static>] {
@@ -1016,6 +1028,10 @@ pub struct GitGraph {
     /// Render-only toggles (Compact refs / Group by date) applied at row
     /// rendering time without re-running `git log`.
     view_options: view_options::ViewOptions,
+    /// Toggle state specific to the file-history (S-FHT) preset. Only
+    /// surfaced in the toolbar when [`Self::mode`] is
+    /// [`GraphMode::FileHistory`]; otherwise unused.
+    file_history_options: file_history::FileHistoryOptions,
     /// Email reported by `git config user.email`, captured at view init.
     /// Used by the My-commits highlight to compare against per-commit
     /// `author_email`. `None` until the background fetch resolves.
@@ -1194,6 +1210,77 @@ impl GitGraph {
         cx.notify();
     }
 
+    /// View-level mode derived from [`Self::log_source`]. See [`GraphMode`].
+    pub fn mode(&self) -> GraphMode {
+        match self.log_source {
+            LogSource::File(_) => GraphMode::FileHistory,
+            _ => GraphMode::Full,
+        }
+    }
+
+    pub fn file_history_options(&self) -> file_history::FileHistoryOptions {
+        self.file_history_options
+    }
+
+    /// File-history preset constructor. Equivalent to
+    /// [`Self::new`] with `LogSource::File(repo_path)` plus the implicit
+    /// file-history rendering preset (no graph column; per-file diff in the
+    /// detail panel). The caller resolves the `RepoPath` from a
+    /// `ProjectPath` via `git_store.repository_and_path_for_project_path`.
+    pub fn for_file_history(
+        repo_id: RepositoryId,
+        repo_path: git::repository::RepoPath,
+        git_store: Entity<GitStore>,
+        workspace: WeakEntity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new(
+            repo_id,
+            git_store,
+            workspace,
+            Some(LogSource::File(repo_path)),
+            window,
+            cx,
+        )
+    }
+
+    pub fn set_follow_renames(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.file_history_options.follow_renames == on {
+            return;
+        }
+        self.file_history_options.follow_renames = on;
+        self.invalidate_state(cx);
+        self.fetch_initial_graph_data(cx);
+    }
+
+    pub fn set_with_local_changes(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.file_history_options.with_local_changes == on {
+            return;
+        }
+        self.file_history_options.with_local_changes = on;
+        cx.emit(ItemEvent::Edit);
+        cx.notify();
+    }
+
+    pub fn set_show_inline_diff(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.file_history_options.show_inline_diff == on {
+            return;
+        }
+        self.file_history_options.show_inline_diff = on;
+        cx.emit(ItemEvent::Edit);
+        cx.notify();
+    }
+
+    /// True when the file-history view should render a synthetic "local
+    /// changes" row at index 0. Used by both the rendering path (to widen
+    /// `commit_count`) and the row-render code (to short-circuit the
+    /// commit-data fetch for the synthetic row).
+    pub fn has_local_changes_row(&self) -> bool {
+        matches!(self.mode(), GraphMode::FileHistory)
+            && self.file_history_options.with_local_changes
+    }
+
     fn render_log_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         log_toolbar::LogToolbar::new(
             cx.weak_entity(),
@@ -1207,6 +1294,8 @@ impl GitGraph {
             self.highlights.new_since_refresh,
             self.view_options.compact_refs,
             self.view_options.group_by_date,
+            self.mode(),
+            self.file_history_options,
         )
         .render(cx)
     }
@@ -1410,6 +1499,7 @@ impl GitGraph {
             filters: filters::LogFilters::default(),
             highlights: highlights::HighlightSet::default(),
             view_options: view_options::ViewOptions::default(),
+            file_history_options: file_history::FileHistoryOptions::default(),
             local_user_email: None,
             commit_details_split_state: cx.new(|_cx| SplitState::new()),
             repo_id,
@@ -1451,14 +1541,14 @@ impl GitGraph {
             RepositoryEvent::GraphEvent((source, order, extra_args, extra_paths), event)
                 if source == &self.log_source
                     && order == &self.log_order
-                    && extra_args == &self.filters.to_git_args()
+                    && extra_args == &self.combined_extra_args()
                     && extra_paths == &self.filters.paths_args() =>
             {
                 let extra_args = extra_args.clone();
                 let extra_paths = extra_paths.clone();
                 match event {
                     GitGraphEvent::FullyLoaded => {
-                        if let Some(pending_sha_index) =
+                        if let Some(pending_sha_data_index) =
                             self.pending_select_sha.take().and_then(|oid| {
                                 repository
                                     .read(cx)
@@ -1471,7 +1561,8 @@ impl GitGraph {
                                     .and_then(|data| data.commit_oid_to_index.get(&oid).copied())
                             })
                         {
-                            self.select_entry(pending_sha_index, ScrollStrategy::Nearest, cx);
+                            let view_index = self.data_to_view_idx(pending_sha_data_index);
+                            self.select_entry(view_index, ScrollStrategy::Nearest, cx);
                         }
                     }
                     GitGraphEvent::LoadingError => {
@@ -1516,7 +1607,8 @@ impl GitGraph {
                                 pending_sha_index
                             })
                         {
-                            self.select_entry(pending_selection_index, ScrollStrategy::Nearest, cx);
+                            let view_index = self.data_to_view_idx(pending_selection_index);
+                            self.select_entry(view_index, ScrollStrategy::Nearest, cx);
                             self.pending_select_sha.take();
                         }
 
@@ -1547,7 +1639,7 @@ impl GitGraph {
 
     fn fetch_initial_graph_data(&mut self, cx: &mut App) {
         if let Some(repository) = self.get_repository(cx) {
-            let extra_args = self.filters.to_git_args();
+            let extra_args = self.combined_extra_args();
             let extra_paths = self.filters.paths_args();
             repository.update(cx, |repository, cx| {
                 let commits = repository
@@ -1563,6 +1655,19 @@ impl GitGraph {
                 self.graph_data.add_commits(commits);
             });
         }
+    }
+
+    /// `git log` extra-args produced by the chip filters plus the
+    /// file-history preset's toggles. Kept in one place so the cache key
+    /// the repository uses (`extra_args`) stays consistent across all call
+    /// sites — `fetch_initial_graph_data`, the `RepositoryEvent::GraphEvent`
+    /// match, and any other code that has to thread args back through.
+    fn combined_extra_args(&self) -> Vec<String> {
+        let mut args = self.filters.to_git_args();
+        if matches!(self.log_source, LogSource::File(_)) {
+            args.extend(self.file_history_options.extra_git_args());
+        }
+        args
     }
 
     fn get_repository(&self, cx: &App) -> Option<Entity<Repository>> {
@@ -1616,6 +1721,10 @@ impl GitGraph {
         });
 
         let row_height = Self::row_height(window, cx);
+        // The synthetic "local changes" row, when active, occupies row 0 in
+        // the view but has no backing commit. Real commit indices shift by
+        // 1 — `data_idx = view_idx.checked_sub(1)`.
+        let has_local_row = self.has_local_changes_row();
 
         // We fetch data outside the visible viewport to avoid loading entries when
         // users scroll through the git graph
@@ -1654,8 +1763,37 @@ impl GitGraph {
 
         range
             .map(|idx| {
-                let Some((commit, repository)) =
-                    self.graph_data.commits.get(idx).zip(repository.as_ref())
+                if has_local_row && idx == 0 {
+                    return vec![
+                        div()
+                            .h(row_height)
+                            .id(("local-changes-row", 0_u32))
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .child(Icon::new(IconName::Pencil).size(IconSize::Small))
+                                    .child(
+                                        Label::new("Local Changes")
+                                            .color(Color::Accent),
+                                    ),
+                            )
+                            .into_any_element(),
+                        div().h(row_height).into_any_element(),
+                        div().h(row_height).into_any_element(),
+                        div().h(row_height).into_any_element(),
+                    ];
+                }
+                // `view_idx` is the row index in the view (used by selection
+                // and hover state); `data_idx` is the index into
+                // `graph_data.commits` (shifted by 1 when the synthetic
+                // local-changes row is at view 0).
+                let view_idx = idx;
+                let data_idx = if has_local_row { idx.saturating_sub(1) } else { idx };
+                let Some((commit, repository)) = self
+                    .graph_data
+                    .commits
+                    .get(data_idx)
+                    .zip(repository.as_ref())
                 else {
                     return vec![
                         div().h(row_height).into_any_element(),
@@ -1664,6 +1802,11 @@ impl GitGraph {
                         div().h(row_height).into_any_element(),
                     ];
                 };
+                // The remaining code originally indexed by `idx` against
+                // `graph_data` (group-by-date prev lookup). Shadow `idx`
+                // with `data_idx` so those lookups stay correct, and use
+                // `view_idx` explicitly for selection comparisons.
+                let idx = data_idx;
 
                 let data = repository.update(cx, |repository, cx| {
                     repository
@@ -1727,7 +1870,7 @@ impl GitGraph {
                     .copied()
                     .unwrap_or_else(|| accent_colors.0.first().copied().unwrap_or_default());
 
-                let is_selected = self.selected_entry_idx == Some(idx);
+                let is_selected = self.selected_entry_idx == Some(view_idx);
                 let column_label = |label: SharedString| {
                     Label::new(label)
                         .when(!is_selected, |c| c.color(Color::Muted))
@@ -1847,7 +1990,7 @@ impl GitGraph {
             self.select_entry(
                 selected_entry_idx
                     .saturating_add(1)
-                    .min(self.graph_data.commits.len().saturating_sub(1)),
+                    .min(self.view_row_count().saturating_sub(1)),
                 ScrollStrategy::Nearest,
                 cx,
             );
@@ -1858,10 +2001,34 @@ impl GitGraph {
 
     fn select_last(&mut self, _: &SelectLast, _window: &mut Window, cx: &mut Context<Self>) {
         self.select_entry(
-            self.graph_data.commits.len().saturating_sub(1),
+            self.view_row_count().saturating_sub(1),
             ScrollStrategy::Nearest,
             cx,
         );
+    }
+
+    /// Total number of rows visible in the table — the data commits plus
+    /// the synthetic "local changes" row if active.
+    fn view_row_count(&self) -> usize {
+        self.graph_data.commits.len() + if self.has_local_changes_row() { 1 } else { 0 }
+    }
+
+    /// Translate a view-space row index into a data-space index. Returns
+    /// `None` for the synthetic local-changes row (it has no commit data).
+    fn view_to_data_idx(&self, view_idx: usize) -> Option<usize> {
+        if self.has_local_changes_row() {
+            view_idx.checked_sub(1)
+        } else {
+            Some(view_idx)
+        }
+    }
+
+    fn data_to_view_idx(&self, data_idx: usize) -> usize {
+        if self.has_local_changes_row() {
+            data_idx.saturating_add(1)
+        } else {
+            data_idx
+        }
     }
 
     fn confirm(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
@@ -1888,7 +2055,21 @@ impl GitGraph {
             cx.notify();
         });
 
-        let Some(commit) = self.graph_data.commits.get(idx) else {
+        // The synthetic "local changes" row at view-index 0 has no commit
+        // data — selecting it leaves the detail panel empty (this is by
+        // design; v1 doesn't render a working-tree-vs-HEAD diff yet).
+        if self.has_local_changes_row() && idx == 0 {
+            cx.emit(ItemEvent::Edit);
+            cx.notify();
+            return;
+        }
+        let data_idx = if self.has_local_changes_row() {
+            idx.saturating_sub(1)
+        } else {
+            idx
+        };
+
+        let Some(commit) = self.graph_data.commits.get(data_idx) else {
             return;
         };
 
@@ -1935,9 +2116,9 @@ impl GitGraph {
                 return;
             };
 
-            let extra_args = this.filters.to_git_args();
+            let extra_args = this.combined_extra_args();
             let extra_paths = this.filters.paths_args();
-            let Some(index) = selected_repository
+            let Some(data_index) = selected_repository
                 .read(cx)
                 .get_graph_data(
                     this.log_source.clone(),
@@ -1953,7 +2134,14 @@ impl GitGraph {
             };
 
             this.pending_select_sha = None;
-            this.select_entry(index, ScrollStrategy::Center, cx);
+            // Convert the data-space index back to view-space (the synthetic
+            // local-changes row, when active, occupies view-index 0).
+            let view_index = if this.has_local_changes_row() {
+                data_index.saturating_add(1)
+            } else {
+                data_index
+            };
+            this.select_entry(view_index, ScrollStrategy::Center, cx);
         }
 
         if let Ok(oid) = sha.try_into() {
@@ -1975,7 +2163,10 @@ impl GitGraph {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(commit_entry) = self.graph_data.commits.get(entry_index) else {
+        let Some(data_index) = self.view_to_data_idx(entry_index) else {
+            return;
+        };
+        let Some(commit_entry) = self.graph_data.commits.get(data_index) else {
             return;
         };
 
@@ -2021,7 +2212,10 @@ impl GitGraph {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(commit_entry) = self.graph_data.commits.get(index) else {
+        let Some(data_index) = self.view_to_data_idx(index) else {
+            return;
+        };
+        let Some(commit_entry) = self.graph_data.commits.get(data_index) else {
             return;
         };
         let Some(repository) = self.get_repository(cx) else {
@@ -2920,10 +3114,10 @@ impl GitGraph {
 
 impl Render for GitGraph {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (commit_count, is_loading) = match self.graph_data.max_commit_count {
+        let (mut commit_count, is_loading) = match self.graph_data.max_commit_count {
             AllCommitCount::Loaded(count) => (count, true),
             AllCommitCount::NotLoaded => {
-                let extra_args = self.filters.to_git_args();
+                let extra_args = self.combined_extra_args();
                 let extra_paths = self.filters.paths_args();
                 let (commit_count, is_loading) = if let Some(repository) = self.get_repository(cx) {
                     repository.update(cx, |repository, cx| {
@@ -2951,7 +3145,15 @@ impl Render for GitGraph {
             }
         };
 
-        let extra_args = self.filters.to_git_args();
+        // S-FHT: when "With Local Changes" is enabled, prepend a synthetic
+        // row at index 0 representing the uncommitted state. The row has no
+        // backing `Oid` and is rendered with a distinct `local-changes`
+        // marker; downstream click / select logic treats it as a no-op.
+        if self.has_local_changes_row() {
+            commit_count = commit_count.saturating_add(1);
+        }
+
+        let extra_args = self.combined_extra_args();
         let extra_paths = self.filters.paths_args();
         let error = self.get_repository(cx).and_then(|repo| {
             repo.read(cx)
@@ -3402,6 +3604,9 @@ impl workspace::SerializableItem for GitGraph {
             highlight_last_seen_sha,
             view_compact_refs,
             view_group_by_date,
+            view_follow_renames,
+            view_with_local_changes,
+            view_show_inline_diff,
         )) = db.get_git_graph(item_id, workspace_id).ok().flatten()
         else {
             return Task::ready(Err(anyhow::anyhow!("No git graph to deserialize")));
@@ -3427,6 +3632,9 @@ impl workspace::SerializableItem for GitGraph {
             highlight_last_seen_sha,
             view_compact_refs,
             view_group_by_date,
+            view_follow_renames,
+            view_with_local_changes,
+            view_show_inline_diff,
         };
 
         let window_handle = window.window_handle();
@@ -3458,6 +3666,7 @@ impl workspace::SerializableItem for GitGraph {
                 let filters = persistence::deserialize_log_filters(&state);
                 let highlights = persistence::deserialize_highlights(&state);
                 let view_options = persistence::deserialize_view_options(&state);
+                let file_history_options = persistence::deserialize_file_history_options(&state);
 
                 let case_sensitive = state.search_case_sensitive.unwrap_or(false);
                 let regex = state.search_regex.unwrap_or(false);
@@ -3480,6 +3689,7 @@ impl workspace::SerializableItem for GitGraph {
                     graph.filters = filters;
                     graph.highlights = highlights;
                     graph.view_options = view_options;
+                    graph.file_history_options = file_history_options;
                     graph.search_state.case_sensitive = case_sensitive;
                     graph.search_state.regex = regex;
                     graph.search_state.search_in_diffs = search_in_diffs;
@@ -3566,6 +3776,8 @@ impl workspace::SerializableItem for GitGraph {
         let filter_columns = persistence::serialize_log_filters(&self.filters);
         let highlight_columns = persistence::serialize_highlights(&self.highlights);
         let view_columns = persistence::serialize_view_options(&self.view_options);
+        let file_history_columns =
+            persistence::serialize_file_history_options(&self.file_history_options);
 
         let db = persistence::GitGraphsDb::global(cx);
         Some(cx.background_spawn(async move {
@@ -3592,6 +3804,9 @@ impl workspace::SerializableItem for GitGraph {
                 highlight_columns.last_seen_sha,
                 view_columns.compact_refs,
                 view_columns.group_by_date,
+                file_history_columns.follow_renames,
+                file_history_columns.with_local_changes,
+                file_history_columns.show_inline_diff,
             )
             .await
         }))
@@ -3621,6 +3836,7 @@ mod persistence {
     use workspace::WorkspaceDb;
 
     use crate::{
+        file_history::FileHistoryOptions,
         filters::{DateRange, LogFilters},
         highlights::HighlightSet,
         view_options::ViewOptions,
@@ -3670,6 +3886,11 @@ mod persistence {
             sql!(
                 ALTER TABLE git_graphs ADD COLUMN search_regex INTEGER;
                 ALTER TABLE git_graphs ADD COLUMN search_in_diffs INTEGER;
+            ),
+            sql!(
+                ALTER TABLE git_graphs ADD COLUMN view_follow_renames INTEGER;
+                ALTER TABLE git_graphs ADD COLUMN view_with_local_changes INTEGER;
+                ALTER TABLE git_graphs ADD COLUMN view_show_inline_diff INTEGER;
             ),
         ];
     }
@@ -3768,6 +3989,9 @@ mod persistence {
         pub highlight_last_seen_sha: Option<String>,
         pub view_compact_refs: Option<bool>,
         pub view_group_by_date: Option<bool>,
+        pub view_follow_renames: Option<bool>,
+        pub view_with_local_changes: Option<bool>,
+        pub view_show_inline_diff: Option<bool>,
     }
 
     /// Column values produced from a [`LogFilters`] for the `save_git_graph`
@@ -3793,6 +4017,16 @@ mod persistence {
     pub struct SerializedViewColumns {
         pub compact_refs: Option<bool>,
         pub group_by_date: Option<bool>,
+    }
+
+    /// Persisted columns for [`FileHistoryOptions`]. Optional shape so
+    /// pre-S-FHT rows hydrate to defaults via `unwrap_or` in the load
+    /// path.
+    #[derive(Debug, Default, Clone)]
+    pub struct SerializedFileHistoryColumns {
+        pub follow_renames: Option<bool>,
+        pub with_local_changes: Option<bool>,
+        pub show_inline_diff: Option<bool>,
     }
 
     pub fn serialize_log_filters(filters: &LogFilters) -> SerializedFilterColumns {
@@ -3915,6 +4149,40 @@ mod persistence {
         }
     }
 
+    pub fn serialize_file_history_options(
+        opts: &FileHistoryOptions,
+    ) -> SerializedFileHistoryColumns {
+        // `follow_renames` defaults to `true`, so persist it as `Some(false)`
+        // when off (and `None` when on, since absence == default). The other
+        // two default to `false`, so the convention is the inverse.
+        SerializedFileHistoryColumns {
+            follow_renames: if opts.follow_renames {
+                None
+            } else {
+                Some(false)
+            },
+            with_local_changes: if opts.with_local_changes {
+                Some(true)
+            } else {
+                None
+            },
+            show_inline_diff: if opts.show_inline_diff {
+                Some(true)
+            } else {
+                None
+            },
+        }
+    }
+
+    pub fn deserialize_file_history_options(state: &SerializedGitGraphState) -> FileHistoryOptions {
+        FileHistoryOptions {
+            // Default-on: missing column hydrates to `true`.
+            follow_renames: state.view_follow_renames.unwrap_or(true),
+            with_local_changes: state.view_with_local_changes.unwrap_or(false),
+            show_inline_diff: state.view_show_inline_diff.unwrap_or(false),
+        }
+    }
+
     fn decode_string_vec(raw: Option<&str>, column: &str) -> Vec<String> {
         match raw {
             None | Some("") => Vec::new(),
@@ -3969,6 +4237,13 @@ mod persistence {
     /// can stay co-located with the rest of the core columns.
     pub type SearchExtraSaveTuple = (Option<bool>, Option<bool>);
 
+    /// File-history (S-FHT) toggles persisted alongside the rest of the
+    /// view state. Three nullable booleans — see
+    /// [`SerializedFileHistoryColumns`] for default semantics.
+    pub type FileHistorySaveTuple = (Option<bool>, Option<bool>, Option<bool>);
+
+    pub type FileHistoryLoadTuple = (Option<bool>, Option<bool>, Option<bool>);
+
     /// Result row for `get_git_graph` — same chunking rationale as
     /// [`CoreSaveTuple`].
     pub type CoreLoadTuple = (
@@ -4006,7 +4281,8 @@ mod persistence {
                 core: CoreSaveTuple,
                 filters: FilterSaveTuple,
                 highlights_view: HighlightViewSaveTuple,
-                search_extra: SearchExtraSaveTuple
+                search_extra: SearchExtraSaveTuple,
+                file_history: FileHistorySaveTuple
             ) -> Result<()> {
                 INSERT OR REPLACE INTO git_graphs(
                     item_id, workspace_id, repo_working_path,
@@ -4016,9 +4292,10 @@ mod persistence {
                     filter_date_since, filter_date_until, filter_all_refs,
                     highlight_my_commits, highlight_new_since_refresh, highlight_last_seen_sha,
                     view_compact_refs, view_group_by_date,
-                    search_regex, search_in_diffs
+                    search_regex, search_in_diffs,
+                    view_follow_renames, view_with_local_changes, view_show_inline_diff
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             }
         }
 
@@ -4047,6 +4324,9 @@ mod persistence {
             highlight_last_seen_sha: Option<String>,
             view_compact_refs: Option<bool>,
             view_group_by_date: Option<bool>,
+            view_follow_renames: Option<bool>,
+            view_with_local_changes: Option<bool>,
+            view_show_inline_diff: Option<bool>,
         ) -> anyhow::Result<()> {
             let core: CoreSaveTuple = (
                 item_id,
@@ -4075,7 +4355,12 @@ mod persistence {
                 view_group_by_date,
             );
             let search_extra: SearchExtraSaveTuple = (search_regex, search_in_diffs);
-            self.save_git_graph_raw(core, filters, highlights_view, search_extra)
+            let file_history: FileHistorySaveTuple = (
+                view_follow_renames,
+                view_with_local_changes,
+                view_show_inline_diff,
+            );
+            self.save_git_graph_raw(core, filters, highlights_view, search_extra, file_history)
                 .await
         }
 
@@ -4087,7 +4372,8 @@ mod persistence {
                 CoreLoadTuple,
                 FilterLoadTuple,
                 HighlightViewLoadTuple,
-                SearchExtraLoadTuple
+                SearchExtraLoadTuple,
+                FileHistoryLoadTuple
             )>> {
                 SELECT
                     repo_working_path,
@@ -4109,7 +4395,10 @@ mod persistence {
                     view_compact_refs,
                     view_group_by_date,
                     search_regex,
-                    search_in_diffs
+                    search_in_diffs,
+                    view_follow_renames,
+                    view_with_local_changes,
+                    view_show_inline_diff
                 FROM git_graphs
                 WHERE item_id = ? AND workspace_id = ?
             }
@@ -4142,58 +4431,68 @@ mod persistence {
                 Option<String>,
                 Option<bool>,
                 Option<bool>,
+                Option<bool>,
+                Option<bool>,
+                Option<bool>,
             )>,
         > {
             let row = self.get_git_graph_raw(item_id, workspace_id)?;
-            Ok(row.map(|(core, filters, highlights_view, search_extra)| {
-                let (
-                    repo_working_path,
-                    log_source_type,
-                    log_source_value,
-                    log_order,
-                    selected_sha,
-                    search_query,
-                    search_case_sensitive,
-                ) = core;
-                let (
-                    filter_branches,
-                    filter_authors,
-                    filter_paths,
-                    filter_date_since,
-                    filter_date_until,
-                    filter_all_refs,
-                ) = filters;
-                let (
-                    highlight_my_commits,
-                    highlight_new_since_refresh,
-                    highlight_last_seen_sha,
-                    view_compact_refs,
-                    view_group_by_date,
-                ) = highlights_view;
-                let (search_regex, search_in_diffs) = search_extra;
-                (
-                    repo_working_path,
-                    log_source_type,
-                    log_source_value,
-                    log_order,
-                    selected_sha,
-                    search_query,
-                    search_case_sensitive,
-                    search_regex,
-                    search_in_diffs,
-                    filter_branches,
-                    filter_authors,
-                    filter_paths,
-                    filter_date_since,
-                    filter_date_until,
-                    filter_all_refs,
-                    highlight_my_commits,
-                    highlight_new_since_refresh,
-                    highlight_last_seen_sha,
-                    view_compact_refs,
-                    view_group_by_date,
-                )
-            }))
+            Ok(row.map(
+                |(core, filters, highlights_view, search_extra, file_history)| {
+                    let (
+                        repo_working_path,
+                        log_source_type,
+                        log_source_value,
+                        log_order,
+                        selected_sha,
+                        search_query,
+                        search_case_sensitive,
+                    ) = core;
+                    let (
+                        filter_branches,
+                        filter_authors,
+                        filter_paths,
+                        filter_date_since,
+                        filter_date_until,
+                        filter_all_refs,
+                    ) = filters;
+                    let (
+                        highlight_my_commits,
+                        highlight_new_since_refresh,
+                        highlight_last_seen_sha,
+                        view_compact_refs,
+                        view_group_by_date,
+                    ) = highlights_view;
+                    let (search_regex, search_in_diffs) = search_extra;
+                    let (view_follow_renames, view_with_local_changes, view_show_inline_diff) =
+                        file_history;
+                    (
+                        repo_working_path,
+                        log_source_type,
+                        log_source_value,
+                        log_order,
+                        selected_sha,
+                        search_query,
+                        search_case_sensitive,
+                        search_regex,
+                        search_in_diffs,
+                        filter_branches,
+                        filter_authors,
+                        filter_paths,
+                        filter_date_since,
+                        filter_date_until,
+                        filter_all_refs,
+                        highlight_my_commits,
+                        highlight_new_since_refresh,
+                        highlight_last_seen_sha,
+                        view_compact_refs,
+                        view_group_by_date,
+                        view_follow_renames,
+                        view_with_local_changes,
+                        view_show_inline_diff,
+                    )
+                },
+            ))
         }
     }
 }
@@ -5650,6 +5949,9 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
+            None,
         )
         .await
         .expect("save should succeed");
@@ -6032,5 +6334,124 @@ mod tests {
                 computed_row_height, measured_item_height,
             );
         });
+    }
+
+    #[gpui::test]
+    async fn test_for_file_history_preset_uses_file_log_source(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            Path::new("/project"),
+            json!({
+                ".git": {},
+                "src": { "main.rs": "fn main() {}" },
+            }),
+        )
+        .await;
+        fs.set_graph_commits(Path::new("/project/.git"), Vec::new());
+
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+        cx.run_until_parked();
+
+        let repository = project.read_with(cx, |project, cx| {
+            project
+                .active_repository(cx)
+                .expect("active repository should exist")
+        });
+        let repo_id = repository.read_with(cx, |repo, _| repo.id);
+        let git_store = project.read_with(cx, |project, _| project.git_store().clone());
+        let repo_path = RepoPath::new(&"src/main.rs").unwrap();
+
+        let workspace_window = cx.add_window(|window, cx| {
+            workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let workspace = workspace_window
+            .read_with(cx, |multi, _| multi.workspace().clone())
+            .expect("workspace should exist");
+        let weak_workspace = workspace.downgrade();
+
+        let graph = workspace_window
+            .update(cx, |_multi, window, cx| {
+                let git_store = git_store.clone();
+                let repo_path = repo_path.clone();
+                cx.new(|cx| {
+                    GitGraph::for_file_history(
+                        repo_id,
+                        repo_path,
+                        git_store,
+                        weak_workspace.clone(),
+                        window,
+                        cx,
+                    )
+                })
+            })
+            .expect("graph should construct");
+
+        graph.read_with(cx, |graph, _| {
+            assert_eq!(graph.log_source, LogSource::File(repo_path.clone()));
+            assert_eq!(graph.mode(), GraphMode::FileHistory);
+            assert!(graph.file_history_options().follow_renames);
+            // Default-off: view_row_count == commits.len() (no synthetic
+            // row).
+            assert_eq!(graph.view_row_count(), graph.graph_data.commits.len());
+            assert!(graph.view_to_data_idx(0).is_some());
+        });
+
+        // Toggle "With Local Changes" on; the view widens by 1 and view-
+        // index 0 is now the synthetic row (returns `None` from
+        // `view_to_data_idx`).
+        graph.update(cx, |graph, cx| {
+            graph.set_with_local_changes(true, cx);
+            assert!(graph.has_local_changes_row());
+            let commits = graph.graph_data.commits.len();
+            assert_eq!(graph.view_row_count(), commits + 1);
+            assert_eq!(graph.view_to_data_idx(0), None);
+            assert_eq!(graph.view_to_data_idx(1), Some(0));
+            assert_eq!(graph.data_to_view_idx(0), 1);
+        });
+
+        // Column-count assertion: in file-history mode the table is the
+        // four columns Description / Date / Author / Hash (the graph lane
+        // is hidden).
+        graph.read_with(cx, |graph, cx| {
+            let widths = graph.column_widths.read(cx);
+            assert_eq!(widths.cols(), 4);
+        });
+
+        // Toggle Follow Renames off; combined_extra_args picks up
+        // `--no-follow` so subsequent fetches stop walking renames.
+        graph.update(cx, |graph, cx| {
+            graph.set_follow_renames(false, cx);
+            let args = graph.combined_extra_args();
+            assert!(args.iter().any(|a| a == "--no-follow"));
+        });
+    }
+
+#[gpui::test]
+    fn test_file_history_options_persistence_roundtrip(_cx: &mut TestAppContext) {
+        use file_history::FileHistoryOptions;
+        use persistence::SerializedGitGraphState;
+
+        let opts = FileHistoryOptions {
+            follow_renames: false,
+            with_local_changes: true,
+            show_inline_diff: true,
+        };
+        let cols = persistence::serialize_file_history_options(&opts);
+        let state = SerializedGitGraphState {
+            view_follow_renames: cols.follow_renames,
+            view_with_local_changes: cols.with_local_changes,
+            view_show_inline_diff: cols.show_inline_diff,
+            ..Default::default()
+        };
+        assert_eq!(persistence::deserialize_file_history_options(&state), opts);
+
+        // Default-on follow_renames hydrates from missing column.
+        let empty = SerializedGitGraphState::default();
+        let restored = persistence::deserialize_file_history_options(&empty);
+        assert!(restored.follow_renames);
+        assert!(!restored.with_local_changes);
+        assert!(!restored.show_inline_diff);
     }
 }

@@ -29,6 +29,14 @@ pub fn register(cx: &mut App) {
     register_tool_with_tier(cx, "editor.git.log", ToolTier::ReadOnly, |server| {
         server.add_tool(LogTool);
     });
+    register_tool_with_tier(
+        cx,
+        "editor.git.file_history",
+        ToolTier::ReadOnly,
+        |server| {
+            server.add_tool(FileHistoryTool);
+        },
+    );
 }
 
 /// Input for `editor.git.log`. The `repo_id` selects which open repository
@@ -269,6 +277,80 @@ fn parse_log_line(line: &str) -> Option<LogCommit> {
         subject,
         ref_names,
     })
+}
+
+/// Input for `editor.git.file_history`. The `path` is repository-relative
+/// (the same shape `editor.git.log` accepts in `filters.paths`). When
+/// `follow_renames` is `true` (default), `git log --follow` is used so the
+/// history walks across rename commits.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct FileHistoryToolInput {
+    /// Repository-relative path of the file to inspect.
+    pub path: String,
+    /// Walk across rename commits via `git log --follow`. Defaults to
+    /// `true` to mirror the in-app file-history view's default toggle
+    /// state.
+    pub follow_renames: Option<bool>,
+    /// Maximum number of commits to return. Defaults to 200; capped at
+    /// 5000.
+    pub limit: Option<usize>,
+    /// Repository to query. Omit to use the focused window's active repo.
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Clone)]
+pub struct FileHistoryTool;
+
+impl McpServerTool for FileHistoryTool {
+    type Input = FileHistoryToolInput;
+    type Output = LogToolOutput;
+    const NAME: &'static str = "editor.git.file_history";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        if input.path.trim().is_empty() {
+            return Err(anyhow!("`path` must be non-empty"));
+        }
+
+        let limit = input.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+        let follow_renames = input.follow_renames.unwrap_or(true);
+
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+
+        let mut args: Vec<String> = vec![
+            "log".to_string(),
+            "--format=%H%x00%P%x00%ct%x00%an%x00%ae%x00%D%x00%s".to_string(),
+            "--decorate=full".to_string(),
+            format!("--max-count={}", limit.saturating_add(1)),
+        ];
+        if follow_renames {
+            args.push("--follow".to_string());
+        }
+        args.push("--".to_string());
+        args.push(input.path.clone());
+
+        let commits = run_git_log(&work_dir, &args).await?;
+        let truncated = commits.len() > limit;
+        let mut commits = commits;
+        commits.truncate(limit);
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!(
+                    "{} commit(s){} for {}",
+                    commits.len(),
+                    if truncated { " (truncated)" } else { "" },
+                    input.path,
+                ),
+            }],
+            structured_content: LogToolOutput { commits, truncated },
+        })
+    }
 }
 
 #[cfg(test)]

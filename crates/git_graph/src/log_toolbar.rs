@@ -23,7 +23,9 @@ use project::git_store::Repository;
 use ui::{Divider, ListItem, ListItemSpacing, PopoverMenu, TintColor, Tooltip, prelude::*};
 
 use crate::GitGraph;
+use crate::file_history::FileHistoryOptions;
 use crate::filters::DateRange;
+use crate::GraphMode;
 use branch_popover::BranchFilterPopover;
 use path_popover::PathFilterPopover;
 use user_popover::UserFilterPopover;
@@ -191,6 +193,8 @@ pub struct LogToolbar {
     new_since_refresh: bool,
     compact_refs: bool,
     group_by_date: bool,
+    mode: GraphMode,
+    file_history_options: FileHistoryOptions,
 }
 
 impl LogToolbar {
@@ -207,6 +211,8 @@ impl LogToolbar {
         new_since_refresh: bool,
         compact_refs: bool,
         group_by_date: bool,
+        mode: GraphMode,
+        file_history_options: FileHistoryOptions,
     ) -> Self {
         Self {
             weak_graph,
@@ -220,6 +226,8 @@ impl LogToolbar {
             new_since_refresh,
             compact_refs,
             group_by_date,
+            mode,
+            file_history_options,
         }
     }
 
@@ -257,6 +265,10 @@ impl LogToolbar {
         let new_since_refresh = self.new_since_refresh;
         let compact_refs = self.compact_refs;
         let group_by_date = self.group_by_date;
+        let is_file_history = matches!(self.mode, GraphMode::FileHistory);
+        let follow_renames = self.file_history_options.follow_renames;
+        let with_local_changes = self.file_history_options.with_local_changes;
+        let show_inline_diff = self.file_history_options.show_inline_diff;
 
         let toggle_style = |active: bool| {
             if active {
@@ -345,7 +357,8 @@ impl LogToolbar {
                 })
         };
 
-        let group_by_date_button =
+        let group_by_date_button = {
+            let weak = weak.clone();
             IconButton::new("git-graph-toggle-group-by-date", IconName::Clock)
                 .icon_size(IconSize::Small)
                 .style(toggle_style(group_by_date))
@@ -358,6 +371,67 @@ impl LogToolbar {
                             graph.set_group_by_date(!group_by_date, cx);
                         });
                     }
+                })
+        };
+
+        // File-history mode toggles. Built up-front so the conditional
+        // `.when` block below can move them by value.
+        let follow_renames_button = {
+            let weak = weak.clone();
+            IconButton::new("git-graph-toggle-follow-renames", IconName::ArrowRightLeft)
+                .icon_size(IconSize::Small)
+                .style(toggle_style(follow_renames))
+                .toggle_state(follow_renames)
+                .tooltip(Tooltip::text(
+                    "Follow file across renames (--follow)",
+                ))
+                .on_click(move |_, _, cx| {
+                    let weak = weak.clone();
+                    if let Some(graph) = weak.upgrade() {
+                        graph.update(cx, |graph, cx| {
+                            graph.set_follow_renames(!follow_renames, cx);
+                        });
+                    }
+                })
+        };
+
+        let with_local_changes_button = {
+            let weak = weak.clone();
+            IconButton::new("git-graph-toggle-with-local-changes", IconName::Pencil)
+                .icon_size(IconSize::Small)
+                .style(toggle_style(with_local_changes))
+                .toggle_state(with_local_changes)
+                .tooltip(Tooltip::text(
+                    "Show uncommitted changes as a synthetic row",
+                ))
+                .on_click(move |_, _, cx| {
+                    let weak = weak.clone();
+                    if let Some(graph) = weak.upgrade() {
+                        graph.update(cx, |graph, cx| {
+                            graph.set_with_local_changes(!with_local_changes, cx);
+                        });
+                    }
+                })
+        };
+
+        // Show Inline Diff is wired up to persist toggle state but the
+        // per-row hunk rendering is deferred — the v1 surface is the toggle
+        // only, with a "coming soon" tooltip.
+        let show_inline_diff_button =
+            IconButton::new("git-graph-toggle-show-inline-diff", IconName::ListTree)
+                .icon_size(IconSize::Small)
+                .style(toggle_style(show_inline_diff))
+                .toggle_state(show_inline_diff)
+                .tooltip(Tooltip::text(
+                    "Show inline diff per row (coming soon)",
+                ))
+                .on_click(move |_, _, cx| {
+                    let weak = weak.clone();
+                    if let Some(graph) = weak.upgrade() {
+                        graph.update(cx, |graph, cx| {
+                            graph.set_show_inline_diff(!show_inline_diff, cx);
+                        });
+                    }
                 });
 
         h_flex()
@@ -367,6 +441,12 @@ impl LogToolbar {
             .child(new_since_refresh_button)
             .child(compact_refs_button)
             .child(group_by_date_button)
+            .when(is_file_history, |this| {
+                this.child(div().px_1().child(Divider::vertical()))
+                    .child(follow_renames_button)
+                    .child(with_local_changes_button)
+                    .child(show_inline_diff_button)
+            })
     }
 
     fn render_date_chip(&self) -> impl IntoElement {
