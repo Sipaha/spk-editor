@@ -68,6 +68,8 @@ actions!(
         StashPop,
         /// Apply the most recent stash.
         StashApply,
+        /// Opens the Stashes pane item (S-STH).
+        Stashes,
         /// Restores all tracked files to their last committed state.
         RestoreTrackedFiles,
         /// Moves all untracked files to trash.

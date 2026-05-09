@@ -55,6 +55,14 @@ pub(crate) fn register(cx: &mut App) {
     register_typed_tool_with_tier(cx, ToolTier::Write, ApplyPatchTool);
     // S-SAR — open a snapshot worktree at a specific commit in a new window.
     register_typed_tool_with_tier(cx, ToolTier::Write, ShowAtRevisionTool);
+    // S-STH — Stash management surface.
+    register_typed_tool_with_tier(cx, ToolTier::Write, StashSaveTool);
+    register_typed_tool_with_tier(cx, ToolTier::ReadOnly, StashListTool);
+    register_typed_tool_with_tier(cx, ToolTier::ReadOnly, StashShowTool);
+    register_typed_tool_with_tier(cx, ToolTier::Write, StashApplyTool);
+    register_typed_tool_with_tier(cx, ToolTier::Write, StashPopTool);
+    register_typed_tool_with_tier(cx, ToolTier::Destructive, StashDropTool);
+    register_typed_tool_with_tier(cx, ToolTier::Write, StashBranchTool);
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -1982,4 +1990,362 @@ mod tests {
             Err(err) => assert!(format!("{err}").contains("unknown rebase action")),
         }
     }
+}
+
+// =====================================================================
+//  S-STH — Stash management MCP surface.
+//
+//  All tools shell out via `run_git*` helpers against the resolved working
+//  directory rather than going through `project::git_store::Repository`,
+//  matching the rest of `handlers_mcp.rs`. The destructive `stash_drop`
+//  tool requires `confirmed: true` per `require_confirmed`.
+// =====================================================================
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct StashSaveInput {
+    /// Optional message for the stash entry. When `None`, git uses the
+    /// default `WIP on <branch>` form.
+    pub message: Option<String>,
+    /// `git stash push --include-untracked`.
+    pub include_untracked: bool,
+    /// `git stash push --keep-index` (keeps already-staged hunks in the
+    /// index after the stash is taken).
+    pub keep_index: bool,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct StashSaveOutput {
+    pub created: bool,
+    pub message: Option<String>,
+    pub include_untracked: bool,
+    pub keep_index: bool,
+}
+
+#[derive(Clone)]
+pub struct StashSaveTool;
+
+impl McpServerTool for StashSaveTool {
+    type Input = StashSaveInput;
+    type Output = StashSaveOutput;
+    const NAME: &'static str = "editor.git.stash_save";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let mut args: Vec<String> = vec!["stash".into(), "push".into()];
+        if input.include_untracked {
+            args.push("--include-untracked".into());
+        }
+        if input.keep_index {
+            args.push("--keep-index".into());
+        }
+        if let Some(message) = input.message.as_deref().filter(|m| !m.is_empty()) {
+            args.push("-m".into());
+            args.push(message.to_string());
+        }
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let raw = run_git(&work_dir, &arg_refs).await?;
+        let created = !raw.contains("No local changes to save");
+        let summary = if created {
+            "stash saved".to_string()
+        } else {
+            "no local changes to stash".to_string()
+        };
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: StashSaveOutput {
+                created,
+                message: input.message,
+                include_untracked: input.include_untracked,
+                keep_index: input.keep_index,
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct StashListInput {
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct StashListOutput {
+    pub entries: Vec<StashEntryPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct StashEntryPayload {
+    pub index: usize,
+    pub stash_ref: String,
+    pub stash_sha: String,
+    pub created_at_unix: i64,
+    pub message: String,
+    pub branch: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct StashListTool;
+
+impl McpServerTool for StashListTool {
+    type Input = StashListInput;
+    type Output = StashListOutput;
+    const NAME: &'static str = "editor.git.stash_list";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let raw = run_git(
+            &work_dir,
+            &[
+                "stash",
+                "list",
+                "--pretty=format:%gd%x00%H%x00%ct%x00%s",
+            ],
+        )
+        .await?;
+        let parsed: git::stash::GitStash = raw.parse().unwrap_or_default();
+        let entries: Vec<StashEntryPayload> = parsed
+            .entries
+            .iter()
+            .map(|entry| StashEntryPayload {
+                index: entry.index,
+                stash_ref: format!("stash@{{{}}}", entry.index),
+                stash_sha: entry.oid.to_string(),
+                created_at_unix: entry.timestamp,
+                message: entry.message.clone(),
+                branch: entry.branch.clone(),
+            })
+            .collect();
+        let summary = format!("{} stash entr{}", entries.len(), if entries.len() == 1 { "y" } else { "ies" });
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: StashListOutput { entries },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct StashShowInput {
+    /// Either a `stash@{N}` ref or a stash sha. Required.
+    pub stash_ref: String,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct StashShowOutput {
+    pub stash_ref: String,
+    pub patch: String,
+}
+
+#[derive(Clone)]
+pub struct StashShowTool;
+
+impl McpServerTool for StashShowTool {
+    type Input = StashShowInput;
+    type Output = StashShowOutput;
+    const NAME: &'static str = "editor.git.stash_show";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        require_stash_ref(&input.stash_ref, "stash_show")?;
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let patch = run_git(
+            &work_dir,
+            &["stash", "show", "-p", "--no-color", &input.stash_ref],
+        )
+        .await?;
+        let summary = format!("stash {} patch ({} bytes)", input.stash_ref, patch.len());
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: StashShowOutput {
+                stash_ref: input.stash_ref,
+                patch,
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct StashApplyInput {
+    pub stash_ref: String,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct StashMutationOutput {
+    pub stash_ref: String,
+}
+
+#[derive(Clone)]
+pub struct StashApplyTool;
+
+impl McpServerTool for StashApplyTool {
+    type Input = StashApplyInput;
+    type Output = StashMutationOutput;
+    const NAME: &'static str = "editor.git.stash_apply";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        require_stash_ref(&input.stash_ref, "stash_apply")?;
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        run_git_void(&work_dir, &["stash", "apply", &input.stash_ref]).await?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("applied {}", input.stash_ref),
+            }],
+            structured_content: StashMutationOutput {
+                stash_ref: input.stash_ref,
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct StashPopInput {
+    pub stash_ref: String,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Clone)]
+pub struct StashPopTool;
+
+impl McpServerTool for StashPopTool {
+    type Input = StashPopInput;
+    type Output = StashMutationOutput;
+    const NAME: &'static str = "editor.git.stash_pop";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        require_stash_ref(&input.stash_ref, "stash_pop")?;
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        run_git_void(&work_dir, &["stash", "pop", &input.stash_ref]).await?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("popped {}", input.stash_ref),
+            }],
+            structured_content: StashMutationOutput {
+                stash_ref: input.stash_ref,
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct StashDropInput {
+    pub stash_ref: String,
+    pub confirmed: bool,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Clone)]
+pub struct StashDropTool;
+
+impl McpServerTool for StashDropTool {
+    type Input = StashDropInput;
+    type Output = StashMutationOutput;
+    const NAME: &'static str = "editor.git.stash_drop";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        require_confirmed(input.confirmed, "stash_drop")?;
+        require_stash_ref(&input.stash_ref, "stash_drop")?;
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        run_git_void(&work_dir, &["stash", "drop", &input.stash_ref]).await?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("dropped {}", input.stash_ref),
+            }],
+            structured_content: StashMutationOutput {
+                stash_ref: input.stash_ref,
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct StashBranchInput {
+    pub name: String,
+    pub stash_ref: String,
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct StashBranchOutput {
+    pub name: String,
+    pub stash_ref: String,
+}
+
+#[derive(Clone)]
+pub struct StashBranchTool;
+
+impl McpServerTool for StashBranchTool {
+    type Input = StashBranchInput;
+    type Output = StashBranchOutput;
+    const NAME: &'static str = "editor.git.stash_branch";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        if input.name.trim().is_empty() {
+            return Err(anyhow!("stash_branch requires a non-empty name"));
+        }
+        require_stash_ref(&input.stash_ref, "stash_branch")?;
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        run_git_void(
+            &work_dir,
+            &["stash", "branch", &input.name, &input.stash_ref],
+        )
+        .await?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("branched {} from {}", input.name, input.stash_ref),
+            }],
+            structured_content: StashBranchOutput {
+                name: input.name,
+                stash_ref: input.stash_ref,
+            },
+        })
+    }
+}
+
+fn require_stash_ref(stash_ref: &str, op: &str) -> Result<()> {
+    if stash_ref.trim().is_empty() {
+        return Err(anyhow!("{op} requires a non-empty stash_ref"));
+    }
+    Ok(())
 }

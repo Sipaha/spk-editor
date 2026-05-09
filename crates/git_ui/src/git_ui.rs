@@ -55,6 +55,7 @@ pub mod project_diff;
 pub(crate) mod remote_output;
 pub mod repository_selector;
 pub mod stash_picker;
+pub mod stashes;
 pub mod text_diff_view;
 pub mod worktree_names;
 pub mod worktree_picker;
@@ -81,6 +82,7 @@ pub fn init(cx: &mut App) {
         repository_selector::register(workspace);
         git_picker::register(workspace);
         undo_modal::register(workspace);
+        stashes::register(workspace);
 
         workspace.register_action(
             |workspace, action: &git::InteractiveRebaseFromHere, window, cx| {

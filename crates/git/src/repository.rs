@@ -1,5 +1,5 @@
 use crate::commit::parse_git_diff_name_status;
-use crate::stash::GitStash;
+use crate::stash::{GitStash, StashStat};
 use crate::status::{DiffTreeType, GitStatus, StatusCode, TreeDiff};
 use crate::{Oid, RunHook, SHORT_SHA_LENGTH};
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -1037,6 +1037,55 @@ pub trait GitRepository: Send + Sync {
         index: Option<usize>,
         env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<()>>;
+
+    /// `git stash push -m <message> [--include-untracked] [--keep-index]`.
+    /// S-STH "Stash Current Changes…" form.
+    fn stash_push(
+        &self,
+        message: Option<String>,
+        include_untracked: bool,
+        keep_index: bool,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let _ = (message, include_untracked, keep_index, env);
+        future::ready(Err(anyhow!("stash_push not supported on this backend"))).boxed()
+    }
+
+    /// `git stash branch <name> <stash_ref>` — create a branch from the
+    /// stash and apply it. S-STH "Branch from Stash…" entry.
+    fn stash_branch(
+        &self,
+        name: String,
+        stash_ref: String,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let _ = (name, stash_ref, env);
+        future::ready(Err(anyhow!("stash_branch not supported on this backend"))).boxed()
+    }
+
+    /// `git stash show -p <stash_ref>` — full unified diff for a stash.
+    /// Used for the S-STH detail pane; default falls back to an error so
+    /// remote-only backends without stash patch access fail loudly.
+    fn stash_show_patch(
+        &self,
+        stash_ref: String,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<String>> {
+        let _ = (stash_ref, env);
+        future::ready(Err(anyhow!("stash_show_patch not supported on this backend"))).boxed()
+    }
+
+    /// `git stash show --stat --include-untracked <stash_ref>` parsed for
+    /// (file count, has_untracked). Cheap badge data; the full diff lives
+    /// behind [`Self::stash_show_patch`].
+    fn stash_stat(
+        &self,
+        stash_ref: String,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<StashStat>> {
+        let _ = (stash_ref, env);
+        future::ready(Err(anyhow!("stash_stat not supported on this backend"))).boxed()
+    }
 
     fn push(
         &self,
@@ -2593,6 +2642,135 @@ impl GitRepository for RealGitRepository {
                     String::from_utf8_lossy(&output.stderr)
                 );
                 Ok(())
+            })
+            .boxed()
+    }
+
+    fn stash_push(
+        &self,
+        message: Option<String>,
+        include_untracked: bool,
+        keep_index: bool,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let git = git_binary?;
+                let mut args: Vec<String> = vec!["stash".into(), "push".into()];
+                if include_untracked {
+                    args.push("--include-untracked".into());
+                }
+                if keep_index {
+                    args.push("--keep-index".into());
+                }
+                if let Some(message) = message
+                    && !message.is_empty()
+                {
+                    args.push("-m".into());
+                    args.push(message);
+                }
+                let output = git.build_command(&args).envs(env.iter()).output().await?;
+                anyhow::ensure!(
+                    output.status.success(),
+                    "Failed to stash push:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                Ok(())
+            })
+            .boxed()
+    }
+
+    fn stash_branch(
+        &self,
+        name: String,
+        stash_ref: String,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let git = git_binary?;
+                let output = git
+                    .build_command(&["stash", "branch", &name, &stash_ref])
+                    .envs(env.iter())
+                    .output()
+                    .await?;
+                anyhow::ensure!(
+                    output.status.success(),
+                    "Failed to stash branch:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                Ok(())
+            })
+            .boxed()
+    }
+
+    fn stash_show_patch(
+        &self,
+        stash_ref: String,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<String>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let git = git_binary?;
+                let output = git
+                    .build_command(&["stash", "show", "-p", "--no-color", &stash_ref])
+                    .envs(env.iter())
+                    .output()
+                    .await?;
+                anyhow::ensure!(
+                    output.status.success(),
+                    "Failed to stash show:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+            })
+            .boxed()
+    }
+
+    fn stash_stat(
+        &self,
+        stash_ref: String,
+        env: Arc<HashMap<String, String>>,
+    ) -> BoxFuture<'_, Result<StashStat>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let git = git_binary?;
+                let output = git
+                    .build_command(&[
+                        "stash",
+                        "show",
+                        "--stat",
+                        "--include-untracked",
+                        "--no-color",
+                        &stash_ref,
+                    ])
+                    .envs(env.iter())
+                    .output()
+                    .await?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    if stderr.contains("unknown option") || stderr.contains("--include-untracked") {
+                        let fallback = git
+                            .build_command(&["stash", "show", "--stat", "--no-color", &stash_ref])
+                            .envs(env.iter())
+                            .output()
+                            .await?;
+                        anyhow::ensure!(
+                            fallback.status.success(),
+                            "Failed to stash show --stat:\n{}",
+                            String::from_utf8_lossy(&fallback.stderr)
+                        );
+                        let raw = String::from_utf8_lossy(&fallback.stdout);
+                        return Ok(StashStat::from_stat_output(&raw));
+                    }
+                    anyhow::bail!("Failed to stash show --stat:\n{}", stderr);
+                }
+                let raw = String::from_utf8_lossy(&output.stdout);
+                Ok(StashStat::from_stat_output(&raw))
             })
             .boxed()
     }

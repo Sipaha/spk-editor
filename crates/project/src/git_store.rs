@@ -6070,6 +6070,145 @@ impl Repository {
         })
     }
 
+    /// `git stash push -m <msg> [--include-untracked] [--keep-index]`.
+    /// On success refreshes the snapshot's cached stash entries so the
+    /// S-STH list updates immediately.
+    pub fn stash_push(
+        &mut self,
+        message: Option<String>,
+        include_untracked: bool,
+        keep_index: bool,
+        cx: &mut Context<Self>,
+    ) -> oneshot::Receiver<anyhow::Result<()>> {
+        let updates_tx = self
+            .git_store()
+            .and_then(|git_store| match &git_store.read(cx).state {
+                GitStoreState::Local { downstream, .. } => downstream
+                    .as_ref()
+                    .map(|downstream| downstream.updates_tx.clone()),
+                _ => None,
+            });
+        let this = cx.weak_entity();
+        self.send_job(None, move |git_repo, mut cx| async move {
+            match git_repo {
+                RepositoryState::Local(LocalRepositoryState {
+                    backend,
+                    environment,
+                    ..
+                }) => {
+                    let result = backend
+                        .stash_push(message, include_untracked, keep_index, environment)
+                        .await;
+                    if result.is_ok()
+                        && let Ok(stash_entries) = backend.stash_entries().await
+                    {
+                        let snapshot = this.update(&mut cx, |this, cx| {
+                            this.snapshot.stash_entries = stash_entries;
+                            cx.emit(RepositoryEvent::StashEntriesChanged);
+                            this.snapshot.clone()
+                        })?;
+                        if let Some(updates_tx) = updates_tx {
+                            updates_tx
+                                .unbounded_send(DownstreamUpdate::UpdateRepository(snapshot))
+                                .ok();
+                        }
+                    }
+                    result
+                }
+                RepositoryState::Remote(_) => {
+                    Err(anyhow::anyhow!("stash_push not supported on remote repository"))
+                }
+            }
+        })
+    }
+
+    /// `git stash branch <name> <stash_ref>`. Used by the S-STH "Branch
+    /// from Stash…" entry.
+    pub fn stash_branch(
+        &mut self,
+        name: String,
+        stash_ref: String,
+        cx: &mut Context<Self>,
+    ) -> oneshot::Receiver<anyhow::Result<()>> {
+        let updates_tx = self
+            .git_store()
+            .and_then(|git_store| match &git_store.read(cx).state {
+                GitStoreState::Local { downstream, .. } => downstream
+                    .as_ref()
+                    .map(|downstream| downstream.updates_tx.clone()),
+                _ => None,
+            });
+        let this = cx.weak_entity();
+        self.send_job(None, move |git_repo, mut cx| async move {
+            match git_repo {
+                RepositoryState::Local(LocalRepositoryState {
+                    backend,
+                    environment,
+                    ..
+                }) => {
+                    let result = backend.stash_branch(name, stash_ref, environment).await;
+                    if result.is_ok()
+                        && let Ok(stash_entries) = backend.stash_entries().await
+                    {
+                        let snapshot = this.update(&mut cx, |this, cx| {
+                            this.snapshot.stash_entries = stash_entries;
+                            cx.emit(RepositoryEvent::StashEntriesChanged);
+                            this.snapshot.clone()
+                        })?;
+                        if let Some(updates_tx) = updates_tx {
+                            updates_tx
+                                .unbounded_send(DownstreamUpdate::UpdateRepository(snapshot))
+                                .ok();
+                        }
+                    }
+                    result
+                }
+                RepositoryState::Remote(_) => Err(anyhow::anyhow!(
+                    "stash_branch not supported on remote repository"
+                )),
+            }
+        })
+    }
+
+    /// Read-only `git stash show -p <stash_ref>` for the S-STH detail
+    /// pane.
+    pub fn stash_show_patch(
+        &mut self,
+        stash_ref: String,
+    ) -> oneshot::Receiver<anyhow::Result<String>> {
+        self.send_job(None, move |git_repo, _cx| async move {
+            match git_repo {
+                RepositoryState::Local(LocalRepositoryState {
+                    backend,
+                    environment,
+                    ..
+                }) => backend.stash_show_patch(stash_ref, environment).await,
+                RepositoryState::Remote(_) => Err(anyhow::anyhow!(
+                    "stash_show_patch not supported on remote repository"
+                )),
+            }
+        })
+    }
+
+    /// File count + untracked badge for a single stash entry.
+    pub fn stash_stat(
+        &mut self,
+        stash_ref: String,
+    ) -> oneshot::Receiver<anyhow::Result<git::stash::StashStat>> {
+        self.send_job(None, move |git_repo, _cx| async move {
+            match git_repo {
+                RepositoryState::Local(LocalRepositoryState {
+                    backend,
+                    environment,
+                    ..
+                }) => backend.stash_stat(stash_ref, environment).await,
+                RepositoryState::Remote(_) => Err(anyhow::anyhow!(
+                    "stash_stat not supported on remote repository"
+                )),
+            }
+        })
+    }
+
     pub fn run_hook(&mut self, hook: RunHook, _cx: &mut App) -> oneshot::Receiver<Result<()>> {
         let id = self.id;
         self.send_job(
