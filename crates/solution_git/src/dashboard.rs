@@ -36,8 +36,8 @@ use context_server::types::ToolResponseContent;
 use editor_mcp::{ToolTier, register_typed_tool_with_tier};
 use futures::StreamExt as _;
 use gpui::{
-    AnyElement, App, AsyncApp, Context, EventEmitter, FocusHandle, Focusable, IntoElement, Render,
-    SharedString, Subscription, Task, WeakEntity, Window,
+    AnyElement, App, AsyncApp, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+    Render, SharedString, Subscription, Task, WeakEntity, Window,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -1022,13 +1022,17 @@ pub fn register(workspace: &mut Workspace) {
     });
     workspace.register_action(|workspace, _: &SuggestCherryPicks, window, cx| {
         open_or_reuse_dashboard(workspace, window, cx);
-        // After (re)opening, kick off analyze on the current dashboard.
+        // Snapshot the project handle here, where we still hold an
+        // outer-update reference to the workspace; threading it through
+        // `dashboard.update(...).start_ai_suggest(project, cx)` avoids
+        // a workspace double-lease inside the dashboard's own update.
+        let project = workspace.project().clone();
         let dashboard = workspace
             .items_of_type::<SolutionStatusDashboard>(cx)
             .next();
         if let Some(dashboard) = dashboard {
             dashboard.update(cx, |dashboard, cx| {
-                dashboard.start_ai_suggest(cx);
+                dashboard.start_ai_suggest(project, cx);
             });
         }
     });
@@ -1112,7 +1116,16 @@ impl SolutionStatusDashboard {
                     .tooltip(Tooltip::text(
                         "Suggest cherry-picks from other members (S-AI-CHP)",
                     ))
-                    .on_click(cx.listener(|this, _, _, cx| this.start_ai_suggest(cx))),
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let Some(project) = this
+                            ._workspace
+                            .read_with(cx, |ws, _cx| ws.project().clone())
+                            .ok()
+                        else {
+                            return;
+                        };
+                        this.start_ai_suggest(project, cx);
+                    })),
             )
     }
 
@@ -1316,21 +1329,24 @@ impl SolutionStatusDashboard {
 
     /// S-AI-CHP — kick off cross-member cherry-pick analysis. Reveals the
     /// suggestions section (creating a placeholder if no run yet), spawns
-    /// the analyze task on the active project, and stores the resulting
-    /// task so dropping the dashboard cancels it.
-    pub fn start_ai_suggest(&mut self, cx: &mut Context<Self>) {
+    /// the analyze task on `project`, and stores the resulting task so
+    /// dropping the dashboard cancels it.
+    ///
+    /// `project` is taken as an argument because callers reach this via
+    /// `workspace.register_action(... → dashboard.update(... → here)`.
+    /// At that moment the workspace entity is mid-update; resolving the
+    /// project from `self._workspace.upgrade()?.read(cx)` would panic
+    /// with the same double-lease as the `spawn_fs_watchers` site.
+    pub fn start_ai_suggest(
+        &mut self,
+        project: Entity<project::Project>,
+        cx: &mut Context<Self>,
+    ) {
         self.ai_suggest.section_open = true;
         if self.ai_suggest.in_flight {
             cx.notify();
             return;
         }
-        let Some(workspace) = self._workspace.upgrade() else {
-            log::info!(
-                "solution_git::dashboard: SuggestCherryPicks invoked but workspace is gone"
-            );
-            return;
-        };
-        let project = workspace.read(cx).project().clone();
         let solution = self.solution.clone();
         let token_budget = <solutions::SolutionsSettings as settings::Settings>::get_global(cx)
             .ai_cherry_pick_suggest

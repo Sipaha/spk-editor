@@ -188,11 +188,17 @@ pub(crate) async fn analyze_solution_with(
 
     // 1. Per-member commit + tree scan. Sequential to keep the user's
     //    git working trees from contending; the per-call work is small
-    //    (`git log` + a single `git ls-tree`).
+    //    (`git log` + a single `git ls-tree`). Non-git members are
+    //    silently skipped — same pattern as `commit_all`, `aggregator`,
+    //    and `dashboard::resolve_targets` — so a bare folder member
+    //    doesn't sink the whole analysis with "fatal: not a git repo".
     let mut members: Vec<MemberCommits> = Vec::with_capacity(solution.members.len());
     for member in &solution.members {
         let member_id = SharedString::from(member.catalog_id.0.clone());
         let work_dir = member.local_path.clone();
+        if !work_dir.join(".git").exists() {
+            continue;
+        }
         let commits = list_commits(&work_dir, config.days_back)
             .await
             .with_context(|| {
