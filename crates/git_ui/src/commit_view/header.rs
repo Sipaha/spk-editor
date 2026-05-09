@@ -5,14 +5,29 @@ use std::sync::Arc;
 
 use git::repository::CommitDetails;
 use git::{BuildCommitPermalinkParams, GitRemote, ParsedGitRemote};
-use gpui::{AnyElement, App, ClipboardItem, IntoElement, ParentElement, Styled, Window};
-use ui::{Tooltip, prelude::*};
+use gpui::{
+    AnyElement, App, ClickEvent, ClipboardItem, IntoElement, ParentElement, Styled, Window,
+};
+use ui::{Disclosure, Tooltip, prelude::*};
 
 use crate::commit_tooltip::CommitAvatar;
 use crate::git_panel_settings::{CommitViewSettings, GitPanelSettings};
 use settings::Settings as _;
 
 use super::mentions::{MessageToken, parse_message_tokens};
+
+/// State the [`render_header`] surface needs to render the S-AI-EXP
+/// "Explain" button + expandable section.
+#[derive(Clone)]
+pub(crate) struct ExplainHeaderState {
+    pub pending: bool,
+    pub body: Option<SharedString>,
+    pub error: Option<SharedString>,
+    pub from_cache: bool,
+    pub expanded: bool,
+    pub disabled_reason: Option<&'static str>,
+    pub on_click: Arc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>,
+}
 
 /// Render the IDEA-style header for the commit view.
 ///
@@ -26,6 +41,7 @@ pub(crate) fn render_header(
     extra_committer: Option<(SharedString, SharedString)>,
     is_stash: bool,
     gutter_width: gpui::Pixels,
+    explain: ExplainHeaderState,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -88,13 +104,14 @@ pub(crate) fn render_header(
         .color(Color::Muted)
         .tooltip(move |_, cx| Tooltip::simple(absolute_for_tooltip.clone(), cx));
 
-    h_flex()
+    let explain_button = render_explain_button(is_stash, &explain);
+    let explain_panel = render_explain_panel(&explain, cx);
+
+    let top_row = h_flex()
         .py_2()
         .pr_2p5()
         .w_full()
         .justify_between()
-        .border_b_1()
-        .border_color(cx.theme().colors().border_variant)
         .child(
             h_flex()
                 .gap_2()
@@ -149,32 +166,200 @@ pub(crate) fn render_header(
                         }),
                 ),
         )
-        .when(!is_stash, |this| {
-            this.child(
-                Button::new("sha", "Commit SHA")
-                    .start_icon(
-                        Icon::new(copy_icon)
-                            .size(IconSize::Small)
-                            .color(copy_icon_color),
+        .child(
+            h_flex()
+                .gap_1p5()
+                .when_some(explain_button, |this, btn| this.child(btn))
+                .when(!is_stash, |this| {
+                    this.child(
+                        Button::new("sha", "Commit SHA")
+                            .start_icon(
+                                Icon::new(copy_icon)
+                                    .size(IconSize::Small)
+                                    .color(copy_icon_color),
+                            )
+                            .tooltip({
+                                let commit_sha = commit_sha.clone();
+                                move |_, cx| {
+                                    Tooltip::with_meta(
+                                        "Copy Commit SHA",
+                                        None,
+                                        commit_sha.clone(),
+                                        cx,
+                                    )
+                                }
+                            })
+                            .on_click({
+                                let commit_sha = commit_sha.clone();
+                                move |_, _, cx| {
+                                    cx.stop_propagation();
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        commit_sha.to_string(),
+                                    ));
+                                }
+                            }),
                     )
-                    .tooltip({
-                        let commit_sha = commit_sha.clone();
-                        move |_, cx| {
-                            Tooltip::with_meta("Copy Commit SHA", None, commit_sha.clone(), cx)
-                        }
-                    })
-                    .on_click({
-                        let commit_sha = commit_sha.clone();
-                        move |_, _, cx| {
-                            cx.stop_propagation();
-                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                commit_sha.to_string(),
-                            ));
-                        }
-                    }),
-            )
-        })
+                }),
+        );
+
+    v_flex()
+        .w_full()
+        .border_b_1()
+        .border_color(cx.theme().colors().border_variant)
+        .child(top_row)
+        .when_some(explain_panel, |this, el| this.child(el))
         .into_any_element()
+}
+
+/// "Explain" button rendered next to "Commit SHA" in the top row. Returns
+/// `None` for stash entries — the AI prompt would be unhelpful since
+/// the stash "commit" is just the working-tree snapshot.
+fn render_explain_button(is_stash: bool, explain: &ExplainHeaderState) -> Option<AnyElement> {
+    if is_stash {
+        return None;
+    }
+    let label = if explain.pending {
+        "Explaining…"
+    } else if explain.body.is_some() {
+        if explain.expanded {
+            "Hide Explanation"
+        } else {
+            "Show Explanation"
+        }
+    } else {
+        "Explain"
+    };
+    let mut button = Button::new("commit-explain", label)
+        .start_icon(Icon::new(IconName::Sparkle).size(IconSize::Small))
+        .label_size(LabelSize::Small)
+        .loading(explain.pending)
+        .disabled(explain.pending || explain.disabled_reason.is_some());
+
+    button = if let Some(reason) = explain.disabled_reason {
+        let reason_str: SharedString = SharedString::from(reason);
+        button.tooltip(move |_, cx| Tooltip::simple(reason_str.clone(), cx))
+    } else if explain.pending {
+        button.tooltip(Tooltip::text("AI explanation in progress"))
+    } else if explain.body.is_some() {
+        button.tooltip(Tooltip::text(
+            "Toggle the AI-generated explanation panel",
+        ))
+    } else {
+        button.tooltip(Tooltip::text(
+            "Generate a 2-3 sentence AI explanation of this commit",
+        ))
+    };
+
+    let on_click = explain.on_click.clone();
+    button = button.on_click(move |event, window, cx| {
+        cx.stop_propagation();
+        on_click(event, window, cx);
+    });
+    Some(button.into_any_element())
+}
+
+/// The expandable explanation block under the top row. Rendered only
+/// when there's something to show (a body, an in-flight request, or a
+/// recent error).
+fn render_explain_panel(explain: &ExplainHeaderState, cx: &App) -> Option<AnyElement> {
+    let has_body = explain.body.is_some();
+    let has_error = explain.error.is_some();
+    if !explain.pending && !has_body && !has_error {
+        return None;
+    }
+    let on_click = explain.on_click.clone();
+    let toggle = Disclosure::new("commit-explain-disclosure", explain.expanded)
+        .on_click(move |event, window, cx| on_click(event, window, cx));
+
+    let header_label = if explain.pending && !has_body {
+        Label::new("Generating explanation…")
+            .size(LabelSize::Small)
+            .color(Color::Muted)
+            .into_any_element()
+    } else if has_error {
+        Label::new("AI explanation unavailable")
+            .size(LabelSize::Small)
+            .color(Color::Error)
+            .into_any_element()
+    } else {
+        Label::new("AI explanation")
+            .size(LabelSize::Small)
+            .color(Color::Muted)
+            .into_any_element()
+    };
+
+    let cache_badge = if explain.from_cache && has_body {
+        Some(
+            Label::new("from cache")
+                .size(LabelSize::XSmall)
+                .color(Color::Muted)
+                .into_any_element(),
+        )
+    } else {
+        None
+    };
+
+    let header_row = h_flex()
+        .gap_1p5()
+        .px_2()
+        .py_1()
+        .child(toggle)
+        .child(
+            Icon::new(IconName::Sparkle)
+                .size(IconSize::XSmall)
+                .color(Color::Muted),
+        )
+        .child(header_label)
+        .when_some(cache_badge, |this, badge| this.child(badge));
+
+    let body_block = if explain.expanded {
+        if let Some(body) = explain.body.as_ref() {
+            Some(
+                div()
+                    .px_2()
+                    .pb_2()
+                    .text_sm()
+                    .text_color(cx.theme().colors().text)
+                    .child(body.clone())
+                    .into_any_element(),
+            )
+        } else if let Some(err) = explain.error.as_ref() {
+            Some(
+                div()
+                    .px_2()
+                    .pb_2()
+                    .text_sm()
+                    .text_color(cx.theme().colors().text_muted)
+                    .child(err.clone())
+                    .into_any_element(),
+            )
+        } else if explain.pending {
+            Some(
+                div()
+                    .px_2()
+                    .pb_2()
+                    .text_sm()
+                    .text_color(cx.theme().colors().text_muted)
+                    .child(SharedString::from("Asking the AI agent…"))
+                    .into_any_element(),
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Some(
+        v_flex()
+            .w_full()
+            .bg(cx.theme().colors().element_background)
+            .border_t_1()
+            .border_color(cx.theme().colors().border_variant)
+            .child(header_row)
+            .when_some(body_block, |this, el| this.child(el))
+            .into_any_element(),
+    )
 }
 
 fn render_avatar(

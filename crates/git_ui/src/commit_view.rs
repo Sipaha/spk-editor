@@ -5,6 +5,7 @@
 //! (`CommitView`, `CommitViewToolbar`, `CommitView::open`) is unchanged.
 
 mod affected_files;
+pub mod ai_explain;
 mod contains_panel;
 mod footer;
 mod header;
@@ -60,7 +61,17 @@ use crate::git_panel::{GitPanel, OpenAtCommit};
 use crate::git_panel_settings::GitPanelSettings;
 use settings::Settings as _;
 
-actions!(git, [ApplyCurrentStash, PopCurrentStash, DropCurrentStash,]);
+actions!(
+    git,
+    [
+        ApplyCurrentStash,
+        PopCurrentStash,
+        DropCurrentStash,
+        /// S-AI-EXP — kick off an AI explanation for the open commit
+        /// (or expand/collapse the section when one already exists).
+        ExplainCommit,
+    ]
+);
 
 /// Action emitted by the footer's "Open in New Tab" button. The workspace
 /// handler resolves the target repository, fetches the commit, and adds a
@@ -109,6 +120,7 @@ pub struct CommitView {
     stash: Option<usize>,
     multibuffer: Entity<MultiBuffer>,
     repository: Entity<Repository>,
+    project: Entity<Project>,
     remote: Option<GitRemote>,
     /// Parents in display order. Loaded asynchronously after `new`.
     parents: Vec<SharedString>,
@@ -130,6 +142,15 @@ pub struct CommitView {
     /// Whether this view is the standalone-tab variant. Drives the
     /// "Open in New Tab" footer button visibility.
     in_pane: bool,
+    /// S-AI-EXP — Explain button state. The body / cache flag are only
+    /// `Some` once an explanation has been produced (or pulled from
+    /// disk). `pending` is the spinner driver.
+    explain_body: Option<SharedString>,
+    explain_from_cache: bool,
+    explain_pending: bool,
+    explain_expanded: bool,
+    explain_error: Option<SharedString>,
+    _explain_task: Option<Task<()>>,
 }
 
 struct GitBlob {
@@ -465,6 +486,7 @@ impl CommitView {
             multibuffer,
             stash,
             repository: repository.clone(),
+            project: project.clone(),
             remote,
             parents: Vec::new(),
             ref_names: Vec::new(),
@@ -474,6 +496,12 @@ impl CommitView {
             affected_files,
             contains_panel: CommitContainsPanel::new(),
             in_pane: true,
+            explain_body: None,
+            explain_from_cache: false,
+            explain_pending: false,
+            explain_expanded: false,
+            explain_error: None,
+            _explain_task: None,
         };
         let sha_for_meta = view.commit.sha.to_string();
         view.contains_panel
@@ -510,6 +538,100 @@ impl CommitView {
 
     fn calculate_changed_lines(&self, cx: &App) -> (u32, u32) {
         self.multibuffer.read(cx).snapshot(cx).total_changed_lines()
+    }
+
+    /// True if there's a Solution available to host the ephemeral AI
+    /// session. Without one, [`ai_explain::explain_commit`] would
+    /// surface the same error via the toast path; disabling the button
+    /// up front is friendlier — and keeps the affordance consistent
+    /// with the conflict-resolver AI button.
+    fn has_active_solution(cx: &App) -> bool {
+        solutions::SolutionStore::try_global(cx)
+            .map(|store| !store.read(cx).solutions().is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Reason the Explain button is disabled (or `None` when active).
+    /// Surfaced as the button's tooltip so the user knows why the
+    /// affordance is greyed out.
+    pub(crate) fn explain_disabled_reason(&self, cx: &App) -> Option<&'static str> {
+        if self.commit.sha.as_ref().is_empty() {
+            return Some("This commit has no SHA");
+        }
+        if self.stash.is_some() {
+            return Some("Explain is only available for non-stash commits");
+        }
+        if !Self::has_active_solution(cx) {
+            return Some("Explain requires an active Solution");
+        }
+        None
+    }
+
+    /// Toolbar / header click handler for the Explain button. If an
+    /// explanation is already produced, just toggles the expandable
+    /// section; otherwise kicks off the ephemeral AI task.
+    pub(crate) fn toggle_or_request_explain(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.explain_pending {
+            return;
+        }
+        if self.explain_body.is_some() {
+            self.explain_expanded = !self.explain_expanded;
+            cx.notify();
+            return;
+        }
+        if self.explain_disabled_reason(cx).is_some() {
+            return;
+        }
+        let work_dir: PathBuf = self
+            .repository
+            .read(cx)
+            .work_directory_abs_path
+            .as_ref()
+            .to_path_buf();
+        let sha = self.commit.sha.to_string();
+        let project = self.project.clone();
+        let cache_ttl_days = GitPanelSettings::get_global(cx)
+            .commit_explanations
+            .cache_ttl_days;
+
+        self.explain_pending = true;
+        self.explain_expanded = true;
+        self.explain_error = None;
+        cx.notify();
+
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let outcome = ai_explain::explain_commit(
+                &work_dir,
+                &sha,
+                &project,
+                cache_ttl_days,
+                &mut cx.clone(),
+            )
+            .await;
+            let _ = this.update(cx, |view, cx| {
+                view.explain_pending = false;
+                match outcome {
+                    Ok(out) => {
+                        view.explain_body = Some(SharedString::from(out.text));
+                        view.explain_from_cache =
+                            out.source == ai_explain::ExplainSource::Cached;
+                        view.explain_expanded = true;
+                    }
+                    Err(err) => {
+                        log::warn!("AI commit explain failed: {err:#}");
+                        view.explain_error = Some(SharedString::from(format!(
+                            "Couldn't explain commit: {err}"
+                        )));
+                    }
+                }
+                cx.notify();
+            });
+        });
+        self._explain_task = Some(task);
     }
 
     /// Reload the diff for a different parent (1-based merge-parent toggle).
@@ -557,12 +679,24 @@ impl CommitView {
             .as_ref()
             .map(|branch| SharedString::from(branch.name().to_string()));
 
+        let explain_state = header::ExplainHeaderState {
+            pending: self.explain_pending,
+            body: self.explain_body.clone(),
+            error: self.explain_error.clone(),
+            from_cache: self.explain_from_cache,
+            expanded: self.explain_expanded,
+            disabled_reason: self.explain_disabled_reason(cx),
+            on_click: Arc::new(cx.listener(|view, _event, window, cx| {
+                view.toggle_or_request_explain(window, cx);
+            })),
+        };
         let header = header::render_header(
             &self.commit,
             self.remote.as_ref(),
             self.extra_committer.clone(),
             self.stash.is_some(),
             gutter_width,
+            explain_state,
             window,
             cx,
         );
@@ -1110,6 +1244,7 @@ impl Item for CommitView {
                 commit: self.commit.clone(),
                 stash: self.stash,
                 repository: self.repository.clone(),
+                project: self.project.clone(),
                 remote: self.remote.clone(),
                 parents,
                 ref_names,
@@ -1119,6 +1254,12 @@ impl Item for CommitView {
                 affected_files,
                 contains_panel: CommitContainsPanel::new(),
                 in_pane: true,
+                explain_body: self.explain_body.clone(),
+                explain_from_cache: self.explain_from_cache,
+                explain_pending: false,
+                explain_expanded: self.explain_expanded,
+                explain_error: self.explain_error.clone(),
+                _explain_task: None,
             }
         })))
     }
@@ -1132,6 +1273,9 @@ impl Render for CommitView {
             .key_context(if is_stash { "StashDiff" } else { "CommitDiff" })
             .size_full()
             .bg(cx.theme().colors().editor_background)
+            .on_action(cx.listener(|view, _: &ExplainCommit, window, cx| {
+                view.toggle_or_request_explain(window, cx);
+            }))
             .child(self.render_metadata_panel(window, cx))
             .when(!self.editor.read(cx).is_empty(cx), |this| {
                 this.child(div().flex_grow().child(self.editor.clone()))

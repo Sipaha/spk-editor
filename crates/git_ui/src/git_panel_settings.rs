@@ -37,6 +37,19 @@ pub struct AutoShelveSettings {
     pub max_snapshots: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitExplanationsSettings {
+    pub cache_ttl_days: u32,
+}
+
+impl Default for CommitExplanationsSettings {
+    fn default() -> Self {
+        Self {
+            cache_ttl_days: crate::commit_view::ai_explain::DEFAULT_CACHE_TTL_DAYS,
+        }
+    }
+}
+
 impl AutoShelveSettings {
     pub const DEFAULT_INTERVAL_MINUTES: u32 = 15;
     pub const DEFAULT_MAX_SNAPSHOTS: u32 = 5;
@@ -78,6 +91,7 @@ pub struct GitPanelSettings {
     pub show_at_revision: ShowAtRevisionSettings,
     pub auto_shelve: AutoShelveSettings,
     pub run_pre_commit_hooks_in_panel: bool,
+    pub commit_explanations: CommitExplanationsSettings,
 }
 
 #[derive(Default)]
@@ -163,6 +177,14 @@ impl Settings for GitPanelSettings {
             run_pre_commit_hooks_in_panel: git_panel
                 .run_pre_commit_hooks_in_panel
                 .unwrap_or(true),
+            commit_explanations: {
+                let raw = git_panel.commit_explanations.unwrap_or_default();
+                CommitExplanationsSettings {
+                    cache_ttl_days: raw
+                        .cache_ttl_days
+                        .unwrap_or(crate::commit_view::ai_explain::DEFAULT_CACHE_TTL_DAYS),
+                }
+            },
         }
     }
 }

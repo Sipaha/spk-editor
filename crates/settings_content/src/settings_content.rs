@@ -713,6 +713,10 @@ pub struct GitPanelSettingsContent {
     ///
     /// Default: true
     pub run_pre_commit_hooks_in_panel: Option<bool>,
+
+    /// Commit-explanation cache (S-AI-EXP) configuration: TTL for the
+    /// per-sha cache file under `<temp_dir>/commit_explanations/`.
+    pub commit_explanations: Option<CommitExplanationsSettingsContent>,
 }
 
 #[with_fallible_options]
@@ -756,6 +760,18 @@ pub struct InteractiveRebaseSettingsContent {
     ///
     /// Default: false
     pub allow_exec_via_mcp: Option<bool>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+pub struct CommitExplanationsSettingsContent {
+    /// Days a cached AI commit explanation under
+    /// `<temp_dir>/commit_explanations/<repo-hash>/<sha>.txt` stays valid.
+    /// `0` disables caching: every Explain click re-runs the agent.
+    /// At startup, anything older than `2 * cache_ttl_days` is swept.
+    ///
+    /// Default: 7
+    pub cache_ttl_days: Option<u32>,
 }
 
 #[with_fallible_options]

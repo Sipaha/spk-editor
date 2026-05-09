@@ -1085,6 +1085,17 @@
     //
     // Default: true
     "run_pre_commit_hooks_in_panel": true,
+    // Commit-explanation cache (S-AI-EXP). The Explain button in the
+    // commit detail view caches the AI-generated 2-3 sentence summary
+    // under `<temp_dir>/commit_explanations/<repo-hash>/<sha>.txt`.
+    // `0` disables caching (the agent runs on every click). At startup
+    // anything older than `2 * cache_ttl_days` is swept; live reads
+    // also drop entries older than `cache_ttl_days` themselves, so a
+    // stale entry that survives cleanup just gets re-generated.
+    "commit_explanations": {
+      // Default: 7
+      "cache_ttl_days": 7,
+    },
   },
   "message_editor": {
     // Whether to automatically replace emoji shortcodes with emoji characters.

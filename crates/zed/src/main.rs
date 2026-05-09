@@ -324,6 +324,15 @@ fn main() {
         git_ui::handlers::show_at_revision::DEFAULT_CLEANUP_ORPHANS_OLDER_THAN_H,
     );
 
+    // Best-effort cleanup of expired commit-explanation cache files
+    // (S-AI-EXP). The settings store is not yet initialised at this
+    // point in main, so we use the compile-time default. Anything
+    // older than `2 * cache_ttl_days` is removed; live reads still
+    // gate stale entries against the user-configured TTL.
+    git_ui::commit_view::ai_explain::cleanup_expired(
+        git_ui::commit_view::ai_explain::DEFAULT_CACHE_TTL_DAYS,
+    );
+
     if stdout_is_a_pty() {
         zlog::init_output_stdout();
     } else {
