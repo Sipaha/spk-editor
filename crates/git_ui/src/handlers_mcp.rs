@@ -280,10 +280,7 @@ impl McpServerTool for CheckoutRevisionTool {
                     Some(trimmed.to_string())
                 }
             });
-        // `--` disambiguates the argument as a ref, not a pathspec — without
-        // it, `HEAD~1` and similar relative refs that don't match a tracked
-        // file path silently fail with `pathspec did not match`.
-        run_git_void(&work_dir, &["checkout", &input.sha, "--"]).await?;
+        run_git_void(&work_dir, &["checkout", &input.sha]).await?;
         let detached_head = run_git(&work_dir, &["symbolic-ref", "--short", "-q", "HEAD"])
             .await
             .ok()

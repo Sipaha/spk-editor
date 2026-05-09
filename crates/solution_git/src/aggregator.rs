@@ -365,11 +365,17 @@ async fn produce_range(
     _wanted: usize,
     cx: &mut AsyncApp,
 ) -> Result<Vec<AggregatedCommit>> {
-    // Initialise / reuse session.
+    // Initialise / reuse session. A fresh init is required when (a) no
+    // session exists yet, (b) the SessionKey changed (different filters
+    // / members), or (c) the caller asked for `range.start == 0`. The
+    // last case is what `solution.git.aggregated_log` always sends:
+    // without it, the first call drains the buffers, `total_emitted`
+    // bumps to N, and every subsequent re-query returns 0 commits even
+    // though the underlying repos have not changed.
     let need_init = {
         let guard = state.lock();
         match guard.session.as_ref() {
-            Some(s) => s.key != plan.key,
+            Some(s) => s.key != plan.key || range.start == 0,
             None => true,
         }
     };
