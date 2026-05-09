@@ -17,7 +17,9 @@ use std::sync::OnceLock;
 
 pub use log_data_source::{AggregatedCommit, LogDataSource, LogQuery};
 pub use push::SolutionPushProvider;
-pub use solution_panel::SolutionPanelProvider;
+pub use solution_panel::{
+    CommitAllOutcome, CommitStatus, MemberCommitResult, SolutionPanelProvider,
+};
 
 struct Providers {
     solution_panel: OnceLock<Box<dyn SolutionPanelProvider>>,
