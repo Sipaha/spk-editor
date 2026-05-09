@@ -6,6 +6,7 @@
 
 pub mod actions;
 pub mod adapter;
+pub mod agent_settings;
 pub mod claude_adapter;
 pub(crate) mod cold_persistence;
 pub(crate) mod compact;
@@ -14,6 +15,7 @@ pub(crate) mod db;
 pub mod event_sources;
 pub(crate) mod expanded_compose;
 pub mod mcp;
+pub mod message_generator;
 pub mod model;
 pub mod navigator;
 pub mod notifier;
@@ -40,6 +42,9 @@ use gpui::{App, AppContext, AsyncApp, SharedString};
 use project::agent_server_store::AgentId;
 
 pub fn init(cx: &mut App) {
+    use ::settings::Settings as _;
+    agent_settings::SolutionAgentSettings::register(cx);
+
     let mut adapters = adapter::AdapterRegistry::new();
     adapters.register(Arc::new(claude_adapter::ClaudeAcpAdapter));
     let adapters = Arc::new(adapters);

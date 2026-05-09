@@ -176,6 +176,11 @@ pub struct SettingsContent {
     /// + named groups that open as a single editor window).
     pub solutions: Option<SolutionsSettingsContent>,
 
+    /// Configuration for the per-Solution AI subprocess pool used by
+    /// `solution_agent` (ephemeral commit-message / explain / cherry-pick
+    /// suggestion tasks). See M5 in the git-panel plan.
+    pub solution_agent: Option<SolutionAgentSettingsContent>,
+
     /// Configuration for the Message Editor
     pub message_editor: Option<MessageEditorSettings>,
 
@@ -1179,6 +1184,42 @@ pub struct SolutionsSettingsContent {
 pub struct SolutionGitSettingsContent {
     /// Aggregated-log knobs (S-SOL-LOG).
     pub aggregated_log: Option<SolutionGitAggregatedLogSettingsContent>,
+}
+
+/// Per-Solution AI subprocess pool configuration. Used by `solution_agent`
+/// for ephemeral tasks (commit message generation, explain commit,
+/// AI-suggested merge resolution, …). Persistent interactive sessions are
+/// not affected by these caps.
+#[with_fallible_options]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, Default, PartialEq)]
+pub struct SolutionAgentSettingsContent {
+    /// Ephemeral-task pool sizing. Optional — when absent, defaults apply
+    /// (3 concurrent / 30s queue timeout / 60s idle TTL).
+    pub ephemeral: Option<SolutionAgentEphemeralSettingsContent>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, Default, PartialEq)]
+pub struct SolutionAgentEphemeralSettingsContent {
+    /// Maximum number of concurrent ephemeral subprocesses per Solution.
+    /// Additional calls queue up until a slot frees or the queue timeout
+    /// expires.
+    ///
+    /// Default: 3
+    pub max_concurrent: Option<u32>,
+
+    /// How long an ephemeral call waits for a free slot when the
+    /// concurrency cap is hit. After this it returns an error.
+    ///
+    /// Default: 30
+    pub queue_timeout_seconds: Option<u32>,
+
+    /// How long an idle ephemeral subprocess is kept alive before being
+    /// shut down. Higher values amortize spawn cost across bursts of
+    /// activity.
+    ///
+    /// Default: 60
+    pub idle_ttl_seconds: Option<u32>,
 }
 
 #[with_fallible_options]

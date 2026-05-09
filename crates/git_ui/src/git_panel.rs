@@ -22,7 +22,6 @@ use editor::{
 };
 use editor::{EditorStyle, RewrapOptions};
 use file_icons::FileIcons;
-use futures::StreamExt as _;
 use futures::channel::oneshot::Canceled;
 use git::commit::ParsedCommitMessage;
 use git::repository::{
@@ -45,10 +44,6 @@ use gpui::{
 };
 use itertools::Itertools;
 use language::{Buffer, File};
-use language_model::{
-    CompletionIntent, ConfiguredModel, LanguageModelRegistry, LanguageModelRequest,
-    LanguageModelRequestMessage, Role,
-};
 use menu;
 use multi_buffer::ExcerptBoundaryInfo;
 use notifications::status_toast::StatusToast;
@@ -2893,17 +2888,15 @@ impl GitPanel {
             .unwrap_or_else(|| BuiltInPrompt::CommitMessage.default_content().to_string())
     }
 
-    /// Generates a commit message using an LLM.
+    /// Generates a commit message via the fork's `solution_agent` ephemeral
+    /// pool (subscription-auth `claude` subprocess), NOT upstream's
+    /// `LanguageModelRegistry` (which would require a configured BYOK
+    /// provider with API key). The action button still shows the spinner
+    /// while the ephemeral session runs; cancellation drops the task.
     pub fn generate_commit_message(&mut self, cx: &mut Context<Self>) {
-        if !self.can_commit() || !AgentSettings::get_global(cx).enabled(cx) {
+        if !self.can_commit() {
             return;
         }
-
-        let Some(ConfiguredModel { provider, model }) =
-            LanguageModelRegistry::read_global(cx).commit_message_model(cx)
-        else {
-            return;
-        };
 
         let Some(repo) = self.active_repository.as_ref() else {
             return;
@@ -2919,7 +2912,6 @@ impl GitPanel {
             }
         });
 
-        let temperature = AgentSettings::temperature_for_model(&model, cx);
         let project = self.project.clone();
         let repo_work_dir = repo.read(cx).work_directory_abs_path.clone();
 
@@ -2928,16 +2920,6 @@ impl GitPanel {
                 let _defer = cx.on_drop(&this, |this, _cx| {
                     this.generate_commit_message_task.take();
                 });
-
-                if let Some(task) = cx.update(|cx| {
-                    if !provider.is_authenticated(cx) {
-                        Some(provider.authenticate(cx))
-                    } else {
-                        None
-                    }
-                }) {
-                    task.await.log_err();
-                }
 
                 let mut diff_text = match diff.await {
                     Ok(result) => match result {
@@ -2980,57 +2962,30 @@ impl GitPanel {
                     format!("\nHere is the user's subject line:\n{subject}")
                 };
 
-                let content = format!(
-                    "{prompt}{rules_section}{subject_section}\nHere are the changes in this commit:\n{diff_text}"
+                let combined_prompt = format!(
+                    "{prompt}{rules_section}{subject_section}\n\
+                     Return ONLY the commit message text. No preamble, no code fences, no explanation.\n\n\
+                     Here are the changes in this commit:\n{diff_text}"
                 );
 
-                let request = LanguageModelRequest {
-                    thread_id: None,
-                    prompt_id: None,
-                    intent: Some(CompletionIntent::GenerateGitCommitMessage),
-                    messages: vec![LanguageModelRequestMessage {
-                        role: Role::User,
-                        content: vec![content.into()],
-                        cache: false,
-                        reasoning_details: None,
-                    }],
-                    tools: Vec::new(),
-                    tool_choice: None,
-                    stop: Vec::new(),
-                    temperature,
-                    thinking_allowed: false,
-                    thinking_effort: None,
-                    speed: None,
-                };
+                let result = solution_agent::message_generator::run_ephemeral_task(
+                    combined_prompt,
+                    project.clone(),
+                    Some(repo_work_dir.as_ref()),
+                    &mut cx,
+                ).await;
 
-                let stream = model.stream_completion_text(request, cx);
-                match stream.await {
-                    Ok(mut messages) => {
-                        if !text_empty {
-                            this.update(cx, |this, cx| {
-                                this.commit_message_buffer(cx).update(cx, |buffer, cx| {
-                                    let insert_position = buffer.anchor_before(buffer.len());
-                                    buffer.edit([(insert_position..insert_position, "\n")], None, cx)
-                                });
-                            })?;
-                        }
-
-                        while let Some(message) = messages.stream.next().await {
-                            match message {
-                                Ok(text) => {
-                                    this.update(cx, |this, cx| {
-                                        this.commit_message_buffer(cx).update(cx, |buffer, cx| {
-                                            let insert_position = buffer.anchor_before(buffer.len());
-                                            buffer.edit([(insert_position..insert_position, text)], None, cx);
-                                        });
-                                    })?;
-                                }
-                                Err(e) => {
-                                    Self::show_commit_message_error(&this, &e, cx);
-                                    break;
-                                }
-                            }
-                        }
+                match result {
+                    Ok(message) => {
+                        let cleaned = solution_agent::message_generator::clean_commit_message(&message);
+                        this.update(cx, |this, cx| {
+                            let prefix = if text_empty { "" } else { "\n" };
+                            this.commit_message_buffer(cx).update(cx, |buffer, cx| {
+                                let insert_position = buffer.anchor_before(buffer.len());
+                                let payload = format!("{prefix}{cleaned}");
+                                buffer.edit([(insert_position..insert_position, payload)], None, cx);
+                            });
+                        })?;
                     }
                     Err(e) => {
                         Self::show_commit_message_error(&this, &e, cx);
@@ -4585,10 +4540,14 @@ impl GitPanel {
             );
         }
 
-        let model_registry = LanguageModelRegistry::read_global(cx);
-        let has_commit_model_configuration_error = model_registry
-            .configuration_error(model_registry.commit_message_model(cx), cx)
-            .is_some();
+        // Fork-local: AI commit-message generation routes through
+        // `solution_agent`'s `claude` subprocess pool (subscription auth via
+        // `~/.claude/`), not upstream's BYOK `LanguageModelRegistry`. The
+        // only precondition is that a Solution is open — we don't surface
+        // the upstream "Configure an LLM provider..." path.
+        let no_active_solution = solutions::SolutionStore::try_global(cx)
+            .map(|s| s.read(cx).solutions().iter().all(|s| s.last_opened_at.is_none()))
+            .unwrap_or(true);
         let can_commit = self.can_commit();
 
         let editor_focus_handle = self.commit_editor.focus_handle(cx);
@@ -4596,7 +4555,7 @@ impl GitPanel {
         Some(
             IconButton::new("generate-commit-message", IconName::AiEdit)
                 .shape(ui::IconButtonShape::Square)
-                .icon_color(if has_commit_model_configuration_error {
+                .icon_color(if no_active_solution {
                     Color::Disabled
                 } else {
                     Color::Muted
@@ -4604,8 +4563,11 @@ impl GitPanel {
                 .tooltip(move |_window, cx| {
                     if !can_commit {
                         Tooltip::simple("No Changes to Commit", cx)
-                    } else if has_commit_model_configuration_error {
-                        Tooltip::simple("Configure an LLM provider to generate commit messages", cx)
+                    } else if no_active_solution {
+                        Tooltip::simple(
+                            "Open a Solution to generate AI commit messages",
+                            cx,
+                        )
                     } else {
                         Tooltip::for_action_in(
                             "Generate Commit Message",
@@ -4615,7 +4577,7 @@ impl GitPanel {
                         )
                     }
                 })
-                .disabled(!can_commit || has_commit_model_configuration_error)
+                .disabled(!can_commit || no_active_solution)
                 .on_click(cx.listener(move |this, _event, _window, cx| {
                     this.generate_commit_message(cx);
                 }))
