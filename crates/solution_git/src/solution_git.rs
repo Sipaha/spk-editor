@@ -8,6 +8,7 @@
 //! Owns the `solution.git.*` MCP tool namespace.
 
 pub mod aggregator;
+pub mod ai_cherry_pick_suggest;
 pub mod branch_protection;
 pub mod commit;
 pub mod cross_cherry_pick;

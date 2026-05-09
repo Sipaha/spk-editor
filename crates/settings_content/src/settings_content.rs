@@ -1200,6 +1200,11 @@ pub struct SolutionsSettingsContent {
 pub struct SolutionGitSettingsContent {
     /// Aggregated-log knobs (S-SOL-LOG).
     pub aggregated_log: Option<SolutionGitAggregatedLogSettingsContent>,
+
+    /// AI cherry-pick suggestion knobs (S-AI-CHP). Manual-trigger by
+    /// default; `background = true` runs analyze on a daily cadence /
+    /// at every Fetch All.
+    pub ai_cherry_pick_suggest: Option<SolutionGitAiCherryPickSuggestSettingsContent>,
 }
 
 /// Per-Solution AI subprocess pool configuration. Used by `solution_agent`
@@ -1285,6 +1290,25 @@ pub struct SolutionGitAggregatedLogSettingsContent {
     ///
     /// Default: 50000
     pub max_total_commits: Option<u32>,
+}
+
+/// S-AI-CHP — cross-member cherry-pick suggestion engine. Internal AI
+/// call; cost-conscious by default (manual-trigger, hard token budget).
+#[with_fallible_options]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, Default, PartialEq)]
+pub struct SolutionGitAiCherryPickSuggestSettingsContent {
+    /// Run the analyzer in the background on a daily cadence (and at
+    /// every Fetch All). Off by default — every run consumes AI tokens.
+    ///
+    /// Default: false
+    pub background: Option<bool>,
+
+    /// Hard cap on estimated tokens consumed per analyze run. The
+    /// analyzer stops early when one more pair would exceed this; the
+    /// dashboard surfaces a "budget exhausted" indicator.
+    ///
+    /// Default: 25000
+    pub token_budget: Option<u32>,
 }
 
 /// The settings for the image viewer.

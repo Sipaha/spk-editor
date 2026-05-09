@@ -957,6 +957,23 @@
         // Default: 50000
         "max_total_commits": 50000,
       },
+      "ai_cherry_pick_suggest": {
+        // Run cross-member cherry-pick analysis in the background on a
+        // daily cadence (and at every Fetch All). Off by default — every
+        // run consumes AI tokens, so the manual-trigger path
+        // (`solution: suggest cherry-picks across members`) is the
+        // recommended entry point.
+        //
+        // Default: false
+        "background": false,
+        // Hard cap on estimated tokens consumed per analyze run.
+        // ~$0.10 / Solution on typical Claude pricing. Above this the
+        // analyzer stops early and the dashboard shows "budget
+        // exhausted, processed N pairs of M".
+        //
+        // Default: 25000
+        "token_budget": 25000,
+      },
     },
   },
   "collaboration_panel": {

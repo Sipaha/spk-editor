@@ -10,6 +10,8 @@ pub struct SolutionsSettings {
     /// S-SOL-PRT branch-protection rules. Solution-wide defaults plus
     /// per-member overrides keyed by `SolutionMember::catalog_id`.
     pub branch_protection: BranchProtectionSettings,
+    /// S-AI-CHP cross-member cherry-pick suggestion knobs.
+    pub ai_cherry_pick_suggest: AiCherryPickSuggestSettings,
 }
 
 #[derive(Clone, Debug)]
@@ -25,6 +27,25 @@ impl Default for AggregatedLogSettings {
         Self {
             background_load: true,
             max_total_commits: 50_000,
+        }
+    }
+}
+
+/// S-AI-CHP — cross-member cherry-pick suggestion engine config.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AiCherryPickSuggestSettings {
+    /// Run analyze in the background on a daily cadence + every Fetch
+    /// All. Off by default — every run spends AI tokens.
+    pub background: bool,
+    /// Hard cap on estimated tokens per analyze run.
+    pub token_budget: u32,
+}
+
+impl Default for AiCherryPickSuggestSettings {
+    fn default() -> Self {
+        Self {
+            background: false,
+            token_budget: 25_000,
         }
     }
 }
@@ -72,6 +93,7 @@ impl Default for SolutionsSettings {
             root: default_root(),
             aggregated_log: AggregatedLogSettings::default(),
             branch_protection: BranchProtectionSettings::default(),
+            ai_cherry_pick_suggest: AiCherryPickSuggestSettings::default(),
         }
     }
 }
@@ -107,10 +129,20 @@ impl Settings for SolutionsSettings {
             .and_then(|s| s.branch_protection.as_ref())
             .map(branch_protection_from_content)
             .unwrap_or_default();
+        let ai_defaults = AiCherryPickSuggestSettings::default();
+        let ai_cherry_pick_suggest = solutions
+            .and_then(|s| s.git.as_ref())
+            .and_then(|g| g.ai_cherry_pick_suggest.as_ref())
+            .map(|c| AiCherryPickSuggestSettings {
+                background: c.background.unwrap_or(ai_defaults.background),
+                token_budget: c.token_budget.unwrap_or(ai_defaults.token_budget),
+            })
+            .unwrap_or(ai_defaults);
         let result = Self {
             root,
             aggregated_log,
             branch_protection,
+            ai_cherry_pick_suggest,
         };
         crate::store::set_branch_protection_settings(result.branch_protection.clone());
         result

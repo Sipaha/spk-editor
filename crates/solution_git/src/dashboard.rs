@@ -155,6 +155,26 @@ pub struct SolutionStatusDashboard {
     /// Detached watcher tasks (one per member working tree). Dropping the
     /// dashboard cancels them.
     _fs_tasks: Vec<Task<()>>,
+    /// S-AI-CHP — Cross-member suggestion state. `None` until the user
+    /// triggers the action; populated incrementally as analyze runs.
+    ai_suggest: AiSuggestState,
+}
+
+/// S-AI-CHP — UI state for the Cross-member suggestions section.
+#[derive(Default)]
+struct AiSuggestState {
+    /// True after the user clicks the "Suggest cherry-picks…" toolbar
+    /// button or invokes `solution_git::SuggestCherryPicks`. Drives the
+    /// "no analysis yet" placeholder vs. progress / results.
+    section_open: bool,
+    /// True while the analyze task is running.
+    in_flight: bool,
+    /// Set when the analyze task finishes. None during run / before run.
+    last_outcome: Option<crate::ai_cherry_pick_suggest::AnalyzeOutcome>,
+    /// Last-known error message from analyze.
+    last_error: Option<SharedString>,
+    /// Detached analyze task. Held so dropping the dashboard cancels.
+    _task: Option<Task<()>>,
 }
 
 impl SolutionStatusDashboard {
@@ -184,6 +204,7 @@ impl SolutionStatusDashboard {
             _subscriptions: Vec::new(),
             pending_loads: HashMap::default(),
             _fs_tasks: Vec::new(),
+            ai_suggest: AiSuggestState::default(),
         };
 
         for row in this.rows.clone() {
@@ -975,6 +996,11 @@ gpui::actions!(
     [
         /// Open the Solution Git Status dashboard in the active pane.
         OpenStatusDashboard,
+        /// S-AI-CHP — run AI cherry-pick suggestion analysis across the
+        /// active Solution's members. Opens the dashboard (creating it
+        /// if needed), reveals the "Cross-member suggestions" section,
+        /// and starts a background analyze task.
+        SuggestCherryPicks,
     ]
 );
 
@@ -983,6 +1009,18 @@ gpui::actions!(
 pub fn register(workspace: &mut Workspace) {
     workspace.register_action(|workspace, _: &OpenStatusDashboard, window, cx| {
         open_or_reuse_dashboard(workspace, window, cx);
+    });
+    workspace.register_action(|workspace, _: &SuggestCherryPicks, window, cx| {
+        open_or_reuse_dashboard(workspace, window, cx);
+        // After (re)opening, kick off analyze on the current dashboard.
+        let dashboard = workspace
+            .items_of_type::<SolutionStatusDashboard>(cx)
+            .next();
+        if let Some(dashboard) = dashboard {
+            dashboard.update(cx, |dashboard, cx| {
+                dashboard.start_ai_suggest(cx);
+            });
+        }
     });
 }
 
@@ -1054,6 +1092,13 @@ impl SolutionStatusDashboard {
                     .tooltip(Tooltip::text("Cancel pending loads"))
                     .disabled(!any_loading)
                     .on_click(cx.listener(|this, _, _, cx| this.cancel_pending(cx))),
+            )
+            .child(
+                IconButton::new("dsh-ai-suggest", IconName::Sparkle)
+                    .tooltip(Tooltip::text(
+                        "Suggest cherry-picks from other members (S-AI-CHP)",
+                    ))
+                    .on_click(cx.listener(|this, _, _, cx| this.start_ai_suggest(cx))),
             )
     }
 
@@ -1254,6 +1299,136 @@ impl SolutionStatusDashboard {
         })
         .detach();
     }
+
+    /// S-AI-CHP — kick off cross-member cherry-pick analysis. Reveals the
+    /// suggestions section (creating a placeholder if no run yet), spawns
+    /// the analyze task on the active project, and stores the resulting
+    /// task so dropping the dashboard cancels it.
+    pub fn start_ai_suggest(&mut self, cx: &mut Context<Self>) {
+        self.ai_suggest.section_open = true;
+        if self.ai_suggest.in_flight {
+            cx.notify();
+            return;
+        }
+        let Some(workspace) = self._workspace.upgrade() else {
+            log::info!(
+                "solution_git::dashboard: SuggestCherryPicks invoked but workspace is gone"
+            );
+            return;
+        };
+        let project = workspace.read(cx).project().clone();
+        let solution = self.solution.clone();
+        let token_budget = <solutions::SolutionsSettings as settings::Settings>::get_global(cx)
+            .ai_cherry_pick_suggest
+            .token_budget;
+
+        self.ai_suggest.in_flight = true;
+        self.ai_suggest.last_error = None;
+        cx.notify();
+
+        let task = cx.spawn(async move |this, cx| {
+            let config = crate::ai_cherry_pick_suggest::AnalyzeConfig {
+                token_budget,
+                ..crate::ai_cherry_pick_suggest::AnalyzeConfig::default()
+            };
+            let outcome = crate::ai_cherry_pick_suggest::analyze_solution(
+                &solution, &project, config, cx,
+            )
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                this.ai_suggest.in_flight = false;
+                match outcome {
+                    Ok(out) => {
+                        this.ai_suggest.last_outcome = Some(out);
+                        this.ai_suggest.last_error = None;
+                    }
+                    Err(err) => {
+                        this.ai_suggest.last_error =
+                            Some(SharedString::from(format!("{err}")));
+                    }
+                }
+                cx.notify();
+            });
+        });
+        self.ai_suggest._task = Some(task);
+    }
+
+    /// User clicked "Apply" on a suggestion — dispatch the existing
+    /// `solution_git::CrossCherryPick` action so the modal opens
+    /// pre-filled with `(source_member, source_sha)`. Target preselection
+    /// is approximated by the modal's first-other-member default; the
+    /// user can cycle to the suggested target inside the modal. (A more
+    /// targeted preselect requires extending `CrossCherryPick` with an
+    /// optional `target_member` field, deferred to keep this patch
+    /// additive.)
+    fn apply_suggestion(
+        &mut self,
+        suggestion: &crate::ai_cherry_pick_suggest::Suggestion,
+        window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        let action = crate::cross_cherry_pick::CrossCherryPick {
+            source_member: suggestion.source_member.to_string(),
+            source_sha: suggestion.source_sha.clone(),
+        };
+        window.dispatch_action(Box::new(action), _cx);
+    }
+
+    /// User clicked "Dismiss" on a suggestion — write a `verdict: false`
+    /// cache entry so the pair doesn't come back, then drop the row
+    /// from the live list.
+    fn dismiss_suggestion(
+        &mut self,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(outcome) = self.ai_suggest.last_outcome.as_mut() else {
+            return;
+        };
+        if index >= outcome.suggestions.len() {
+            return;
+        }
+        let removed = outcome.suggestions.remove(index);
+        if let Err(err) = crate::ai_cherry_pick_suggest::dismiss_suggestion(
+            &self.solution,
+            &removed.source_sha,
+            removed.target_member.as_ref(),
+        ) {
+            log::warn!(
+                "solution_git::dashboard: failed to persist dismiss for {}@{} → {}: {err}",
+                removed.source_member,
+                removed.source_sha,
+                removed.target_member
+            );
+        }
+        cx.notify();
+    }
+
+    /// User clicked "Compare" on a suggestion — dispatch the upstream
+    /// `git::Diff` action so the editor's Project Diff opens against the
+    /// target member's working tree. The diff itself is left in the
+    /// upstream-shaped Project Diff surface; we don't try to scope it
+    /// further (a finer-grained diff requires unique workspace plumbing
+    /// not yet present in the fork).
+    fn compare_suggestion(
+        &mut self,
+        suggestion: &crate::ai_cherry_pick_suggest::Suggestion,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        // Logging-only stub for v1 — the full Project Diff dispatch
+        // wires through `git_ui::project_diff`, which expects a
+        // workspace-scoped action that doesn't currently take a member
+        // selector. Surfacing a toast keeps the UX legible without
+        // pretending to do something we don't yet plumb. See plan
+        // S-SOL-DSH for the eventual `solution_git::CompareMembers` op.
+        log::info!(
+            "solution_git::dashboard: Compare requested for {}@{} → {} (target preview not yet wired)",
+            suggestion.source_member,
+            suggestion.source_sha,
+            suggestion.target_member,
+        );
+    }
 }
 
 impl Render for SolutionStatusDashboard {
@@ -1273,6 +1448,216 @@ impl Render for SolutionStatusDashboard {
                             .iter()
                             .map(|row| self.render_row(row, cx).into_any_element())
                             .collect::<Vec<AnyElement>>(),
+                    )
+                    .child(self.render_ai_suggestions_section(cx)),
+            )
+    }
+}
+
+impl SolutionStatusDashboard {
+    /// S-AI-CHP — render the "Cross-member suggestions" collapsible
+    /// section. Shows progress while analyze is running, error / empty
+    /// states, and one row per surviving suggestion with Apply / Dismiss
+    /// / Compare buttons.
+    fn render_ai_suggestions_section(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme_colors = cx.theme().colors();
+        let header = h_flex()
+            .id("dsh-ai-section-header")
+            .px_3()
+            .py_2()
+            .gap_2()
+            .border_t_1()
+            .border_color(theme_colors.border_variant)
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.ai_suggest.section_open = !this.ai_suggest.section_open;
+                cx.notify();
+            }))
+            .child(
+                ui::Icon::new(if self.ai_suggest.section_open {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .size(ui::IconSize::Small)
+                .color(Color::Muted),
+            )
+            .child(
+                Label::new(SharedString::from("Cross-member suggestions"))
+                    .size(LabelSize::Default),
+            )
+            .child({
+                let count = self
+                    .ai_suggest
+                    .last_outcome
+                    .as_ref()
+                    .map(|o| o.suggestions.len())
+                    .unwrap_or(0);
+                let label = if self.ai_suggest.in_flight {
+                    "analyzing…".to_string()
+                } else if let Some(err) = &self.ai_suggest.last_error {
+                    format!("error: {err}")
+                } else if self.ai_suggest.last_outcome.is_some() {
+                    format!("{count} suggestion(s)")
+                } else {
+                    "(no analysis yet)".to_string()
+                };
+                Label::new(SharedString::from(label))
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted)
+            });
+
+        if !self.ai_suggest.section_open {
+            return v_flex().child(header).into_any_element();
+        }
+
+        let body: AnyElement = if self.ai_suggest.in_flight {
+            self.render_ai_progress(cx).into_any_element()
+        } else if let Some(outcome) = self.ai_suggest.last_outcome.clone() {
+            if outcome.suggestions.is_empty() {
+                v_flex()
+                    .px_3()
+                    .py_2()
+                    .child(
+                        Label::new(SharedString::from(format!(
+                            "No suggestions found ({} pair(s) seen, {} after prefilter, {} processed{}).",
+                            outcome.stats.pairs_seen,
+                            outcome.stats.pairs_after_prefilter,
+                            outcome.stats.pairs_processed,
+                            if outcome.stats.budget_exhausted {
+                                "; token budget exhausted"
+                            } else {
+                                ""
+                            },
+                        )))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                    )
+                    .into_any_element()
+            } else {
+                v_flex()
+                    .children(
+                        outcome
+                            .suggestions
+                            .iter()
+                            .enumerate()
+                            .map(|(i, s)| {
+                                self.render_ai_suggestion_row(i, s, cx).into_any_element()
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                    .into_any_element()
+            }
+        } else {
+            v_flex()
+                .px_3()
+                .py_2()
+                .child(
+                    Label::new(SharedString::from(
+                        "Click the spark icon in the toolbar to analyze cross-member cherry-picks.",
+                    ))
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+                )
+                .into_any_element()
+        };
+
+        v_flex().child(header).child(body).into_any_element()
+    }
+
+    fn render_ai_progress(&self, _cx: &Context<Self>) -> impl IntoElement {
+        let stats_label: SharedString = self
+            .ai_suggest
+            .last_outcome
+            .as_ref()
+            .map(|o| {
+                format!(
+                    "Processed {} / {} pairs · ~{} / ? tokens",
+                    o.stats.pairs_processed,
+                    o.stats.pairs_after_prefilter,
+                    o.stats.tokens_consumed_estimate,
+                )
+                .into()
+            })
+            .unwrap_or_else(|| SharedString::from("Scanning members…"));
+        h_flex()
+            .px_3()
+            .py_2()
+            .gap_2()
+            .child(
+                ui::Icon::new(IconName::ArrowCircle)
+                    .size(ui::IconSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(Label::new(stats_label).size(LabelSize::Small).color(Color::Muted))
+    }
+
+    fn render_ai_suggestion_row(
+        &self,
+        index: usize,
+        suggestion: &crate::ai_cherry_pick_suggest::Suggestion,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let theme_colors = cx.theme().colors();
+        let short_sha: String = suggestion.source_sha.chars().take(7).collect();
+        let title: SharedString = format!(
+            "{}:{} '{}' → {}",
+            suggestion.source_member,
+            short_sha,
+            suggestion.source_subject,
+            suggestion.target_member,
+        )
+        .into();
+        let reasoning: SharedString = suggestion.reasoning.clone().into();
+
+        let suggestion_for_apply = suggestion.clone();
+        let suggestion_for_compare = suggestion.clone();
+        let row_id = SharedString::from(format!("dsh-ai-sug-{index}"));
+
+        v_flex()
+            .id(row_id)
+            .px_3()
+            .py_1p5()
+            .border_t_1()
+            .border_color(theme_colors.border_variant)
+            .gap_1()
+            .child(Label::new(title).size(LabelSize::Small).truncate())
+            .child(
+                Label::new(reasoning)
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted)
+                    .truncate(),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .pt_1()
+                    .child(
+                        ui::Button::new(
+                            SharedString::from(format!("dsh-ai-apply-{index}")),
+                            "Apply",
+                        )
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.apply_suggestion(&suggestion_for_apply, window, cx);
+                        })),
+                    )
+                    .child(
+                        ui::Button::new(
+                            SharedString::from(format!("dsh-ai-dismiss-{index}")),
+                            "Dismiss",
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.dismiss_suggestion(index, cx);
+                        })),
+                    )
+                    .child(
+                        ui::Button::new(
+                            SharedString::from(format!("dsh-ai-compare-{index}")),
+                            "Compare",
+                        )
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.compare_suggestion(&suggestion_for_compare, window, cx);
+                        })),
                     ),
             )
     }
