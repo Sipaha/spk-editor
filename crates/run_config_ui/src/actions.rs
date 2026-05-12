@@ -47,9 +47,7 @@ fn register(workspace: &mut Workspace, _window: Option<&mut Window>, _cx: &mut g
         .register_action(|workspace, _: &SelectNextConfig, _window, cx| {
             crate::toolbar_strip::with_controller(workspace, cx, |controller, cx| controller.select_next(cx));
         })
-        .register_action(|workspace, _: &EditConfigurations, _window, _cx| {
-            // The Edit Configurations modal is implemented in Tasks 17–18. For now this is a
-            // no-op placeholder so the action is registered; replace its body when edit_modal lands.
-            let _ = workspace;
+        .register_action(|workspace, _: &EditConfigurations, window, cx| {
+            crate::edit_modal::EditConfigurationsModal::toggle(workspace, window, cx);
         });
 }
