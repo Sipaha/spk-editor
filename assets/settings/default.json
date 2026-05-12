@@ -987,9 +987,10 @@
   "git_panel": {
     // Whether to show the git panel button in the status bar.
     "button": true,
-    // Where to dock the git panel. Can be 'left', 'right', or 'bottom'
-    // (SPK fork: defaults to 'bottom', IDEA-style).
-    "dock": "bottom",
+    // Where to dock the git panel (the commit / changed-files list). Can
+    // be 'left' or 'right'. The git *graph* (commit log) is a separate
+    // bottom-docked panel.
+    "dock": "right",
     // Default width of the git panel.
     "default_width": 360,
     // Style of the git status indicator in the panel.
