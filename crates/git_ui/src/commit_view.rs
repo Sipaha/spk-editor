@@ -151,6 +151,12 @@ pub struct CommitView {
     explain_expanded: bool,
     explain_error: Option<SharedString>,
     _explain_task: Option<Task<()>>,
+    /// `Some` when this view was opened as a focused single-file diff
+    /// (clicking a file in the git-graph commit-detail panel) — render
+    /// only the diff editor, no metadata panel / commit-message excerpt,
+    /// and title the tab with the file name. Also keys the open-view
+    /// dedup so a single-file diff and the full commit view coexist.
+    single_file: Option<RepoPath>,
 }
 
 struct GitBlob {
@@ -192,6 +198,34 @@ impl CommitView {
         window: &mut Window,
         cx: &mut App,
     ) {
+        Self::open_internal(commit_sha, repo, workspace, stash, file_filter, false, window, cx);
+    }
+
+    /// Open a focused diff of a single file's changes in `commit_sha`
+    /// (its content at the commit vs. at the parent) — no commit
+    /// metadata chrome, tab titled with the file name. Used by the
+    /// changed-files list in the git-graph commit-detail panel.
+    pub fn open_file_diff(
+        commit_sha: String,
+        repo: WeakEntity<Repository>,
+        workspace: WeakEntity<Workspace>,
+        file: RepoPath,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        Self::open_internal(commit_sha, repo, workspace, None, Some(file), true, window, cx);
+    }
+
+    fn open_internal(
+        commit_sha: String,
+        repo: WeakEntity<Repository>,
+        workspace: WeakEntity<Workspace>,
+        stash: Option<usize>,
+        file_filter: Option<RepoPath>,
+        single_file_mode: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let commit_diff = repo
             .update(cx, |repo, _| repo.load_commit_diff(commit_sha.clone()))
             .ok();
@@ -209,11 +243,14 @@ impl CommitView {
                     commit_diff.files.retain(|f| &f.path == filter_path);
                 }
 
+                let single_file = if single_file_mode { file_filter.clone() } else { None };
+
                 let repo = repo.upgrade()?;
 
                 workspace
                     .update_in(cx, |workspace, window, cx| {
                         let project = workspace.project();
+                        let single_file_for_view = single_file.clone();
                         let commit_view = cx.new(|cx| {
                             CommitView::new(
                                 commit_details,
@@ -221,6 +258,7 @@ impl CommitView {
                                 repo,
                                 project.clone(),
                                 stash,
+                                single_file_for_view,
                                 window,
                                 cx,
                             )
@@ -230,8 +268,11 @@ impl CommitView {
                         pane.update(cx, |pane, cx| {
                             let ix = pane.items().position(|item| {
                                 let commit_view = item.downcast::<CommitView>();
-                                commit_view
-                                    .is_some_and(|view| view.read(cx).commit.sha == commit_sha)
+                                commit_view.is_some_and(|view| {
+                                    let view = view.read(cx);
+                                    view.commit.sha == commit_sha
+                                        && view.single_file == single_file
+                                })
                             });
                             if let Some(ix) = ix {
                                 pane.activate_item(ix, true, true, window, cx);
@@ -251,35 +292,41 @@ impl CommitView {
         repository: Entity<Repository>,
         project: Entity<Project>,
         stash: Option<usize>,
+        single_file: Option<RepoPath>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // Single-file diff mode: render only the file's diff editor — skip
+        // the commit-message excerpt (and the metadata panel, see `render`).
+        let compact = single_file.is_some();
         let language_registry = project.read(cx).languages().clone();
         let multibuffer = cx.new(|_| MultiBuffer::new(Capability::ReadOnly));
 
-        let message_buffer = cx.new(|cx| {
-            let mut buffer = Buffer::local(commit.message.clone(), cx);
-            buffer.set_capability(Capability::ReadOnly, cx);
+        let message_buffer = (!compact).then(|| {
+            let buffer = cx.new(|cx| {
+                let mut buffer = Buffer::local(commit.message.clone(), cx);
+                buffer.set_capability(Capability::ReadOnly, cx);
+                buffer
+            });
+            multibuffer.update(cx, |multibuffer, cx| {
+                let snapshot = buffer.read(cx).snapshot();
+                let full_range = Point::zero()..snapshot.max_point();
+                let range = ExcerptRange {
+                    context: full_range.clone(),
+                    primary: full_range,
+                };
+                multibuffer.set_excerpt_ranges_for_path(
+                    PathKey::with_sort_prefix(
+                        COMMIT_MESSAGE_SORT_PREFIX,
+                        RelPath::unix("commit message").unwrap().into(),
+                    ),
+                    buffer.clone(),
+                    &snapshot,
+                    vec![range],
+                    cx,
+                )
+            });
             buffer
-        });
-
-        multibuffer.update(cx, |multibuffer, cx| {
-            let snapshot = message_buffer.read(cx).snapshot();
-            let full_range = Point::zero()..snapshot.max_point();
-            let range = ExcerptRange {
-                context: full_range.clone(),
-                primary: full_range,
-            };
-            multibuffer.set_excerpt_ranges_for_path(
-                PathKey::with_sort_prefix(
-                    COMMIT_MESSAGE_SORT_PREFIX,
-                    RelPath::unix("commit message").unwrap().into(),
-                ),
-                message_buffer.clone(),
-                &snapshot,
-                vec![range],
-                cx,
-            )
         });
 
         let editor = cx.new(|cx| {
@@ -291,9 +338,25 @@ impl CommitView {
             editor.set_show_breakpoints(false, cx);
             editor.set_show_diff_review_button(true, cx);
             editor.set_expand_all_diff_hunks(cx);
-            editor.disable_header_for_buffer(message_buffer.read(cx).remote_id(), cx);
-            editor.disable_indent_guides_for_buffer(message_buffer.read(cx).remote_id(), cx);
+            if let Some(message_buffer) = &message_buffer {
+                editor.disable_header_for_buffer(message_buffer.read(cx).remote_id(), cx);
+                editor.disable_indent_guides_for_buffer(message_buffer.read(cx).remote_id(), cx);
+            }
 
+            let message_below_block = message_buffer.as_ref().and_then(|message_buffer| {
+                editor
+                    .buffer()
+                    .read(cx)
+                    .snapshot(cx)
+                    .anchor_in_buffer(Anchor::max_for_buffer(message_buffer.read(cx).remote_id()))
+                    .map(|anchor| BlockProperties {
+                        placement: BlockPlacement::Below(anchor),
+                        height: Some(1),
+                        style: BlockStyle::Sticky,
+                        render: Arc::new(|_| gpui::Empty.into_any_element()),
+                        priority: 0,
+                    })
+            });
             editor.insert_blocks(
                 [BlockProperties {
                     placement: BlockPlacement::Above(editor::Anchor::Min),
@@ -303,22 +366,7 @@ impl CommitView {
                     priority: 0,
                 }]
                 .into_iter()
-                .chain(
-                    editor
-                        .buffer()
-                        .read(cx)
-                        .snapshot(cx)
-                        .anchor_in_buffer(Anchor::max_for_buffer(
-                            message_buffer.read(cx).remote_id(),
-                        ))
-                        .map(|anchor| BlockProperties {
-                            placement: BlockPlacement::Below(anchor),
-                            height: Some(1),
-                            style: BlockStyle::Sticky,
-                            render: Arc::new(|_| gpui::Empty.into_any_element()),
-                            priority: 0,
-                        }),
-                ),
+                .chain(message_below_block),
                 None,
                 cx,
             );
@@ -502,11 +550,16 @@ impl CommitView {
             explain_expanded: false,
             explain_error: None,
             _explain_task: None,
+            single_file,
         };
-        let sha_for_meta = view.commit.sha.to_string();
-        view.contains_panel
-            .load(sha_for_meta.clone(), repository.clone(), cx);
-        view.spawn_load_metadata(sha_for_meta, repository, cx);
+        // The metadata panel (parents / refs / contains) isn't rendered in
+        // single-file diff mode, so don't pay for the git calls that fill it.
+        if !compact {
+            let sha_for_meta = view.commit.sha.to_string();
+            view.contains_panel
+                .load(sha_for_meta.clone(), repository.clone(), cx);
+            view.spawn_load_metadata(sha_for_meta, repository, cx);
+        }
         view
     }
 
@@ -1108,6 +1161,13 @@ impl Item for CommitView {
     }
 
     fn tab_content_text(&self, _detail: usize, _cx: &App) -> SharedString {
+        if let Some(path) = &self.single_file {
+            return path
+                .file_name()
+                .map(|name| name.to_string())
+                .unwrap_or_else(|| path.as_unix_str().to_string())
+                .into();
+        }
         let short_sha = self.commit.sha.get(0..7).unwrap_or(&*self.commit.sha);
         let subject = truncate_and_trailoff(self.commit.message.split('\n').next().unwrap(), 20);
         format!("{short_sha} — {subject}").into()
@@ -1116,6 +1176,23 @@ impl Item for CommitView {
     fn tab_tooltip_content(&self, _: &App) -> Option<TabTooltipContent> {
         let short_sha = self.commit.sha.get(0..16).unwrap_or(&*self.commit.sha);
         let subject = self.commit.message.split('\n').next().unwrap();
+
+        if let Some(path) = &self.single_file {
+            let path = path.as_unix_str().to_string();
+            let short_sha = short_sha.to_string();
+            return Some(TabTooltipContent::Custom(Box::new(Tooltip::element(
+                move |_, _| {
+                    v_flex()
+                        .child(Label::new(path.clone()))
+                        .child(
+                            Label::new(format!("at {short_sha}"))
+                                .color(Color::Muted)
+                                .size(LabelSize::Small),
+                        )
+                        .into_any_element()
+                },
+            ))));
+        }
 
         Some(TabTooltipContent::Custom(Box::new(Tooltip::element({
             let subject = subject.to_string();
@@ -1265,6 +1342,7 @@ impl Item for CommitView {
                 explain_expanded: self.explain_expanded,
                 explain_error: self.explain_error.clone(),
                 _explain_task: None,
+                single_file: self.single_file.clone(),
             }
         })))
     }
@@ -1274,14 +1352,22 @@ impl Render for CommitView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_stash = self.stash.is_some();
 
-        v_flex()
+        let base = v_flex()
             .key_context(if is_stash { "StashDiff" } else { "CommitDiff" })
             .size_full()
             .bg(cx.theme().colors().editor_background)
             .on_action(cx.listener(|view, _: &ExplainCommit, window, cx| {
                 view.toggle_or_request_explain(window, cx);
-            }))
-            .child(self.render_metadata_panel(window, cx))
+            }));
+
+        // Single-file diff mode — just the diff editor, no commit metadata.
+        if self.single_file.is_some() {
+            return base.when(!self.editor.read(cx).is_empty(cx), |this| {
+                this.child(div().flex_grow().child(self.editor.clone()))
+            });
+        }
+
+        base.child(self.render_metadata_panel(window, cx))
             .when(!self.editor.read(cx).is_empty(cx), |this| {
                 this.child(div().flex_grow().child(self.editor.clone()))
             })

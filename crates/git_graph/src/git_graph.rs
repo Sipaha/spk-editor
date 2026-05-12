@@ -138,7 +138,7 @@ impl ChangedFileEntry {
         }
     }
 
-    fn open_in_commit_view(
+    fn open_file_diff(
         &self,
         commit_sha: &SharedString,
         repository: &WeakEntity<Repository>,
@@ -146,12 +146,11 @@ impl ChangedFileEntry {
         window: &mut Window,
         cx: &mut App,
     ) {
-        CommitView::open(
+        CommitView::open_file_diff(
             commit_sha.to_string(),
             repository.clone(),
             workspace.clone(),
-            None,
-            Some(self.repo_path.clone()),
+            self.repo_path.clone(),
             window,
             cx,
         );
@@ -204,13 +203,7 @@ impl ChangedFileEntry {
                     .on_click({
                         let entry = self.clone();
                         move |_, window, cx| {
-                            entry.open_in_commit_view(
-                                &commit_sha,
-                                &repository,
-                                &workspace,
-                                window,
-                                cx,
-                            );
+                            entry.open_file_diff(&commit_sha, &repository, &workspace, window, cx);
                         }
                     }),
             )
