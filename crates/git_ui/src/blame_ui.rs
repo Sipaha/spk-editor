@@ -527,6 +527,11 @@ fn deploy_blame_entry_context_menu(
         provider,
         work_dir,
         member_id: None,
+        // The blame gutter has no ref-decoration info, so the
+        // branches/tags section stays hidden here.
+        refs: Vec::new(),
+        head_branch: None,
+        local_branches: Vec::new(),
     };
     let context_menu = build_commit_context_menu(ctx, window, cx);
 

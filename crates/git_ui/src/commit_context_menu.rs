@@ -19,7 +19,7 @@
 use std::path::PathBuf;
 
 use crate::handlers::{
-    branch, checkout, cherry_pick, compare, copy, drop as drop_handler, edit_message, fixup,
+    branch, checkout, cherry_pick, compare, copy, drop as drop_handler, edit_message, fixup, merge,
     patch as patch_handler, reset, revert, show_at_revision, squash, tag,
 };
 use editor::Editor;
@@ -57,6 +57,19 @@ pub struct CommitContext {
     /// Member…" entry (S-SOL-CHP). `None` for plain single-repo log rows
     /// — no cross-member entry is shown.
     pub member_id: Option<SharedString>,
+    /// Raw `%D` ref-decoration tokens for this commit — e.g.
+    /// `HEAD -> main`, `tag: v1.0`, `origin/main`, `feat-x`. Drives the
+    /// "Branches / Tags at This Commit" submenus. Empty when the source
+    /// (e.g. the blame gutter) doesn't carry decoration info.
+    pub refs: Vec<SharedString>,
+    /// Name of the currently checked-out branch (`None` on detached
+    /// HEAD). Labels "Merge into <head>" and suppresses checkout / merge /
+    /// delete on the head branch itself.
+    pub head_branch: Option<SharedString>,
+    /// Local branch names known to the repository. Used to tell a local
+    /// branch token in [`Self::refs`] apart from a remote-tracking ref
+    /// like `origin/feature` — both are slash-bearing in `%D`.
+    pub local_branches: Vec<SharedString>,
 }
 
 pub fn build_commit_context_menu(
@@ -74,6 +87,7 @@ pub fn build_commit_context_menu(
         let destructive_ctx = ctx.clone();
         let irb_ctx = ctx.clone();
         let patch_ctx = ctx.clone();
+        let refs_ctx = ctx.clone();
         let external_ctx = ctx;
         let has_provider = external_ctx.provider.is_some();
 
@@ -93,7 +107,15 @@ pub fn build_commit_context_menu(
             .entry("Checkout Revision", None, {
                 let ctx = checkout_ctx;
                 move |window, cx| open_checkout_confirmation(ctx.clone(), window, cx)
-            })
+            });
+
+        // S-CTM refs section — branches / tags pointing at this commit,
+        // each with checkout / merge / delete actions. Hidden when the
+        // commit carries no ref decorations (or the source didn't supply
+        // them, e.g. the blame gutter).
+        let menu = build_branch_tag_section(menu, refs_ctx);
+
+        let menu = menu
             .separator()
             .submenu("Compare", move |menu, _window, _cx| {
                 build_compare_submenu(menu, compare_ctx.clone())
@@ -350,6 +372,218 @@ fn build_show_submenu(menu: ContextMenu, ctx: CommitContext) -> ContextMenu {
     } else {
         menu
     }
+}
+
+// =====================================================================
+//  S-CTM "Branches / Tags at This Commit" section.
+//
+//  Parses the commit's `%D` ref decorations into local branches and
+//  tags, then exposes per-ref submenus: branches get Checkout / Merge
+//  into <head> / Delete; tags get Checkout / Delete. Remote-tracking
+//  refs are intentionally omitted — operating on them from here would be
+//  surprising. The head branch is listed but shown as a non-actionable
+//  label (you can't checkout / merge / `git branch -d` the current
+//  branch).
+// =====================================================================
+
+struct RefsAtCommit {
+    branches: Vec<SharedString>,
+    tags: Vec<SharedString>,
+}
+
+fn refs_at_commit(ctx: &CommitContext) -> RefsAtCommit {
+    let mut branches: Vec<SharedString> = Vec::new();
+    let mut tags: Vec<SharedString> = Vec::new();
+    for token in &ctx.refs {
+        let token = token.as_ref().trim();
+        if token.is_empty() || token == "HEAD" {
+            continue;
+        }
+        if let Some(tag) = token.strip_prefix("tag: ") {
+            let tag = tag.trim();
+            if !tag.is_empty() && !tags.iter().any(|t| t.as_ref() == tag) {
+                tags.push(tag.to_string().into());
+            }
+            continue;
+        }
+        let name = token
+            .strip_prefix("HEAD -> ")
+            .map(str::trim)
+            .unwrap_or(token);
+        if name.is_empty() {
+            continue;
+        }
+        // `%D` lists local branches as bare names and remote-tracking refs
+        // as `<remote>/<branch>` — both are slash-bearing when the local
+        // branch name itself contains a `/` (GitFlow-style). Disambiguate
+        // against the repository's known local-branch set.
+        let is_local =
+            !name.contains('/') || ctx.local_branches.iter().any(|b| b.as_ref() == name);
+        if !is_local {
+            continue;
+        }
+        if !branches.iter().any(|b| b.as_ref() == name) {
+            branches.push(name.to_string().into());
+        }
+    }
+    RefsAtCommit { branches, tags }
+}
+
+fn build_branch_tag_section(menu: ContextMenu, ctx: CommitContext) -> ContextMenu {
+    let RefsAtCommit { branches, tags } = refs_at_commit(&ctx);
+    if branches.is_empty() && tags.is_empty() {
+        return menu;
+    }
+    let mut menu = menu.separator();
+    if !branches.is_empty() {
+        menu = menu.header("Branches at This Commit");
+        for branch in branches {
+            let entry_ctx = ctx.clone();
+            menu = menu.submenu_with_icon(
+                branch.clone(),
+                IconName::GitBranch,
+                move |submenu, _window, _cx| {
+                    build_branch_ref_submenu(submenu, entry_ctx.clone(), branch.clone())
+                },
+            );
+        }
+    }
+    if !tags.is_empty() {
+        menu = menu.header("Tags at This Commit");
+        for tag in tags {
+            let entry_ctx = ctx.clone();
+            menu = menu.submenu_with_icon(tag.clone(), IconName::Hash, move |submenu, _window, _cx| {
+                build_tag_ref_submenu(submenu, entry_ctx.clone(), tag.clone())
+            });
+        }
+    }
+    menu
+}
+
+fn build_branch_ref_submenu(
+    menu: ContextMenu,
+    ctx: CommitContext,
+    branch: SharedString,
+) -> ContextMenu {
+    let is_head = ctx
+        .head_branch
+        .as_ref()
+        .is_some_and(|h| h.as_ref() == branch.as_ref());
+    if is_head {
+        return menu.label("Currently checked out");
+    }
+
+    let menu = {
+        let repo = ctx.repository.clone();
+        let branch = branch.clone();
+        menu.entry("Checkout", None, move |window, cx| {
+            run_checkout_branch(repo.clone(), branch.clone(), window, cx);
+        })
+    };
+
+    let menu = if let Some(head) = ctx.head_branch.clone() {
+        let merge_ctx = ctx.clone();
+        let target = branch.clone();
+        menu.entry(format!("Merge into {head}"), None, move |window, cx| {
+            let Some(work_dir) = repo_work_dir(&merge_ctx, cx) else {
+                return;
+            };
+            run_merge_branch(work_dir, target.clone(), window, cx);
+        })
+    } else {
+        menu
+    };
+
+    let repo = ctx.repository.clone();
+    menu.entry("Delete", None, move |window, cx| {
+        run_delete_branch(repo.clone(), branch.clone(), window, cx);
+    })
+}
+
+fn build_tag_ref_submenu(menu: ContextMenu, ctx: CommitContext, tag: SharedString) -> ContextMenu {
+    let menu = {
+        let repo = ctx.repository.clone();
+        let tag = tag.clone();
+        menu.entry("Checkout", None, move |window, cx| {
+            run_checkout_tag(repo.clone(), tag.clone(), window, cx);
+        })
+    };
+    let repo = ctx.repository.clone();
+    menu.entry("Delete", None, move |window, cx| {
+        run_delete_tag(repo.clone(), tag.clone(), window, cx);
+    })
+}
+
+fn await_repo_recv(
+    recv: futures::channel::oneshot::Receiver<anyhow::Result<()>>,
+    canceled_msg: &'static str,
+    label: &'static str,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let task = cx.spawn(async move |_cx| match recv.await {
+        Ok(Ok(())) => anyhow::Ok(()),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(anyhow::anyhow!("{canceled_msg}")),
+    });
+    task.detach_and_prompt_err(label, window, cx, |e, _, _| Some(format!("{e}")));
+}
+
+fn run_checkout_branch(
+    repo: Entity<Repository>,
+    branch: SharedString,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let recv = repo.update(cx, |repo, _| repo.change_branch(branch.to_string()));
+    await_repo_recv(recv, "checkout was canceled", "Checkout failed", window, cx);
+}
+
+fn run_delete_branch(
+    repo: Entity<Repository>,
+    branch: SharedString,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let recv = repo.update(cx, |repo, _| repo.delete_branch(false, branch.to_string()));
+    await_repo_recv(
+        recv,
+        "delete branch was canceled",
+        "Delete branch failed",
+        window,
+        cx,
+    );
+}
+
+fn run_checkout_tag(
+    repo: Entity<Repository>,
+    tag: SharedString,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let recv = repo.update(cx, |repo, _| repo.checkout_revision(tag.to_string()));
+    await_repo_recv(recv, "checkout was canceled", "Checkout failed", window, cx);
+}
+
+fn run_delete_tag(repo: Entity<Repository>, tag: SharedString, window: &mut Window, cx: &mut App) {
+    let recv = repo.update(cx, |repo, _| repo.delete_tag(tag.to_string()));
+    await_repo_recv(
+        recv,
+        "delete tag was canceled",
+        "Delete tag failed",
+        window,
+        cx,
+    );
+}
+
+fn run_merge_branch(
+    work_dir: PathBuf,
+    target_branch: SharedString,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let task = merge::run(work_dir, target_branch.to_string(), false, false, None, cx);
+    task.detach_and_prompt_err("Merge failed", window, cx, |e, _, _| Some(format!("{e}")));
 }
 
 fn build_external_submenu(menu: ContextMenu, ctx: CommitContext) -> ContextMenu {

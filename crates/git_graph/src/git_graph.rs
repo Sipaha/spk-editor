@@ -1644,7 +1644,9 @@ impl GitGraph {
                     }
                 }
             }
-            RepositoryEvent::HeadChanged | RepositoryEvent::BranchListChanged => {
+            RepositoryEvent::HeadChanged
+            | RepositoryEvent::BranchListChanged
+            | RepositoryEvent::TagListChanged => {
                 // Only invalidate if we scanned atleast once,
                 // meaning we are not inside the initial repo loading state
                 // NOTE: this fixes an loading performance regression
@@ -2284,6 +2286,7 @@ impl GitGraph {
             return;
         };
         let sha: SharedString = commit_entry.data.sha.to_string().into();
+        let refs: Vec<SharedString> = commit_entry.data.ref_names.clone();
         let subject: SharedString = {
             let data = repository.update(cx, |repo, cx| {
                 repo.fetch_commit_data(commit_entry.data.sha, false, cx).clone()
@@ -2308,6 +2311,20 @@ impl GitGraph {
                 .as_ref()
                 .to_path_buf(),
         );
+        let (head_branch, local_branches) = {
+            let repo = repository.read(cx);
+            let head_branch = repo
+                .branch
+                .as_ref()
+                .map(|b| SharedString::from(b.name().to_string()));
+            let local_branches = repo
+                .branch_list
+                .iter()
+                .filter(|b| !b.is_remote())
+                .map(|b| SharedString::from(b.name().to_string()))
+                .collect::<Vec<_>>();
+            (head_branch, local_branches)
+        };
 
         let ctx = context_menu::CommitContext {
             workspace: self.workspace.clone(),
@@ -2321,6 +2338,9 @@ impl GitGraph {
             // here. The Solution-aggregated log view (S-SOL-LOG) sets
             // this when constructing its own context.
             member_id: None,
+            refs,
+            head_branch,
+            local_branches,
         };
         let menu = context_menu::build_commit_context_menu(ctx, window, cx);
         let subscription = cx.subscribe_in(

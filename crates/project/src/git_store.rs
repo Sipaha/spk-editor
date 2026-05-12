@@ -476,6 +476,10 @@ pub enum RepositoryEvent {
     StatusesChanged,
     HeadChanged,
     BranchListChanged,
+    /// A tag ref was created or deleted. The status scan doesn't track
+    /// tags, so this is emitted directly by `tag_at_sha` / `delete_tag`
+    /// so graph views drop their cached `git log` decorations and re-query.
+    TagListChanged,
     StashEntriesChanged,
     GitWorktreeListChanged,
     PendingOpsChanged { pending_ops: SumTree<PendingOps> },
@@ -4326,7 +4330,9 @@ impl Repository {
 
         // todo(git_graph_remote): Make this subscription on both remote/local repo
         cx.subscribe_self(move |this, event: &RepositoryEvent, _| match event {
-            RepositoryEvent::HeadChanged | RepositoryEvent::BranchListChanged => {
+            RepositoryEvent::HeadChanged
+            | RepositoryEvent::BranchListChanged
+            | RepositoryEvent::TagListChanged => {
                 if this.scan_id > 2 {
                     this.initial_graph_data.clear();
                 }
@@ -7328,17 +7334,23 @@ impl Repository {
         message: Option<String>,
     ) -> oneshot::Receiver<Result<()>> {
         let kind = if message.is_some() { "tag -a" } else { "tag" };
+        let this = self.this.clone();
         self.send_job(
             Some(format!("git {kind} {name} {sha}").into()),
-            move |repo, _cx| async move {
-                match repo {
+            move |repo, mut cx| async move {
+                let result = match repo {
                     RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
                         backend.tag_at_sha(name, sha, message).await
                     }
                     RepositoryState::Remote(_) => {
                         Err(anyhow!("tag_at_sha is not supported for remote projects"))
                     }
+                };
+                if result.is_ok() {
+                    this.update(&mut cx, |_, cx| cx.emit(RepositoryEvent::TagListChanged))
+                        .ok();
                 }
+                result
             },
         )
     }
@@ -7443,17 +7455,23 @@ impl Repository {
 
     /// S-BRP "Delete Tag" — `git tag -d <name>`.
     pub fn delete_tag(&mut self, name: String) -> oneshot::Receiver<Result<()>> {
+        let this = self.this.clone();
         self.send_job(
             Some(format!("git tag -d {name}").into()),
-            move |repo, _cx| async move {
-                match repo {
+            move |repo, mut cx| async move {
+                let result = match repo {
                     RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
                         backend.delete_tag(name).await
                     }
                     RepositoryState::Remote(_) => {
                         Err(anyhow!("delete_tag is not supported for remote projects"))
                     }
+                };
+                if result.is_ok() {
+                    this.update(&mut cx, |_, cx| cx.emit(RepositoryEvent::TagListChanged))
+                        .ok();
                 }
+                result
             },
         )
     }
