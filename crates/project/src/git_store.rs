@@ -309,6 +309,11 @@ pub struct RepositorySnapshot {
     pub path_style: PathStyle,
     pub branch: Option<Branch>,
     pub branch_list: Arc<[Branch]>,
+    /// Tag names (unsorted), refreshed by the status scan so graph views
+    /// pick up tag create/delete done from outside the editor (CLI,
+    /// agents, the `editor.git.tag_*` MCP tools — none of which go
+    /// through `Repository::tag_at_sha` / `delete_tag`).
+    pub tag_list: Arc<[SharedString]>,
     pub head_commit: Option<CommitDetails>,
     pub scan_id: u64,
     pub merge: MergeDetails,
@@ -3952,6 +3957,7 @@ impl RepositorySnapshot {
             work_directory_abs_path,
             branch: None,
             branch_list: Arc::from([]),
+            tag_list: Arc::from([]),
             head_commit: None,
             scan_id: 0,
             merge: Default::default(),
@@ -9014,14 +9020,15 @@ async fn compute_snapshot(
             })
         }
     };
-    let (branches, head_commit, all_worktrees) = cx
+    let (branches, head_commit, all_worktrees, tag_names) = cx
         .background_spawn({
             let backend = backend.clone();
             async move {
-                futures::future::try_join3(
+                futures::future::try_join4(
                     backend.branches(),
                     head_commit_future,
                     backend.worktrees(),
+                    backend.tag_names(),
                 )
                 .await
             }
@@ -9029,6 +9036,7 @@ async fn compute_snapshot(
         .await?;
     let branch = branches.iter().find(|branch| branch.is_head).cloned();
     let branch_list: Arc<[Branch]> = branches.into();
+    let tag_list: Arc<[SharedString]> = tag_names.into();
 
     let linked_worktrees: Arc<[GitWorktree]> = all_worktrees
         .into_iter()
@@ -9054,6 +9062,7 @@ async fn compute_snapshot(
         let head_changed =
             branch != this.snapshot.branch || head_commit != this.snapshot.head_commit;
         let branch_list_changed = *branch_list != *this.snapshot.branch_list;
+        let tag_list_changed = *tag_list != *this.snapshot.tag_list;
         let worktrees_changed = *linked_worktrees != *this.snapshot.linked_worktrees;
 
         this.snapshot = RepositorySnapshot {
@@ -9061,6 +9070,7 @@ async fn compute_snapshot(
             work_directory_abs_path,
             branch,
             branch_list: branch_list.clone(),
+            tag_list: tag_list.clone(),
             head_commit,
             remote_origin_url,
             remote_upstream_url,
@@ -9075,6 +9085,10 @@ async fn compute_snapshot(
 
         if branch_list_changed {
             cx.emit(RepositoryEvent::BranchListChanged);
+        }
+
+        if tag_list_changed {
+            cx.emit(RepositoryEvent::TagListChanged);
         }
 
         if worktrees_changed {

@@ -901,6 +901,14 @@ pub trait GitRepository: Send + Sync {
         future::ready(Ok(Vec::new())).boxed()
     }
 
+    /// Cheap unsorted tag-name list (`git for-each-ref refs/tags`) — no
+    /// annotated-tag peeling, no date sort. Used by the status scan to
+    /// notice tag create/delete from outside the editor (CLI / agents /
+    /// the `editor.git.tag_*` MCP tools) so graph views can refresh.
+    fn tag_names(&self) -> BoxFuture<'_, Result<Vec<SharedString>>> {
+        future::ready(Ok(Vec::new())).boxed()
+    }
+
     fn worktrees(&self) -> BoxFuture<'_, Result<Vec<Worktree>>>;
 
     fn create_worktree(
@@ -2427,6 +2435,29 @@ impl GitRepository for RealGitRepository {
                 anyhow::ensure!(
                     output.status.success(),
                     "Failed to run `git tag`:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                Ok(String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .map(|l| SharedString::from(l.to_string()))
+                    .collect())
+            })
+            .boxed()
+    }
+
+    fn tag_names(&self) -> BoxFuture<'_, Result<Vec<SharedString>>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                let git = git_binary?;
+                let output = git
+                    .build_command(&["for-each-ref", "--format=%(refname:short)", "refs/tags"])
+                    .output()
+                    .await?;
+                anyhow::ensure!(
+                    output.status.success(),
+                    "Failed to run `git for-each-ref refs/tags`:\n{}",
                     String::from_utf8_lossy(&output.stderr)
                 );
                 Ok(String::from_utf8_lossy(&output.stdout)
