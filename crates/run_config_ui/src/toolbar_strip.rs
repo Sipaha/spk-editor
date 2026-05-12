@@ -21,12 +21,17 @@ pub struct RunConfigStrip {
 /// Create the `RunController`, register it on the workspace, build the strip
 /// view and register it on the workspace. Called once per workspace from
 /// `run_config_ui::init`. Honours the `run_config.toolbar` setting.
-pub fn install(workspace: &mut Workspace, _window: &mut Window, cx: &mut Context<Workspace>) {
+pub fn install(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     if !RunConfigSettings::get_global(cx).toolbar {
         return;
     }
     let controller = cx.new(|cx| RunController::new(workspace, cx));
     workspace.set_run_config_controller(controller.clone().into());
+    let status_item =
+        cx.new(|cx| crate::status_item::RunStatusItem::new(controller.clone(), cx));
+    workspace.status_bar().update(cx, |status_bar, cx| {
+        status_bar.add_left_item(status_item, window, cx);
+    });
     let strip = cx.new(|cx| {
         let mut subscriptions = Vec::new();
         if let Some(store) = RunConfigStore::try_global(cx) {
