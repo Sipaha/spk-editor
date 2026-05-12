@@ -53,6 +53,14 @@ pub(crate) fn register(cx: &mut App) {
         rename_branch_extractor,
     );
     register_typed_tool_with_tier(cx, ToolTier::Write, SetUpstreamTool);
+    // Tag / branch lifecycle — round out the surface alongside the context
+    // menu / branch picker (list_branches + delete_branch + rename_branch
+    // already exist above).
+    register_typed_tool_with_tier(cx, ToolTier::ReadOnly, ListTagsTool);
+    register_typed_tool_with_tier(cx, ToolTier::Write, TagDeleteTool);
+    register_typed_tool_with_tier(cx, ToolTier::Write, TagPushTool);
+    register_typed_tool_with_tier(cx, ToolTier::Write, TagDeleteRemoteTool);
+    register_typed_tool_with_tier(cx, ToolTier::Write, BranchCheckoutTool);
     // S-DST — Destructive commit operations.
     register_typed_tool_with_tier(cx, ToolTier::Write, CherryPickTool);
     register_typed_tool_with_tier(cx, ToolTier::Write, RevertTool);
@@ -904,6 +912,299 @@ impl McpServerTool for SetUpstreamTool {
             structured_content: SetUpstreamOutput {
                 branch: input.branch,
                 upstream_ref: input.upstream_ref,
+            },
+        })
+    }
+}
+
+// =====================================================================
+//  Tag / branch lifecycle — round out the `editor.git.*` surface so an
+//  agent can do the same things the commit context menu / branch picker
+//  expose: list tags, delete / push / delete-remote a tag, delete /
+//  rename / checkout a branch. All shell out via `run_git*`, mirroring
+//  the rest of this module (no `Repository` entity access — see the
+//  module doc comment).
+// =====================================================================
+
+/// Input for `editor.git.list_tags`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ListTagsInput {
+    /// Case-insensitive substring filter applied to tag names.
+    pub pattern: Option<String>,
+    /// Repository to query. Defaults to the focused window's active repo.
+    pub repo_id: Option<u64>,
+}
+
+/// Output of `editor.git.list_tags` — tags newest-first by creator date.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ListTagsOutput {
+    pub tags: Vec<TagEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct TagEntry {
+    pub name: String,
+    pub creator_date_relative: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct ListTagsTool;
+
+impl McpServerTool for ListTagsTool {
+    type Input = ListTagsInput;
+    type Output = ListTagsOutput;
+    const NAME: &'static str = "editor.git.list_tags";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        let raw = run_git(
+            &work_dir,
+            &[
+                "tag",
+                "--sort=-creatordate",
+                "--format=%(refname:short)%09%(creatordate:relative)",
+            ],
+        )
+        .await?;
+        let pattern = input.pattern.as_deref().map(str::to_lowercase);
+        let mut tags = Vec::new();
+        for line in raw.lines() {
+            let mut cols = line.splitn(2, '\t');
+            let Some(name) = cols.next().map(str::trim).filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            if let Some(p) = pattern.as_deref()
+                && !name.to_lowercase().contains(p)
+            {
+                continue;
+            }
+            let date = cols
+                .next()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            tags.push(TagEntry {
+                name: name.to_string(),
+                creator_date_relative: date,
+            });
+        }
+        let summary = format!("{} tag(s)", tags.len());
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text: summary }],
+            structured_content: ListTagsOutput { tags },
+        })
+    }
+}
+
+/// Input for `editor.git.tag_delete` — `git tag -d <name>`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct TagDeleteInput {
+    /// Tag to delete.
+    pub name: String,
+    /// Repository to operate on. Defaults to the focused window's active repo.
+    pub repo_id: Option<u64>,
+}
+
+/// Output of `editor.git.tag_delete`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct TagDeleteOutput {
+    pub tag: String,
+}
+
+#[derive(Clone)]
+pub struct TagDeleteTool;
+
+impl McpServerTool for TagDeleteTool {
+    type Input = TagDeleteInput;
+    type Output = TagDeleteOutput;
+    const NAME: &'static str = "editor.git.tag_delete";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        if input.name.trim().is_empty() {
+            return Err(anyhow!("tag name must be non-empty"));
+        }
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        run_git_void(&work_dir, &["tag", "-d", &input.name]).await?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("deleted tag {}", input.name),
+            }],
+            structured_content: TagDeleteOutput { tag: input.name },
+        })
+    }
+}
+
+/// Input for `editor.git.tag_push` — `git push <remote> <tag>`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct TagPushInput {
+    /// Tag to push.
+    pub name: String,
+    /// Remote to push to. Defaults to `origin`.
+    pub remote: Option<String>,
+    /// Repository to operate on. Defaults to the focused window's active repo.
+    pub repo_id: Option<u64>,
+}
+
+/// Output of `editor.git.tag_push` / `editor.git.tag_delete_remote`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct RemoteTagOutput {
+    pub tag: String,
+    pub remote: String,
+}
+
+#[derive(Clone)]
+pub struct TagPushTool;
+
+impl McpServerTool for TagPushTool {
+    type Input = TagPushInput;
+    type Output = RemoteTagOutput;
+    const NAME: &'static str = "editor.git.tag_push";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        if input.name.trim().is_empty() {
+            return Err(anyhow!("tag name must be non-empty"));
+        }
+        let remote = input
+            .remote
+            .filter(|r| !r.trim().is_empty())
+            .unwrap_or_else(|| "origin".to_string());
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        run_git_void(&work_dir, &["push", &remote, &input.name]).await?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("pushed tag {} to {}", input.name, remote),
+            }],
+            structured_content: RemoteTagOutput {
+                tag: input.name,
+                remote,
+            },
+        })
+    }
+}
+
+/// Input for `editor.git.tag_delete_remote` — `git push <remote> --delete
+/// refs/tags/<name>`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct TagDeleteRemoteInput {
+    /// Tag to delete on the remote.
+    pub name: String,
+    /// Remote to delete from. Defaults to `origin`.
+    pub remote: Option<String>,
+    /// Repository to operate on. Defaults to the focused window's active repo.
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Clone)]
+pub struct TagDeleteRemoteTool;
+
+impl McpServerTool for TagDeleteRemoteTool {
+    type Input = TagDeleteRemoteInput;
+    type Output = RemoteTagOutput;
+    const NAME: &'static str = "editor.git.tag_delete_remote";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        if input.name.trim().is_empty() {
+            return Err(anyhow!("tag name must be non-empty"));
+        }
+        let remote = input
+            .remote
+            .filter(|r| !r.trim().is_empty())
+            .unwrap_or_else(|| "origin".to_string());
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        run_git_void(
+            &work_dir,
+            &["push", &remote, "--delete", &format!("refs/tags/{}", input.name)],
+        )
+        .await?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("deleted tag {} on {}", input.name, remote),
+            }],
+            structured_content: RemoteTagOutput {
+                tag: input.name,
+                remote,
+            },
+        })
+    }
+}
+
+/// Output of `editor.git.branch_checkout`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BranchNameOutput {
+    pub branch: String,
+}
+
+/// Input for `editor.git.branch_checkout` — switch to an existing branch
+/// (`git switch <name>`), or create + switch (`git switch -c <name>`).
+/// Unlike `editor.git.checkout_revision` this leaves HEAD attached.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct BranchCheckoutInput {
+    /// Branch to switch to (or create when `create` is `true`).
+    pub name: String,
+    /// When `true`, create the branch at the current HEAD first (`-c`).
+    pub create: bool,
+    /// Repository to operate on. Defaults to the focused window's active repo.
+    pub repo_id: Option<u64>,
+}
+
+#[derive(Clone)]
+pub struct BranchCheckoutTool;
+
+impl McpServerTool for BranchCheckoutTool {
+    type Input = BranchCheckoutInput;
+    type Output = BranchNameOutput;
+    const NAME: &'static str = "editor.git.branch_checkout";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        if input.name.trim().is_empty() {
+            return Err(anyhow!("branch name must be non-empty"));
+        }
+        let work_dir =
+            cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
+        if input.create {
+            run_git_void(&work_dir, &["switch", "-c", &input.name]).await?;
+        } else {
+            run_git_void(&work_dir, &["switch", &input.name]).await?;
+        }
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: if input.create {
+                    format!("created and switched to {}", input.name)
+                } else {
+                    format!("switched to {}", input.name)
+                },
+            }],
+            structured_content: BranchNameOutput {
+                branch: input.name,
             },
         })
     }
