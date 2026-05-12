@@ -15204,6 +15204,7 @@ dependencies = [
  "collections",
  "editor_mcp",
  "fs",
+ "futures 0.3.32",
  "gpui",
  "log",
  "paths",

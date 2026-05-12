@@ -20,6 +20,7 @@ anyhow.workspace = true
 collections.workspace = true
 editor_mcp.workspace = true
 fs.workspace = true
+futures.workspace = true
 gpui.workspace = true
 log.workspace = true
 paths.workspace = true
