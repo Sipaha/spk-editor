@@ -275,6 +275,12 @@ pub fn debug_scenarios_file() -> &'static PathBuf {
     DEBUG_SCENARIOS_FILE.get_or_init(|| config_dir().join("debug.json"))
 }
 
+/// Returns the path to the `run-configurations.json` file.
+pub fn run_configurations_file() -> &'static PathBuf {
+    static RUN_CONFIGURATIONS_FILE: OnceLock<PathBuf> = OnceLock::new();
+    RUN_CONFIGURATIONS_FILE.get_or_init(|| config_dir().join("run-configurations.json"))
+}
+
 /// Returns the path to the extensions directory.
 ///
 /// This is where installed extensions are stored.
@@ -437,6 +443,13 @@ pub fn local_settings_file_relative_path() -> &'static RelPath {
 pub fn local_tasks_file_relative_path() -> &'static RelPath {
     static CACHED: LazyLock<&'static RelPath> =
         LazyLock::new(|| RelPath::unix(".spke/tasks.json").unwrap());
+    *CACHED
+}
+
+/// Returns the relative path to a `run-configurations.json` file within a project.
+pub fn local_run_configurations_file_relative_path() -> &'static RelPath {
+    static CACHED: LazyLock<&'static RelPath> =
+        LazyLock::new(|| RelPath::unix(".spke/run-configurations.json").unwrap());
     *CACHED
 }
 

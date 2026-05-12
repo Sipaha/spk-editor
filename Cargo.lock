@@ -5549,6 +5549,7 @@ dependencies = [
  "log",
  "paths",
  "pretty_assertions",
+ "run_config",
  "schemars 1.0.4",
  "serde",
  "serde_json",
@@ -15197,6 +15198,57 @@ dependencies = [
 ]
 
 [[package]]
+name = "run_config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "context_server",
+ "editor_mcp",
+ "fs",
+ "futures 0.3.32",
+ "gpui",
+ "log",
+ "paths",
+ "pretty_assertions",
+ "project",
+ "schemars 1.0.4",
+ "serde",
+ "serde_json",
+ "serde_json_lenient",
+ "settings",
+ "smol",
+ "task",
+ "ui",
+ "util",
+]
+
+[[package]]
+name = "run_config_ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "db",
+ "editor",
+ "gpui",
+ "log",
+ "menu",
+ "project",
+ "run_config",
+ "schemars 1.0.4",
+ "serde",
+ "serde_json",
+ "settings",
+ "task",
+ "terminal_view",
+ "theme",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "runtimelib"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -22737,6 +22789,8 @@ dependencies = [
  "repl",
  "reqwest_client",
  "rope",
+ "run_config",
+ "run_config_ui",
  "search",
  "semver",
  "serde",

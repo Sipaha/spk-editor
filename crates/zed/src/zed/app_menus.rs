@@ -265,6 +265,15 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
             name: "Run".into(),
             disabled: false,
             items: vec![
+                MenuItem::action("Run", run_config_ui::actions::Run),
+                MenuItem::action("Debug", run_config_ui::actions::Debug),
+                MenuItem::action("Stop", run_config_ui::actions::Stop),
+                MenuItem::separator(),
+                MenuItem::action(
+                    "Edit Configurations…",
+                    run_config_ui::actions::EditConfigurations,
+                ),
+                MenuItem::separator(),
                 MenuItem::action(
                     "Spawn Task",
                     zed_actions::Spawn::ViaModal {
