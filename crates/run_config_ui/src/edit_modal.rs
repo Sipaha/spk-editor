@@ -23,8 +23,8 @@ struct DraftConfig {
 
 /// The "Edit Configurations" modal: a two-pane editor for the set of run
 /// configurations. The left pane lists the configs (with +/-/duplicate), the
-/// right pane edits the selected one. Disk write-back is deferred to Task 18 —
-/// `apply` only updates the in-memory `RunConfigStore`.
+/// right pane edits the selected one. `apply` updates the in-memory
+/// `RunConfigStore` and writes the changes back to disk.
 pub struct EditConfigurationsModal {
     workspace: WeakEntity<Workspace>,
     drafts: Vec<DraftConfig>,
@@ -147,7 +147,7 @@ impl EditConfigurationsModal {
 
     /// Pull the detail-pane widgets back into `drafts[selected]`. Called before
     /// switching selection or applying. The config id is *not* recomputed here —
-    /// Task 18 does that at apply time.
+    /// `apply` does that at apply time.
     fn flush_detail_into_draft(&mut self, cx: &mut App) {
         if self.drafts.is_empty() {
             return;
@@ -308,9 +308,12 @@ impl EditConfigurationsModal {
 
     fn apply(&mut self, cx: &mut App) {
         self.flush_detail_into_draft(cx);
-        // TODO Task 18: also persist these drafts back to disk
-        // (global `run-configurations.json` + each worktree's `.spke/run-configurations.json`)
-        // and recompute the persisted config ids from their names.
+        // Recompute each persisted draft's id from its (possibly edited) name so a
+        // rename produces a fresh stable id rather than keeping the old slug.
+        for draft in self.drafts.iter_mut().filter(|draft| !draft.is_ephemeral) {
+            draft.config.id =
+                RunConfigId::new(&draft.config.provider_type, &Self::slug_of(&draft.config.name));
+        }
         if let Some(store) = RunConfigStore::try_global(cx) {
             let new_list: Vec<RunConfiguration> = self
                 .drafts
@@ -318,7 +321,10 @@ impl EditConfigurationsModal {
                 .filter(|draft| !draft.is_ephemeral)
                 .map(|draft| draft.config.clone())
                 .collect();
-            store.update(cx, |store, cx| store.set_persisted(new_list, cx));
+            store.update(cx, |store, cx| {
+                store.set_persisted(new_list, cx);
+                store.save_to_disk(cx).detach();
+            });
         }
     }
 

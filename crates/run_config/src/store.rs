@@ -246,6 +246,62 @@ impl RunConfigStore {
         }
     }
 
+    /// Write the current persisted configs back to disk: global-scoped ones to
+    /// the global `run-configurations.json`, project-scoped ones to each
+    /// worktree's `.spke/run-configurations.json`. Best-effort: with no `fs` /
+    /// no project handle only what can be written is written; failures are
+    /// logged, not propagated.
+    ///
+    /// Note: a worktree that *lost* all its configs since the last save is not
+    /// rewritten with an empty document — its stale file is left untouched.
+    pub fn save_to_disk(&self, cx: &App) -> Task<()> {
+        let Some(fs) = self.fs.clone() else {
+            log::warn!("run_config: cannot save run configurations — no fs");
+            return Task::ready(());
+        };
+
+        let mut global: Vec<RunConfiguration> = Vec::new();
+        let mut per_worktree: HashMap<WorktreeId, Vec<RunConfiguration>> = HashMap::default();
+        for config in self.configs() {
+            match &config.scope {
+                ConfigScope::Global => global.push(config),
+                ConfigScope::Project { worktree } => {
+                    per_worktree.entry(*worktree).or_default().push(config);
+                }
+                ConfigScope::Ephemeral => {}
+            }
+        }
+
+        let mut writes: Vec<(std::path::PathBuf, String)> = Vec::new();
+        writes.push((
+            paths::run_configurations_file().clone(),
+            document_text(&global),
+        ));
+        if let Some(project) = self.project.as_ref().and_then(|project| project.upgrade()) {
+            let relative_path = paths::local_run_configurations_file_relative_path().as_std_path();
+            for (worktree_id, configs) in per_worktree {
+                if let Some(worktree) = project.read(cx).worktree_for_id(worktree_id, cx) {
+                    let path = worktree.read(cx).abs_path().join(relative_path);
+                    writes.push((path, document_text(&configs)));
+                }
+            }
+        }
+
+        cx.background_spawn(async move {
+            for (path, text) in writes {
+                if let Some(parent) = path.parent() {
+                    if let Err(err) = fs.create_dir(parent).await {
+                        log::warn!("run_config: creating {parent:?}: {err:#}");
+                        continue;
+                    }
+                }
+                if let Err(err) = fs.atomic_write(path.clone(), text).await {
+                    log::warn!("run_config: writing {path:?}: {err:#}");
+                }
+            }
+        })
+    }
+
     /// Load and live-watch the global + per-worktree `run-configurations.json`
     /// files for `project`, and keep the ephemeral (discovered) set in sync with
     /// the project. Idempotent: a second call for any project is a no-op.
@@ -297,6 +353,15 @@ fn parse_text(text: &str, scope: ConfigScope) -> Vec<RunConfiguration> {
     file_format::parse_document(text, scope).log_err().unwrap_or_default()
 }
 
+fn document_text(configs: &[RunConfiguration]) -> String {
+    serde_json::to_string_pretty(&file_format::build_document(configs))
+        .map(|mut text| {
+            text.push('\n');
+            text
+        })
+        .unwrap_or_else(|_| "{\n  \"configurations\": []\n}\n".to_string())
+}
+
 /// Register a provider on the global store. Call from `init` / extension setup.
 pub fn register_provider(cx: &mut App, provider: impl RunConfigProvider) {
     if let Some(store) = RunConfigStore::try_global(cx) {
@@ -342,6 +407,90 @@ mod tests {
         store.read_with(cx, |s, _| {
             assert_eq!(s.configs().len(), 1);
             assert_eq!(s.configs()[0].name.as_ref(), "b");
+        });
+    }
+
+    #[gpui::test]
+    async fn save_to_disk_writes_project_and_global_files(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/proj", serde_json::json!({})).await;
+        let project = project::Project::test(fs.clone(), [Path::new("/proj")], cx).await;
+        cx.update(|cx| RunConfigStore::init_global(cx));
+        let store = cx.update(|cx| RunConfigStore::global(cx));
+        store.update(cx, |s, cx| s.watch_project(project.clone(), fs.clone(), cx));
+        cx.run_until_parked();
+
+        let worktree_id = project.read_with(cx, |project, cx| {
+            project
+                .worktrees(cx)
+                .next()
+                .expect("project has a worktree")
+                .read(cx)
+                .id()
+        });
+
+        store.update(cx, |s, cx| {
+            s.upsert(
+                RunConfiguration {
+                    id: RunConfigId::new("shell", "echo"),
+                    name: "Echo".into(),
+                    provider_type: "shell".into(),
+                    settings: serde_json::json!({ "command": "echo", "args": ["hi"] }),
+                    executors: vec![Executor::Run],
+                    before_launch: vec![],
+                    folder: None,
+                    scope: ConfigScope::Project { worktree: worktree_id },
+                },
+                cx,
+            );
+            s.upsert(
+                RunConfiguration {
+                    id: RunConfigId::new("shell", "global-one"),
+                    name: "GlobalOne".into(),
+                    provider_type: "shell".into(),
+                    settings: serde_json::json!({ "command": "true" }),
+                    executors: vec![Executor::Run],
+                    before_launch: vec![],
+                    folder: None,
+                    scope: ConfigScope::Global,
+                },
+                cx,
+            );
+            s.save_to_disk(cx).detach();
+        });
+        cx.run_until_parked();
+
+        let project_text = fs
+            .load(Path::new("/proj/.spke/run-configurations.json"))
+            .await
+            .expect("project run-configurations.json was written");
+        assert!(project_text.contains("\"Echo\""), "project file: {project_text}");
+        assert!(project_text.contains("\"echo\""), "project file: {project_text}");
+        assert!(
+            !project_text.contains("\"GlobalOne\""),
+            "global config leaked into project file: {project_text}"
+        );
+
+        let global_text = fs
+            .load(paths::run_configurations_file().as_path())
+            .await
+            .expect("global run-configurations.json was written");
+        assert!(
+            global_text.contains("\"GlobalOne\""),
+            "global file: {global_text}"
+        );
+        assert!(
+            !global_text.contains("\"Echo\""),
+            "project config leaked into global file: {global_text}"
+        );
+
+        store.read_with(cx, |s, _| {
+            assert!(s.configs().iter().any(|c| c.name.as_ref() == "Echo"));
+            assert!(s.configs().iter().any(|c| c.name.as_ref() == "GlobalOne"));
         });
     }
 
