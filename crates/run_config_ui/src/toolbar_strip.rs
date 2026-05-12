@@ -1,5 +1,7 @@
-use gpui::{Action as _, Entity, IntoElement, ParentElement, Render, Styled, Window, div, px};
-use run_config::{Executor, RunConfigId, RunConfigSettings, RunConfigStore, RunConfigStoreEvent};
+use gpui::{Action as _, App, Entity, IntoElement, ParentElement, Render, Styled, Window, div, px};
+use run_config::{
+    Executor, RunCommand, RunConfigId, RunConfigSettings, RunConfigStore, RunConfigStoreEvent,
+};
 use settings::Settings as _;
 use ui::{
     Button, ButtonStyle, ContextMenu, Icon, IconButton, IconName, PopoverMenu, PopoverMenuHandle,
@@ -45,6 +47,62 @@ pub fn install(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
         }
     });
     workspace.set_run_config_strip(strip.into(), cx);
+}
+
+/// Route a `RunCommand` (issued by an MCP tool, which lives in `run_config`
+/// and can't reach `RunController` directly) to a window's `RunController`.
+///
+/// Targets the active window if it hosts a `MultiWorkspace`; otherwise the
+/// first window that does. Best-effort: with no such window the command is
+/// dropped (logged). v1 single-workspace assumption — if several windows have
+/// run controllers, only the first reachable one acts.
+pub fn dispatch_run_command(command: RunCommand, cx: &mut App) {
+    let active = cx.active_window();
+    let mut candidates: Vec<gpui::AnyWindowHandle> = Vec::new();
+    if let Some(active) = active {
+        candidates.push(active);
+    }
+    for handle in cx.windows() {
+        if Some(handle) != active {
+            candidates.push(handle);
+        }
+    }
+
+    for handle in candidates {
+        let Some(window_handle) = handle.downcast::<workspace::MultiWorkspace>() else {
+            continue;
+        };
+        let command = command.clone();
+        let dispatched = window_handle
+            .update(cx, |multi, window, cx| {
+                let workspace = multi.workspace().clone();
+                workspace.update(cx, |workspace, cx| {
+                    if workspace.run_config_controller().is_none() {
+                        return false;
+                    }
+                    apply_run_command(workspace, command, window, cx);
+                    true
+                })
+            })
+            .unwrap_or(false);
+        if dispatched {
+            return;
+        }
+    }
+    log::warn!("run_config: no window with a RunController to handle {command:?}");
+}
+
+fn apply_run_command(
+    workspace: &mut Workspace,
+    command: RunCommand,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    with_controller(workspace, cx, |controller, cx| match command {
+        RunCommand::Run { id, executor } => controller.run(id, executor, window, cx),
+        RunCommand::Stop { id } => controller.stop(&id, cx),
+        RunCommand::Select { id } => controller.select(id, cx),
+    });
 }
 
 /// Run `f` against the workspace's `RunController`, if one is installed.

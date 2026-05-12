@@ -8,8 +8,19 @@ use settings::watch_config_file;
 use util::ResultExt as _;
 
 use crate::file_format;
-use crate::model::{ConfigScope, RunConfigId, RunConfiguration};
+use crate::model::{ConfigScope, Executor, RunConfigId, RunConfiguration};
 use crate::provider::{ArcProvider, RunConfigProvider};
+
+/// A request from an MCP tool (which lives in `run_config`, can't depend on
+/// `run_config_ui`) for "the active workspace's `RunController`" to act.
+#[derive(Clone, Debug)]
+pub enum RunCommand {
+    Run { id: RunConfigId, executor: Executor },
+    Stop { id: RunConfigId },
+    Select { id: RunConfigId },
+}
+
+type CommandSink = Arc<dyn Fn(RunCommand, &mut App) + Send + Sync>;
 
 pub struct RunConfigStore {
     providers: HashMap<&'static str, ArcProvider>,
@@ -26,6 +37,11 @@ pub struct RunConfigStore {
     global_configs: Vec<RunConfiguration>,
     /// Configs loaded from each worktree's `.spke/run-configurations.json`.
     worktree_configs: HashMap<WorktreeId, Vec<RunConfiguration>>,
+    /// Ids of configs currently running (pushed by `RunController`s).
+    running: collections::HashSet<RunConfigId>,
+    /// Sink for `RunCommand`s, registered by `run_config_ui` (routes to the
+    /// active workspace's `RunController`). `None` until the UI installs it.
+    command_sink: Option<CommandSink>,
     /// Live FS watcher tasks (dropped → watchers stop).
     _watchers: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -52,6 +68,8 @@ impl RunConfigStore {
             fs: None,
             global_configs: Vec::new(),
             worktree_configs: HashMap::default(),
+            running: collections::HashSet::default(),
+            command_sink: None,
             _watchers: Vec::new(),
             _subscriptions: Vec::new(),
         }
@@ -84,6 +102,11 @@ impl RunConfigStore {
         self.providers.values()
     }
 
+    /// The project handle captured by `watch_project`, if still alive.
+    pub fn project(&self) -> Option<Entity<Project>> {
+        self.project.as_ref().and_then(|project| project.upgrade())
+    }
+
     // --- config set ---
     /// All configs (persisted in insertion order, then ephemeral sorted by name).
     pub fn configs(&self) -> Vec<RunConfiguration> {
@@ -103,6 +126,49 @@ impl RunConfigStore {
             .get(id)
             .or_else(|| self.ephemeral.get(id))
             .cloned()
+    }
+
+    // --- running set ---
+
+    /// Replace the set of currently-running config ids (pushed by `RunController`s).
+    pub fn set_running(&mut self, ids: collections::HashSet<RunConfigId>, cx: &mut Context<Self>) {
+        if self.running != ids {
+            self.running = ids;
+            cx.notify();
+            cx.emit(RunConfigStoreEvent::ConfigsChanged);
+        }
+    }
+
+    pub fn is_running(&self, id: &RunConfigId) -> bool {
+        self.running.contains(id)
+    }
+
+    pub fn running_ids(&self) -> impl Iterator<Item = &RunConfigId> + '_ {
+        self.running.iter()
+    }
+
+    // --- command sink ---
+
+    /// Register the sink that routes `RunCommand`s to the active workspace's
+    /// `RunController`. Called once from `run_config_ui::init`.
+    pub fn set_command_sink(&mut self, sink: CommandSink) {
+        self.command_sink = Some(sink);
+    }
+
+    /// Dispatch a run command via the registered sink. Returns `false` (no-op)
+    /// if no sink has been registered (e.g. headless).
+    pub fn dispatch_command(cx: &mut App, command: RunCommand) -> bool {
+        let Some(store) = Self::try_global(cx) else {
+            return false;
+        };
+        let sink = store.read(cx).command_sink.clone();
+        match sink {
+            Some(sink) => {
+                sink(command, cx);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Replace the full set of persisted configs (called after a file reload).
@@ -408,6 +474,46 @@ mod tests {
             assert_eq!(s.configs().len(), 1);
             assert_eq!(s.configs()[0].name.as_ref(), "b");
         });
+    }
+
+    #[gpui::test]
+    fn running_set_and_command_sink(cx: &mut TestAppContext) {
+        use std::sync::{Arc, Mutex};
+
+        let store = cx.new(|_| RunConfigStore::empty());
+        let id = RunConfigId::new("shell", "a");
+        store.read_with(cx, |s, _| assert!(!s.is_running(&id)));
+        store.update(cx, |s, cx| {
+            s.set_running(collections::HashSet::from_iter([id.clone()]), cx)
+        });
+        store.read_with(cx, |s, _| {
+            assert!(s.is_running(&id));
+            assert_eq!(s.running_ids().count(), 1);
+        });
+
+        // No sink installed yet → dispatch_command is a no-op returning false.
+        cx.update(|cx| {
+            cx.set_global(GlobalRunConfigStore(store.clone()));
+            assert!(!RunConfigStore::dispatch_command(
+                cx,
+                RunCommand::Stop { id: id.clone() }
+            ));
+        });
+
+        let seen: Arc<Mutex<Vec<RunCommand>>> = Arc::new(Mutex::new(Vec::new()));
+        store.update(cx, |s, _| {
+            let seen = seen.clone();
+            s.set_command_sink(Arc::new(move |command, _cx| {
+                seen.lock().expect("lock").push(command);
+            }));
+        });
+        cx.update(|cx| {
+            assert!(RunConfigStore::dispatch_command(
+                cx,
+                RunCommand::Select { id: id.clone() }
+            ));
+        });
+        assert_eq!(seen.lock().expect("lock").len(), 1);
     }
 
     #[gpui::test]

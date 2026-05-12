@@ -9,7 +9,7 @@ mod store;
 pub use model::*;
 pub use provider::*;
 pub use settings::RunConfigSettings;
-pub use store::{RunConfigStore, RunConfigStoreEvent, register_provider};
+pub use store::{RunCommand, RunConfigStore, RunConfigStoreEvent, register_provider};
 
 use gpui::App;
 use ::settings::Settings as _;

@@ -122,7 +122,7 @@ fn entry_value(config: &RunConfiguration) -> Value {
     Value::Object(obj)
 }
 
-pub(crate) fn slugify(name: &str) -> String {
+pub fn slugify(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut prev_dash = false;
     for ch in name.chars() {

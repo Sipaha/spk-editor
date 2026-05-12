@@ -123,6 +123,7 @@ impl RunController {
                     self.active
                         .retain(|_, run| !matches!(run.kind, ActiveRunKind::Debug));
                     cx.emit(RunControllerEvent::ActiveRunsChanged);
+                    self.publish_running(cx);
                     cx.notify();
                 }
             }
@@ -161,6 +162,19 @@ impl RunController {
     }
 
     // --- active runs ---
+
+    /// Push the current set of running config ids into the global store so that
+    /// non-UI consumers (the toolbar strip, MCP `run_config.list`) see them.
+    ///
+    /// v1 single-workspace assumption: if several workspaces have run
+    /// controllers, the last one to publish wins. Fine for the current UI
+    /// (one toolbar strip per window, one window in practice).
+    fn publish_running(&self, cx: &mut Context<Self>) {
+        let ids: collections::HashSet<RunConfigId> = self.active.keys().cloned().collect();
+        if let Some(store) = RunConfigStore::try_global(cx) {
+            store.update(cx, |store, cx| store.set_running(ids, cx));
+        }
+    }
 
     pub fn is_running(&self, id: &RunConfigId) -> bool {
         self.active.contains_key(id)
@@ -275,6 +289,7 @@ impl RunController {
                         this.update(cx, |this, cx| {
                             if this.active.remove(&poller_config_id).is_some() {
                                 cx.emit(RunControllerEvent::ActiveRunsChanged);
+                                this.publish_running(cx);
                                 cx.notify();
                             }
                         })
@@ -295,6 +310,7 @@ impl RunController {
                     },
                 );
                 cx.emit(RunControllerEvent::ActiveRunsChanged);
+                self.publish_running(cx);
                 cx.notify();
             }
             RunRequest::Debug(scenario) => {
@@ -320,6 +336,7 @@ impl RunController {
                     },
                 );
                 cx.emit(RunControllerEvent::ActiveRunsChanged);
+                self.publish_running(cx);
                 cx.notify();
             }
         }
@@ -352,6 +369,7 @@ impl RunController {
             }
         }
         cx.emit(RunControllerEvent::ActiveRunsChanged);
+        self.publish_running(cx);
         cx.notify();
     }
 
