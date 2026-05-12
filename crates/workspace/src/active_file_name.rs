@@ -1,22 +1,25 @@
-use gpui::{
-    Context, Empty, EventEmitter, IntoElement, ParentElement, Render, SharedString, Window,
-};
+use gpui::{Context, Empty, EventEmitter, IntoElement, ParentElement, Render, SharedString, WeakEntity, Window};
 use settings::Settings;
 use ui::{Button, Tooltip, prelude::*};
 use util::paths::PathStyle;
 
-use crate::{StatusItemView, item::ItemHandle, workspace_settings::StatusBarSettings};
+use crate::{StatusItemView, Workspace, item::ItemHandle, workspace_settings::StatusBarSettings};
 
 pub struct ActiveFileName {
-    project_path: Option<SharedString>,
+    /// Path shown in the status bar — the active file's path relative to
+    /// its worktree, prefixed with the worktree's root name (so it's
+    /// unambiguous across the multiple worktrees of a Solution).
+    display_path: Option<SharedString>,
     full_path: Option<SharedString>,
+    workspace: WeakEntity<Workspace>,
 }
 
 impl ActiveFileName {
-    pub fn new() -> Self {
+    pub fn new(workspace: &Workspace) -> Self {
         Self {
-            project_path: None,
+            display_path: None,
             full_path: None,
+            workspace: workspace.weak_handle(),
         }
     }
 }
@@ -27,18 +30,18 @@ impl Render for ActiveFileName {
             return Empty.into_any_element();
         }
 
-        let Some(project_path) = self.project_path.clone() else {
+        let Some(display_path) = self.display_path.clone() else {
             return Empty.into_any_element();
         };
 
         let tooltip_text = self
             .full_path
             .clone()
-            .unwrap_or_else(|| project_path.clone());
+            .unwrap_or_else(|| display_path.clone());
 
         div()
             .child(
-                Button::new("active-file-name-button", project_path)
+                Button::new("active-file-name-button", display_path)
                     .label_size(LabelSize::Small)
                     .tooltip(Tooltip::text(tooltip_text)),
             )
@@ -56,12 +59,28 @@ impl StatusItemView for ActiveFileName {
         cx: &mut Context<Self>,
     ) {
         if let Some(item) = active_pane_item {
-            self.project_path = item
-                .project_path(cx)
-                .map(|path| path.path.display(PathStyle::local()).into_owned().into());
+            self.display_path = item.project_path(cx).map(|project_path| {
+                let relative = project_path.path.display(PathStyle::local());
+                let prefixed = self
+                    .workspace
+                    .read_with(cx, |workspace, cx| {
+                        workspace
+                            .project()
+                            .read(cx)
+                            .worktree_for_id(project_path.worktree_id, cx)
+                            .map(|worktree| {
+                                format!("{}/{}", worktree.read(cx).root_name_str(), relative)
+                            })
+                    })
+                    .ok()
+                    .flatten();
+                prefixed
+                    .unwrap_or_else(|| relative.into_owned())
+                    .into()
+            });
             self.full_path = item.tab_tooltip_text(cx);
         } else {
-            self.project_path = None;
+            self.display_path = None;
             self.full_path = None;
         }
         cx.notify();
