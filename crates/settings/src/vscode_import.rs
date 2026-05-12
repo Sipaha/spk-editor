@@ -209,6 +209,7 @@ impl VsCodeSettings {
             repl: None,
             solutions: None,
             solution_agent: None,
+            run_config: None,
             server_url: None,
             session: None,
             status_bar: self.status_bar_settings_content(),

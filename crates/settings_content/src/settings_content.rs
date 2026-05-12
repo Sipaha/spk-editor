@@ -181,6 +181,9 @@ pub struct SettingsContent {
     /// suggestion tasks). See M5 in the git-panel plan.
     pub solution_agent: Option<SolutionAgentSettingsContent>,
 
+    /// Configuration for the Run Configurations feature.
+    pub run_config: Option<RunConfigSettingsContent>,
+
     /// Configuration for the Message Editor
     pub message_editor: Option<MessageEditorSettings>,
 
@@ -1205,6 +1208,14 @@ pub struct SolutionGitSettingsContent {
     /// default; `background = true` runs analyze on a daily cadence /
     /// at every Fetch All.
     pub ai_cherry_pick_suggest: Option<SolutionGitAiCherryPickSuggestSettingsContent>,
+}
+
+/// Run Configurations feature configuration.
+#[with_fallible_options]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, MergeFrom, Default, PartialEq)]
+pub struct RunConfigSettingsContent {
+    /// Show the Run Configurations toolbar strip under the title bar. Default: true.
+    pub toolbar: Option<bool>,
 }
 
 /// Per-Solution AI subprocess pool configuration. Used by `solution_agent`
