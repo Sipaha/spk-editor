@@ -1,4 +1,5 @@
 use gpui::{Context, Empty, EventEmitter, IntoElement, ParentElement, Render, SharedString, WeakEntity, Window};
+use project::Project;
 use settings::Settings;
 use ui::{Button, Tooltip, prelude::*};
 use util::paths::PathStyle;
@@ -11,7 +12,7 @@ pub struct ActiveFileName {
     /// unambiguous across the multiple worktrees of a Solution).
     display_path: Option<SharedString>,
     full_path: Option<SharedString>,
-    workspace: WeakEntity<Workspace>,
+    project: WeakEntity<Project>,
 }
 
 impl ActiveFileName {
@@ -19,7 +20,7 @@ impl ActiveFileName {
         Self {
             display_path: None,
             full_path: None,
-            workspace: workspace.weak_handle(),
+            project: workspace.project().downgrade(),
         }
     }
 }
@@ -61,22 +62,23 @@ impl StatusItemView for ActiveFileName {
         if let Some(item) = active_pane_item {
             self.display_path = item.project_path(cx).map(|project_path| {
                 let relative = project_path.path.display(PathStyle::local());
-                let prefixed = self
-                    .workspace
-                    .read_with(cx, |workspace, cx| {
-                        workspace
-                            .project()
-                            .read(cx)
+                // `set_active_pane_item` runs inside a `Workspace` update, so
+                // we can't touch the workspace entity here — read the project
+                // (not mid-update during pane focus) to resolve the worktree
+                // name, and fall back to the bare relative path otherwise.
+                let root_name = self
+                    .project
+                    .read_with(cx, |project, cx| {
+                        project
                             .worktree_for_id(project_path.worktree_id, cx)
-                            .map(|worktree| {
-                                format!("{}/{}", worktree.read(cx).root_name_str(), relative)
-                            })
+                            .map(|worktree| worktree.read(cx).root_name_str().to_string())
                     })
                     .ok()
                     .flatten();
-                prefixed
-                    .unwrap_or_else(|| relative.into_owned())
-                    .into()
+                match root_name {
+                    Some(root_name) => format!("{root_name}/{relative}").into(),
+                    None => relative.into_owned().into(),
+                }
             });
             self.full_path = item.tab_tooltip_text(cx);
         } else {
