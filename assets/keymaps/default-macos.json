@@ -771,6 +771,11 @@
       "cmd-shift-x": "zed::Extensions",
       "f5": "debugger::Rerun",
       "cmd-w": "workspace::CloseActiveDock",
+      // Run configurations (IntelliJ-style; alt-shift variants avoid conflicts
+      // with shift-f9/cmd-f2 which are already bound in Editor context).
+      "alt-shift-f10": "run_config::Run",
+      "alt-shift-f9": "run_config::Debug",
+      "alt-shift-f2": "run_config::Stop",
     },
   },
   {

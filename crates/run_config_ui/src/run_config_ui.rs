@@ -1,4 +1,4 @@
-mod actions;
+pub mod actions;
 mod edit_modal;
 mod run_controller;
 mod schema_form;
