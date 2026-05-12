@@ -171,27 +171,62 @@ impl RunConfigStore {
         }
     }
 
-    /// Replace the full set of persisted configs (called after a file reload).
+    /// Replace the full set of persisted configs (called by the Edit modal's
+    /// `apply` with its full list of non-ephemeral drafts). Rebuilds the
+    /// per-source buckets from `configs` so that an interleaved watcher-fired
+    /// `rebuild_persisted` is a no-op rather than reverting this edit.
+    ///
+    /// Worktrees that previously had a bucket but now have zero configs keep an
+    /// empty `Vec` entry so `save_to_disk` knows to rewrite their file empty.
     pub fn set_persisted(&mut self, configs: Vec<RunConfiguration>, cx: &mut Context<Self>) {
-        self.persisted.clear();
-        self.order.clear();
-        for config in configs {
-            self.order.push(config.id.clone());
-            self.persisted.insert(config.id.clone(), config);
+        let mut global_configs: Vec<RunConfiguration> = Vec::new();
+        let mut worktree_configs: HashMap<WorktreeId, Vec<RunConfiguration>> = HashMap::default();
+        // Preserve existing worktree keys (possibly emptied) so files that lost
+        // all their configs still get rewritten with an empty document.
+        for worktree_id in self.worktree_configs.keys() {
+            worktree_configs.entry(*worktree_id).or_default();
         }
-        cx.emit(RunConfigStoreEvent::ConfigsChanged);
-        cx.notify();
+        for config in configs {
+            match &config.scope {
+                ConfigScope::Global => global_configs.push(config),
+                ConfigScope::Project { worktree } => {
+                    worktree_configs.entry(*worktree).or_default().push(config);
+                }
+                ConfigScope::Ephemeral => {}
+            }
+        }
+        self.global_configs = global_configs;
+        self.worktree_configs = worktree_configs;
+        self.rebuild_persisted(cx);
     }
 
-    /// Insert/update one persisted config.
+    /// Insert/update one persisted config (used by the `run_config.create` MCP
+    /// tool). Patches the matching per-source bucket then rebuilds `persisted`.
     pub fn upsert(&mut self, config: RunConfiguration, cx: &mut Context<Self>) {
         debug_assert!(config.scope.is_persisted());
-        if !self.persisted.contains_key(&config.id) {
-            self.order.push(config.id.clone());
+        let target_worktree = match &config.scope {
+            ConfigScope::Global => None,
+            ConfigScope::Project { worktree } => Some(*worktree),
+            ConfigScope::Ephemeral => {
+                debug_assert!(false, "upsert called with an ephemeral config");
+                return;
+            }
+        };
+        // Remove any existing config with this id from every bucket (its scope
+        // may have changed), then push it into the target bucket.
+        self.global_configs.retain(|existing| existing.id != config.id);
+        for bucket in self.worktree_configs.values_mut() {
+            bucket.retain(|existing| existing.id != config.id);
         }
-        self.persisted.insert(config.id.clone(), config);
-        cx.emit(RunConfigStoreEvent::ConfigsChanged);
-        cx.notify();
+        match target_worktree {
+            None => self.global_configs.push(config),
+            Some(worktree) => self
+                .worktree_configs
+                .entry(worktree)
+                .or_default()
+                .push(config),
+        }
+        self.rebuild_persisted(cx);
     }
 
     pub fn remove(
@@ -199,11 +234,17 @@ impl RunConfigStore {
         id: &RunConfigId,
         cx: &mut Context<Self>,
     ) -> Option<RunConfiguration> {
-        let removed = self.persisted.remove(id);
-        self.order.retain(|existing| existing != id);
+        let mut removed: Option<RunConfiguration> = None;
+        if let Some(position) = self.global_configs.iter().position(|config| &config.id == id) {
+            removed = Some(self.global_configs.remove(position));
+        }
+        for bucket in self.worktree_configs.values_mut() {
+            if let Some(position) = bucket.iter().position(|config| &config.id == id) {
+                removed = Some(bucket.remove(position));
+            }
+        }
         if removed.is_some() {
-            cx.emit(RunConfigStoreEvent::ConfigsChanged);
-            cx.notify();
+            self.rebuild_persisted(cx);
         }
         removed
     }
@@ -318,8 +359,9 @@ impl RunConfigStore {
     /// no project handle only what can be written is written; failures are
     /// logged, not propagated.
     ///
-    /// Note: a worktree that *lost* all its configs since the last save is not
-    /// rewritten with an empty document — its stale file is left untouched.
+    /// A worktree that *lost* all its configs since the last save (still a key
+    /// in `worktree_configs` with an empty bucket) is rewritten with an empty
+    /// document so the deletion is persisted.
     pub fn save_to_disk(&self, cx: &App) -> Task<()> {
         let Some(fs) = self.fs.clone() else {
             log::warn!("run_config: cannot save run configurations — no fs");
@@ -328,6 +370,10 @@ impl RunConfigStore {
 
         let mut global: Vec<RunConfiguration> = Vec::new();
         let mut per_worktree: HashMap<WorktreeId, Vec<RunConfiguration>> = HashMap::default();
+        // Seed with every known worktree bucket so emptied ones get an empty doc.
+        for worktree_id in self.worktree_configs.keys() {
+            per_worktree.entry(*worktree_id).or_default();
+        }
         for config in self.configs() {
             match &config.scope {
                 ConfigScope::Global => global.push(config),
@@ -598,6 +644,85 @@ mod tests {
             assert!(s.configs().iter().any(|c| c.name.as_ref() == "Echo"));
             assert!(s.configs().iter().any(|c| c.name.as_ref() == "GlobalOne"));
         });
+    }
+
+    #[gpui::test]
+    async fn deleting_project_config_persists_and_does_not_reappear(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/proj", serde_json::json!({})).await;
+        let project = project::Project::test(fs.clone(), [Path::new("/proj")], cx).await;
+        cx.update(|cx| RunConfigStore::init_global(cx));
+        let store = cx.update(|cx| RunConfigStore::global(cx));
+        store.update(cx, |s, cx| s.watch_project(project.clone(), fs.clone(), cx));
+        cx.run_until_parked();
+
+        let worktree_id = project.read_with(cx, |project, cx| {
+            project
+                .worktrees(cx)
+                .next()
+                .expect("project has a worktree")
+                .read(cx)
+                .id()
+        });
+
+        // Upsert a single project-scoped config and persist it.
+        store.update(cx, |s, cx| {
+            s.upsert(
+                RunConfiguration {
+                    id: RunConfigId::new("shell", "only"),
+                    name: "Only".into(),
+                    provider_type: "shell".into(),
+                    settings: serde_json::json!({ "command": "true" }),
+                    executors: vec![Executor::Run],
+                    before_launch: vec![],
+                    folder: None,
+                    scope: ConfigScope::Project { worktree: worktree_id },
+                },
+                cx,
+            );
+            s.save_to_disk(cx).detach();
+        });
+        cx.run_until_parked();
+
+        let project_path = Path::new("/proj/.spke/run-configurations.json");
+        let text = fs.load(project_path).await.expect("project file written");
+        assert!(text.contains("\"Only\""), "project file: {text}");
+        store.read_with(cx, |s, _| {
+            assert!(s.configs().iter().any(|c| c.name.as_ref() == "Only"));
+        });
+
+        // Now remove it (the only project-scoped config) and persist again.
+        store.update(cx, |s, cx| {
+            let removed = s.remove(&RunConfigId::new("shell", "only"), cx);
+            assert!(removed.is_some(), "config should have been removed");
+            s.save_to_disk(cx).detach();
+        });
+        // Let the FS watcher fire on the rewritten (now-empty) file.
+        cx.run_until_parked();
+
+        store.read_with(cx, |s, _| {
+            assert!(
+                s.configs().is_empty(),
+                "config reappeared after deletion: {:?}",
+                s.configs()
+            );
+        });
+        let text = fs.load(project_path).await.expect("project file still exists");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&text).expect("project file is valid JSON");
+        let entries = parsed
+            .get("configurations")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            entries.is_empty(),
+            "project file should have no configs after deletion: {text}"
+        );
     }
 
     #[gpui::test]

@@ -282,19 +282,33 @@ impl RunController {
                 let poller_config_id = config_id.clone();
                 let poller = cx.spawn(async move |this, cx| {
                     let outcome = spawn_task.await;
-                    // `Some(_)` => the process actually exited (success or not);
+                    // `Some(_)` => the process actually exited or failed to launch;
                     // `None` => the spawn was cancelled / no terminal provider —
                     // leave the run tracked so the user can Stop it explicitly.
-                    if outcome.is_some() {
+                    let Some(result) = outcome else {
+                        return;
+                    };
+                    if let Err(err) = &result {
+                        log::warn!(
+                            "run_config: terminal task `{}` failed to launch: {err:#}",
+                            poller_config_id.as_str()
+                        );
                         this.update(cx, |this, cx| {
-                            if this.active.remove(&poller_config_id).is_some() {
-                                cx.emit(RunControllerEvent::ActiveRunsChanged);
-                                this.publish_running(cx);
-                                cx.notify();
-                            }
+                            this.notify_error(
+                                format!("Failed to launch run configuration: {err:#}"),
+                                cx,
+                            );
                         })
                         .ok();
                     }
+                    this.update(cx, |this, cx| {
+                        if this.active.remove(&poller_config_id).is_some() {
+                            cx.emit(RunControllerEvent::ActiveRunsChanged);
+                            this.publish_running(cx);
+                            cx.notify();
+                        }
+                    })
+                    .ok();
                 });
                 // `spawn_in_terminal` doesn't hand back a `TerminalView`, so
                 // terminal runs carry `view: None` and Stop is best-effort.

@@ -15230,7 +15230,6 @@ dependencies = [
  "anyhow",
  "collections",
  "db",
- "debugger_ui",
  "editor",
  "gpui",
  "log",

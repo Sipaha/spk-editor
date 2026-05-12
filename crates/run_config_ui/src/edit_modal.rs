@@ -310,9 +310,21 @@ impl EditConfigurationsModal {
         self.flush_detail_into_draft(cx);
         // Recompute each persisted draft's id from its (possibly edited) name so a
         // rename produces a fresh stable id rather than keeping the old slug.
+        // If two drafts would slug to the same base, suffix the later one (-2,
+        // -3, …) so every persisted config keeps a distinct id.
+        let mut seen_slugs: std::collections::HashMap<(SharedString, String), usize> =
+            std::collections::HashMap::default();
         for draft in self.drafts.iter_mut().filter(|draft| !draft.is_ephemeral) {
-            draft.config.id =
-                RunConfigId::new(&draft.config.provider_type, &Self::slug_of(&draft.config.name));
+            let base_slug = Self::slug_of(&draft.config.name);
+            let key = (draft.config.provider_type.clone(), base_slug.clone());
+            let count = seen_slugs.entry(key).or_insert(0);
+            *count += 1;
+            let slug = if *count == 1 {
+                base_slug
+            } else {
+                format!("{base_slug}-{count}")
+            };
+            draft.config.id = RunConfigId::new(&draft.config.provider_type, &slug);
         }
         if let Some(store) = RunConfigStore::try_global(cx) {
             let new_list: Vec<RunConfiguration> = self
