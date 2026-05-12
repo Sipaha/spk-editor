@@ -674,6 +674,23 @@ impl Inventory {
             .collect()
     }
 
+    /// SPK Editor fork (S-RUN): returns all settings-derived task templates
+    /// (worktree-scoped first, then global) without requiring a `TaskContext`
+    /// or async resolution. Used by the `task-ref` run-config provider to list
+    /// and look up `.spke/tasks.json` tasks synchronously. Language runnables
+    /// are *not* included (those need an async, buffer-aware listing — see
+    /// `Inventory::list_tasks`).
+    pub fn task_templates_from_settings(
+        &self,
+        worktree: Option<WorktreeId>,
+    ) -> Vec<(TaskSourceKind, TaskTemplate)> {
+        worktree
+            .into_iter()
+            .flat_map(|worktree| self.worktree_templates_from_settings(worktree))
+            .chain(self.global_templates_from_settings())
+            .collect()
+    }
+
     fn global_templates_from_settings(
         &self,
     ) -> impl '_ + Iterator<Item = (TaskSourceKind, TaskTemplate)> {
