@@ -2492,18 +2492,8 @@ impl GitGraph {
             CommitDataState::Loading(_) => ("Loading…".into(), "".into(), None, "Loading…".into()),
         };
 
-        let date_string = commit_timestamp
-            .and_then(|ts| OffsetDateTime::from_unix_timestamp(ts).ok())
-            .map(|datetime| {
-                let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-                let local_datetime = datetime.to_offset(local_offset);
-                let format =
-                    time::format_description::parse("[month repr:short] [day], [year]").ok();
-                format
-                    .and_then(|f| local_datetime.format(&f).ok())
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default();
+        let date_string = commit_timestamp.map(format_timestamp).unwrap_or_default();
+        let short_sha: SharedString = commit_entry.data.sha.display_short().into();
 
         let remote = repository.update(cx, |repo, cx| self.get_remote(repo, window, cx));
 
@@ -2515,7 +2505,7 @@ impl GitGraph {
             };
 
             CommitAvatar::new(&full_sha, author_email_for_avatar, remote.as_ref())
-                .size(px(40.))
+                .size(px(16.))
                 .render(window, cx)
         };
 
@@ -2553,10 +2543,11 @@ impl GitGraph {
                 v_flex()
                     .relative()
                     .w_full()
-                    .p_2()
-                    .gap_2()
+                    .px_2()
+                    .py_1p5()
+                    .gap_1p5()
                     .child(
-                        div().absolute().top_2().right_2().child(
+                        div().absolute().top_1().right_1().child(
                             IconButton::new("close-detail", IconName::Close)
                                 .icon_size(IconSize::Small)
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -2568,41 +2559,85 @@ impl GitGraph {
                                 })),
                         ),
                     )
+                    // Subject — pad on the right so it doesn't run under the
+                    // absolutely-positioned close button.
                     .child(
-                        v_flex()
-                            .py_1()
-                            .w_full()
-                            .items_center()
-                            .gap_1()
-                            .child(avatar)
-                            .child(
-                                v_flex()
-                                    .items_center()
-                                    .child(Label::new(author_name))
-                                    .child(
-                                        Label::new(date_string)
-                                            .color(Color::Muted)
-                                            .size(LabelSize::Small),
-                                    ),
-                            ),
+                        div()
+                            .pr_5()
+                            .child(Label::new(commit_message).weight(gpui::FontWeight::SEMIBOLD)),
                     )
-                    .children((!ref_names.is_empty()).then(|| {
-                        h_flex().gap_1().flex_wrap().justify_center().children(
-                            ref_names.iter().map(|name| {
-                                let is_head = Self::is_head_ref(name.as_ref(), &head_branch_name);
-                                self.render_chip(
-                                    name,
-                                    accent_color,
-                                    is_head,
-                                    Some(work_dir.as_path()),
-                                )
-                            }),
-                        )
-                    }))
+                    // Author identity line: avatar · short SHA (click to copy) · name.
                     .child(
-                        v_flex()
-                            .ml_neg_1()
+                        h_flex()
                             .gap_1p5()
+                            .items_center()
+                            .child(avatar)
+                            .child({
+                                let copy_sha = full_sha.clone();
+                                let copied_state: Entity<CopiedState> =
+                                    window.use_keyed_state("sha-copy", cx, CopiedState::new);
+                                let is_copied = copied_state.read(cx).is_copied();
+
+                                let (label_text, icon, icon_color, tooltip_label) = if is_copied {
+                                    (
+                                        SharedString::from("Copied!"),
+                                        IconName::Check,
+                                        Color::Success,
+                                        "Commit SHA Copied!",
+                                    )
+                                } else {
+                                    (
+                                        short_sha.clone(),
+                                        IconName::Hash,
+                                        Color::Muted,
+                                        "Copy Commit SHA",
+                                    )
+                                };
+
+                                Button::new("sha-button", label_text)
+                                    .start_icon(
+                                        Icon::new(icon).size(IconSize::Small).color(icon_color),
+                                    )
+                                    .label_size(LabelSize::Small)
+                                    .color(Color::Muted)
+                                    .tooltip({
+                                        let full_sha = full_sha.clone();
+                                        move |_, cx| {
+                                            Tooltip::with_meta(
+                                                tooltip_label,
+                                                None,
+                                                full_sha.clone(),
+                                                cx,
+                                            )
+                                        }
+                                    })
+                                    .on_click(move |_, _, cx| {
+                                        copied_state.update(cx, |state, _cx| {
+                                            state.mark_copied();
+                                        });
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            copy_sha.to_string(),
+                                        ));
+                                        let state_id = copied_state.entity_id();
+                                        cx.spawn(async move |cx| {
+                                            cx.background_executor()
+                                                .timer(COPIED_STATE_DURATION)
+                                                .await;
+                                            cx.update(|cx| {
+                                                cx.notify(state_id);
+                                            })
+                                        })
+                                        .detach();
+                                    })
+                            })
+                            .child(Label::new(author_name).size(LabelSize::Small).truncate()),
+                    )
+                    // Email · date line.
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            .flex_wrap()
                             .when(!author_email.is_empty(), |this| {
                                 let copied_state: Entity<CopiedState> = window.use_keyed_state(
                                     "author-email-copy",
@@ -2656,95 +2691,51 @@ impl GitGraph {
                                         }),
                                 )
                             })
-                            .child({
-                                let copy_sha = full_sha.clone();
-                                let copied_state: Entity<CopiedState> =
-                                    window.use_keyed_state("sha-copy", cx, CopiedState::new);
-                                let is_copied = copied_state.read(cx).is_copied();
-
-                                let (icon, icon_color, tooltip_label) = if is_copied {
-                                    (IconName::Check, Color::Success, "Commit SHA Copied!")
-                                } else {
-                                    (IconName::Hash, Color::Muted, "Copy Commit SHA")
-                                };
-
-                                Button::new("sha-button", &full_sha)
-                                    .start_icon(
-                                        Icon::new(icon).size(IconSize::Small).color(icon_color),
-                                    )
-                                    .label_size(LabelSize::Small)
-                                    .truncate(true)
+                            .child(
+                                Label::new(date_string)
                                     .color(Color::Muted)
-                                    .tooltip({
-                                        let full_sha = full_sha.clone();
-                                        move |_, cx| {
-                                            Tooltip::with_meta(
-                                                tooltip_label,
-                                                None,
-                                                full_sha.clone(),
-                                                cx,
-                                            )
-                                        }
-                                    })
-                                    .on_click(move |_, _, cx| {
-                                        copied_state.update(cx, |state, _cx| {
-                                            state.mark_copied();
-                                        });
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            copy_sha.to_string(),
-                                        ));
-                                        let state_id = copied_state.entity_id();
-                                        cx.spawn(async move |cx| {
-                                            cx.background_executor()
-                                                .timer(COPIED_STATE_DURATION)
-                                                .await;
-                                            cx.update(|cx| {
-                                                cx.notify(state_id);
-                                            })
-                                        })
-                                        .detach();
-                                    })
-                            })
-                            .when_some(remote.clone(), |this, remote| {
-                                let provider_name = remote.host.name();
-                                let icon = match provider_name.as_str() {
-                                    "GitHub" => IconName::Github,
-                                    _ => IconName::Link,
-                                };
-                                let parsed_remote = ParsedGitRemote {
-                                    owner: remote.owner.as_ref().into(),
-                                    repo: remote.repo.as_ref().into(),
-                                };
-                                let params = BuildCommitPermalinkParams {
-                                    sha: full_sha.as_ref(),
-                                };
-                                let url = remote
-                                    .host
-                                    .build_commit_permalink(&parsed_remote, params)
-                                    .to_string();
+                                    .size(LabelSize::Small),
+                            ),
+                    )
+                    // Ref decorations.
+                    .children((!ref_names.is_empty()).then(|| {
+                        h_flex().gap_1().flex_wrap().children(ref_names.iter().map(|name| {
+                            let is_head = Self::is_head_ref(name.as_ref(), &head_branch_name);
+                            self.render_chip(name, accent_color, is_head, Some(work_dir.as_path()))
+                        }))
+                    }))
+                    .when_some(remote.clone(), |this, remote| {
+                        let provider_name = remote.host.name();
+                        let icon = match provider_name.as_str() {
+                            "GitHub" => IconName::Github,
+                            _ => IconName::Link,
+                        };
+                        let parsed_remote = ParsedGitRemote {
+                            owner: remote.owner.as_ref().into(),
+                            repo: remote.repo.as_ref().into(),
+                        };
+                        let params = BuildCommitPermalinkParams {
+                            sha: full_sha.as_ref(),
+                        };
+                        let url = remote
+                            .host
+                            .build_commit_permalink(&parsed_remote, params)
+                            .to_string();
 
-                                this.child(
-                                    Button::new(
-                                        "view-on-provider",
-                                        format!("View on {}", provider_name),
-                                    )
-                                    .start_icon(
-                                        Icon::new(icon).size(IconSize::Small).color(Color::Muted),
-                                    )
-                                    .label_size(LabelSize::Small)
-                                    .truncate(true)
-                                    .color(Color::Muted)
-                                    .on_click(
-                                        move |_, _, cx| {
-                                            cx.open_url(&url);
-                                        },
-                                    ),
+                        this.child(
+                            Button::new("view-on-provider", format!("View on {}", provider_name))
+                                .start_icon(
+                                    Icon::new(icon).size(IconSize::Small).color(Color::Muted),
                                 )
-                            }),
-                    ),
+                                .label_size(LabelSize::Small)
+                                .truncate(true)
+                                .color(Color::Muted)
+                                .on_click(move |_, _, cx| {
+                                    cx.open_url(&url);
+                                }),
+                        )
+                    }),
             )
-            .child(Divider::horizontal())
-            .child(div().p_2().child(Label::new(commit_message)))
             .child(Divider::horizontal())
             .child(
                 v_flex()
