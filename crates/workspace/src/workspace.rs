@@ -1363,6 +1363,8 @@ pub struct Workspace {
     pub(crate) modal_layer: Entity<ModalLayer>,
     toast_layer: Entity<ToastLayer>,
     titlebar_item: Option<AnyView>,
+    run_config_strip: Option<AnyView>,
+    run_config_controller: Option<AnyEntity>,
     notifications: Notifications,
     suppressed_notifications: HashSet<NotificationId>,
     project: Entity<Project>,
@@ -1779,6 +1781,8 @@ impl Workspace {
             modal_layer,
             toast_layer,
             titlebar_item: None,
+            run_config_strip: None,
+            run_config_controller: None,
             notifications: Notifications::default(),
             suppressed_notifications: HashSet::default(),
             left_dock,
@@ -3026,6 +3030,19 @@ impl Workspace {
     pub fn set_titlebar_item(&mut self, item: AnyView, _: &mut Window, cx: &mut Context<Self>) {
         self.titlebar_item = Some(item);
         cx.notify();
+    }
+
+    pub fn set_run_config_strip(&mut self, strip: AnyView, cx: &mut Context<Self>) {
+        self.run_config_strip = Some(strip);
+        cx.notify();
+    }
+
+    pub fn set_run_config_controller(&mut self, controller: AnyEntity) {
+        self.run_config_controller = Some(controller);
+    }
+
+    pub fn run_config_controller(&self) -> Option<&AnyEntity> {
+        self.run_config_controller.as_ref()
     }
 
     pub fn set_prompt_for_new_path(&mut self, prompt: PromptForNewPath) {
@@ -8470,6 +8487,7 @@ impl Render for Workspace {
             .text_color(colors.text)
             .overflow_hidden()
             .children(self.titlebar_item.clone())
+            .children(self.run_config_strip.clone())
             .on_modifiers_changed(move |_, _, cx| {
                 for &id in &notification_entities {
                     cx.notify(id);
