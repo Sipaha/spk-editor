@@ -1989,26 +1989,31 @@ impl GitGraph {
                     None
                 };
 
-                let description_inner = h_flex()
-                    .gap_2()
-                    .overflow_hidden()
-                    .children(highlight_marker)
-                    .children(ref_chips_element)
-                    .child(subject_label);
-
-                let description_cell = if let Some(label) = date_header_label {
-                    v_flex()
-                        .gap_0p5()
+                // The table is a fixed-row-height `uniform_list`, so the
+                // group-by-date marker can't be a stacked second line (it'd
+                // overflow the row and clip / overlap the next one). Render it
+                // inline as a leading pill instead.
+                let date_pill = date_header_label.map(|label| {
+                    div()
+                        .flex_none()
+                        .px_1()
+                        .rounded_sm()
+                        .bg(cx.theme().colors().element_background)
                         .child(
                             Label::new(label)
                                 .size(LabelSize::XSmall)
                                 .color(Color::Muted),
                         )
-                        .child(description_inner)
-                        .into_any_element()
-                } else {
-                    description_inner.into_any_element()
-                };
+                });
+
+                let description_cell = h_flex()
+                    .gap_2()
+                    .overflow_hidden()
+                    .children(date_pill)
+                    .children(highlight_marker)
+                    .children(ref_chips_element)
+                    .child(subject_label)
+                    .into_any_element();
 
                 vec![
                     div()
