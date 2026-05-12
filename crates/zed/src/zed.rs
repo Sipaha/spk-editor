@@ -714,6 +714,10 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let outline_panel = OutlinePanel::load(workspace_handle.clone(), cx.clone());
         let terminal_panel = TerminalPanel::load(workspace_handle.clone(), cx.clone());
         let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
+        // SPK Editor: the commit-log graph as a bottom-docked panel
+        // (IDEA-style "Git" tool window); still also openable as a pane item.
+        let git_graph_panel =
+            git_graph::git_graph_panel::GitGraphPanel::load(workspace_handle.clone(), cx.clone());
         // SPK Editor: the upstream-style left-dock SolutionsPanel was
         // removed; Solutions are surfaced via the title-bar tab strip
         // (`solutions_ui::solution_tab_strip`) instead.
@@ -742,6 +746,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(outline_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(terminal_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(git_graph_panel, workspace_handle.clone(), cx.clone()),
             // add_panel_when_ready(channels_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
             // SPK Editor: agent_panel disabled — this fork's AI story is the
