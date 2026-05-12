@@ -15222,6 +15222,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "run_config_ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "db",
+ "debugger_ui",
+ "editor",
+ "gpui",
+ "log",
+ "menu",
+ "project",
+ "run_config",
+ "schemars 1.0.4",
+ "serde",
+ "serde_json",
+ "settings",
+ "task",
+ "terminal_view",
+ "theme",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "runtimelib"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
