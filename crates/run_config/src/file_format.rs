@@ -82,6 +82,8 @@ fn parse_entry(entry: &Value, scope: ConfigScope) -> Result<RunConfiguration> {
 
 /// Serialize a list of (persisted) configs back into a document `Value`. The
 /// caller writes this with `serde_json::to_string_pretty`.
+// Wired up by `RunConfigStore::save_to_disk` (Edit Configurations write-back).
+#[allow(dead_code)]
 pub fn build_document(configs: &[RunConfiguration]) -> Value {
     let entries: Vec<Value> = configs
         .iter()
@@ -91,6 +93,7 @@ pub fn build_document(configs: &[RunConfiguration]) -> Value {
     serde_json::json!({ "configurations": entries })
 }
 
+#[allow(dead_code)]
 fn entry_value(config: &RunConfiguration) -> Value {
     let mut obj = Map::new();
     obj.insert("name".into(), Value::String(config.name.to_string()));
