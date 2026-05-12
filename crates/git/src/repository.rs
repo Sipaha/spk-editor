@@ -886,6 +886,15 @@ pub trait GitRepository: Send + Sync {
         .boxed()
     }
 
+    /// "Delete Remote Tag" — `git push <remote> --delete refs/tags/<tag>`.
+    fn delete_remote_tag(&self, remote: String, tag: String) -> BoxFuture<'_, Result<()>> {
+        let _ = (remote, tag);
+        future::ready(Err(anyhow!(
+            "delete_remote_tag not supported on this backend"
+        )))
+        .boxed()
+    }
+
     /// S-BRP — list tag names via `git tag`. Sorted by tagger date, newest
     /// first.
     fn tags(&self) -> BoxFuture<'_, Result<Vec<SharedString>>> {
@@ -2385,6 +2394,18 @@ impl GitRepository for RealGitRepository {
         self.executor
             .spawn(async move {
                 git_binary?.run(&["push", &remote, &tag]).await?;
+                anyhow::Ok(())
+            })
+            .boxed()
+    }
+
+    fn delete_remote_tag(&self, remote: String, tag: String) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+        self.executor
+            .spawn(async move {
+                git_binary?
+                    .run(&["push", &remote, "--delete", &format!("refs/tags/{tag}")])
+                    .await?;
                 anyhow::Ok(())
             })
             .boxed()

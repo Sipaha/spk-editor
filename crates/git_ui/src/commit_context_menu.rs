@@ -33,7 +33,10 @@ use serde_json::json;
 use ui::ContextMenu;
 use ui::prelude::*;
 use util::ResultExt as _;
-use workspace::{ModalView, Workspace, notifications::DetachAndPromptErr};
+use workspace::{
+    ModalView, Toast, Workspace,
+    notifications::{DetachAndPromptErr, NotificationId},
+};
 
 #[derive(Clone)]
 pub struct CommitContext {
@@ -508,9 +511,8 @@ fn build_tag_ref_submenu(menu: ContextMenu, ctx: CommitContext, tag: SharedStrin
             run_checkout_tag(repo.clone(), tag.clone(), window, cx);
         })
     };
-    let repo = ctx.repository.clone();
     menu.entry("Delete", None, move |window, cx| {
-        run_delete_tag(repo.clone(), tag.clone(), window, cx);
+        run_delete_tag(ctx.clone(), tag.clone(), window, cx);
     })
 }
 
@@ -565,15 +567,62 @@ fn run_checkout_tag(
     await_repo_recv(recv, "checkout was canceled", "Checkout failed", window, cx);
 }
 
-fn run_delete_tag(repo: Entity<Repository>, tag: SharedString, window: &mut Window, cx: &mut App) {
+/// Marker type for the post-delete "tag deleted — also delete on origin?"
+/// toast's [`NotificationId`].
+struct TagDeletedToast;
+
+fn run_delete_tag(ctx: CommitContext, tag: SharedString, window: &mut Window, cx: &mut App) {
+    let repo = ctx.repository.clone();
+    let workspace = ctx.workspace.clone();
     let recv = repo.update(cx, |repo, _| repo.delete_tag(tag.to_string()));
-    await_repo_recv(
-        recv,
-        "delete tag was canceled",
-        "Delete tag failed",
-        window,
-        cx,
-    );
+    let task = cx.spawn({
+        let tag = tag.clone();
+        let repo = repo.clone();
+        async move |cx| match recv.await {
+            Ok(Ok(())) => {
+                offer_remote_tag_delete(workspace, repo, tag, cx);
+                anyhow::Ok(())
+            }
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(anyhow::anyhow!("delete tag was canceled")),
+        }
+    });
+    task.detach_and_prompt_err("Delete tag failed", window, cx, |e, _, _| Some(format!("{e}")));
+}
+
+/// IDEA-style: after a local tag is deleted, drop a toast offering to
+/// delete the tag on `origin` too. The remote may not actually have the
+/// tag — in that case `git push --delete` errors and the error surfaces
+/// through the toast handler's log (no notification, to avoid noise).
+fn offer_remote_tag_delete(
+    workspace: WeakEntity<Workspace>,
+    repo: Entity<Repository>,
+    tag: SharedString,
+    cx: &mut gpui::AsyncApp,
+) {
+    workspace
+        .update(cx, |workspace, cx| {
+            workspace.show_toast(
+                Toast::new(
+                    NotificationId::unique::<TagDeletedToast>(),
+                    format!("Deleted tag “{tag}”."),
+                )
+                .autohide()
+                .on_click("Also delete on origin", move |_window, cx| {
+                    let recv = repo.update(cx, |repo, _| {
+                        repo.delete_remote_tag("origin".into(), tag.to_string())
+                    });
+                    cx.spawn(async move |_| match recv.await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => log::error!("delete remote tag failed: {error}"),
+                        Err(_) => {}
+                    })
+                    .detach();
+                }),
+                cx,
+            );
+        })
+        .ok();
 }
 
 fn run_merge_branch(

@@ -4330,9 +4330,19 @@ impl Repository {
 
         // todo(git_graph_remote): Make this subscription on both remote/local repo
         cx.subscribe_self(move |this, event: &RepositoryEvent, _| match event {
-            RepositoryEvent::HeadChanged
-            | RepositoryEvent::BranchListChanged
-            | RepositoryEvent::TagListChanged => {
+            RepositoryEvent::TagListChanged => {
+                // Unconditional, unlike the head/branch arm below: a tag op is
+                // only ever the result of an explicit `git tag` / `git tag -d`
+                // (context menu, branch picker, MCP) — never the initial-load
+                // scan storm — so the `scan_id > 2` guard isn't needed for
+                // perf, and keeping it would race the graph view's own
+                // `scan_id > 1` invalidate check (the fs-watcher rescan that
+                // bumps `scan_id` past 2 happens *after* this event, so a
+                // freshly-opened repo's first tag op would otherwise leave the
+                // cached `git log` decorations stale until restart).
+                this.initial_graph_data.clear();
+            }
+            RepositoryEvent::HeadChanged | RepositoryEvent::BranchListChanged => {
                 if this.scan_id > 2 {
                     this.initial_graph_data.clear();
                 }
@@ -7492,6 +7502,31 @@ impl Repository {
                     RepositoryState::Remote(_) => {
                         Err(anyhow!("push_tag is not supported for remote projects"))
                     }
+                }
+            },
+        )
+    }
+
+    /// "Delete Remote Tag" — `git push <remote> --delete refs/tags/<tag>`.
+    /// Surfaced via the post-delete toast on the commit context menu's
+    /// "Tags at This Commit" → "Delete" action (IDEA-style "also delete on
+    /// remote?"). Local refs are unaffected, so no [`RepositoryEvent`] is
+    /// emitted here.
+    pub fn delete_remote_tag(
+        &mut self,
+        remote: String,
+        tag: String,
+    ) -> oneshot::Receiver<Result<()>> {
+        self.send_job(
+            Some(format!("git push {remote} --delete refs/tags/{tag}").into()),
+            move |repo, _cx| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                        backend.delete_remote_tag(remote, tag).await
+                    }
+                    RepositoryState::Remote(_) => Err(anyhow!(
+                        "delete_remote_tag is not supported for remote projects"
+                    )),
                 }
             },
         )

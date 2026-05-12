@@ -125,6 +125,11 @@ else
     else
         socket_dir="$HOME/.spk/spk-editor/config"
     fi
+    # Pin the editor's home-dir resolution to the real $HOME. A binary built
+    # with `--features test-support` (needed for the workspace.screenshot MCP
+    # tool) would otherwise hard-code /home/zed in util::paths::home_dir() and
+    # fail to create its config/data dirs. Harmless for normal builds.
+    export SPK_EDITOR_HOME="$HOME"
 fi
 socket_path="$socket_dir/mcp.sock"
 mkdir -p "$socket_dir"
