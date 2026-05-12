@@ -22788,6 +22788,8 @@ dependencies = [
  "repl",
  "reqwest_client",
  "rope",
+ "run_config",
+ "run_config_ui",
  "search",
  "semver",
  "serde",
