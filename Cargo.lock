@@ -5549,6 +5549,7 @@ dependencies = [
  "log",
  "paths",
  "pretty_assertions",
+ "run_config",
  "schemars 1.0.4",
  "serde",
  "serde_json",
