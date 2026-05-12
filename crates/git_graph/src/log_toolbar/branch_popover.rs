@@ -284,6 +284,7 @@ impl Render for BranchFilterPopover {
                 .into_any_element()
         } else {
             let row_count = self.rows.len();
+            let list_height = rems((row_count as f32 * ROW_HEIGHT_REMS).min(LIST_MAX_HEIGHT_REMS));
             uniform_list(
                 "git-graph-branch-filter-list",
                 row_count,
@@ -341,7 +342,9 @@ impl Render for BranchFilterPopover {
                         .collect()
                 }),
             )
-            .max_h(rems(LIST_MAX_HEIGHT_REMS))
+            // See user_popover: `uniform_list` needs a concrete height in this
+            // unbounded popover column or it collapses.
+            .h(list_height)
             .into_any_element()
         };
 

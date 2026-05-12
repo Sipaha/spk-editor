@@ -340,6 +340,8 @@ impl Render for UserFilterPopover {
                 .into_any_element(),
             LoadState::Ready => {
                 let row_count = self.rows.len();
+                let list_height =
+                    rems((row_count as f32 * ROW_HEIGHT_REMS).min(LIST_MAX_HEIGHT_REMS));
                 uniform_list(
                     "git-graph-user-filter-list",
                     row_count,
@@ -424,7 +426,11 @@ impl Render for UserFilterPopover {
                             .collect()
                     }),
                 )
-                .max_h(rems(LIST_MAX_HEIGHT_REMS))
+                // `uniform_list` virtualizes against its viewport height — with
+                // only `max_h` and no concrete height in this unbounded popover
+                // column it collapses to ~nothing, so size it to the rows
+                // (capped). The empty case is handled by an earlier arm.
+                .h(list_height)
                 .into_any_element()
             }
         };
