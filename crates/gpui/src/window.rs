@@ -2097,7 +2097,10 @@ impl Window {
     /// Renders the current frame's scene to a texture and returns the pixel data as an RGBA image.
     /// This does not present the frame to screen - useful for visual testing where we want
     /// to capture what would be rendered without displaying it or requiring the window to be visible.
-    #[cfg(any(test, feature = "test-support"))]
+    ///
+    /// SPK fork: ungated (was `#[cfg(any(test, feature = "test-support"))]`) so the
+    /// `workspace.screenshot` MCP tool works in normal dev/release builds. Backends that
+    /// don't implement `PlatformWindow::render_to_image` still return an error.
     pub fn render_to_image(&self) -> anyhow::Result<image::RgbaImage> {
         self.platform_window
             .render_to_image(&self.rendered_frame.scene)

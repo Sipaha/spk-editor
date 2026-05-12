@@ -1,5 +1,6 @@
 use crate::{CompositorGpuHint, WgpuAtlas, WgpuContext};
 use bytemuck::{Pod, Zeroable};
+use image::RgbaImage;
 use gpui::{
     AtlasTextureId, Background, Bounds, DevicePixels, GpuSpecs, MonochromeSprite, Path, Point,
     PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size, SubpixelSprite,
@@ -1189,6 +1190,30 @@ impl WgpuRenderer {
             );
         }
 
+        match self.render_scene_into(scene, &frame_view) {
+            Some(encoder) => {
+                self.resources()
+                    .queue
+                    .submit(std::iter::once(encoder.finish()));
+                frame.present();
+            }
+            None => {
+                frame.present();
+            }
+        }
+    }
+
+    /// Encode `scene` into a render pass targeting `target_view`, retrying with
+    /// a larger instance buffer on overflow. Returns the (un-submitted) command
+    /// encoder on success, or `None` if the instance buffer would have to grow
+    /// past the adapter's maximum. The caller must have already written the
+    /// per-frame globals/gamma uniforms (matching `target_view`'s size) and
+    /// ensured the intermediate textures exist.
+    fn render_scene_into(
+        &mut self,
+        scene: &Scene,
+        target_view: &wgpu::TextureView,
+    ) -> Option<wgpu::CommandEncoder> {
         loop {
             let mut instance_offset: u64 = 0;
             let mut overflow = false;
@@ -1204,7 +1229,7 @@ impl WgpuRenderer {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("main_pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &frame_view,
+                        view: target_view,
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -1243,7 +1268,7 @@ impl WgpuRenderer {
                             pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                                 label: Some("main_pass_continued"),
                                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                    view: &frame_view,
+                                    view: target_view,
                                     resolve_target: None,
                                     ops: wgpu::Operations {
                                         load: wgpu::LoadOp::Load,
@@ -1311,19 +1336,171 @@ impl WgpuRenderer {
                         "instance buffer size grew too large: {}",
                         self.instance_buffer_capacity
                     );
-                    frame.present();
-                    return;
+                    return None;
                 }
                 self.grow_instance_buffer();
                 continue;
             }
 
-            self.resources()
-                .queue
-                .submit(std::iter::once(encoder.finish()));
-            frame.present();
-            return;
+            return Some(encoder);
         }
+    }
+
+    /// Render `scene` to an offscreen texture (the same size and format as the
+    /// swapchain surface, so the existing pipelines are reused as-is) and read
+    /// it back as an RGBA8 image. Used by `gpui::Window::render_to_image` —
+    /// drives the `workspace.screenshot` MCP tool. Does not touch the surface,
+    /// so it can be called out-of-band (the scene is the last rendered frame's).
+    pub fn render_to_image(&mut self, scene: &Scene) -> anyhow::Result<RgbaImage> {
+        if !self.surface_configured {
+            anyhow::bail!("render_to_image: surface is not configured");
+        }
+        let width = self.surface_config.width;
+        let height = self.surface_config.height;
+        if width == 0 || height == 0 {
+            anyhow::bail!("render_to_image: zero-sized surface ({width}x{height})");
+        }
+        let format = self.surface_config.format;
+
+        // Deliberately *not* calling `atlas.before_frame()`: the scene we render
+        // here is the last frame's, which already went through `draw` (atlas
+        // uploads flushed), and re-running per-frame atlas bookkeeping
+        // out-of-band could desync the next real frame.
+        self.ensure_intermediate_textures();
+
+        let device = self.resources().device.clone();
+        let queue = self.resources().queue.clone();
+
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("render_to_image_target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Mirror `draw`'s per-frame uniform write so the offscreen pass sees the
+        // same viewport / gamma state.
+        let gamma_params = GammaParams {
+            gamma_ratios: self.rendering_params.gamma_ratios,
+            grayscale_enhanced_contrast: self.rendering_params.grayscale_enhanced_contrast,
+            subpixel_enhanced_contrast: self.rendering_params.subpixel_enhanced_contrast,
+            _pad: [0.0; 2],
+        };
+        let globals = GlobalParams {
+            viewport_size: [width as f32, height as f32],
+            premultiplied_alpha: if self.surface_config.alpha_mode
+                == wgpu::CompositeAlphaMode::PreMultiplied
+            {
+                1
+            } else {
+                0
+            },
+            pad: 0,
+        };
+        let path_globals = GlobalParams {
+            premultiplied_alpha: 0,
+            ..globals
+        };
+        {
+            let resources = self.resources();
+            resources
+                .queue
+                .write_buffer(&resources.globals_buffer, 0, bytemuck::bytes_of(&globals));
+            resources.queue.write_buffer(
+                &resources.globals_buffer,
+                self.path_globals_offset,
+                bytemuck::bytes_of(&path_globals),
+            );
+            resources.queue.write_buffer(
+                &resources.globals_buffer,
+                self.gamma_offset,
+                bytemuck::bytes_of(&gamma_params),
+            );
+        }
+
+        let mut encoder = self.render_scene_into(scene, &target_view).ok_or_else(|| {
+            anyhow::anyhow!("render_to_image: instance buffer grew past the adapter maximum")
+        })?;
+
+        // `copy_texture_to_buffer` requires the destination's bytes-per-row to be
+        // a multiple of 256, so the readback buffer is over-allocated and the
+        // padding stripped per row below.
+        let unpadded_bytes_per_row = width * 4;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("render_to_image_readback"),
+            size: u64::from(padded_bytes_per_row) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .map_err(|e| anyhow::anyhow!("render_to_image: device poll failed: {e:?}"))?;
+        rx.recv()
+            .map_err(|_| anyhow::anyhow!("render_to_image: readback map callback dropped"))?
+            .map_err(|e| anyhow::anyhow!("render_to_image: buffer map failed: {e:?}"))?;
+
+        let mapped = slice.get_mapped_range();
+        let mut pixels = Vec::with_capacity((unpadded_bytes_per_row * height) as usize);
+        for row in 0..height as usize {
+            let start = row * padded_bytes_per_row as usize;
+            pixels.extend_from_slice(&mapped[start..start + unpadded_bytes_per_row as usize]);
+        }
+        drop(mapped);
+        readback.unmap();
+
+        if matches!(
+            format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        ) {
+            for px in pixels.chunks_exact_mut(4) {
+                px.swap(0, 2);
+            }
+        }
+
+        RgbaImage::from_raw(width, height, pixels)
+            .ok_or_else(|| anyhow::anyhow!("render_to_image: failed to build RgbaImage from readback"))
     }
 
     fn draw_quads(

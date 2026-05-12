@@ -2156,10 +2156,11 @@ impl McpServerTool for ScreenshotTool {
     }
 }
 
-// `Window::render_to_image` is gated behind gpui's `test-support` feature, so
-// the production build cannot capture pixels. We surface a clear error in that
-// configuration; the tool still parses params and validates state.
-#[cfg(any(test, feature = "test-support"))]
+// SPK fork: `gpui::Window::render_to_image` is now ungated, and the wgpu
+// renderer (`gpui_wgpu`) implements offscreen render-to-image for the Linux
+// X11/Wayland backends, so this works in normal builds. Backends that don't
+// implement it (e.g. the headless test platform with no `HeadlessRenderer`)
+// still surface an error from `render_to_image` itself.
 fn render_window_to_image(
     handle: gpui::AnyWindowHandle,
     cx: &mut App,
@@ -2167,16 +2168,6 @@ fn render_window_to_image(
     handle
         .update(cx, |_view, window, _cx| window.render_to_image())
         .map_err(|err| anyhow::anyhow!("render_to_image failed: {err}"))?
-}
-
-#[cfg(not(any(test, feature = "test-support")))]
-fn render_window_to_image(
-    _handle: gpui::AnyWindowHandle,
-    _cx: &mut App,
-) -> anyhow::Result<image::RgbaImage> {
-    anyhow::bail!(
-        "screenshot_unsupported: gpui::Window::render_to_image is only available in test/test-support builds of this fork"
-    )
 }
 
 // =====================================================================
