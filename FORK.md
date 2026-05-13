@@ -234,7 +234,7 @@ How to apply: per state store, declare a `mod persistence` (or `<name>_db.rs`) i
 
 Tests use a per-thread `Mutex<HashMap<ThreadId, Domain>>` registry (each parallel test gets its own UUID-named in-memory DB) to sidestep `SQLITE_LOCKED_SHAREDCACHE` under `cargo test`'s parallel runner. The pattern is duplicated across four modules today (`undo_registry`, `branch_picker::favorites`, `shelf`, `pre_commit`); consolidating into a `db::test_registry<T>` helper is a low-priority follow-up — the duplication is `#[cfg(test|test-support)]`-only.
 
-Stores that should NOT use this pattern: caches living in `paths::temp_dir()` (`commit_explanations/`, `ai_cherry_pick_cache/`, `auto-shelve/*.diff`) — direct file IO is fine for write-once / read-once / age-out shapes. Per-worktree filesystem markers (`.spke-readonly.json` from S-SAR) similarly stay as files because their detection runs at worktree-load time before any DB connection is available.
+Stores that should NOT use this pattern: caches living in `paths::temp_dir()` (`commit_explanations/`, `ai_cherry_pick_cache/`) — direct file IO is fine for write-once / read-once / age-out shapes. Per-worktree filesystem markers (`.spke-readonly.json` from S-SAR) similarly stay as files because their detection runs at worktree-load time before any DB connection is available.
 
 ### 20. Cross-crate dynamic action dispatch via `cx.build_action(name, params)`
 

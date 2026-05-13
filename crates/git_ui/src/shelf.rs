@@ -5,13 +5,8 @@
 //! file summary + stash patch. Mirrors the structure of [`crate::stashes`]
 //! (S-STH) — stickable surface with filter, list, detail, per-row context
 //! menu, and a "Shelve Current Changes…" form modal.
-//!
-//! Auto-shelve recovery (a separate mechanism, see
-//! [`git::operations::auto_shelve`]) is wired in [`crate::git_ui::init`]
-//! and surfaced through a startup modal — *not* this view.
 
 use std::any::TypeId;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use editor::{Editor, EditorEvent, MultiBuffer};
@@ -35,7 +30,6 @@ use workspace::{Item, ItemNavHistory, ModalView, Workspace};
 
 pub fn register(workspace: &mut Workspace) {
     workspace.register_action(ShelfView::deploy);
-    workspace.register_action(ShelfView::deploy_discard_auto_shelves);
 }
 
 #[derive(Clone, Debug)]
@@ -78,42 +72,6 @@ impl ShelfView {
         let workspace_handle = workspace.weak_handle();
         let view = cx.new(|cx| Self::new(repo, project, workspace_handle, window, cx));
         workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
-    }
-
-    pub fn deploy_discard_auto_shelves(
-        workspace: &mut Workspace,
-        _: &git::DiscardAutoShelves,
-        window: &mut Window,
-        cx: &mut Context<Workspace>,
-    ) {
-        let project = workspace.project().clone();
-        let Some(repo) = project.read(cx).active_repository(cx) else {
-            return;
-        };
-        let work_dir = repo.read(cx).work_directory_abs_path.clone();
-        let answer = window.prompt(
-            PromptLevel::Warning,
-            "Discard every auto-shelve recovery snapshot for this repository?",
-            None,
-            &["Discard", "Cancel"],
-            cx,
-        );
-        cx.spawn(async move |_, cx| {
-            if answer.await != Ok(0) {
-                return anyhow::Ok(());
-            }
-            cx.background_spawn(async move {
-                git::operations::auto_shelve::clear_for_repo(&work_dir).ok();
-            })
-            .await;
-            anyhow::Ok(())
-        })
-        .detach_and_prompt_err(
-            "Failed to discard auto-shelves",
-            window,
-            cx,
-            |e, _, _| Some(e.to_string()),
-        );
     }
 
     fn new(
@@ -1377,203 +1335,3 @@ impl Render for ShelfEditDescriptionModal {
     }
 }
 
-// =====================================================================
-//  Auto-shelve runner.
-//
-//  Spawned at `crate::git_ui::init` time. Walks every workspace's active
-//  repository on a fixed cadence and writes a `git diff HEAD` snapshot
-//  via `git::operations::auto_shelve::take_snapshot`. The runner reads
-//  the live `GitPanelSettings::auto_shelve` snapshot on each tick so a
-//  user-toggled `interval_minutes = 0` halts further snapshots without a
-//  restart.
-//
-//  Successful commits clear that repo's snapshots — `RepositoryEvent`
-//  emits `BranchTipChanged` whenever HEAD moves, which we use as a
-//  proxy: after the move, if `git status` is clean, drop the snapshots.
-// =====================================================================
-
-pub fn spawn_runner(cx: &mut App) {
-    use crate::git_panel_settings::{AutoShelveSettings, GitPanelSettings};
-    use settings::Settings as _;
-
-    cx.spawn(async move |cx| {
-        loop {
-            let interval_minutes = cx
-                .update(|cx| GitPanelSettings::get_global(cx).auto_shelve.interval_minutes);
-
-            // 0 = disabled. We still poll the setting periodically so a
-            // user-flipped enable lights the runner back up without a
-            // restart — but we sleep on the default cadence so we're not
-            // spinning.
-            let effective = if interval_minutes == 0 {
-                AutoShelveSettings::DEFAULT_INTERVAL_MINUTES
-            } else {
-                interval_minutes
-            };
-            let timer = cx
-                .background_executor()
-                .timer(std::time::Duration::from_secs(60u64 * effective as u64));
-            timer.await;
-
-            if interval_minutes == 0 {
-                continue;
-            }
-
-            let max_snapshots = cx
-                .update(|cx| GitPanelSettings::get_global(cx).auto_shelve.max_snapshots);
-
-            let work_dirs = cx.update(collect_work_directories);
-            for work_dir in work_dirs {
-                let work_dir_inner: PathBuf = work_dir.clone();
-                cx.background_spawn(async move {
-                    if let Err(err) =
-                        git::operations::auto_shelve::take_snapshot(&work_dir_inner, max_snapshots)
-                    {
-                        log::warn!(
-                            "auto-shelve: snapshot failed for {}: {err}",
-                            work_dir_inner.display()
-                        );
-                    }
-                })
-                .detach();
-            }
-        }
-    })
-    .detach();
-}
-
-fn collect_work_directories(cx: &mut App) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    for handle in cx.windows() {
-        let Some(multi) = handle.downcast::<workspace::MultiWorkspace>() else {
-            continue;
-        };
-        let _ = multi.update(cx, |multi, _window, cx| {
-            for ws in multi.workspaces() {
-                let project = ws.read(cx).project();
-                let git_store = project.read(cx).git_store().clone();
-                for (_, repo) in git_store.read(cx).repositories().iter() {
-                    let path = repo.read(cx).work_directory_abs_path.clone();
-                    let buf: PathBuf = path.as_ref().into();
-                    if !out.contains(&buf) {
-                        out.push(buf);
-                    }
-                }
-            }
-        });
-    }
-    out
-}
-
-/// Subscribe to `RepositoryEvent::HeadChanged` on the workspace's git
-/// store. After every commit lands and the working tree is clean,
-/// remove the auto-shelve bucket for that repo. Wired from
-/// `crate::git_ui::init` per-workspace.
-pub fn install_post_commit_cleanup(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
-    let project = workspace.project().clone();
-    let git_store = project.read(cx).git_store().clone();
-    cx.subscribe(&git_store, |_workspace, git_store, event, cx| {
-        let project::git_store::GitStoreEvent::RepositoryUpdated(repo_id, repo_event, _is_active) =
-            event
-        else {
-            return;
-        };
-        if !matches!(repo_event, project::git_store::RepositoryEvent::HeadChanged) {
-            return;
-        }
-        let Some(repo) = git_store.read(cx).repositories().get(repo_id).cloned() else {
-            return;
-        };
-        let work_dir = repo.read(cx).work_directory_abs_path.clone();
-        cx.background_spawn(async move {
-            // Only clear if the working tree is clean — a HeadChanged
-            // event also fires for amend / reset / branch operations,
-            // and we want to keep recovery snapshots around through
-            // those.
-            let work_dir_inner = work_dir.clone();
-            if !git::operations::auto_shelve::is_recovery_needed(&work_dir_inner) {
-                if let Err(err) = git::operations::auto_shelve::clear_for_repo(&work_dir_inner) {
-                    log::warn!(
-                        "auto-shelve: post-commit cleanup failed for {}: {err}",
-                        work_dir_inner.display()
-                    );
-                }
-            }
-        })
-        .detach();
-    })
-    .detach();
-}
-
-// =====================================================================
-//  Auto-shelve startup recovery prompt.
-//
-//  Wired from `crate::git_ui::init` after a workspace's project finishes
-//  loading. The prompt appears once per repo per editor run and runs
-//  `git apply <snapshot>` after user confirmation.
-// =====================================================================
-
-pub fn maybe_offer_recovery(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
-    let project = workspace.project().clone();
-    let Some(repo) = project.read(cx).active_repository(cx) else {
-        return;
-    };
-    let work_dir = repo.read(cx).work_directory_abs_path.clone();
-    cx.spawn_in(window, async move |workspace_handle, cx| {
-        let work_dir_inner = work_dir.clone();
-        let snapshot: Option<PathBuf> = cx
-            .background_spawn(async move {
-                if git::operations::auto_shelve::is_recovery_needed(&work_dir_inner) {
-                    git::operations::auto_shelve::latest_snapshot(&work_dir_inner)
-                } else {
-                    None
-                }
-            })
-            .await;
-        let Some(snapshot) = snapshot else {
-            return anyhow::Ok(());
-        };
-        let answer = workspace_handle
-            .update_in(cx, |_workspace, window, cx| {
-                window.prompt(
-                    PromptLevel::Info,
-                    "Auto-shelve found",
-                    Some(&format!(
-                        "An auto-shelve snapshot taken after the last commit \
-                         is available:\n\n  {}\n\nApply it to the working tree?",
-                        snapshot.display()
-                    )),
-                    &["Apply", "Discard", "Keep for later"],
-                    cx,
-                )
-            })?
-            .await;
-        match answer {
-            Ok(0) => {
-                let work_dir_inner = work_dir.clone();
-                let snapshot_inner = snapshot.clone();
-                let apply_result: anyhow::Result<()> = cx
-                    .background_spawn(async move {
-                        git::operations::auto_shelve::apply_snapshot(
-                            &work_dir_inner,
-                            &snapshot_inner,
-                        )
-                    })
-                    .await;
-                if let Err(err) = apply_result {
-                    log::warn!("auto-shelve: apply failed: {err}");
-                }
-            }
-            Ok(1) => {
-                let work_dir_inner = work_dir.clone();
-                cx.background_spawn(async move {
-                    git::operations::auto_shelve::clear_for_repo(&work_dir_inner).ok();
-                })
-                .await;
-            }
-            _ => {}
-        }
-        anyhow::Ok(())
-    })
-    .detach();
-}

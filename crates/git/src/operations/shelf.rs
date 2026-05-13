@@ -12,10 +12,6 @@
 //! separate table). Concurrent writers across threads are serialized by
 //! sqlez's write queue; multi-process coordination uses SQLite's WAL +
 //! busy_timeout configured globally for `AppDatabase`.
-//!
-//! Auto-shelve (the crash-recovery `.diff` snapshots under
-//! `<temp_dir>/spk-editor-auto-shelve/`) is a separate mechanism and lives
-//! in `super::auto_shelve` — named shelf and auto-shelve never share state.
 
 use anyhow::{Context as _, Result, anyhow};
 use serde::{Deserialize, Serialize};
