@@ -33,7 +33,7 @@ impl Render for RunStatusItem {
 
         let any_debug = controller
             .active_runs()
-            .any(|run| matches!(run.kind, ActiveRunKind::Debug));
+            .any(|run| matches!(run.kind, ActiveRunKind::Debug { .. }));
         let icon = if any_debug {
             IconName::Debug
         } else {

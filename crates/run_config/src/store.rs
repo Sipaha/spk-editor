@@ -37,8 +37,9 @@ pub struct RunConfigStore {
     global_configs: Vec<RunConfiguration>,
     /// Configs loaded from each worktree's `.spke/run-configurations.json`.
     worktree_configs: HashMap<WorktreeId, Vec<RunConfiguration>>,
-    /// Ids of configs currently running (pushed by `RunController`s).
-    running: collections::HashSet<RunConfigId>,
+    /// Running config ids keyed by the source controller's entity id (as u64).
+    /// Each `RunController` owns its own entry; `is_running` unions across all sources.
+    running_by_source: collections::HashMap<u64, collections::HashSet<RunConfigId>>,
     /// Sink for `RunCommand`s, registered by `run_config_ui` (routes to the
     /// active workspace's `RunController`). `None` until the UI installs it.
     command_sink: Option<CommandSink>,
@@ -68,7 +69,7 @@ impl RunConfigStore {
             fs: None,
             global_configs: Vec::new(),
             worktree_configs: HashMap::default(),
-            running: collections::HashSet::default(),
+            running_by_source: collections::HashMap::default(),
             command_sink: None,
             _watchers: Vec::new(),
             _subscriptions: Vec::new(),
@@ -130,21 +131,45 @@ impl RunConfigStore {
 
     // --- running set ---
 
-    /// Replace the set of currently-running config ids (pushed by `RunController`s).
-    pub fn set_running(&mut self, ids: collections::HashSet<RunConfigId>, cx: &mut Context<Self>) {
-        if self.running != ids {
-            self.running = ids;
+    /// Replace the set of currently-running config ids for the given source
+    /// controller (identified by its entity id). `RunController`s push their
+    /// own slice; `is_running` unions across all sources so multiple workspace
+    /// windows don't overwrite each other.
+    pub fn set_running(
+        &mut self,
+        source: u64,
+        ids: collections::HashSet<RunConfigId>,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self
+            .running_by_source
+            .get(&source)
+            .map(|existing| existing != &ids)
+            .unwrap_or(true);
+        if changed {
+            self.running_by_source.insert(source, ids);
+            cx.notify();
+            cx.emit(RunConfigStoreEvent::ConfigsChanged);
+        }
+    }
+
+    /// Drop the running set for a source controller (called from the
+    /// `RunController`'s release handler when its workspace window closes).
+    /// Without this, configs that were running when a window closed mid-run
+    /// would keep showing as running forever.
+    pub fn clear_running_source(&mut self, source: u64, cx: &mut Context<Self>) {
+        if self.running_by_source.remove(&source).is_some() {
             cx.notify();
             cx.emit(RunConfigStoreEvent::ConfigsChanged);
         }
     }
 
     pub fn is_running(&self, id: &RunConfigId) -> bool {
-        self.running.contains(id)
+        self.running_by_source.values().any(|set| set.contains(id))
     }
 
     pub fn running_ids(&self) -> impl Iterator<Item = &RunConfigId> + '_ {
-        self.running.iter()
+        self.running_by_source.values().flatten()
     }
 
     // --- command sink ---
@@ -359,9 +384,11 @@ impl RunConfigStore {
     /// no project handle only what can be written is written; failures are
     /// logged, not propagated.
     ///
-    /// A worktree that *lost* all its configs since the last save (still a key
-    /// in `worktree_configs` with an empty bucket) is rewritten with an empty
-    /// document so the deletion is persisted.
+    /// The global file is always written (even if empty) so the global config
+    /// dir is seeded on first launch. For worktree files, an emptied bucket
+    /// causes the file to be **deleted** rather than rewritten as an empty
+    /// document — a missing file is treated as empty by the watcher, so the
+    /// deletion is effectively persisted without leaving a stub.
     pub fn save_to_disk(&self, cx: &App) -> Task<()> {
         let Some(fs) = self.fs.clone() else {
             log::warn!("run_config: cannot save run configurations — no fs");
@@ -370,7 +397,7 @@ impl RunConfigStore {
 
         let mut global: Vec<RunConfiguration> = Vec::new();
         let mut per_worktree: HashMap<WorktreeId, Vec<RunConfiguration>> = HashMap::default();
-        // Seed with every known worktree bucket so emptied ones get an empty doc.
+        // Seed with every known worktree bucket so emptied ones are handled below.
         for worktree_id in self.worktree_configs.keys() {
             per_worktree.entry(*worktree_id).or_default();
         }
@@ -385,6 +412,7 @@ impl RunConfigStore {
         }
 
         let mut writes: Vec<(std::path::PathBuf, String)> = Vec::new();
+        let mut deletes: Vec<std::path::PathBuf> = Vec::new();
         writes.push((
             paths::run_configurations_file().clone(),
             document_text(&global),
@@ -394,7 +422,11 @@ impl RunConfigStore {
             for (worktree_id, configs) in per_worktree {
                 if let Some(worktree) = project.read(cx).worktree_for_id(worktree_id, cx) {
                     let path = worktree.read(cx).abs_path().join(relative_path);
-                    writes.push((path, document_text(&configs)));
+                    if configs.is_empty() {
+                        deletes.push(path);
+                    } else {
+                        writes.push((path, document_text(&configs)));
+                    }
                 }
             }
         }
@@ -409,6 +441,20 @@ impl RunConfigStore {
                 }
                 if let Err(err) = fs.atomic_write(path.clone(), text).await {
                     log::warn!("run_config: writing {path:?}: {err:#}");
+                }
+            }
+            for path in deletes {
+                if let Err(err) = fs
+                    .remove_file(
+                        &path,
+                        fs::RemoveOptions {
+                            recursive: false,
+                            ignore_if_not_exists: true,
+                        },
+                    )
+                    .await
+                {
+                    log::warn!("run_config: deleting {path:?}: {err:#}");
                 }
             }
         })
@@ -530,7 +576,7 @@ mod tests {
         let id = RunConfigId::new("shell", "a");
         store.read_with(cx, |s, _| assert!(!s.is_running(&id)));
         store.update(cx, |s, cx| {
-            s.set_running(collections::HashSet::from_iter([id.clone()]), cx)
+            s.set_running(1u64, collections::HashSet::from_iter([id.clone()]), cx)
         });
         store.read_with(cx, |s, _| {
             assert!(s.is_running(&id));
@@ -560,6 +606,51 @@ mod tests {
             ));
         });
         assert_eq!(seen.lock().expect("lock").len(), 1);
+    }
+
+    #[gpui::test]
+    fn running_set_unions_across_sources(cx: &mut TestAppContext) {
+        let store = cx.new(|_| RunConfigStore::empty());
+        let id_a = RunConfigId::new("shell", "a");
+        let id_b = RunConfigId::new("shell", "b");
+
+        store.update(cx, |s, cx| {
+            s.set_running(1u64, collections::HashSet::from_iter([id_a.clone()]), cx);
+        });
+        store.update(cx, |s, cx| {
+            s.set_running(2u64, collections::HashSet::from_iter([id_b.clone()]), cx);
+        });
+        store.read_with(cx, |s, _| {
+            assert!(s.is_running(&id_a), "source 1's config should be running");
+            assert!(s.is_running(&id_b), "source 2's config should be running");
+            assert_eq!(s.running_ids().count(), 2);
+        });
+
+        // Clearing source 1 does not affect source 2.
+        store.update(cx, |s, cx| {
+            s.set_running(1u64, collections::HashSet::default(), cx);
+        });
+        store.read_with(cx, |s, _| {
+            assert!(!s.is_running(&id_a), "source 1's config should no longer be running");
+            assert!(s.is_running(&id_b), "source 2's config should still be running");
+        });
+    }
+
+    #[gpui::test]
+    fn clear_running_source_removes_entry(cx: &mut TestAppContext) {
+        let store = cx.new(|_| RunConfigStore::empty());
+        let id = RunConfigId::new("shell", "a");
+        store.update(cx, |s, cx| {
+            s.set_running(1u64, collections::HashSet::from_iter([id.clone()]), cx);
+        });
+        store.read_with(cx, |s, _| assert!(s.is_running(&id)));
+        store.update(cx, |s, cx| s.clear_running_source(1u64, cx));
+        store.read_with(cx, |s, _| {
+            assert!(!s.is_running(&id), "clearing the source removes its running set");
+            assert_eq!(s.running_ids().count(), 0);
+        });
+        // Clearing an unknown source is a harmless no-op.
+        store.update(cx, |s, cx| s.clear_running_source(99u64, cx));
     }
 
     #[gpui::test]
@@ -711,17 +802,9 @@ mod tests {
                 s.configs()
             );
         });
-        let text = fs.load(project_path).await.expect("project file still exists");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&text).expect("project file is valid JSON");
-        let entries = parsed
-            .get("configurations")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
         assert!(
-            entries.is_empty(),
-            "project file should have no configs after deletion: {text}"
+            !fs.is_file(project_path).await,
+            "emptied worktree config file should have been deleted"
         );
     }
 

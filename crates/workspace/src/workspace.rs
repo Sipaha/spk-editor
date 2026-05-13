@@ -3037,6 +3037,12 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The run-config widget view (set by `run_config_ui`). Read and rendered
+    /// right-aligned in the header by `title_bar`.
+    pub fn run_config_strip(&self) -> Option<&AnyView> {
+        self.run_config_strip.as_ref()
+    }
+
     pub fn set_run_config_controller(&mut self, controller: AnyEntity) {
         self.run_config_controller = Some(controller);
     }
@@ -8487,7 +8493,6 @@ impl Render for Workspace {
             .text_color(colors.text)
             .overflow_hidden()
             .children(self.titlebar_item.clone())
-            .children(self.run_config_strip.clone())
             .on_modifiers_changed(move |_, _, cx| {
                 for &id in &notification_entities {
                     cx.notify(id);

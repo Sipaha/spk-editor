@@ -1,18 +1,18 @@
-use gpui::{Action as _, App, Entity, IntoElement, ParentElement, Render, Styled, Window, div, px};
+use gpui::{Action as _, App, Entity, IntoElement, ParentElement, Render, Styled, Window, div};
 use run_config::{
     Executor, RunCommand, RunConfigId, RunConfigSettings, RunConfigStore, RunConfigStoreEvent,
 };
 use settings::Settings as _;
 use ui::{
-    Button, ButtonStyle, ContextMenu, Icon, IconButton, IconName, PopoverMenu, PopoverMenuHandle,
-    Tooltip, prelude::*,
+    Button, ButtonStyle, ContextMenu, Icon, IconButton, IconButtonShape, IconName, IconSize,
+    PopoverMenu, PopoverMenuHandle, Tooltip, prelude::*,
 };
 use workspace::Workspace;
 
 use crate::actions;
 use crate::run_controller::{RunController, RunControllerEvent};
 
-/// Full-width strip rendered under the title bar (above the workspace panes).
+/// Compact inline widget rendered right-aligned in the title bar (IDEA-style).
 /// Shows the run-config picker dropdown plus Run / Debug / Stop buttons.
 pub struct RunConfigStrip {
     controller: Entity<RunController>,
@@ -122,12 +122,12 @@ pub fn with_controller(
 impl Render for RunConfigStrip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(store_entity) = RunConfigStore::try_global(cx) else {
-            return div().id("run-config-strip-empty").into_any_element();
+            return div().id("run-config-widget-empty").into_any_element();
         };
         let store = store_entity.read(cx);
         let configs = store.configs();
         if configs.is_empty() {
-            return div().id("run-config-strip-empty").into_any_element();
+            return div().id("run-config-widget-empty").into_any_element();
         }
 
         let controller = self.controller.read(cx);
@@ -166,20 +166,16 @@ impl Render for RunConfigStrip {
         };
 
         h_flex()
-            .id("run-config-strip")
-            .w_full()
-            .h(px(30.))
-            .px_2()
-            .gap_1()
-            .border_b_1()
-            .border_color(cx.theme().colors().border_variant)
-            .bg(cx.theme().colors().toolbar_background)
+            .id("run-config-widget")
+            .h_full()
+            .gap_0p5()
             .child(
                 PopoverMenu::new("run-config-picker")
                     .trigger(
                         Button::new("run-config-trigger", selected_name)
-                            .start_icon(Icon::new(selected_icon))
-                            .end_icon(Icon::new(IconName::ChevronDown))
+                            .start_icon(Icon::new(selected_icon).size(IconSize::Small))
+                            .end_icon(Icon::new(IconName::ChevronDown).size(IconSize::Small))
+                            .label_size(LabelSize::Small)
                             .style(ButtonStyle::Subtle),
                     )
                     .with_handle(self.menu_handle.clone())
@@ -203,6 +199,8 @@ impl Render for RunConfigStrip {
             )
             .child(
                 IconButton::new("run-config-run", run_icon)
+                    .shape(IconButtonShape::Square)
+                    .icon_size(IconSize::Small)
                     .disabled(!supports_run)
                     .tooltip(Tooltip::text(if selected_running { "Rerun" } else { "Run" }))
                     .on_click(|_, window, cx| window.dispatch_action(actions::Run.boxed_clone(), cx)),
@@ -210,12 +208,16 @@ impl Render for RunConfigStrip {
             .when(supports_debug, |this| {
                 this.child(
                     IconButton::new("run-config-debug", IconName::Debug)
+                        .shape(IconButtonShape::Square)
+                        .icon_size(IconSize::Small)
                         .tooltip(Tooltip::text("Debug"))
                         .on_click(|_, window, cx| window.dispatch_action(actions::Debug.boxed_clone(), cx)),
                 )
             })
             .child(
                 IconButton::new("run-config-stop", IconName::Stop)
+                    .shape(IconButtonShape::Square)
+                    .icon_size(IconSize::Small)
                     .disabled(!selected_running)
                     .tooltip(Tooltip::text("Stop"))
                     .on_click(|_, window, cx| window.dispatch_action(actions::Stop.boxed_clone(), cx)),
