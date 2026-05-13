@@ -254,6 +254,13 @@ impl Render for TitleBar {
                 })
                 .gap_1()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                // SPK Editor fork: IDEA-style run-config widget, right-aligned
+                // in the header (set by `run_config_ui`, read from the workspace).
+                .children(
+                    self.workspace
+                        .upgrade()
+                        .and_then(|workspace| workspace.read(cx).run_config_strip().cloned()),
+                )
                 .children(self.render_call_controls(window, cx))
                 .children(self.render_connection_status(status, cx))
                 .child(self.update_version.clone())
