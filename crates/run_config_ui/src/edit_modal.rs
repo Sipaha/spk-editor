@@ -193,26 +193,6 @@ impl EditConfigurationsModal {
         }
     }
 
-    fn slug_of(name: &str) -> String {
-        let mut slug = String::new();
-        let mut last_was_dash = false;
-        for ch in name.chars() {
-            if ch.is_ascii_alphanumeric() {
-                slug.extend(ch.to_lowercase());
-                last_was_dash = false;
-            } else if !last_was_dash {
-                slug.push('-');
-                last_was_dash = true;
-            }
-        }
-        let trimmed = slug.trim_matches('-').to_string();
-        if trimmed.is_empty() {
-            "config".to_string()
-        } else {
-            trimmed
-        }
-    }
-
     fn unique_name(&self, base: &str) -> SharedString {
         let exists = |candidate: &str| {
             self.drafts
@@ -244,7 +224,7 @@ impl EditConfigurationsModal {
         self.flush_detail_into_draft(cx);
         let scope = self.first_worktree_scope(cx);
         let config = RunConfiguration {
-            id: RunConfigId::new(provider_type, &Self::slug_of(&name)),
+            id: RunConfigId::new_random(),
             name,
             provider_type: provider_type.into(),
             settings: template,
@@ -286,7 +266,7 @@ impl EditConfigurationsModal {
         let index = self.selected.min(self.drafts.len() - 1);
         let mut config = self.drafts[index].config.clone();
         let name = self.unique_name(&format!("{} copy", config.name));
-        config.id = RunConfigId::new(&config.provider_type, &Self::slug_of(&name));
+        config.id = RunConfigId::new_random();
         config.name = name;
         if matches!(config.scope, ConfigScope::Ephemeral) {
             config.scope = self.first_worktree_scope(cx);
@@ -313,7 +293,7 @@ impl EditConfigurationsModal {
         // flush_detail_into_draft no-ops on ephemeral, so no stale edits to flush.
         let mut config = self.drafts[index].config.clone();
         let name = self.unique_name(&config.name);
-        config.id = RunConfigId::new(&config.provider_type, &Self::slug_of(&name));
+        config.id = RunConfigId::new_random();
         config.name = name;
         config.scope = self.first_worktree_scope(cx);
         self.drafts.push(DraftConfig {
@@ -337,24 +317,11 @@ impl EditConfigurationsModal {
 
     fn apply(&mut self, cx: &mut App) {
         self.flush_detail_into_draft(cx);
-        // Recompute each persisted draft's id from its (possibly edited) name so a
-        // rename produces a fresh stable id rather than keeping the old slug.
-        // If two drafts would slug to the same base, suffix the later one (-2,
-        // -3, …) so every persisted config keeps a distinct id.
-        let mut seen_slugs: std::collections::HashMap<(SharedString, String), usize> =
-            std::collections::HashMap::default();
-        for draft in self.drafts.iter_mut().filter(|draft| !draft.is_ephemeral) {
-            let base_slug = Self::slug_of(&draft.config.name);
-            let key = (draft.config.provider_type.clone(), base_slug.clone());
-            let count = seen_slugs.entry(key).or_insert(0);
-            *count += 1;
-            let slug = if *count == 1 {
-                base_slug
-            } else {
-                format!("{base_slug}-{count}")
-            };
-            draft.config.id = RunConfigId::new(&draft.config.provider_type, &slug);
-        }
+        // Each draft keeps the stable id it already carries — new drafts got a
+        // fresh random id when created/duplicated/promoted, existing ones kept
+        // the id loaded from disk. Renaming no longer changes the id, and ids
+        // are inherently unique so no dedup is needed here (display-name dedup,
+        // if any, happens via `unique_name`).
         if let Some(store) = RunConfigStore::try_global(cx) {
             let new_list: Vec<RunConfiguration> = self
                 .drafts
@@ -848,7 +815,7 @@ mod tests {
         modal.update_in(cx, |modal, window, cx| {
             modal.drafts.push(DraftConfig {
                 config: RunConfiguration {
-                    id: RunConfigId::new("mock", "detected-run"),
+                    id: RunConfigId::discovered("mock", "detected-run"),
                     name: "Detected Run".into(),
                     provider_type: "mock".into(),
                     settings: serde_json::json!({}),

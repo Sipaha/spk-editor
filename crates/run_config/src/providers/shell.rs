@@ -95,7 +95,7 @@ mod tests {
         let project = project::Project::test(fs, [Path::new("/proj")], cx).await;
 
         let config = RunConfiguration {
-            id: RunConfigId::new("shell", "echo-hi"),
+            id: RunConfigId::from_raw("shell:echo-hi"),
             name: "Echo hi".into(),
             provider_type: "shell".into(),
             settings: serde_json::json!({ "command": "echo", "args": ["hi"] }),

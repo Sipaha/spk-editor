@@ -622,7 +622,7 @@ mod tests {
 
     fn mock_config(name: &str) -> RunConfiguration {
         RunConfiguration {
-            id: RunConfigId::new("mock", name),
+            id: RunConfigId::from_raw(format!("mock:{name}")),
             name: name.into(),
             provider_type: "mock".into(),
             settings: serde_json::json!({}),
@@ -688,7 +688,7 @@ mod tests {
             .update(cx, |workspace, cx| cx.new(|cx| RunController::new(workspace, cx)));
         cx.run_until_parked();
 
-        let id = RunConfigId::new("mock", "a");
+        let id = RunConfigId::from_raw("mock:a");
         let window = cx
             .update(|cx| cx.windows().first().copied())
             .expect("a window exists");
@@ -722,7 +722,7 @@ mod tests {
             .update(cx, |workspace, cx| cx.new(|cx| RunController::new(workspace, cx)));
         cx.run_until_parked();
 
-        let id = RunConfigId::new("mock", "a");
+        let id = RunConfigId::from_raw("mock:a");
         let window = cx
             .update(|cx| cx.windows().first().copied())
             .expect("a window exists");
@@ -755,8 +755,8 @@ mod tests {
 
     #[test]
     fn claim_started_session_matches_by_novelty_not_label() {
-        let alpha = RunConfigId::new("debug", "Same Name");
-        let beta = RunConfigId::new("debug", "Same Name (2)");
+        let alpha = RunConfigId::from_raw("debug:same-name");
+        let beta = RunConfigId::from_raw("debug:same-name-2");
 
         // Two of our debug launches are in flight. They have *identical*
         // scenario labels, so label matching would be ambiguous — but their
@@ -779,7 +779,7 @@ mod tests {
 
     #[test]
     fn claim_started_session_ignores_already_known_session() {
-        let config = RunConfigId::new("debug", "Run");
+        let config = RunConfigId::from_raw("debug:run");
         // The only pending launch already had session 7 in its snapshot, so a
         // `DebugClientStarted(7)` can't be ours — leave the queue untouched.
         let mut pending: VecDeque<(RunConfigId, HashSet<SessionId>)> =

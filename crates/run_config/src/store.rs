@@ -537,7 +537,7 @@ mod tests {
 
     fn cfg(name: &str) -> RunConfiguration {
         RunConfiguration {
-            id: RunConfigId::new("shell", name),
+            id: RunConfigId::from_raw(format!("shell:{name}")),
             name: name.into(),
             provider_type: "shell".into(),
             settings: serde_json::json!({}),
@@ -560,7 +560,7 @@ mod tests {
             assert_eq!(names, vec!["a", "b"]);
         });
         store.update(cx, |s, cx| {
-            s.remove(&RunConfigId::new("shell", "a"), cx);
+            s.remove(&RunConfigId::from_raw("shell:a"), cx);
         });
         store.read_with(cx, |s, _| {
             assert_eq!(s.configs().len(), 1);
@@ -573,7 +573,7 @@ mod tests {
         use std::sync::{Arc, Mutex};
 
         let store = cx.new(|_| RunConfigStore::empty());
-        let id = RunConfigId::new("shell", "a");
+        let id = RunConfigId::from_raw("shell:a");
         store.read_with(cx, |s, _| assert!(!s.is_running(&id)));
         store.update(cx, |s, cx| {
             s.set_running(1u64, collections::HashSet::from_iter([id.clone()]), cx)
@@ -611,8 +611,8 @@ mod tests {
     #[gpui::test]
     fn running_set_unions_across_sources(cx: &mut TestAppContext) {
         let store = cx.new(|_| RunConfigStore::empty());
-        let id_a = RunConfigId::new("shell", "a");
-        let id_b = RunConfigId::new("shell", "b");
+        let id_a = RunConfigId::from_raw("shell:a");
+        let id_b = RunConfigId::from_raw("shell:b");
 
         store.update(cx, |s, cx| {
             s.set_running(1u64, collections::HashSet::from_iter([id_a.clone()]), cx);
@@ -639,7 +639,7 @@ mod tests {
     #[gpui::test]
     fn clear_running_source_removes_entry(cx: &mut TestAppContext) {
         let store = cx.new(|_| RunConfigStore::empty());
-        let id = RunConfigId::new("shell", "a");
+        let id = RunConfigId::from_raw("shell:a");
         store.update(cx, |s, cx| {
             s.set_running(1u64, collections::HashSet::from_iter([id.clone()]), cx);
         });
@@ -679,7 +679,7 @@ mod tests {
         store.update(cx, |s, cx| {
             s.upsert(
                 RunConfiguration {
-                    id: RunConfigId::new("shell", "echo"),
+                    id: RunConfigId::from_raw("shell:echo"),
                     name: "Echo".into(),
                     provider_type: "shell".into(),
                     settings: serde_json::json!({ "command": "echo", "args": ["hi"] }),
@@ -692,7 +692,7 @@ mod tests {
             );
             s.upsert(
                 RunConfiguration {
-                    id: RunConfigId::new("shell", "global-one"),
+                    id: RunConfigId::from_raw("shell:global-one"),
                     name: "GlobalOne".into(),
                     provider_type: "shell".into(),
                     settings: serde_json::json!({ "command": "true" }),
@@ -764,7 +764,7 @@ mod tests {
         store.update(cx, |s, cx| {
             s.upsert(
                 RunConfiguration {
-                    id: RunConfigId::new("shell", "only"),
+                    id: RunConfigId::from_raw("shell:only"),
                     name: "Only".into(),
                     provider_type: "shell".into(),
                     settings: serde_json::json!({ "command": "true" }),
@@ -788,7 +788,7 @@ mod tests {
 
         // Now remove it (the only project-scoped config) and persist again.
         store.update(cx, |s, cx| {
-            let removed = s.remove(&RunConfigId::new("shell", "only"), cx);
+            let removed = s.remove(&RunConfigId::from_raw("shell:only"), cx);
             assert!(removed.is_some(), "config should have been removed");
             s.save_to_disk(cx).detach();
         });

@@ -86,7 +86,7 @@ mod tests {
         let project = project::Project::test(fs, [Path::new("/proj")], cx).await;
 
         let config = RunConfiguration {
-            id: RunConfigId::new("debug", "lldb-main"),
+            id: RunConfigId::from_raw("debug:lldb-main"),
             name: "Debug main".into(),
             provider_type: "debug".into(),
             settings: serde_json::json!({
@@ -133,7 +133,7 @@ mod tests {
         let project = project::Project::test(fs, [Path::new("/proj")], cx).await;
 
         let config = RunConfiguration {
-            id: RunConfigId::new("debug", "with-build"),
+            id: RunConfigId::from_raw("debug:with-build"),
             name: "Debug with build".into(),
             provider_type: "debug".into(),
             settings: serde_json::json!({
@@ -184,7 +184,7 @@ mod tests {
         let project = project::Project::test(fs, [Path::new("/proj")], cx).await;
 
         let config = RunConfiguration {
-            id: RunConfigId::new("debug", "bad"),
+            id: RunConfigId::from_raw("debug:bad"),
             name: "Bad".into(),
             provider_type: "debug".into(),
             settings: serde_json::json!({ "adapter": "" }),

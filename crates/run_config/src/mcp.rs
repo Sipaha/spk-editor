@@ -15,7 +15,6 @@ use gpui::{App, AsyncApp};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::file_format::slugify;
 use crate::model::{ConfigScope, Executor, RunConfigId, RunConfiguration};
 use crate::store::{RunCommand, RunConfigStore};
 
@@ -272,7 +271,7 @@ impl McpServerTool for CreateRunConfigTool {
                 input.settings.clone()
             };
 
-            let id = RunConfigId::new(&input.provider_type, &slugify(&input.name));
+            let id = RunConfigId::new_random();
             let config = RunConfiguration {
                 id: id.clone(),
                 name: input.name.clone().into(),

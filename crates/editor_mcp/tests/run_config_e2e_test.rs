@@ -84,12 +84,11 @@ async fn run_config_create_list_delete(cx: &mut TestAppContext) {
         .and_then(|v| v.as_str())
         .unwrap_or_else(|| panic!("run_config.create returned: {resp}"))
         .to_string();
+    // Ids are now fresh, name-independent (random uuid) — just check it's non-empty.
     assert!(
         !config_id.is_empty(),
         "expected a non-empty id, got: {resp}"
     );
-    // "Echo hi" → slug "echo-hi" → id "shell:echo-hi"
-    assert_eq!(config_id, "shell:echo-hi", "unexpected id format");
 
     // 3. List now shows the created config.
     let resp = call_tool(&mut stream, 3, "run_config.list", json!({})).await;
@@ -106,7 +105,7 @@ async fn run_config_create_list_delete(cx: &mut TestAppContext) {
     let entry = &configurations[0];
     assert_eq!(
         entry.get("id").and_then(|v| v.as_str()),
-        Some("shell:echo-hi"),
+        Some(config_id.as_str()),
         "id mismatch: {entry}"
     );
     assert_eq!(
