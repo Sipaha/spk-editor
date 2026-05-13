@@ -127,7 +127,22 @@ impl Render for RunConfigStrip {
         let store = store_entity.read(cx);
         let configs = store.configs();
         if configs.is_empty() {
-            return div().id("run-config-widget-empty").into_any_element();
+            // No run configurations defined yet — show an "Add Configuration…"
+            // affordance (IDEA-style) instead of hiding the widget entirely, so
+            // the user has a discoverable entry point into the Edit modal.
+            return h_flex()
+                .id("run-config-widget-add")
+                .h_full()
+                .child(
+                    Button::new("run-config-add", "Add Configuration…")
+                        .start_icon(Icon::new(IconName::Plus).size(IconSize::Small))
+                        .label_size(LabelSize::Small)
+                        .style(ButtonStyle::Subtle)
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(actions::EditConfigurations.boxed_clone(), cx)
+                        }),
+                )
+                .into_any_element();
         }
 
         let controller = self.controller.read(cx);
