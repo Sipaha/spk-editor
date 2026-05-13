@@ -15229,6 +15229,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "collections",
+ "dap",
  "db",
  "editor",
  "gpui",
@@ -15241,6 +15242,7 @@ dependencies = [
  "serde_json",
  "settings",
  "task",
+ "terminal",
  "terminal_view",
  "theme",
  "ui",
