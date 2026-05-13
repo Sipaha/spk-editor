@@ -15,7 +15,7 @@ use chrono::{Datelike, Local, NaiveDate, TimeZone};
 use editor::Editor;
 use git::repository::RepoPath;
 use gpui::{
-    Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
+    AnyElement, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity, Window,
     rems,
 };
@@ -195,6 +195,10 @@ pub struct LogToolbar {
     group_by_date: bool,
     mode: GraphMode,
     file_history_options: FileHistoryOptions,
+    /// Optional leading element rendered at the start of the toolbar row,
+    /// before the filter chips. The git-graph panel uses this to inline its
+    /// "Search commits…" box into the toolbar row (IDEA-style).
+    leading: Option<AnyElement>,
 }
 
 impl LogToolbar {
@@ -228,11 +232,21 @@ impl LogToolbar {
             group_by_date,
             mode,
             file_history_options,
+            leading: None,
         }
     }
 
-    pub fn render(self, cx: &mut App) -> impl IntoElement + use<> {
+    /// Prepend a leading element to the toolbar row (rendered before the
+    /// filter chips, taking the remaining horizontal width). Used to inline
+    /// the commit-search box into the log toolbar.
+    pub fn with_leading(mut self, leading: impl IntoElement) -> Self {
+        self.leading = Some(leading.into_any_element());
+        self
+    }
+
+    pub fn render(mut self, cx: &mut App) -> impl IntoElement + use<> {
         let color = cx.theme().colors();
+        let leading = self.leading.take();
         let branch_chip = self.render_branch_chip();
         let user_chip = self.render_user_chip();
         let path_chip = self.render_path_chip();
@@ -246,6 +260,9 @@ impl LogToolbar {
             .border_b_1()
             .border_color(color.border_variant)
             .bg(color.toolbar_background)
+            .when_some(leading, |this, leading| {
+                this.child(div().flex_1().min_w_0().mr_1().child(leading))
+            })
             .child(branch_chip)
             .child(user_chip)
             .child(path_chip)

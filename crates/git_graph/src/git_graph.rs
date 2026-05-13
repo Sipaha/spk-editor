@@ -1312,6 +1312,7 @@ impl GitGraph {
     }
 
     fn render_log_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let search_input = self.render_search_input(cx).into_any_element();
         log_toolbar::LogToolbar::new(
             cx.weak_entity(),
             self.filters.date_range,
@@ -1327,6 +1328,7 @@ impl GitGraph {
             self.mode(),
             self.file_history_options,
         )
+        .with_leading(search_input)
         .render(cx)
     }
 
@@ -2313,7 +2315,10 @@ impl GitGraph {
         cx.notify();
     }
 
-    fn render_search_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The "Search commits…" input box (text editor + case-sensitive / regex /
+    /// search-in-diffs toggles), styled as a rounded bordered field. Rendered
+    /// inline at the start of the log toolbar row (see `render_log_toolbar`).
+    fn render_search_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let color = cx.theme().colors();
         let query_focus_handle = self.search_state.editor.focus_handle(cx);
         let search_options = {
@@ -2329,50 +2334,42 @@ impl GitGraph {
         let in_diffs_focus_handle = query_focus_handle.clone();
 
         h_flex()
+            .h_7()
             .w_full()
-            .p_1p5()
-            .gap_1p5()
-            .border_b_1()
+            .min_w_0()
+            .px_1p5()
+            .gap_1()
+            .border_1()
             .border_color(color.border_variant)
+            .rounded_md()
+            .bg(color.editor_background)
+            .child(self.search_state.editor.clone())
+            .child(SearchOption::CaseSensitive.as_button(
+                search_options,
+                SearchSource::Buffer,
+                query_focus_handle.clone(),
+            ))
+            .child(SearchOption::Regex.as_button(
+                search_options,
+                SearchSource::Buffer,
+                query_focus_handle,
+            ))
             .child(
-                h_flex()
-                    .h_8()
-                    .flex_1()
-                    .min_w_0()
-                    .px_1p5()
-                    .gap_1()
-                    .border_1()
-                    .border_color(color.border_variant)
-                    .rounded_md()
-                    .bg(color.toolbar_background)
-                    .child(self.search_state.editor.clone())
-                    .child(SearchOption::CaseSensitive.as_button(
-                        search_options,
-                        SearchSource::Buffer,
-                        query_focus_handle.clone(),
-                    ))
-                    .child(SearchOption::Regex.as_button(
-                        search_options,
-                        SearchSource::Buffer,
-                        query_focus_handle,
-                    ))
-                    .child(
-                        IconButton::new("git-graph-search-in-diffs", IconName::FileDiff)
-                            .shape(ui::IconButtonShape::Square)
-                            .style(ButtonStyle::Subtle)
-                            .toggle_state(search_in_diffs)
-                            .tooltip(move |_, cx| {
-                                Tooltip::for_action_in(
-                                    "Search in commit content (slower)",
-                                    &ToggleSearchInDiffs,
-                                    &in_diffs_focus_handle,
-                                    cx,
-                                )
-                            })
-                            .on_click(cx.listener(|_, _, window, cx| {
-                                window.dispatch_action(Box::new(ToggleSearchInDiffs), cx);
-                            })),
-                    ),
+                IconButton::new("git-graph-search-in-diffs", IconName::FileDiff)
+                    .shape(ui::IconButtonShape::Square)
+                    .style(ButtonStyle::Subtle)
+                    .toggle_state(search_in_diffs)
+                    .tooltip(move |_, cx| {
+                        Tooltip::for_action_in(
+                            "Search in commit content (slower)",
+                            &ToggleSearchInDiffs,
+                            &in_diffs_focus_handle,
+                            cx,
+                        )
+                    })
+                    .on_click(cx.listener(|_, _, window, cx| {
+                        window.dispatch_action(Box::new(ToggleSearchInDiffs), cx);
+                    })),
             )
     }
 
@@ -2533,7 +2530,7 @@ impl GitGraph {
                                     )
                                 } else {
                                     (
-                                        short_sha.clone(),
+                                        short_sha,
                                         IconName::Hash,
                                         Color::Muted,
                                         "Copy Commit SHA",
@@ -3493,7 +3490,6 @@ impl Render for GitGraph {
             .child(
                 v_flex()
                     .size_full()
-                    .child(self.render_search_bar(cx))
                     .child(self.render_log_toolbar(cx))
                     .child(div().flex_1().child(content)),
             )
