@@ -2,11 +2,9 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use anyhow::anyhow;
-use collections::HashMap;
+use collections::{HashMap, HashSet};
 use dap::client::SessionId;
-use gpui::{
-    Action as _, Context, Entity, EventEmitter, SharedString, Subscription, Task, WeakEntity, Window,
-};
+use gpui::{Action as _, Context, Entity, EventEmitter, Subscription, Task, WeakEntity, Window};
 use project::Project;
 use project::debugger::dap_store::{DapStore, DapStoreEvent};
 use run_config::{
@@ -29,14 +27,16 @@ pub struct RunController {
     active: HashMap<RunConfigId, ActiveRun>,
     /// Debug runs whose `DapStore` session id we haven't matched yet, oldest
     /// first. `start_debug_session` doesn't hand back a `SessionId`, so we
-    /// remember which configs we just launched (paired with the scenario label
-    /// we used) and, on each `DebugClientStarted` event, match the started
-    /// session against the first pending entry whose label matches the new
-    /// session's label. Events for sessions we didn't launch (user-initiated
-    /// debug-panel runs) don't match any pending label, so they're ignored
-    /// rather than draining the queue. Two of *our* configs sharing a name is
-    /// the only remaining ambiguity (rare; IDEA has the same caveat).
-    pending_debug_launches: VecDeque<(RunConfigId, SharedString)>,
+    /// can't learn the id directly. Instead, right before each launch we
+    /// snapshot the set of session ids that already existed; the session our
+    /// launch creates is then the one that's *not* in that snapshot. On each
+    /// `DebugClientStarted(id)` we hand `id` to the first pending entry whose
+    /// snapshot doesn't contain it (so it's "new" relative to that launch) and
+    /// drop that entry. This is robust to two configs sharing a display name:
+    /// we never match by label. Residual ambiguity is only the rare race where
+    /// the user starts an unrelated debug session in the same tick a config's
+    /// debug launch is in flight (same race the old label-matching code had).
+    pending_debug_launches: VecDeque<(RunConfigId, HashSet<SessionId>)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -139,31 +139,23 @@ impl RunController {
 
     fn on_dap_store_event(
         &mut self,
-        dap_store: Entity<DapStore>,
+        _dap_store: Entity<DapStore>,
         event: &DapStoreEvent,
         cx: &mut Context<Self>,
     ) {
         match event {
             DapStoreEvent::DebugClientStarted(session_id) => {
-                // Match the started session against our pending launches by
-                // scenario label. A session we didn't launch (user-initiated
-                // debug-panel run) won't match any pending label — ignore it
-                // rather than mis-claiming a pending launch.
-                let started_label = dap_store
-                    .read(cx)
-                    .session_by_id(session_id)
-                    .and_then(|session| session.read(cx).label());
-                let Some(started_label) = started_label else {
-                    return;
-                };
-                let Some(position) = self
-                    .pending_debug_launches
-                    .iter()
-                    .position(|(_, label)| label == &started_label)
+                // Hand the started session to whichever of our pending launches
+                // didn't already see it (so it must be the one that launch
+                // created). A session we didn't launch (user-initiated
+                // debug-panel run) is "new" relative to every pending launch,
+                // so it could be mis-claimed if a launch is in flight at the
+                // same time — but that's a far narrower race than two configs
+                // sharing a name (the bug this replaced), and unavoidable
+                // without an id handed back from `start_debug_session`.
+                let Some(config_id) =
+                    claim_started_session(&mut self.pending_debug_launches, *session_id)
                 else {
-                    return;
-                };
-                let Some((config_id, _)) = self.pending_debug_launches.remove(position) else {
                     return;
                 };
                 if let Some(ActiveRun {
@@ -454,7 +446,16 @@ impl RunController {
                 let Some(workspace) = self.workspace.upgrade() else {
                     return;
                 };
-                let scenario_label = scenario.label.clone();
+                // Snapshot the sessions that already exist so we can later
+                // recognise the one this launch creates as "the new one".
+                let prior_sessions: HashSet<SessionId> = self
+                    .project
+                    .read(cx)
+                    .dap_store()
+                    .read(cx)
+                    .sessions()
+                    .map(|session| session.read(cx).session_id())
+                    .collect();
                 workspace.update(cx, |workspace, cx| {
                     workspace.start_debug_session(
                         scenario,
@@ -466,7 +467,7 @@ impl RunController {
                     );
                 });
                 self.pending_debug_launches
-                    .push_back((config_id.clone(), scenario_label));
+                    .push_back((config_id.clone(), prior_sessions));
                 self.active.insert(
                     config_id.clone(),
                     ActiveRun {
@@ -538,6 +539,22 @@ impl RunController {
             });
         }
     }
+}
+
+/// Match a just-started debug session against the oldest pending launch that
+/// hadn't already seen it (its snapshot doesn't contain `started`), removing
+/// that entry and returning its config id. Returns `None` if every pending
+/// launch already knew about `started` (so it isn't ours) or the queue is
+/// empty. Pulled out as a free function so the matching logic can be unit
+/// tested without a live DAP adapter.
+fn claim_started_session(
+    pending: &mut VecDeque<(RunConfigId, HashSet<SessionId>)>,
+    started: SessionId,
+) -> Option<RunConfigId> {
+    let position = pending
+        .iter()
+        .position(|(_, prior_sessions)| !prior_sessions.contains(&started))?;
+    pending.remove(position).map(|(config_id, _)| config_id)
 }
 
 #[cfg(test)]
@@ -734,5 +751,40 @@ mod tests {
                 "dropping the controller clears its running set"
             );
         });
+    }
+
+    #[test]
+    fn claim_started_session_matches_by_novelty_not_label() {
+        let alpha = RunConfigId::new("debug", "Same Name");
+        let beta = RunConfigId::new("debug", "Same Name (2)");
+
+        // Two of our debug launches are in flight. They have *identical*
+        // scenario labels, so label matching would be ambiguous — but their
+        // session-id snapshots differ: `alpha` launched first (snapshot empty),
+        // then `beta` launched after `alpha`'s session (id 1) already existed.
+        let mut pending: VecDeque<(RunConfigId, HashSet<SessionId>)> = VecDeque::from(vec![
+            (alpha.clone(), HashSet::default()),
+            (beta.clone(), HashSet::from_iter([SessionId(1)])),
+        ]);
+
+        // Session 1 started: it's new only relative to `alpha`'s snapshot, so
+        // `alpha` claims it (even though `beta` is also pending, and even
+        // though both share a label).
+        assert_eq!(claim_started_session(&mut pending, SessionId(1)), Some(alpha));
+        // Session 2 started: now `beta` is the only pending launch, and 2 is
+        // new relative to its snapshot, so `beta` claims it.
+        assert_eq!(claim_started_session(&mut pending, SessionId(2)), Some(beta));
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn claim_started_session_ignores_already_known_session() {
+        let config = RunConfigId::new("debug", "Run");
+        // The only pending launch already had session 7 in its snapshot, so a
+        // `DebugClientStarted(7)` can't be ours — leave the queue untouched.
+        let mut pending: VecDeque<(RunConfigId, HashSet<SessionId>)> =
+            VecDeque::from(vec![(config, HashSet::from_iter([SessionId(7)]))]);
+        assert_eq!(claim_started_session(&mut pending, SessionId(7)), None);
+        assert_eq!(pending.len(), 1);
     }
 }
