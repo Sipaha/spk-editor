@@ -113,14 +113,18 @@ impl EditConfigurationsModal {
             self.executors = Vec::new();
             self.name_editor.update(cx, |editor, cx| {
                 editor.set_text("", window, cx);
+                editor.set_read_only(false);
             });
             cx.notify();
             return;
         }
-        let draft = self.drafts[self.selected.min(self.drafts.len() - 1)].config.clone();
         self.selected = self.selected.min(self.drafts.len() - 1);
+        let selected_draft = &self.drafts[self.selected];
+        let is_ephemeral = selected_draft.is_ephemeral;
+        let draft = selected_draft.config.clone();
         self.name_editor.update(cx, |editor, cx| {
             editor.set_text(draft.name.to_string(), window, cx);
+            editor.set_read_only(is_ephemeral);
         });
         self.store_in_global = matches!(draft.scope, ConfigScope::Global);
         self.before_save_all = draft
@@ -287,6 +291,31 @@ impl EditConfigurationsModal {
         if matches!(config.scope, ConfigScope::Ephemeral) {
             config.scope = self.first_worktree_scope(cx);
         }
+        self.drafts.push(DraftConfig {
+            config,
+            is_ephemeral: false,
+        });
+        self.selected = self.drafts.len() - 1;
+        self.rebuild_detail_pane(window, cx);
+    }
+
+    /// Promote the currently-selected ephemeral draft into a new persisted draft.
+    /// The original ephemeral entry remains in the list (it represents the
+    /// discovered source and will be re-populated by discovery on next open).
+    fn promote_ephemeral(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.drafts.is_empty() {
+            return;
+        }
+        let index = self.selected.min(self.drafts.len() - 1);
+        if !self.drafts[index].is_ephemeral {
+            return;
+        }
+        // flush_detail_into_draft no-ops on ephemeral, so no stale edits to flush.
+        let mut config = self.drafts[index].config.clone();
+        let name = self.unique_name(&config.name);
+        config.id = RunConfigId::new(&config.provider_type, &Self::slug_of(&name));
+        config.name = name;
+        config.scope = self.first_worktree_scope(cx);
         self.drafts.push(DraftConfig {
             config,
             is_ephemeral: false,
@@ -483,11 +512,53 @@ impl EditConfigurationsModal {
         }
         let index = self.selected.min(self.drafts.len() - 1);
         let draft = &self.drafts[index];
+        let is_ephemeral = draft.is_ephemeral;
         let provider_type = draft.config.provider_type.clone();
         let supported_executors: Vec<Executor> = RunConfigStore::try_global(cx)
             .and_then(|store| store.read(cx).provider(&provider_type))
             .map(|provider| provider.supported_executors().to_vec())
             .unwrap_or_default();
+
+        if is_ephemeral {
+            let provider_display_name: SharedString = RunConfigStore::try_global(cx)
+                .and_then(|store| store.read(cx).provider(&provider_type))
+                .map(|provider| SharedString::from(provider.display_name()))
+                .unwrap_or_else(|| provider_type.clone());
+            return detail
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(Label::new("Name"))
+                        .child(
+                            div()
+                                .w_full()
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(cx.theme().colors().border_variant)
+                                .bg(cx.theme().colors().editor_background)
+                                .child(self.name_editor.clone()),
+                        ),
+                )
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(Label::new("Type").color(Color::Muted))
+                        .child(Label::new(provider_display_name)),
+                )
+                .child(
+                    Label::new("Detected configuration — read-only. Save it to edit.")
+                        .color(Color::Muted),
+                )
+                .child(
+                    Button::new("edit-config-save-ephemeral", "Save as project configuration")
+                        .style(ButtonStyle::Filled)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.promote_ephemeral(window, cx);
+                        })),
+                );
+        }
 
         let mut detail = detail
             .child(
@@ -749,6 +820,84 @@ mod tests {
                 store.read(cx).configs().len(),
                 1,
                 "apply should update the in-memory store"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn promote_ephemeral(cx: &mut TestAppContext) {
+        let app_state = cx.update(|cx| {
+            let app_state = AppState::test(cx);
+            cx.set_global(db::AppDatabase::test_new());
+            editor::init(cx);
+            RunConfigSettings::register(cx);
+            RunConfigStore::init_global(cx);
+            run_config::register_provider(cx, MockProvider);
+            app_state
+        });
+        let project = Project::test(app_state.fs.clone(), [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let weak_workspace = workspace.downgrade();
+        let modal = workspace.update_in(cx, |_, window, cx| {
+            cx.new(|cx| EditConfigurationsModal::new(weak_workspace.clone(), window, cx))
+        });
+        cx.run_until_parked();
+
+        // Inject an ephemeral draft directly to simulate a discovered config.
+        modal.update_in(cx, |modal, window, cx| {
+            modal.drafts.push(DraftConfig {
+                config: RunConfiguration {
+                    id: RunConfigId::new("mock", "detected-run"),
+                    name: "Detected Run".into(),
+                    provider_type: "mock".into(),
+                    settings: serde_json::json!({}),
+                    executors: vec![Executor::Run],
+                    before_launch: vec![],
+                    folder: None,
+                    scope: ConfigScope::Ephemeral,
+                },
+                is_ephemeral: true,
+            });
+            modal.selected = 0;
+            modal.rebuild_detail_pane(window, cx);
+        });
+
+        modal.update(cx, |modal, _| {
+            assert_eq!(modal.drafts.len(), 1);
+            assert!(modal.drafts[0].is_ephemeral, "injected draft is ephemeral");
+        });
+
+        // Promote the ephemeral draft.
+        modal.update_in(cx, |modal, window, cx| {
+            modal.promote_ephemeral(window, cx);
+        });
+
+        modal.update(cx, |modal, _| {
+            assert_eq!(modal.drafts.len(), 2, "original ephemeral draft is preserved");
+            assert!(modal.drafts[0].is_ephemeral, "original is still ephemeral");
+            assert!(!modal.drafts[1].is_ephemeral, "promoted draft is persisted");
+            assert_eq!(modal.selected, 1, "promoted draft is selected");
+            let promoted = &modal.drafts[1].config;
+            assert!(
+                !matches!(promoted.scope, ConfigScope::Ephemeral),
+                "promoted draft has a non-ephemeral scope"
+            );
+            assert_eq!(
+                promoted.provider_type, "mock",
+                "provider type is preserved"
+            );
+        });
+
+        // apply should write only the promoted (non-ephemeral) draft to the store.
+        modal.update(cx, |modal, cx| modal.apply(cx));
+        cx.run_until_parked();
+        cx.update(|_window, cx| {
+            let store = RunConfigStore::global(cx);
+            assert_eq!(
+                store.read(cx).configs().len(),
+                1,
+                "only the promoted config is persisted"
             );
         });
     }
