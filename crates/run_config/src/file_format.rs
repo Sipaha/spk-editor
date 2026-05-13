@@ -3,7 +3,7 @@ use serde_json::{Map, Value};
 
 use crate::model::{BeforeLaunchStep, ConfigScope, Executor, RunConfigId, RunConfiguration};
 
-const RESERVED_KEYS: &[&str] = &["name", "type", "executors", "before_launch", "folder"];
+const RESERVED_KEYS: &[&str] = &["id", "name", "type", "executors", "before_launch", "folder"];
 
 /// Parse a `run-configurations.json` document into `RunConfiguration`s.
 ///
@@ -61,6 +61,17 @@ fn parse_entry(entry: &Value, scope: ConfigScope) -> Result<RunConfiguration> {
         .and_then(Value::as_str)
         .map(|s| s.to_string());
 
+    // A stable id, either read verbatim from the file or — for legacy entries
+    // that predate the `"id"` key — derived deterministically from the name so
+    // identity is stable for this load. `build_document` always writes `"id"`,
+    // so the legacy id is materialized into the file on the next save.
+    let id = obj
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(RunConfigId::from_raw)
+        .unwrap_or_else(|| legacy_id(&provider_type, &name));
+
     // Everything that isn't a reserved key is the provider payload.
     let settings: Map<String, Value> = obj
         .iter()
@@ -69,7 +80,7 @@ fn parse_entry(entry: &Value, scope: ConfigScope) -> Result<RunConfiguration> {
         .collect();
 
     Ok(RunConfiguration {
-        id: RunConfigId::new(&provider_type, &slugify(&name)),
+        id,
         name: name.into(),
         provider_type: provider_type.into(),
         settings: Value::Object(settings),
@@ -91,8 +102,15 @@ pub fn build_document(configs: &[RunConfiguration]) -> Value {
     serde_json::json!({ "configurations": entries })
 }
 
+/// The pre-`"id"` deterministic id: `"<provider_type>:<slugified name>"`. Kept
+/// only for the legacy-fallback path in `parse_entry`.
+fn legacy_id(provider_type: &str, name: &str) -> RunConfigId {
+    RunConfigId::from_raw(format!("{provider_type}:{}", slugify(name)))
+}
+
 fn entry_value(config: &RunConfiguration) -> Value {
     let mut obj = Map::new();
+    obj.insert("id".into(), Value::String(config.id.as_str().to_string()));
     obj.insert("name".into(), Value::String(config.name.to_string()));
     obj.insert(
         "type".into(),
@@ -155,6 +173,7 @@ mod tests {
         {
           "configurations": [
             {
+              "id": "the-id",
               "name": "Build release",
               "type": "shell",
               "executors": ["run"],
@@ -170,6 +189,7 @@ mod tests {
         let configs = parse_document(src, ConfigScope::Global).unwrap();
         assert_eq!(configs.len(), 1);
         let c = &configs[0];
+        assert_eq!(c.id.as_str(), "the-id");
         assert_eq!(c.name.as_ref(), "Build release");
         assert_eq!(c.provider_type.as_ref(), "shell");
         assert_eq!(c.executors, vec![Executor::Run]);
@@ -177,12 +197,32 @@ mod tests {
         assert_eq!(c.folder.as_ref().map(|s| s.as_ref()), Some("Build"));
         assert_eq!(c.settings["command"], serde_json::json!("cargo"));
         assert_eq!(c.settings["future_field"], serde_json::json!({ "x": 1 }));
+        // `id` is reserved — not echoed into the provider payload.
+        assert!(c.settings.get("id").is_none());
 
         let doc = build_document(&configs);
         let entry = &doc["configurations"][0];
+        assert_eq!(entry["id"], serde_json::json!("the-id"));
         assert_eq!(entry["command"], serde_json::json!("cargo"));
         assert_eq!(entry["future_field"], serde_json::json!({ "x": 1 }));
         assert_eq!(entry["before_launch"], serde_json::json!(["save_all_files"]));
+    }
+
+    #[test]
+    fn entry_without_id_gets_legacy_id_materialized_on_save() {
+        let src = r#"
+        {
+          "configurations": [
+            { "name": "Build release", "type": "shell", "command": "cargo" }
+          ]
+        }
+        "#;
+        let configs = parse_document(src, ConfigScope::Global).unwrap();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].id.as_str(), "shell:build-release");
+
+        let doc = build_document(&configs);
+        assert_eq!(doc["configurations"][0]["id"], serde_json::json!("shell:build-release"));
     }
 
     #[test]

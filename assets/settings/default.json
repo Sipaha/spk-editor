@@ -85,9 +85,10 @@
     // Values are clamped to the [0.0, 1.0] range.
     "inactive_opacity": 1.0,
   },
-  // Layout mode of the bottom dock. Defaults to "contained"
+  // Layout mode of the bottom dock. Fork default is "full" (IDEA-style: the
+  // bottom dock spans the full window width, with the left/right docks above it).
   //   choices: contained, full, left_aligned, right_aligned
-  "bottom_dock_layout": "contained",
+  "bottom_dock_layout": "full",
   // The direction that you want to split panes horizontally. Defaults to "down"
   "pane_split_direction_horizontal": "down",
   // The direction that you want to split panes vertically. Defaults to "right"
@@ -1379,7 +1380,9 @@
   //     "autosave": "on_focus_change",
   // 4. Save when idle for a certain amount of time:
   //     "autosave": { "after_delay": {"milliseconds": 500} },
-  "autosave": "off",
+  // SPK Editor fork: default to IDEA-style autosave (save a buffer when focus
+  // leaves it). Set to "off" to restore upstream Zed's manual-save default.
+  "autosave": "on_focus_change",
   // Maximum number of tabs per pane. Unset for unlimited.
   "max_tabs": null,
   // Settings related to the editor's tab bar.

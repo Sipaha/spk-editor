@@ -176,7 +176,7 @@ mod tests {
     async fn resolves_named_task(cx: &mut gpui::TestAppContext) {
         let project = test_project(cx).await;
         let config = RunConfiguration {
-            id: RunConfigId::new("task-ref", "build"),
+            id: RunConfigId::from_raw("task-ref:build"),
             name: "build".into(),
             provider_type: "task-ref".into(),
             settings: serde_json::json!({ "task_label": "build" }),

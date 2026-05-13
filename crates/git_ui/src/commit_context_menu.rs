@@ -497,7 +497,7 @@ fn build_branch_ref_submenu(
         menu
     };
 
-    let repo = ctx.repository.clone();
+    let repo = ctx.repository;
     menu.entry("Delete", None, move |window, cx| {
         run_delete_branch(repo.clone(), branch.clone(), window, cx);
     })
@@ -572,8 +572,8 @@ fn run_checkout_tag(
 struct TagDeletedToast;
 
 fn run_delete_tag(ctx: CommitContext, tag: SharedString, window: &mut Window, cx: &mut App) {
-    let repo = ctx.repository.clone();
-    let workspace = ctx.workspace.clone();
+    let repo = ctx.repository;
+    let workspace = ctx.workspace;
     let recv = repo.update(cx, |repo, _| repo.delete_tag(tag.to_string()));
     let task = cx.spawn({
         let tag = tag.clone();

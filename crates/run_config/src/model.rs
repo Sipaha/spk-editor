@@ -6,16 +6,27 @@ use project::WorktreeId;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Stable identifier for a run configuration.
+/// Stable, name-independent identifier for a run configuration.
 ///
-/// For persisted configs: `"<provider_type>:<slugified name>"` (e.g. `"shell:build-release"`).
-/// For ephemeral discovered configs: `"<provider_type>:discovered:<provider-supplied key>"`.
+/// For persisted configs: a fresh random id assigned when the config is first
+/// created, materialized in `run-configurations.json` as the `"id"` key. Legacy
+/// entries without an `"id"` key get a deterministic-from-name id on load (see
+/// `file_format::legacy_id`) which is then written into the file on the next save.
+/// For ephemeral discovered configs: `"<provider_type>:discovered:<provider-supplied key>"`
+/// (regenerated each load — never persisted).
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RunConfigId(Arc<str>);
 
 impl RunConfigId {
-    pub fn new(provider_type: &str, key: &str) -> Self {
-        Self(format!("{provider_type}:{key}").into())
+    /// Generate a fresh unique id for a newly-created persisted config.
+    pub fn new_random() -> Self {
+        Self(uuid::Uuid::new_v4().to_string().into())
+    }
+
+    /// Wrap an id string verbatim (parsing files that already carry an `"id"`,
+    /// or accepting id strings over the MCP surface).
+    pub fn from_raw(s: impl Into<Arc<str>>) -> Self {
+        Self(s.into())
     }
 
     pub fn discovered(provider_type: &str, key: &str) -> Self {
@@ -89,10 +100,15 @@ mod tests {
 
     #[test]
     fn run_config_id_formats() {
-        assert_eq!(RunConfigId::new("shell", "build-release").as_str(), "shell:build-release");
+        assert_eq!(RunConfigId::from_raw("shell:build-release").as_str(), "shell:build-release");
         assert_eq!(
             RunConfigId::discovered("task-ref", "cargo run").as_str(),
             "task-ref:discovered:cargo run"
         );
+    }
+
+    #[test]
+    fn new_random_ids_are_unique() {
+        assert_ne!(RunConfigId::new_random(), RunConfigId::new_random());
     }
 }

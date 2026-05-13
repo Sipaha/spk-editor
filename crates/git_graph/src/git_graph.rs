@@ -67,6 +67,13 @@ const COMMIT_CIRCLE_RADIUS: Pixels = px(3.5);
 const COMMIT_CIRCLE_STROKE_WIDTH: Pixels = px(1.5);
 const LANE_WIDTH: Pixels = px(16.0);
 const LEFT_PADDING: Pixels = px(12.0);
+// The commit-graph column has a fixed (non-user-resizable) width, IDEA-style:
+// sized to the number of lanes in the loaded history, but always at least
+// `MIN_GRAPH_LANES` (so even a linear history reserves sensible space) and
+// never more than `MAX_GRAPH_LANES` (so a busy history's lanes don't crowd
+// out the message column — overflow lanes are clipped).
+const MIN_GRAPH_LANES: usize = 4;
+const MAX_GRAPH_LANES: usize = 12;
 const LINE_WIDTH: Pixels = px(1.5);
 const RESIZE_HANDLE_WIDTH: f32 = 8.0;
 const COPIED_STATE_DURATION: Duration = Duration::from_secs(2);
@@ -1305,6 +1312,7 @@ impl GitGraph {
     }
 
     fn render_log_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let search_input = self.render_search_input(cx).into_any_element();
         log_toolbar::LogToolbar::new(
             cx.weak_entity(),
             self.filters.date_range,
@@ -1320,6 +1328,7 @@ impl GitGraph {
             self.mode(),
             self.file_history_options,
         )
+        .with_leading(search_input)
         .render(cx)
     }
 
@@ -1338,58 +1347,22 @@ impl GitGraph {
         (raw * scale).round() / scale
     }
 
-    fn graph_canvas_content_width(&self) -> Pixels {
-        (LANE_WIDTH * self.graph_data.max_lanes.max(6) as f32) + LEFT_PADDING * 2.0
+    /// Fixed width of the commit-graph column: `clamp(loaded lanes, MIN, MAX)`
+    /// lanes' worth, plus the left/right padding the canvas reserves. Not
+    /// user-resizable (IDEA-style); lanes past `MAX_GRAPH_LANES` are clipped.
+    fn graph_column_width(&self) -> Pixels {
+        let lanes = self
+            .graph_data
+            .max_lanes
+            .clamp(MIN_GRAPH_LANES, MAX_GRAPH_LANES);
+        (LANE_WIDTH * lanes as f32) + LEFT_PADDING * 2.0
     }
 
-    fn preview_column_fractions(&self, window: &Window, cx: &App) -> [f32; 5] {
-        // todo(git_graph): We should make a column/table api that allows removing table columns
-        let fractions = self
-            .column_widths
-            .read(cx)
-            .preview_fractions(window.rem_size());
-
-        let is_file_history = matches!(self.log_source, LogSource::File(_));
-        let graph_fraction = if is_file_history { 0.0 } else { fractions[0] };
-        let offset = if is_file_history { 0 } else { 1 };
-
-        [
-            graph_fraction,
-            fractions[offset],
-            fractions[offset + 1],
-            fractions[offset + 2],
-            fractions[offset + 3],
-        ]
-    }
-
-    fn table_column_width_config(&self, window: &Window, cx: &App) -> ColumnWidthConfig {
-        let [_, description, date, author, commit] = self.preview_column_fractions(window, cx);
-        let table_total = description + date + author + commit;
-
-        let widths = if table_total > 0.0 {
-            vec![
-                DefiniteLength::Fraction(description / table_total),
-                DefiniteLength::Fraction(date / table_total),
-                DefiniteLength::Fraction(author / table_total),
-                DefiniteLength::Fraction(commit / table_total),
-            ]
-        } else {
-            vec![
-                DefiniteLength::Fraction(0.25),
-                DefiniteLength::Fraction(0.25),
-                DefiniteLength::Fraction(0.25),
-                DefiniteLength::Fraction(0.25),
-            ]
-        };
-
-        ColumnWidthConfig::explicit(widths)
-    }
-
-    fn graph_viewport_width(&self, window: &Window, cx: &App) -> Pixels {
-        self.column_widths
-            .read(cx)
-            .preview_column_width(0, window)
-            .unwrap_or_else(|| self.graph_canvas_content_width())
+    fn table_column_width_config(&self, _window: &Window, cx: &App) -> ColumnWidthConfig {
+        // The four text columns (Description / Date / Author / Commit) live in
+        // `column_widths`; the graph column is rendered separately at a fixed
+        // width to the left of the table, so it's no longer a table column.
+        ColumnWidthConfig::explicit(self.column_widths.read(cx).preview_widths().as_slice().to_vec())
     }
 
     pub fn new(
@@ -1429,45 +1402,27 @@ impl GitGraph {
 
         let table_interaction_state = cx.new(|cx| TableInteractionState::new(cx));
 
-        let column_widths = if matches!(log_source, LogSource::File(_)) {
-            cx.new(|_cx| {
-                RedistributableColumnsState::new(
-                    4,
-                    vec![
-                        DefiniteLength::Fraction(0.72),
-                        DefiniteLength::Fraction(0.12),
-                        DefiniteLength::Fraction(0.1),
-                        DefiniteLength::Fraction(0.06),
-                    ],
-                    vec![
-                        TableResizeBehavior::Resizable,
-                        TableResizeBehavior::Resizable,
-                        TableResizeBehavior::Resizable,
-                        TableResizeBehavior::Resizable,
-                    ],
-                )
-            })
-        } else {
-            cx.new(|_cx| {
-                RedistributableColumnsState::new(
-                    5,
-                    vec![
-                        DefiniteLength::Fraction(0.14),
-                        DefiniteLength::Fraction(0.6192),
-                        DefiniteLength::Fraction(0.1032),
-                        DefiniteLength::Fraction(0.086),
-                        DefiniteLength::Fraction(0.0516),
-                    ],
-                    vec![
-                        TableResizeBehavior::Resizable,
-                        TableResizeBehavior::Resizable,
-                        TableResizeBehavior::Resizable,
-                        TableResizeBehavior::Resizable,
-                        TableResizeBehavior::Resizable,
-                    ],
-                )
-            })
-        };
+        // The table holds only the four text columns (Description / Date /
+        // Author / Commit); they're user-resizable. The commit-graph column is
+        // *not* a table column — it's rendered separately at a fixed width to
+        // the left of the table (IDEA-style), so it has no resize handle.
+        let column_widths = cx.new(|_cx| {
+            RedistributableColumnsState::new(
+                4,
+                vec![
+                    DefiniteLength::Fraction(0.72),
+                    DefiniteLength::Fraction(0.12),
+                    DefiniteLength::Fraction(0.1),
+                    DefiniteLength::Fraction(0.06),
+                ],
+                vec![
+                    TableResizeBehavior::Resizable,
+                    TableResizeBehavior::Resizable,
+                    TableResizeBehavior::Resizable,
+                    TableResizeBehavior::Resizable,
+                ],
+            )
+        });
         let mut row_height = Self::row_height(window, cx);
 
         cx.observe_global_in::<settings::SettingsStore>(window, move |this, window, cx| {
@@ -2360,7 +2315,10 @@ impl GitGraph {
         cx.notify();
     }
 
-    fn render_search_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The "Search commits…" input box (text editor + case-sensitive / regex /
+    /// search-in-diffs toggles), styled as a rounded bordered field. Rendered
+    /// inline at the start of the log toolbar row (see `render_log_toolbar`).
+    fn render_search_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let color = cx.theme().colors();
         let query_focus_handle = self.search_state.editor.focus_handle(cx);
         let search_options = {
@@ -2376,50 +2334,42 @@ impl GitGraph {
         let in_diffs_focus_handle = query_focus_handle.clone();
 
         h_flex()
+            .h_7()
             .w_full()
-            .p_1p5()
-            .gap_1p5()
-            .border_b_1()
+            .min_w_0()
+            .px_1p5()
+            .gap_1()
+            .border_1()
             .border_color(color.border_variant)
+            .rounded_md()
+            .bg(color.editor_background)
+            .child(self.search_state.editor.clone())
+            .child(SearchOption::CaseSensitive.as_button(
+                search_options,
+                SearchSource::Buffer,
+                query_focus_handle.clone(),
+            ))
+            .child(SearchOption::Regex.as_button(
+                search_options,
+                SearchSource::Buffer,
+                query_focus_handle,
+            ))
             .child(
-                h_flex()
-                    .h_8()
-                    .flex_1()
-                    .min_w_0()
-                    .px_1p5()
-                    .gap_1()
-                    .border_1()
-                    .border_color(color.border_variant)
-                    .rounded_md()
-                    .bg(color.toolbar_background)
-                    .child(self.search_state.editor.clone())
-                    .child(SearchOption::CaseSensitive.as_button(
-                        search_options,
-                        SearchSource::Buffer,
-                        query_focus_handle.clone(),
-                    ))
-                    .child(SearchOption::Regex.as_button(
-                        search_options,
-                        SearchSource::Buffer,
-                        query_focus_handle,
-                    ))
-                    .child(
-                        IconButton::new("git-graph-search-in-diffs", IconName::FileDiff)
-                            .shape(ui::IconButtonShape::Square)
-                            .style(ButtonStyle::Subtle)
-                            .toggle_state(search_in_diffs)
-                            .tooltip(move |_, cx| {
-                                Tooltip::for_action_in(
-                                    "Search in commit content (slower)",
-                                    &ToggleSearchInDiffs,
-                                    &in_diffs_focus_handle,
-                                    cx,
-                                )
-                            })
-                            .on_click(cx.listener(|_, _, window, cx| {
-                                window.dispatch_action(Box::new(ToggleSearchInDiffs), cx);
-                            })),
-                    ),
+                IconButton::new("git-graph-search-in-diffs", IconName::FileDiff)
+                    .shape(ui::IconButtonShape::Square)
+                    .style(ButtonStyle::Subtle)
+                    .toggle_state(search_in_diffs)
+                    .tooltip(move |_, cx| {
+                        Tooltip::for_action_in(
+                            "Search in commit content (slower)",
+                            &ToggleSearchInDiffs,
+                            &in_diffs_focus_handle,
+                            cx,
+                        )
+                    })
+                    .on_click(cx.listener(|_, _, window, cx| {
+                        window.dispatch_action(Box::new(ToggleSearchInDiffs), cx);
+                    })),
             )
     }
 
@@ -2580,7 +2530,7 @@ impl GitGraph {
                                     )
                                 } else {
                                     (
-                                        short_sha.clone(),
+                                        short_sha,
                                         IconName::Hash,
                                         Color::Muted,
                                         "Copy Commit SHA",
@@ -2828,12 +2778,7 @@ impl GitGraph {
         let first_visible_row = (scroll_offset_y / row_height).floor() as usize;
         let vertical_scroll_offset = scroll_offset_y - (first_visible_row as f32 * row_height);
 
-        let graph_viewport_width = self.graph_viewport_width(window, cx);
-        let graph_width = if self.graph_canvas_content_width() > graph_viewport_width {
-            self.graph_canvas_content_width()
-        } else {
-            graph_viewport_width
-        };
+        let graph_width = self.graph_column_width();
         let last_visible_row =
             first_visible_row + (viewport_height / row_height).ceil() as usize + 1;
 
@@ -3280,16 +3225,9 @@ impl Render for GitGraph {
                 Some(self.column_widths.read(cx).widths_to_render()),
                 true,
             );
-            let [
-                graph_fraction,
-                description_fraction,
-                date_fraction,
-                author_fraction,
-                commit_fraction,
-            ] = self.preview_column_fractions(window, cx);
-            let table_fraction =
-                description_fraction + date_fraction + author_fraction + commit_fraction;
             let table_width_config = self.table_column_width_config(window, cx);
+            // Fixed width for the (non-resizable) commit-graph column.
+            let graph_width = self.graph_column_width();
 
             h_flex()
                 .size_full()
@@ -3300,41 +3238,53 @@ impl Render for GitGraph {
                         .size_full()
                         .flex()
                         .flex_col()
-                        .child(render_table_header(
-                            if !is_file_history {
-                                TableRow::from_vec(
-                                    vec![
-                                        Label::new("Graph")
-                                            .color(Color::Muted)
-                                            .truncate()
-                                            .into_any_element(),
-                                        Label::new("Description")
-                                            .color(Color::Muted)
-                                            .into_any_element(),
-                                        Label::new("Date").color(Color::Muted).into_any_element(),
-                                        Label::new("Author").color(Color::Muted).into_any_element(),
-                                        Label::new("Commit").color(Color::Muted).into_any_element(),
-                                    ],
-                                    5,
-                                )
-                            } else {
-                                TableRow::from_vec(
-                                    vec![
-                                        Label::new("Description")
-                                            .color(Color::Muted)
-                                            .into_any_element(),
-                                        Label::new("Date").color(Color::Muted).into_any_element(),
-                                        Label::new("Author").color(Color::Muted).into_any_element(),
-                                        Label::new("Commit").color(Color::Muted).into_any_element(),
-                                    ],
-                                    4,
-                                )
-                            },
-                            header_context,
-                            Some(header_resize_info),
-                            Some(self.column_widths.entity_id()),
-                            cx,
-                        ))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .items_stretch()
+                                .when(!is_file_history, |this| {
+                                    this.child(
+                                        div()
+                                            .flex_none()
+                                            .w(graph_width)
+                                            .overflow_hidden()
+                                            .border_b_1()
+                                            .border_color(cx.theme().colors().border)
+                                            .px_1()
+                                            .py_0p5()
+                                            .child(
+                                                Label::new("Graph")
+                                                    .color(Color::Muted)
+                                                    .truncate(),
+                                            ),
+                                    )
+                                })
+                                .child(
+                                    div().flex_1().min_w_0().child(render_table_header(
+                                        TableRow::from_vec(
+                                            vec![
+                                                Label::new("Description")
+                                                    .color(Color::Muted)
+                                                    .into_any_element(),
+                                                Label::new("Date")
+                                                    .color(Color::Muted)
+                                                    .into_any_element(),
+                                                Label::new("Author")
+                                                    .color(Color::Muted)
+                                                    .into_any_element(),
+                                                Label::new("Commit")
+                                                    .color(Color::Muted)
+                                                    .into_any_element(),
+                                            ],
+                                            4,
+                                        ),
+                                        header_context,
+                                        Some(header_resize_info),
+                                        Some(self.column_widths.entity_id()),
+                                        cx,
+                                    )),
+                                ),
+                        )
                         .child({
                             let row_height = Self::row_height(window, cx);
                             let selected_entry_idx = self.selected_entry_idx;
@@ -3446,40 +3396,35 @@ impl Render for GitGraph {
                                     cx.processor(Self::render_table_rows),
                                 );
 
-                            bind_redistributable_columns(
-                                div()
-                                    .relative()
-                                    .flex_1()
-                                    .w_full()
-                                    .overflow_hidden()
-                                    .child(
-                                        h_flex()
-                                            .size_full()
-                                            .when(!is_file_history, |this| {
-                                                this.child(
-                                                    div()
-                                                        .w(DefiniteLength::Fraction(graph_fraction))
-                                                        .h_full()
-                                                        .min_w_0()
-                                                        .overflow_hidden()
-                                                        .child(graph_canvas),
-                                                )
-                                            })
-                                            .child(
-                                                div()
-                                                    .w(DefiniteLength::Fraction(table_fraction))
-                                                    .h_full()
-                                                    .min_w_0()
-                                                    .child(commits_table),
-                                            ),
+                            h_flex()
+                                .flex_1()
+                                .w_full()
+                                .items_stretch()
+                                .when(!is_file_history, |this| {
+                                    this.child(
+                                        div()
+                                            .flex_none()
+                                            .w(graph_width)
+                                            .h_full()
+                                            .overflow_hidden()
+                                            .child(graph_canvas),
                                     )
-                                    .child(render_redistributable_columns_resize_handles(
-                                        &self.column_widths,
-                                        window,
-                                        cx,
-                                    )),
-                                self.column_widths.clone(),
-                            )
+                                })
+                                .child(bind_redistributable_columns(
+                                    div()
+                                        .relative()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .h_full()
+                                        .overflow_hidden()
+                                        .child(commits_table)
+                                        .child(render_redistributable_columns_resize_handles(
+                                            &self.column_widths,
+                                            window,
+                                            cx,
+                                        )),
+                                    self.column_widths.clone(),
+                                ))
                         }),
                 )
                 .on_drag_move::<DraggedSplitHandle>(cx.listener(|this, event, window, cx| {
@@ -3545,7 +3490,6 @@ impl Render for GitGraph {
             .child(
                 v_flex()
                     .size_full()
-                    .child(self.render_search_bar(cx))
                     .child(self.render_log_toolbar(cx))
                     .child(div().flex_1().child(content)),
             )

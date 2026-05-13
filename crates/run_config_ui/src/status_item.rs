@@ -151,7 +151,7 @@ mod tests {
 
     fn mock_config(name: &str) -> RunConfiguration {
         RunConfiguration {
-            id: RunConfigId::new("mock", name),
+            id: RunConfigId::from_raw(format!("mock:{name}")),
             name: name.into(),
             provider_type: "mock".into(),
             settings: serde_json::json!({}),
