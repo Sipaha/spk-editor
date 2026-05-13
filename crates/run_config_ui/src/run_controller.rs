@@ -195,14 +195,13 @@ impl RunController {
 
     /// Push the current set of running config ids into the global store so that
     /// non-UI consumers (the toolbar strip, MCP `run_config.list`) see them.
-    ///
-    /// v1 single-workspace assumption: if several workspaces have run
-    /// controllers, the last one to publish wins. Fine for the current UI
-    /// (one toolbar strip per window, one window in practice).
+    /// Keyed by this controller's entity id so multiple workspace windows don't
+    /// overwrite each other's running state.
     fn publish_running(&self, cx: &mut Context<Self>) {
+        let source = cx.entity_id().as_u64();
         let ids: collections::HashSet<RunConfigId> = self.active.keys().cloned().collect();
         if let Some(store) = RunConfigStore::try_global(cx) {
-            store.update(cx, |store, cx| store.set_running(ids, cx));
+            store.update(cx, |store, cx| store.set_running(source, ids, cx));
         }
     }
 
