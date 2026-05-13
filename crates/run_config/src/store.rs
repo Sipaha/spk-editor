@@ -153,6 +153,17 @@ impl RunConfigStore {
         }
     }
 
+    /// Drop the running set for a source controller (called from the
+    /// `RunController`'s release handler when its workspace window closes).
+    /// Without this, configs that were running when a window closed mid-run
+    /// would keep showing as running forever.
+    pub fn clear_running_source(&mut self, source: u64, cx: &mut Context<Self>) {
+        if self.running_by_source.remove(&source).is_some() {
+            cx.notify();
+            cx.emit(RunConfigStoreEvent::ConfigsChanged);
+        }
+    }
+
     pub fn is_running(&self, id: &RunConfigId) -> bool {
         self.running_by_source.values().any(|set| set.contains(id))
     }
@@ -623,6 +634,23 @@ mod tests {
             assert!(!s.is_running(&id_a), "source 1's config should no longer be running");
             assert!(s.is_running(&id_b), "source 2's config should still be running");
         });
+    }
+
+    #[gpui::test]
+    fn clear_running_source_removes_entry(cx: &mut TestAppContext) {
+        let store = cx.new(|_| RunConfigStore::empty());
+        let id = RunConfigId::new("shell", "a");
+        store.update(cx, |s, cx| {
+            s.set_running(1u64, collections::HashSet::from_iter([id.clone()]), cx);
+        });
+        store.read_with(cx, |s, _| assert!(s.is_running(&id)));
+        store.update(cx, |s, cx| s.clear_running_source(1u64, cx));
+        store.read_with(cx, |s, _| {
+            assert!(!s.is_running(&id), "clearing the source removes its running set");
+            assert_eq!(s.running_ids().count(), 0);
+        });
+        // Clearing an unknown source is a harmless no-op.
+        store.update(cx, |s, cx| s.clear_running_source(99u64, cx));
     }
 
     #[gpui::test]

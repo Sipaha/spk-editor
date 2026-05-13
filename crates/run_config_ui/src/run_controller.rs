@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use anyhow::anyhow;
 use collections::HashMap;
 use dap::client::SessionId;
-use gpui::{Action as _, Context, Entity, EventEmitter, Subscription, Task, WeakEntity, Window};
+use gpui::{
+    Action as _, Context, Entity, EventEmitter, SharedString, Subscription, Task, WeakEntity, Window,
+};
 use project::Project;
 use project::debugger::dap_store::{DapStore, DapStoreEvent};
 use run_config::{
@@ -27,10 +29,14 @@ pub struct RunController {
     active: HashMap<RunConfigId, ActiveRun>,
     /// Debug runs whose `DapStore` session id we haven't matched yet, oldest
     /// first. `start_debug_session` doesn't hand back a `SessionId`, so we
-    /// remember which configs we just launched and pair each one with the next
-    /// `DebugClientStarted` event. Concurrent debug launches are rare; FIFO
-    /// matching is good enough.
-    pending_debug_launches: VecDeque<RunConfigId>,
+    /// remember which configs we just launched (paired with the scenario label
+    /// we used) and, on each `DebugClientStarted` event, match the started
+    /// session against the first pending entry whose label matches the new
+    /// session's label. Events for sessions we didn't launch (user-initiated
+    /// debug-panel runs) don't match any pending label, so they're ignored
+    /// rather than draining the queue. Two of *our* configs sharing a name is
+    /// the only remaining ambiguity (rare; IDEA has the same caveat).
+    pending_debug_launches: VecDeque<(RunConfigId, SharedString)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -80,6 +86,18 @@ impl RunController {
         let dap_store = project.read(cx).dap_store();
         subscriptions.push(cx.subscribe(&dap_store, Self::on_dap_store_event));
 
+        // When this controller's workspace window closes, drop our running-set
+        // entry from the global store; otherwise configs that were running at
+        // close time keep showing as running. `entity_id` values can be reused
+        // after release, so this also closes the (tiny) collision window.
+        let source = cx.entity_id().as_u64();
+        cx.on_release(move |_this, app| {
+            if let Some(store) = RunConfigStore::try_global(app) {
+                store.update(app, |store, cx| store.clear_running_source(source, cx));
+            }
+        })
+        .detach();
+
         Self {
             workspace: workspace.weak_handle(),
             project,
@@ -121,13 +139,31 @@ impl RunController {
 
     fn on_dap_store_event(
         &mut self,
-        _dap_store: Entity<DapStore>,
+        dap_store: Entity<DapStore>,
         event: &DapStoreEvent,
         cx: &mut Context<Self>,
     ) {
         match event {
             DapStoreEvent::DebugClientStarted(session_id) => {
-                let Some(config_id) = self.pending_debug_launches.pop_front() else {
+                // Match the started session against our pending launches by
+                // scenario label. A session we didn't launch (user-initiated
+                // debug-panel run) won't match any pending label — ignore it
+                // rather than mis-claiming a pending launch.
+                let started_label = dap_store
+                    .read(cx)
+                    .session_by_id(session_id)
+                    .and_then(|session| session.read(cx).label());
+                let Some(started_label) = started_label else {
+                    return;
+                };
+                let Some(position) = self
+                    .pending_debug_launches
+                    .iter()
+                    .position(|(_, label)| label == &started_label)
+                else {
+                    return;
+                };
+                let Some((config_id, _)) = self.pending_debug_launches.remove(position) else {
                     return;
                 };
                 if let Some(ActiveRun {
@@ -418,6 +454,7 @@ impl RunController {
                 let Some(workspace) = self.workspace.upgrade() else {
                     return;
                 };
+                let scenario_label = scenario.label.clone();
                 workspace.update(cx, |workspace, cx| {
                     workspace.start_debug_session(
                         scenario,
@@ -428,7 +465,8 @@ impl RunController {
                         cx,
                     );
                 });
-                self.pending_debug_launches.push_back(config_id.clone());
+                self.pending_debug_launches
+                    .push_back((config_id.clone(), scenario_label));
                 self.active.insert(
                     config_id.clone(),
                     ActiveRun {
@@ -470,7 +508,8 @@ impl RunController {
                 }
             }
             ActiveRunKind::Debug { session_id } => {
-                self.pending_debug_launches.retain(|pending| pending != id);
+                self.pending_debug_launches
+                    .retain(|(pending, _)| pending != id);
                 if let Some(session_id) = session_id {
                     let dap_store = self.project.read(cx).dap_store();
                     dap_store
@@ -653,6 +692,47 @@ mod tests {
         controller.update(cx, |controller, cx| controller.stop(&id, cx));
         controller.read_with(cx, |controller, _| {
             assert!(!controller.is_running(&id), "stop should clear the active run");
+        });
+    }
+
+    #[gpui::test]
+    async fn dropping_controller_clears_running_source(cx: &mut TestAppContext) {
+        let workspace = setup(cx, &["a"]).await;
+        workspace.update(cx, |workspace, _| {
+            workspace.set_terminal_provider(PendingTerminalProvider)
+        });
+        let controller = workspace
+            .update(cx, |workspace, cx| cx.new(|cx| RunController::new(workspace, cx)));
+        cx.run_until_parked();
+
+        let id = RunConfigId::new("mock", "a");
+        let window = cx
+            .update(|cx| cx.windows().first().copied())
+            .expect("a window exists");
+        window
+            .update(cx, |_, window, cx| {
+                controller.update(cx, |controller, cx| {
+                    controller.run(id.clone(), Executor::Run, window, cx)
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let store = cx.update(|cx| RunConfigStore::global(cx));
+        store.read_with(cx, |store, _| {
+            assert!(store.is_running(&id), "run is published to the global store");
+        });
+
+        drop(controller);
+        // Entity release (and thus the `on_release` handler) runs during the
+        // next effect flush, not from the `Rc` drop itself.
+        cx.update(|_| {});
+        cx.run_until_parked();
+        store.read_with(cx, |store, _| {
+            assert!(
+                !store.is_running(&id),
+                "dropping the controller clears its running set"
+            );
         });
     }
 }
