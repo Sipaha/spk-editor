@@ -1380,7 +1380,9 @@
   //     "autosave": "on_focus_change",
   // 4. Save when idle for a certain amount of time:
   //     "autosave": { "after_delay": {"milliseconds": 500} },
-  "autosave": "off",
+  // SPK Editor fork: default to IDEA-style autosave (save a buffer when focus
+  // leaves it). Set to "off" to restore upstream Zed's manual-save default.
+  "autosave": "on_focus_change",
   // Maximum number of tabs per pane. Unset for unlimited.
   "max_tabs": null,
   // Settings related to the editor's tab bar.
