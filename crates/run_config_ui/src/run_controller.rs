@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::anyhow;
 use collections::{HashMap, HashSet};
@@ -14,6 +15,12 @@ use run_config::{
 use terminal::Terminal;
 use terminal_view::terminal_panel::TerminalPanel;
 use workspace::Workspace;
+
+/// How long a debug run may sit in `active` with no started session before we
+/// assume the adapter died during launch and clear it. Debug adapters can be
+/// slow to come up (downloading, building), so this is a generous upper bound,
+/// not a tight deadline.
+const DEBUG_LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Per-`Workspace` coordinator for run configurations: tracks the selected
 /// config (what the toolbar dropdown shows), runs / stops configs, and records
@@ -37,6 +44,24 @@ pub struct RunController {
     /// the user starts an unrelated debug session in the same tick a config's
     /// debug launch is in flight (same race the old label-matching code had).
     pending_debug_launches: VecDeque<(RunConfigId, HashSet<SessionId>)>,
+    /// Monotonic per-`run()` token. Each terminal launch captures one so a
+    /// stale poller (from a launch that's since been stopped + re-run) can tell
+    /// it's no longer the current launch for its config.
+    launch_counter: u64,
+    /// Launch tokens of terminal runs that were `stop()`-ed before their
+    /// terminal handle resolved. The poller for such a launch, once the handle
+    /// arrives, kills the terminal and exits instead of tracking it. Keyed by
+    /// token (not config id) so a Stop of a *newer* launch can't make an older
+    /// launch's poller kill the newer launch's terminal. Each poller drains its
+    /// own token, so this never grows unbounded.
+    terminal_launches_pending_kill: HashSet<u64>,
+    /// Fire-and-forget tasks that must outlive the `ActiveRun` they relate to:
+    /// debug-launch-timeout timers (see `DEBUG_LAUNCH_TIMEOUT`) and terminal
+    /// completion pollers that were orphaned by `stop()` (so they can still
+    /// kill the terminal once its handle resolves). Each self-completes within
+    /// a bounded time; `Task` has no "finished?" probe, so we accept that this
+    /// grows by one per run for the life of the workspace window (negligible).
+    _detached_tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -54,6 +79,8 @@ pub enum ActiveRunKind {
     /// stays `None` and Stop only drops the tracking entry.
     Terminal {
         terminal: Option<WeakEntity<Terminal>>,
+        /// The `run()` launch token for this run; see `launch_counter`.
+        launch_token: u64,
         /// Keeps the completion poller alive while the run is tracked.
         _poller: Option<Task<()>>,
     },
@@ -104,6 +131,9 @@ impl RunController {
             selected,
             active: HashMap::default(),
             pending_debug_launches: VecDeque::new(),
+            launch_counter: 0,
+            terminal_launches_pending_kill: HashSet::default(),
+            _detached_tasks: Vec::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -273,6 +303,7 @@ impl RunController {
             );
             return;
         }
+        let config_name = config.name.clone();
 
         for step in &config.before_launch {
             match step {
@@ -328,6 +359,9 @@ impl RunController {
             }
         };
 
+        self.launch_counter += 1;
+        let launch_token = self.launch_counter;
+
         match request {
             RunRequest::Terminal(spawn) => {
                 let Some(workspace) = self.workspace.upgrade() else {
@@ -346,6 +380,29 @@ impl RunController {
                     cx.spawn(async move |this, cx| {
                         match spawn_task.await {
                             Ok(terminal) => {
+                                // If Stop was pressed while the handle was in
+                                // flight, kill the terminal now and don't track
+                                // it (the `ActiveRun` was already removed by
+                                // `stop()`).
+                                let killed = this
+                                    .update(cx, |this, cx| {
+                                        if !this
+                                            .terminal_launches_pending_kill
+                                            .remove(&launch_token)
+                                        {
+                                            return false;
+                                        }
+                                        if let Some(terminal) = terminal.upgrade() {
+                                            terminal.update(cx, |terminal, _| {
+                                                terminal.kill_active_task()
+                                            });
+                                        }
+                                        true
+                                    })
+                                    .unwrap_or(false);
+                                if killed {
+                                    return;
+                                }
                                 this.update(cx, |this, _| {
                                     if let Some(ActiveRun {
                                         kind: ActiveRunKind::Terminal { terminal: slot, .. },
@@ -366,6 +423,10 @@ impl RunController {
                                 }
                             }
                             Err(err) => {
+                                this.update(cx, |this, _| {
+                                    this.terminal_launches_pending_kill.remove(&launch_token);
+                                })
+                                .ok();
                                 log::warn!(
                                     "run_config: terminal task `{}` failed to launch: {err:#}",
                                     poller_config_id.as_str()
@@ -400,7 +461,15 @@ impl RunController {
                         // launch; `None` => the spawn was cancelled / no
                         // terminal provider — leave the run tracked so the user
                         // can Stop it explicitly.
-                        let Some(result) = spawn_task.await else {
+                        let result = spawn_task.await;
+                        // Drain any pending-kill token recorded by `stop()`;
+                        // there's no killable handle on this path, so this just
+                        // keeps the set from growing.
+                        this.update(cx, |this, _| {
+                            this.terminal_launches_pending_kill.remove(&launch_token);
+                        })
+                        .ok();
+                        let Some(result) = result else {
                             return;
                         };
                         if let Err(err) = &result {
@@ -434,6 +503,7 @@ impl RunController {
                         executor,
                         kind: ActiveRunKind::Terminal {
                             terminal: None,
+                            launch_token,
                             _poller: Some(poller),
                         },
                     },
@@ -471,11 +541,45 @@ impl RunController {
                 self.active.insert(
                     config_id.clone(),
                     ActiveRun {
-                        config_id,
+                        config_id: config_id.clone(),
                         executor,
                         kind: ActiveRunKind::Debug { session_id: None },
                     },
                 );
+
+                // If the adapter dies before `DapStoreEvent::DebugClientStarted`
+                // ever fires, no `DebugClientShutdown` will follow either, so
+                // the entry would be stuck "running" forever. Clear it after a
+                // grace period if it never got a session id (i.e. is still in
+                // `pending_debug_launches`). A run that *did* start a session,
+                // or was already stopped, makes this a no-op.
+                let timeout_config_id = config_id.clone();
+                let timer = cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(DEBUG_LAUNCH_TIMEOUT).await;
+                    this.update(cx, |this, cx| {
+                        if !debug_launch_timed_out(
+                            &this.active,
+                            &this.pending_debug_launches,
+                            &timeout_config_id,
+                        ) {
+                            return;
+                        }
+                        this.active.remove(&timeout_config_id);
+                        this.pending_debug_launches
+                            .retain(|(pending, _)| pending != &timeout_config_id);
+                        log::warn!(
+                            "run_config: debug config `{config_name}` did not start a session \
+                             within {}s; clearing",
+                            DEBUG_LAUNCH_TIMEOUT.as_secs()
+                        );
+                        cx.emit(RunControllerEvent::ActiveRunsChanged);
+                        this.publish_running(cx);
+                        cx.notify();
+                    })
+                    .ok();
+                });
+                self._detached_tasks.push(timer);
+
                 cx.emit(RunControllerEvent::ActiveRunsChanged);
                 self.publish_running(cx);
                 cx.notify();
@@ -499,13 +603,29 @@ impl RunController {
             return;
         };
         match run.kind {
-            ActiveRunKind::Terminal { terminal, _poller } => {
-                // Dropping `_poller` cancels the completion watcher; kill the
-                // task terminal so the spawned process actually goes away. If
-                // we never got a handle (no terminal panel) there's nothing we
-                // can do here — the run already won't appear as active.
+            ActiveRunKind::Terminal {
+                terminal,
+                launch_token,
+                _poller,
+            } => {
                 if let Some(terminal) = terminal.and_then(|terminal| terminal.upgrade()) {
+                    // We already have the task terminal: kill it now; dropping
+                    // `_poller` then cancels the (no-longer-needed) completion
+                    // watcher.
                     terminal.update(cx, |terminal, _| terminal.kill_active_task());
+                } else {
+                    // The terminal handle hasn't resolved yet (mid-launch). The
+                    // poller is the only thing that will ever get the handle, so
+                    // it must outlive this `ActiveRun` — move it to
+                    // `_detached_tasks` instead of dropping it — and flag its
+                    // launch token so it kills the terminal (rather than
+                    // tracking it) once the handle arrives. On the no-terminal-
+                    // panel fallback path the poller has nothing to kill, but
+                    // keeping it alive is harmless and it still drains its token.
+                    self.terminal_launches_pending_kill.insert(launch_token);
+                    if let Some(poller) = _poller {
+                        self._detached_tasks.push(poller);
+                    }
                 }
             }
             ActiveRunKind::Debug { session_id } => {
@@ -557,6 +677,23 @@ fn claim_started_session(
     pending.remove(position).map(|(config_id, _)| config_id)
 }
 
+/// Whether the debug run for `config_id` should be treated as a failed launch:
+/// it's still tracked, still has no session id, and is still pending (so its
+/// session never got claimed by `DebugClientStarted`). Pulled out as a free
+/// function so the decision can be unit tested without a live DAP adapter.
+fn debug_launch_timed_out(
+    active: &HashMap<RunConfigId, ActiveRun>,
+    pending: &VecDeque<(RunConfigId, HashSet<SessionId>)>,
+    config_id: &RunConfigId,
+) -> bool {
+    let still_unstarted = matches!(
+        active.get(config_id).map(|run| &run.kind),
+        Some(ActiveRunKind::Debug { session_id: None })
+    );
+    let still_pending = pending.iter().any(|(pending, _)| pending == config_id);
+    still_unstarted && still_pending
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -604,6 +741,49 @@ mod tests {
         }
     }
 
+    /// Like `MockProvider` but its `resolve` returns a `RunRequest::Debug`, so
+    /// `run` goes through the debug arm. With no `debugger_provider` wired up in
+    /// the test `Workspace`, `start_debug_session` is a no-op and no
+    /// `DebugClientStarted` ever fires — exactly the "adapter never started"
+    /// case the launch timeout exists for.
+    struct MockDebugProvider;
+
+    impl RunConfigProvider for MockDebugProvider {
+        fn type_id(&self) -> &'static str {
+            "mock_debug"
+        }
+        fn display_name(&self) -> &'static str {
+            "Mock Debug"
+        }
+        fn icon(&self) -> IconName {
+            IconName::Debug
+        }
+        fn supported_executors(&self) -> &'static [Executor] {
+            &[Executor::Debug]
+        }
+        fn settings_schema(&self) -> schemars::Schema {
+            schemars::json_schema!({ "type": "object" })
+        }
+        fn new_template(&self, _cx: &App) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        fn resolve(
+            &self,
+            _config: &RunConfiguration,
+            _executor: Executor,
+            _cx: &mut RunResolveContext,
+            _app: &App,
+        ) -> Result<RunRequest> {
+            Ok(RunRequest::Debug(task::DebugScenario {
+                adapter: "mock-adapter".into(),
+                label: "mock debug".into(),
+                build: None,
+                config: serde_json::json!({}),
+                tcp_connection: None,
+            }))
+        }
+    }
+
     /// A `TerminalProvider` whose spawned task never completes, so a `run`
     /// stays in the `active` set until the controller is told to `stop`.
     struct PendingTerminalProvider;
@@ -633,6 +813,19 @@ mod tests {
         }
     }
 
+    fn mock_debug_config(name: &str) -> RunConfiguration {
+        RunConfiguration {
+            id: RunConfigId::from_raw(format!("mock_debug:{name}")),
+            name: name.into(),
+            provider_type: "mock_debug".into(),
+            settings: serde_json::json!({}),
+            executors: vec![Executor::Debug],
+            before_launch: vec![],
+            folder: None,
+            scope: ConfigScope::Global,
+        }
+    }
+
     async fn setup(cx: &mut TestAppContext, configs: &[&str]) -> Entity<Workspace> {
         let app_state = cx.update(|cx| {
             let app_state = AppState::test(cx);
@@ -640,6 +833,7 @@ mod tests {
             editor::init(cx);
             RunConfigStore::init_global(cx);
             run_config::register_provider(cx, MockProvider);
+            run_config::register_provider(cx, MockDebugProvider);
             app_state
         });
         let store = cx.update(|cx| RunConfigStore::global(cx));
@@ -710,6 +904,167 @@ mod tests {
         controller.read_with(cx, |controller, _| {
             assert!(!controller.is_running(&id), "stop should clear the active run");
         });
+    }
+
+    #[gpui::test]
+    async fn stop_during_terminal_launch_window_records_pending_kill(cx: &mut TestAppContext) {
+        // On the no-terminal-panel fallback path the `ActiveRun` always has
+        // `terminal: None`, so `stop()` exercises the "handle hasn't resolved
+        // yet" branch: it must flag the launch token for kill-on-arrival and
+        // keep the poller alive (move it to `_detached_tasks`) rather than
+        // dropping it.
+        let workspace = setup(cx, &["a"]).await;
+        workspace.update(cx, |workspace, _| {
+            workspace.set_terminal_provider(PendingTerminalProvider)
+        });
+        let controller = workspace
+            .update(cx, |workspace, cx| cx.new(|cx| RunController::new(workspace, cx)));
+        cx.run_until_parked();
+
+        let id = RunConfigId::from_raw("mock:a");
+        let window = cx
+            .update(|cx| cx.windows().first().copied())
+            .expect("a window exists");
+        window
+            .update(cx, |_, window, cx| {
+                controller.update(cx, |controller, cx| {
+                    controller.run(id.clone(), Executor::Run, window, cx)
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let detached_before =
+            controller.read_with(cx, |controller, _| controller._detached_tasks.len());
+
+        controller.update(cx, |controller, cx| controller.stop(&id, cx));
+        controller.read_with(cx, |controller, _| {
+            assert!(!controller.is_running(&id), "stop clears the active run");
+            assert_eq!(
+                controller.terminal_launches_pending_kill.len(),
+                1,
+                "stop during the launch window records the launch token for kill-on-arrival"
+            );
+            assert_eq!(
+                controller._detached_tasks.len(),
+                detached_before + 1,
+                "the completion poller is kept alive (not dropped) so it can still kill the \
+                 terminal once the handle resolves"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn debug_launch_clears_after_timeout(cx: &mut TestAppContext) {
+        // No `debugger_provider` is wired up, so `start_debug_session` is a
+        // no-op and `DebugClientStarted` never fires. The run should clear
+        // itself once `DEBUG_LAUNCH_TIMEOUT` elapses.
+        let workspace = setup(cx, &[]).await;
+        let store = cx.update(|cx| RunConfigStore::global(cx));
+        store.update(cx, |store, cx| store.upsert(mock_debug_config("d"), cx));
+        let controller = workspace
+            .update(cx, |workspace, cx| cx.new(|cx| RunController::new(workspace, cx)));
+        cx.run_until_parked();
+
+        let id = RunConfigId::from_raw("mock_debug:d");
+        let window = cx
+            .update(|cx| cx.windows().first().copied())
+            .expect("a window exists");
+        window
+            .update(cx, |_, window, cx| {
+                controller.update(cx, |controller, cx| {
+                    controller.run(id.clone(), Executor::Debug, window, cx)
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+        controller.read_with(cx, |controller, _| {
+            assert!(controller.is_running(&id), "debug run is tracked while it launches");
+        });
+
+        cx.executor()
+            .advance_clock(DEBUG_LAUNCH_TIMEOUT + Duration::from_secs(1));
+        cx.run_until_parked();
+        controller.read_with(cx, |controller, _| {
+            assert!(
+                !controller.is_running(&id),
+                "a debug run whose adapter never started a session is cleared after the timeout"
+            );
+            assert!(
+                controller.pending_debug_launches.is_empty(),
+                "the pending-launch bookkeeping is dropped too"
+            );
+        });
+    }
+
+    #[test]
+    fn debug_launch_timed_out_predicate() {
+        let debug_id = RunConfigId::from_raw("mock_debug:d");
+        let terminal_id = RunConfigId::from_raw("mock:t");
+
+        // Still unstarted (no session id) and still pending => timed out.
+        let mut active: HashMap<RunConfigId, ActiveRun> = HashMap::default();
+        active.insert(
+            debug_id.clone(),
+            ActiveRun {
+                config_id: debug_id.clone(),
+                executor: Executor::Debug,
+                kind: ActiveRunKind::Debug { session_id: None },
+            },
+        );
+        let pending: VecDeque<(RunConfigId, HashSet<SessionId>)> =
+            VecDeque::from(vec![(debug_id.clone(), HashSet::default())]);
+        assert!(debug_launch_timed_out(&active, &pending, &debug_id));
+
+        // Got a session id in the meantime => not timed out (even if somehow
+        // still in `pending`).
+        active.insert(
+            debug_id.clone(),
+            ActiveRun {
+                config_id: debug_id.clone(),
+                executor: Executor::Debug,
+                kind: ActiveRunKind::Debug {
+                    session_id: Some(SessionId(1)),
+                },
+            },
+        );
+        assert!(!debug_launch_timed_out(&active, &pending, &debug_id));
+
+        // No pending entry (claimed already / stopped) => not timed out.
+        active.insert(
+            debug_id.clone(),
+            ActiveRun {
+                config_id: debug_id.clone(),
+                executor: Executor::Debug,
+                kind: ActiveRunKind::Debug { session_id: None },
+            },
+        );
+        assert!(!debug_launch_timed_out(&active, &VecDeque::new(), &debug_id));
+
+        // Not even tracked any more => not timed out.
+        assert!(!debug_launch_timed_out(&HashMap::default(), &pending, &debug_id));
+
+        // A terminal run with the same id shape is never "timed out" by this.
+        let mut terminal_active: HashMap<RunConfigId, ActiveRun> = HashMap::default();
+        terminal_active.insert(
+            terminal_id.clone(),
+            ActiveRun {
+                config_id: terminal_id.clone(),
+                executor: Executor::Run,
+                kind: ActiveRunKind::Terminal {
+                    terminal: None,
+                    launch_token: 1,
+                    _poller: None,
+                },
+            },
+        );
+        let terminal_pending: VecDeque<(RunConfigId, HashSet<SessionId>)> =
+            VecDeque::from(vec![(terminal_id.clone(), HashSet::default())]);
+        assert!(!debug_launch_timed_out(
+            &terminal_active,
+            &terminal_pending,
+            &terminal_id
+        ));
     }
 
     #[gpui::test]
