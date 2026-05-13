@@ -82,18 +82,13 @@ pub fn init(cx: &mut App) {
     editor_mcp::set_repo_path_resolver(Some(Box::new(|repo_id, cx| {
         handlers_mcp::resolve_repo_path_by_id(repo_id, cx)
     })));
-    // S-SHL — auto-shelve background snapshotter. A no-op when
-    // `git_panel.auto_shelve.interval_minutes = 0`; the runner reads the
-    // setting on each tick so toggling the value re-arms it without a
-    // restart.
-    shelf::spawn_runner(cx);
 
     cx.observe_new(|editor: &mut Editor, _, cx| {
         conflict_view::register_editor(editor, editor.buffer().clone(), cx);
     })
     .detach();
 
-    cx.observe_new(|workspace: &mut Workspace, window, cx| {
+    cx.observe_new(|workspace: &mut Workspace, _window, cx| {
         ProjectDiff::register(workspace, cx);
         CommitModal::register(workspace);
         git_panel::register(workspace);
@@ -102,14 +97,6 @@ pub fn init(cx: &mut App) {
         undo_modal::register(workspace);
         stashes::register(workspace);
         shelf::register(workspace);
-        // S-SHL — offer to recover the latest auto-shelve snapshot if the
-        // working tree is dirty AND there's a snapshot newer than HEAD.
-        if let Some(window) = window {
-            shelf::maybe_offer_recovery(workspace, window, cx);
-        }
-        // S-SHL — clear auto-shelve snapshots once a successful commit
-        // leaves the working tree clean.
-        shelf::install_post_commit_cleanup(workspace, cx);
 
         workspace.register_action(
             |workspace, action: &git::InteractiveRebaseFromHere, window, cx| {
