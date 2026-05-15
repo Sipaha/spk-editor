@@ -668,6 +668,108 @@ fn dispatch_mouse_click(
     );
 }
 
+// =====================================================================
+// windows.click_id
+// =====================================================================
+
+/// Click a clickable region by the stable `id` previously surfaced from
+/// `workspace.dump_visual_structure` / `windows.dump_visual_structure`.
+/// Avoids the brittle bounds-arithmetic of `windows.click_at` — the agent
+/// reads the dump, picks an item by `kind`+`label`, then passes its `id`
+/// here without computing any geometry itself.
+///
+/// Re-enumerates the rendered frame's hitboxes and the dump tree the same
+/// way the dump tool does, recomputes each stable id, then dispatches a
+/// MouseDown / MouseUp pair to the matched item's centre.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct ClickIdParams {
+    pub window_id: String,
+    pub id: String,
+    /// `"left"` (default), `"right"`, `"middle"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub button: Option<String>,
+    /// Modifiers held during the click. Recognized: `"ctrl"`, `"alt"`,
+    /// `"shift"`, `"cmd"` / `"platform"`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifiers: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for ClickIdParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            window_id: String,
+            id: String,
+            #[serde(default)]
+            button: Option<String>,
+            #[serde(default)]
+            modifiers: Vec<String>,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            window_id: inner.window_id,
+            id: inner.id,
+            button: inner.button,
+            modifiers: inner.modifiers,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ClickIdResult {
+    pub clicked: bool,
+    /// `[x, y, w, h]` of the matched clickable in logical pixels — echoed
+    /// so the caller can sanity-check what was actually clicked.
+    pub bounds: [i32; 4],
+}
+
+#[derive(Clone)]
+pub struct ClickIdTool;
+
+impl McpServerTool for ClickIdTool {
+    type Input = ClickIdParams;
+    type Output = ClickIdResult;
+    const NAME: &'static str = "windows.click_id";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(!input.id.is_empty(), "invalid_params: id is required");
+        let modifiers = parse_modifiers(&input.modifiers)?;
+        let button = parse_button(input.button.as_deref())?;
+        let id = input.id.clone();
+        let bounds = cx.update(|cx| -> anyhow::Result<[i32; 4]> {
+            let handle = find_window_by_id(&input.window_id, cx)?;
+            handle
+                .update(cx, |_view, window, cx| -> anyhow::Result<[i32; 4]> {
+                    let window_id = window.window_handle().window_id();
+                    let clickables =
+                        super::clickables::enumerate_window_clickables(window_id, window);
+                    let matched = clickables.iter().find(|c| c.id == id).ok_or_else(|| {
+                        anyhow::anyhow!("clickable_not_found: id={id}")
+                    })?;
+                    let center = super::clickables::clickable_center(matched);
+                    let arr = matched.bounds;
+                    dispatch_mouse_click(window, cx, center, button, modifiers);
+                    Ok(arr)
+                })
+                .map_err(|err| anyhow::anyhow!("click_id dispatch failed: {err}"))?
+        })?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("click_id {} -> bounds {:?}", input.id, bounds),
+            }],
+            structured_content: ClickIdResult {
+                clicked: true,
+                bounds,
+            },
+        })
+    }
+}
+
 fn find_window_by_id(window_id: &str, cx: &mut App) -> anyhow::Result<gpui::AnyWindowHandle> {
     // Mirror the iteration order used by `windows.list`: prefer Z-ordered
     // stack, fall back to the unstable slot-map iteration so both tools

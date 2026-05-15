@@ -3940,6 +3940,18 @@ impl Window {
         bounds
     }
 
+    /// Iterate over the hitboxes recorded during the most recently rendered
+    /// frame, in the order they were inserted (back-to-front in paint order).
+    ///
+    /// This is intended for introspection (e.g. the autonomous-testing MCP
+    /// tools that surface clickable regions to an agent); it does NOT include
+    /// hitboxes from the in-progress `next_frame`. The set is regenerated each
+    /// frame, so the returned [`HitboxId`]s are only stable within a single
+    /// rendered frame.
+    pub fn iter_hitboxes(&self) -> impl ExactSizeIterator<Item = &Hitbox> + '_ {
+        self.rendered_frame.hitboxes.iter()
+    }
+
     /// This method should be called during `prepaint`. You can use
     /// the returned [Hitbox] during `paint` or in an event handler
     /// to determine whether the inserted hitbox was the topmost.

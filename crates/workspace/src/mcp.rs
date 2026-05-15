@@ -7,6 +7,7 @@
 //! workspace-domain types (`MultiWorkspace`, `AppState`, `open_paths`).
 //! Keeping them out of `editor_mcp` breaks the would-be cycle between
 //! `editor_mcp` and `workspace`.
+pub mod clickables;
 pub mod handle_cli_args;
 pub mod windows;
 
@@ -36,5 +37,8 @@ pub fn register(cx: &mut App) {
     });
     editor_mcp::register_tool(cx, |server| {
         server.add_tool(windows::ClickAtTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(windows::ClickIdTool);
     });
 }
