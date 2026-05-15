@@ -1,6 +1,18 @@
 # R-1: Remote Control settings + status-bar widget + modal panel (UI only)
 
-**Status:** ready to dispatch
+**Status:** complete (2026-05-15). Sub-agent landed `ee50a9508e`,
+`5faad00546`, `6c97a48a8a` (merged as `<this-finalize>`). 16 unit
+tests passing across the 2 new fork-owned crates. Supervisor's § H
+smoke-test: status-bar item "Remote Control" + red LED renders in
+the bottom-right; clicking opens the modal with all 4 sections
+(Server address + Detect/Save, Port 7777, Status row, Authorized
+clients with inline Add). Screenshot:
+[`2026-05-15-remote-control-R1-screenshot.png`](2026-05-15-remote-control-R1-screenshot.png).
+Sub-agent deviated from plan in three (acceptable) ways: inline
+Add-client flow instead of sub-modal; `OsRng.try_fill_bytes` via
+rand 0.9's `TryRngCore` (plan said `RngCore`); UI guard blocks
+enabling toggle until address is set (modal-level, not store-
+level).
 **Estimated:** 1 sub-agent session, ~1.5–2 h, worktree-isolated
 **Goal:** First phase of the Remote Control arc — settings model +
 persistence + status-bar widget + modal panel UI scaffolding. **No
