@@ -49,6 +49,7 @@ can read them.
 
 | Date | Status | Plan |
 |---|---|---|
+| 2026-05-15 | ready to dispatch | [`plans/2026-05-15-clickable-tree.md`](plans/2026-05-15-clickable-tree.md) — hitbox-based clickable enumeration + click-by-id MCP tool (phase 1 of "agent UI without screenshots") |
 | 2026-05-15 | complete | [`plans/2026-05-15-headless-platform-real.md`](plans/2026-05-15-headless-platform-real.md) — native headless GPUI platform (no Xvfb). Screenshot: [`plans/2026-05-15-headless-platform-real-screenshot.png`](plans/2026-05-15-headless-platform-real-screenshot.png). |
 
 ---
