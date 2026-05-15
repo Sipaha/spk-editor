@@ -104,13 +104,13 @@ A running `spk-editor` instance exposes an MCP server over a Unix socket so an a
 
 **Socket:** `~/.spk/spk-editor-dev/config/mcp.sock` for a `--debug` build, `~/.spk/spk-editor/config/mcp.sock` for release (NOT `~/.config/spk-editor/` — see `crates/paths`). Single-instance — one editor process at a time holds the socket; a second `spk-editor` invocation hands off CLI args via the existing socket and exits. Lock file is `…/config/mcp.lock`. (`script/run-mcp` prints the resolved socket path on launch.)
 
-**Tool catalog** (59 tools, JSON-RPC 2.0 over the socket — namespaces: `editor.*`, `windows.*`, `solutions.*`, `solution.git.*`, `catalog.*`, `solution_agent.*`, `workspace.*`, `project.*`, `diagnostics.*`):
+**Tool catalog** (60 tools, JSON-RPC 2.0 over the socket — namespaces: `editor.*`, `windows.*`, `solutions.*`, `solution.git.*`, `catalog.*`, `solution_agent.*`, `workspace.*`, `project.*`, `diagnostics.*`):
 - **Probe / control:** `editor.capabilities`, `editor.handle_cli_args`, `editor.{subscribe,unsubscribe,list_subscriptions}`, `editor.{get_operation,cancel_operation}`
 - **Solutions / catalog (the multi-project workspace abstraction):** `solutions.{list,get,create,rename,delete,open,close,find_for_path,add_member,remove_member,reorder_members}`, `catalog.{list,add_project,remove_project,edit_project,refresh_cache,clear_cache}`
 - **Solution-wide git (S-SOL-LOG / S-SOL-DSH / S-SOL-CMT):** `solution.git.{aggregated_log,status_dashboard,batch_fetch,batch_pull,checkout_pattern,commit_all}`
 - **Solution-scoped AI sessions:** `solution_agent.{list_sessions,get_session,create_session,send_message,cancel_turn,close_session,rename_session,restart_agent}`
-- **Windows:** `windows.{list,focus,close,dispatch_action,send_keystroke,send_text,click_at,dump_visual_structure}`
-- **Workspace state:** `workspace.{list_buffers,get_effective_settings,dispatch_action,screenshot,dump_visual_structure}`
+- **Windows:** `windows.{list,focus,close,dispatch_action,send_keystroke,send_text,click_at,click_id,dump_visual_structure}`
+- **Workspace state:** `workspace.{list_buffers,get_effective_settings,dispatch_action,screenshot,dump_visual_structure}` — the two `dump_visual_structure` variants now also return a `clickables: Vec<Clickable>` array; pair with `windows.click_id` to click by stable hash id rather than computing window-relative coordinates yourself.
 - **Project / buffer ops:** `project.{list_files,read_buffer,apply_edit,save_buffer,open_file,close_buffer,create_file,delete_file,rename_file,find_in_buffers,goto_definition,find_references}`
 - **Diagnostics:** `diagnostics.get` (per-file summaries + per-diagnostic items with severity / message / source / code)
 

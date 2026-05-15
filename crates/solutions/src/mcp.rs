@@ -2213,6 +2213,13 @@ pub struct VisualNode {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct DumpVisualStructureResult {
     pub tree: VisualNode,
+    /// Hitboxes from the most recently rendered frame, cross-referenced
+    /// against the `VisualNode` tree where the deepest enclosing node
+    /// (by bounds containment) can lend its `kind` / `label`. Anonymous
+    /// clickables (no labelled ancestor) are still emitted so an agent
+    /// can fall back on click-by-coordinates if needed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clickables: Vec<workspace::mcp::clickables::Clickable>,
 }
 
 #[derive(Clone)]
@@ -2232,14 +2239,18 @@ impl McpServerTool for DumpVisualStructureTool {
             !input.solution_id.is_empty(),
             "invalid_params: solution_id is required"
         );
-        let tree = cx
+        let (tree, clickables) = cx
             .update(|cx| build_visual_tree(&input.solution_id, cx))
             .ok_or_else(|| anyhow::anyhow!("solution_not_open: {}", input.solution_id))?;
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text {
-                text: format!("structure for {}", input.solution_id),
+                text: format!(
+                    "structure for {} ({} clickables)",
+                    input.solution_id,
+                    clickables.len()
+                ),
             }],
-            structured_content: DumpVisualStructureResult { tree },
+            structured_content: DumpVisualStructureResult { tree, clickables },
         })
     }
 }
@@ -2289,34 +2300,90 @@ impl McpServerTool for DumpWindowStructureTool {
             !input.window_id.is_empty(),
             "invalid_params: window_id is required"
         );
-        let tree = cx.update(|cx| -> anyhow::Result<VisualNode> {
-            let handle = cx
-                .windows()
-                .into_iter()
-                .find(|h| editor_mcp::format_window_id(h.window_id()) == input.window_id)
-                .with_context(|| format!("window_not_found: {}", input.window_id))?;
-            build_visual_tree_for_window(handle, cx)
-                .with_context(|| format!("window_not_multi_workspace: {}", input.window_id))
-        })?;
+        let (tree, clickables) = cx.update(
+            |cx| -> anyhow::Result<(VisualNode, Vec<workspace::mcp::clickables::Clickable>)> {
+                let handle = cx
+                    .windows()
+                    .into_iter()
+                    .find(|h| editor_mcp::format_window_id(h.window_id()) == input.window_id)
+                    .with_context(|| format!("window_not_found: {}", input.window_id))?;
+                build_visual_tree_for_window(handle, cx).with_context(|| {
+                    format!("window_not_multi_workspace: {}", input.window_id)
+                })
+            },
+        )?;
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text {
-                text: format!("structure for {}", input.window_id),
+                text: format!(
+                    "structure for {} ({} clickables)",
+                    input.window_id,
+                    clickables.len()
+                ),
             }],
-            structured_content: DumpVisualStructureResult { tree },
+            structured_content: DumpVisualStructureResult { tree, clickables },
         })
     }
 }
 
-fn build_visual_tree(solution_id: &str, cx: &mut App) -> Option<VisualNode> {
+fn build_visual_tree(
+    solution_id: &str,
+    cx: &mut App,
+) -> Option<(VisualNode, Vec<workspace::mcp::clickables::Clickable>)> {
     let handle = find_window_for_solution(solution_id, cx)?;
     build_visual_tree_for_window(handle, cx)
 }
 
-fn build_visual_tree_for_window(handle: gpui::AnyWindowHandle, cx: &mut App) -> Option<VisualNode> {
+fn build_visual_tree_for_window(
+    handle: gpui::AnyWindowHandle,
+    cx: &mut App,
+) -> Option<(VisualNode, Vec<workspace::mcp::clickables::Clickable>)> {
     let window_handle = handle.downcast::<workspace::MultiWorkspace>()?;
     window_handle
-        .read_with(cx, |multi, cx| build_workspace_node(multi, cx))
+        .update(cx, |multi, window, cx| {
+            let tree = build_workspace_node(multi, cx);
+            let window_id = window.window_handle().window_id();
+            let clickables = enrich_clickables(
+                workspace::mcp::clickables::enumerate_window_clickables(window_id, window),
+                window_id,
+                &tree,
+            );
+            (tree, clickables)
+        })
         .ok()
+}
+
+/// Cross-reference each clickable against the visual tree by trying to
+/// match a known logical region (`TitleBar` / `Dock(left|right|bottom)` /
+/// `PaneArea` / `StatusBar` / `Modal(...)`) — the tree node whose
+/// position is fixed by the workspace layout. Phase 1 surfaces every
+/// hitbox even when no node matches (`kind` / `label` left `None`) so
+/// the agent can still fall back on `click_at` with the bounds.
+///
+/// Once `VisualNode` carries actual `Bounds<Pixels>` from the rendered
+/// frame (phase 2), this function will deepest-enclosing-match every
+/// node — see follow-up.
+fn enrich_clickables(
+    mut clickables: Vec<workspace::mcp::clickables::Clickable>,
+    window_id: gpui::WindowId,
+    _tree: &VisualNode,
+) -> Vec<workspace::mcp::clickables::Clickable> {
+    // Phase-1 placeholder: the synthetic visual tree carries no bounds,
+    // so we can't reliably map a hitbox to a node yet. Leaving kind/label
+    // as None is correct — `windows.click_id` only needs the hash, which
+    // is computed from `(window_id, "", "", bounds_rounded)` in the
+    // anonymous case and stays stable across redraws.
+    //
+    // We still recompute IDs here (using the final kind/label) so any
+    // future enrichment slots in without breaking the click_id contract.
+    for clickable in clickables.iter_mut() {
+        clickable.id = workspace::mcp::clickables::stable_id(
+            window_id,
+            clickable.kind.as_deref(),
+            clickable.label.as_deref(),
+            clickable.bounds,
+        );
+    }
+    clickables
 }
 
 /// Synthesize what the TitleBar would render for this workspace, without
