@@ -418,7 +418,49 @@ Only when the user explicitly asks. This fork has no scheduled push cadence.
 
 ---
 
+## 7. NEXT — picking the next phase
+
+After FINALIZE, look at the pool of outstanding tasks the user has named
+across the session (UI fixes, queued asks, follow-ups surfaced in REPORTs,
+spec items waiting for a phase).
+
+**Self-pick, don't poll.** If the user named multiple tasks and did NOT say
+"do A before B", **the supervisor picks an order on its own judgement and
+starts the next phase in the same turn**. Heuristic:
+
+1. Items that unblock others first (e.g. an infrastructure phase before the
+   UI phases that depend on it).
+2. Items where the supervisor has the freshest context (cheap to keep
+   running) before context-switching to a colder area.
+3. User-facing pain (a reported bug) before purely architectural cleanup,
+   when scope is similar.
+
+Surface the choice in 1–2 sentences ("taking X next because it unblocks Y;
+deferring Z to after") so the user can redirect if they want — but **start
+the work immediately**, don't wait for permission.
+
+**Ask is still appropriate** for:
+- A major direction shift outside the named pool ("now pivot to W").
+- A design call with multiple viable answers + serious downstream
+  consequences (where getting it wrong wastes a full phase).
+- The user said "what would you do here?" explicitly.
+
+Saying "I'm picking X next" while starting the work is **not** the same as
+"asking which to pick". The former gives the user a redirect handle without
+forcing them into the loop on every transition.
+
+---
+
 ## Anti-patterns
+
+❌ **Stopping with "which next?" between phases when the task pool is
+known.** If the user has already named multiple outstanding tasks and
+hasn't said "this before that", the supervisor picks an order on its own
+judgement and starts the next phase in the same turn (§ 7 "NEXT"). Polling
+the user for priority between every phase turns the workflow into
+turn-by-turn approval — that's not autonomous, it's just slower
+non-autonomous. State the pick + start the work; the user can redirect if
+they want.
 
 ❌ **Trusting sub-agent claims without verifying.** Sub-agent says "tests pass"
 → run `cargo test` anyway. "The feature works" → screenshot it.
