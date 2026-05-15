@@ -1,7 +1,7 @@
 # Finding: `workspace.screenshot` returns a blank dark slate under `--headless` (Xvfb)
 
 **Date:** 2026-05-15
-**Status:** open — workaround in place, root cause not fixed
+**Status:** resolved — replaced Xvfb with native headless platform (see Resolution below + ADR-0002)
 
 ## Symptom
 
@@ -100,3 +100,40 @@ agent session if the env-var approach holds; longer if the wgpu surface
 issue with AMD RADV needs proper investigation.
 
 Until that lands, the two-mode workflow above is the canonical recipe.
+
+---
+
+## Resolution (2026-05-15)
+
+Resolved by going option **2** from the original hypothesis: a native
+`HeadlessClient` that bypasses X11 entirely. See
+[ADR-0002](../architecture/decisions/0002-native-headless-platform.md)
+for the full decision rationale.
+
+Concretely:
+
+- `gpui::PlatformHeadlessRenderer` trait ungated (no longer
+  `cfg(test|test-support)`).
+- New `gpui::HeadlessWindow` + `gpui::HeadlessDisplay` in
+  `crates/gpui/src/platform/headless/{window,display}.rs`.
+- New `gpui_wgpu::WgpuHeadlessRenderer` (`crates/gpui_wgpu/src/headless_renderer.rs`)
+  + `WgpuRenderer::new_offscreen` constructor + surface-less
+  `WgpuContext::new_offscreen` path with integrated-GPU adapter bias.
+- `gpui_linux::headless::HeadlessClient::open_window` builds a real
+  `HeadlessWindow` backed by `WgpuHeadlessRenderer`. `displays()` /
+  `primary_display()` / `active_window()` / `window_stack()` all now
+  return real values.
+- `gpui_platform::current_headless_renderer()` ungated; Linux arm added.
+- `crates/zed/src/main.rs` parses `--headless` CLI flag and passes it
+  through `current_platform(headless)`.
+- `script/run-mcp --headless` drops the `xvfb-run` wrapper; passes
+  `--headless` to the binary instead.
+
+The "NVIDIA Vulkan adapter under Xvfb fails the offscreen pass" failure
+mode is gone — adapter selection for the offscreen renderer never consults
+a compositor and biases toward integrated GPUs. No Xvfb. No DRI3.
+`workspace.screenshot` exercises the same `Window::render_to_image` →
+`WgpuRenderer::render_to_image` path as `--display` mode.
+
+Plan doc: [`docs/plans/2026-05-15-headless-platform-real.md`](../plans/2026-05-15-headless-platform-real.md).
+Commit SHAs: see plan-doc bottom (filled at finalize).

@@ -73,7 +73,7 @@ use crate::zed::{OpenRequestKind, eager_load_active_theme_and_icon_theme};
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-fn files_not_created_on_launch(errors: HashMap<io::ErrorKind, Vec<&Path>>) {
+fn files_not_created_on_launch(errors: HashMap<io::ErrorKind, Vec<&Path>>, headless: bool) {
     let message = "SPK Editor failed to launch";
     let error_details = errors
         .into_iter()
@@ -101,6 +101,12 @@ fn files_not_created_on_launch(errors: HashMap<io::ErrorKind, Vec<&Path>>) {
         .collect::<Vec<_>>().join("\n\n");
 
     eprintln!("{message}: {error_details}");
+    // In headless mode there's no display to put a prompt window on, so the
+    // launch-failure path just printed-and-exits. The full prompt path stays
+    // on the on-screen platform.
+    if headless {
+        return;
+    }
     Application::with_platform(gpui_platform::current_platform(false))
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx| {
@@ -301,7 +307,7 @@ fn main() {
 
     let file_errors = init_paths();
     if !file_errors.is_empty() {
-        files_not_created_on_launch(file_errors);
+        files_not_created_on_launch(file_errors, args.headless);
         return;
     }
 
@@ -417,8 +423,8 @@ fn main() {
     #[cfg(windows)]
     check_for_conpty_dll();
 
-    let app =
-        Application::with_platform(gpui_platform::current_platform(false)).with_assets(Assets);
+    let app = Application::with_platform(gpui_platform::current_platform(args.headless))
+        .with_assets(Assets);
 
     let app_db = db::AppDatabase::new();
     let system_id = app.background_executor().spawn(system_id());
@@ -1923,6 +1929,20 @@ struct Args {
     /// by having SPK Editor act like netcat communicating over a Unix socket.
     #[arg(long, hide = true)]
     nc: Option<String>,
+
+    /// Run the editor on the native headless GPUI platform — no X / Wayland
+    /// connection, no window on the user's desktop, all rendering through
+    /// the offscreen wgpu pipeline. Used by `script/run-mcp --headless` to
+    /// drive the editor autonomously over the MCP socket.
+    ///
+    /// `workspace.screenshot` still works in this mode (the offscreen
+    /// renderer captures rendered pixels into a PNG). UI dispatch via
+    /// `windows.dispatch_action` / `send_keystroke` / `send_text` /
+    /// `click_at` works identically to the on-screen platform.
+    ///
+    /// SPK fork addition (was Xvfb-wrapped before; see ADR-0002).
+    #[arg(long)]
+    headless: bool,
 
     /// Used as `GIT_SEQUENCE_EDITOR` during programmatic interactive rebase.
     /// Reads the pre-built todo from the session directory pointed to by

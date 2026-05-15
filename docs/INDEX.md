@@ -34,6 +34,7 @@ contracts, multi-crate invariants). Each ADR is dated `accepted`/`superseded`.
 | # | Title | Status | Document |
 |---|---|---|---|
 | 0001 | Fork philosophy: no scheduled upstream merge | accepted | [`architecture/decisions/0001-fork-philosophy.md`](architecture/decisions/0001-fork-philosophy.md) |
+| 0002 | Native headless GPUI platform for autonomous agent driving | accepted | [`architecture/decisions/0002-native-headless-platform.md`](architecture/decisions/0002-native-headless-platform.md) |
 
 ---
 
@@ -75,7 +76,7 @@ Short, dated, single-fact notes from sessions: "ran a benchmark and got X",
 
 | Date | Status | Topic |
 |---|---|---|
-| 2026-05 | open | [`findings/2026-05-headless-screenshot-blank.md`](findings/2026-05-headless-screenshot-blank.md) — `workspace.screenshot` returns blank under `--headless` (Xvfb); root cause + workaround |
+| 2026-05 | resolved | [`findings/2026-05-headless-screenshot-blank.md`](findings/2026-05-headless-screenshot-blank.md) — `workspace.screenshot` returns blank under `--headless` (Xvfb); resolved by ADR-0002 (native headless platform) |
 
 ---
 

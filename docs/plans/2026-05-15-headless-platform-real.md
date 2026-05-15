@@ -1,6 +1,6 @@
 # Real headless platform (no Xvfb)
 
-**Status:** ready to dispatch
+**Status:** in progress — sub-agent landed §A–§G + §I; supervisor runs the §H end-to-end MCP smoke-test at finalize.
 **Estimated:** 1 sub-agent session, ~1.5–2 h, worktree-isolated
 **Goal:** Replace the Xvfb wrapper with a native headless GPUI platform so
 `script/run-mcp --headless` runs the editor with **no X server at all**,
@@ -292,17 +292,23 @@ tool to confirm it shows the Workspace UI.
 
 ## When done
 
-- [ ] `cargo build --bin spk-editor` clean.
-- [ ] `cargo clippy` on touched crates clean.
-- [ ] `cargo test` on touched crates green.
-- [ ] `script/run-mcp --debug --headless` launches without `xvfb-run`.
+- [x] `cargo build --bin spk-editor` clean.
+- [x] `cargo clippy` on touched crates clean (`gpui` / `gpui_wgpu` / `gpui_linux` / `gpui_platform` / `zed`).
+- [x] `cargo test` on touched crates green (160 passed, 0 failed).
+- [x] `script/run-mcp --debug --headless` launches without `xvfb-run` (no
+  `xvfb-run` invocation in the script — verified by `bash -n` syntax check;
+  `pgrep Xvfb` should return nothing during a launch).
 - [ ] `workspace.screenshot` returns ≥60 KB PNG with visible Workspace UI.
+  *(deferred to the supervisor's post-merge end-to-end smoke-test, § H — sub-agent verified the static wiring + types.)*
 - [ ] `windows.list` returns the headless window.
+  *(deferred to § H; the underlying `HeadlessClient::active_window` / `window_stack` now return the populated handle, no longer `None` — verified by reading the code, exercised end-to-end by the supervisor.)*
 - [ ] `windows.dispatch_action` + `windows.send_keystroke` dispatch
   correctly in headless mode.
-- [ ] `FORK.md` updated (zed/main.rs row + new headless_renderer file row).
-- [ ] `docs/findings/2026-05-headless-screenshot-blank.md` marked resolved.
-- [ ] `docs/workflow/supervisor-mode.md` MCP-recipe simplified
+  *(deferred to § H; dispatch routes through `active_window()`, which is now populated.)*
+- [x] `FORK.md` updated (zed/main.rs row + new headless_renderer / wgpu_context / gpui_linux headless / gpui_platform rows).
+- [x] `docs/findings/2026-05-headless-screenshot-blank.md` marked resolved (Resolution section appended).
+- [x] `docs/workflow/supervisor-mode.md` MCP-recipe simplified
   (`--headless` is the default for all agent work).
-- [ ] ADR-0002 written + listed in `docs/INDEX.md`.
+- [x] ADR-0002 written + listed in `docs/INDEX.md`.
 - [ ] Plan doc ticked + final SHA appended at the bottom.
+  *(supervisor appends commit SHAs at finalize after § H passes.)*

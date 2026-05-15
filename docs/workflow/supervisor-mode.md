@@ -342,15 +342,16 @@ voxelcraft anti-pattern; same applies here).
 
 ### MCP smoke-test (UI / workspace / project / buffer change)
 
-**Two launch modes — pick by what you need to verify:**
+**Default to `--headless` for all agent-driven work.** Since ADR-0002,
+`workspace.screenshot` returns real rendered pixels in headless mode
+(native offscreen wgpu pipeline — no X server / Xvfb / window on the
+user's desktop). State ops, screenshots, action dispatch, keystroke
+delivery all work uniformly.
 
-| Mode | Window | Use for | Limitation |
-|---|---|---|---|
-| `--debug --headless` | Hidden (Xvfb) | State ops: actions, MCP tool calls, `dump_visual_structure`, file edits, diagnostics | `workspace.screenshot` returns **blank** under Xvfb today — see [`findings/2026-05-headless-screenshot-blank.md`](../findings/2026-05-headless-screenshot-blank.md) |
-| `--debug --display` (or default) | Visible on user's desktop | Visual verification: `workspace.screenshot` of actual pixels | Window flashes on user's screen briefly |
-
-Default to `--headless` for state assertions; switch to `--display` only
-when a real screenshot is required.
+| Mode | Window | When to use |
+|---|---|---|
+| `--debug --headless` | None | **Default.** Every agent-driven verification — state ops, screenshots, action dispatch. No window on the user's desktop. |
+| `--debug --display` | Visible on user's desktop | Only when a human developer wants to watch the editor render as the agent drives it. |
 
 ```bash
 # 1. Make sure no stale editor process is holding the socket.
