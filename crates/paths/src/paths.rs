@@ -287,6 +287,22 @@ pub fn remote_control_settings_file() -> &'static PathBuf {
     REMOTE_CONTROL_SETTINGS_FILE.get_or_init(|| config_dir().join("remote-control.json"))
 }
 
+/// Returns the path to the persisted Remote Control self-signed TLS cert
+/// (`remote-control.cert.der`). The cert is generated on first `enabled =
+/// true` and reused on subsequent starts so the SHA-256 fingerprint stays
+/// stable across editor restarts — the Android client pins on it.
+pub fn remote_control_cert_file() -> &'static PathBuf {
+    static REMOTE_CONTROL_CERT_FILE: OnceLock<PathBuf> = OnceLock::new();
+    REMOTE_CONTROL_CERT_FILE.get_or_init(|| config_dir().join("remote-control.cert.der"))
+}
+
+/// Returns the path to the persisted Remote Control private key
+/// (`remote-control.key.der`). Sibling to `remote_control_cert_file`.
+pub fn remote_control_key_file() -> &'static PathBuf {
+    static REMOTE_CONTROL_KEY_FILE: OnceLock<PathBuf> = OnceLock::new();
+    REMOTE_CONTROL_KEY_FILE.get_or_init(|| config_dir().join("remote-control.key.der"))
+}
+
 /// Returns the path to the extensions directory.
 ///
 /// This is where installed extensions are stored.

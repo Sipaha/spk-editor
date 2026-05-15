@@ -614,6 +614,7 @@ heck = "0.5"
 hdrhistogram = "7"
 heed = { version = "0.21.0", features = ["read-txn-no-tls"] }
 hex = "0.4.3"
+hmac = "0.12"
 human_bytes = "0.4.1"
 html5ever = "0.27.0"
 http = "1.1"
@@ -719,6 +720,7 @@ reqwest = { git = "https://github.com/zed-industries/reqwest.git", rev = "c15662
     "socks",
     "stream",
 ], package = "zed-reqwest", version = "0.12.15-zed" }
+rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "pem"] }
 rsa = "0.9.6"
 runtimelib = { version = "1.4.0", default-features = false, features = [
     "async-dispatcher-runtime", "aws-lc-rs"
@@ -751,6 +753,7 @@ stacksafe = "0.1"
 streaming-iterator = "0.1"
 strsim = "0.11"
 strum = { version = "0.27.2", features = ["derive"] }
+subtle = "2.6"
 syn = { version = "2.0.101", features = ["full", "extra-traits", "visit-mut"] }
 sys-locale = "0.3.1"
 sysinfo = "0.37.0"
@@ -767,10 +770,12 @@ time = { version = "0.3", features = [
 ] }
 tiny_http = "0.12"
 tokio = { version = "1" }
+tokio-rustls = "0.26"
 tokio-socks = { version = "0.5.2", default-features = false, features = [
     "futures-io",
     "tokio",
 ] }
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["rustls-tls-webpki-roots", "handshake", "connect"] }
 toml = "0.8"
 toml_edit = { version = "0.22", default-features = false, features = [
     "display",
