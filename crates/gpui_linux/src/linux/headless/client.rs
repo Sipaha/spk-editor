@@ -4,16 +4,25 @@ use std::rc::Rc;
 use calloop::{EventLoop, LoopHandle};
 use util::ResultExt;
 
+use crate::linux::headless::HeadlessDisplay;
 use crate::linux::{LinuxClient, LinuxCommon, LinuxKeyboardLayout};
 use gpui::{
-    AnyWindowHandle, CursorStyle, DisplayId, PlatformDisplay, PlatformKeyboardLayout,
-    PlatformWindow, WindowParams,
+    AnyWindowHandle, CursorStyle, DisplayId, HeadlessWindow, PlatformDisplay,
+    PlatformKeyboardLayout, PlatformWindow, WindowParams,
 };
+
+#[cfg(feature = "x11")]
+use gpui_wgpu::{DEFAULT_OFFSCREEN_HEIGHT, DEFAULT_OFFSCREEN_WIDTH, WgpuHeadlessRenderer};
 
 pub struct HeadlessClientState {
     pub(crate) _loop_handle: LoopHandle<'static, HeadlessClient>,
     pub(crate) event_loop: Option<calloop::EventLoop<'static, HeadlessClient>>,
     pub(crate) common: LinuxCommon,
+    /// Open windows, in z-order (single-window today, kept as a Vec so adding
+    /// multi-window later is a one-line change).
+    windows: Vec<AnyWindowHandle>,
+    /// Cached display so multiple `displays()` calls return the same `Rc`.
+    display: Rc<dyn PlatformDisplay>,
 }
 
 #[derive(Clone)]
@@ -35,10 +44,14 @@ impl HeadlessClient {
             })
             .ok();
 
+        let display: Rc<dyn PlatformDisplay> = Rc::new(HeadlessDisplay::new());
+
         HeadlessClient(Rc::new(RefCell::new(HeadlessClientState {
             event_loop: Some(event_loop),
             _loop_handle: handle,
             common,
+            windows: Vec::new(),
+            display,
         })))
     }
 }
@@ -53,15 +66,20 @@ impl LinuxClient for HeadlessClient {
     }
 
     fn displays(&self) -> Vec<Rc<dyn PlatformDisplay>> {
-        vec![]
+        vec![self.0.borrow().display.clone()]
     }
 
     fn primary_display(&self) -> Option<Rc<dyn PlatformDisplay>> {
-        None
+        Some(self.0.borrow().display.clone())
     }
 
-    fn display(&self, _id: DisplayId) -> Option<Rc<dyn PlatformDisplay>> {
-        None
+    fn display(&self, id: DisplayId) -> Option<Rc<dyn PlatformDisplay>> {
+        let state = self.0.borrow();
+        if state.display.id() == id {
+            Some(state.display.clone())
+        } else {
+            None
+        }
     }
 
     #[cfg(feature = "screen-capture")]
@@ -78,19 +96,63 @@ impl LinuxClient for HeadlessClient {
     }
 
     fn active_window(&self) -> Option<AnyWindowHandle> {
-        None
+        // Last-opened window, matching the X11/Wayland behaviour where the
+        // most recently focused window is the "active" one. `dispatch_action`
+        // routes through here, so returning `None` (the old stub) silently
+        // dropped action dispatches in headless mode.
+        self.0.borrow().windows.last().copied()
     }
 
     fn window_stack(&self) -> Option<Vec<AnyWindowHandle>> {
-        None
+        let stack = self.0.borrow().windows.clone();
+        if stack.is_empty() { None } else { Some(stack) }
     }
 
     fn open_window(
         &self,
-        _handle: AnyWindowHandle,
-        _params: WindowParams,
+        handle: AnyWindowHandle,
+        params: WindowParams,
     ) -> anyhow::Result<Box<dyn PlatformWindow>> {
-        anyhow::bail!("neither DISPLAY nor WAYLAND_DISPLAY is set. You can run in headless mode");
+        let display = self.0.borrow().display.clone();
+
+        // The wgpu offscreen renderer is the *only* headless renderer the fork
+        // ships. Gated on the `x11` feature for build-graph hygiene (that's
+        // what brings `gpui_wgpu` in on Linux); leaving it off means the
+        // user explicitly asked for a no-GPU build, in which case headless
+        // open_window has to bail.
+        #[cfg(feature = "x11")]
+        let renderer: Option<Box<dyn gpui::PlatformHeadlessRenderer>> = {
+            let width =
+                (params.bounds.size.width.as_f32() as u32).clamp(1, DEFAULT_OFFSCREEN_WIDTH);
+            let height =
+                (params.bounds.size.height.as_f32() as u32).clamp(1, DEFAULT_OFFSCREEN_HEIGHT);
+            match WgpuHeadlessRenderer::new(width, height) {
+                Ok(r) => Some(Box::new(r) as Box<dyn gpui::PlatformHeadlessRenderer>),
+                Err(e) => {
+                    log::warn!(
+                        "Headless wgpu renderer init failed ({e}); proceeding without offscreen \
+                         rendering — `workspace.screenshot` will return an error."
+                    );
+                    None
+                }
+            }
+        };
+        #[cfg(not(feature = "x11"))]
+        let renderer: Option<Box<dyn gpui::PlatformHeadlessRenderer>> = {
+            log::warn!(
+                "Headless build has no wgpu feature; offscreen rendering disabled. \
+                 Build with the `x11` feature to enable `workspace.screenshot`."
+            );
+            None
+        };
+
+        let window =
+            HeadlessWindow::new(handle, params, display, /* scale_factor */ 1.0, renderer);
+
+        // Track the handle so `active_window` / `window_stack` reflect reality.
+        self.0.borrow_mut().windows.push(handle);
+
+        Ok(Box::new(window))
     }
 
     fn compositor_name(&self) -> &'static str {

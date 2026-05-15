@@ -7912,6 +7912,7 @@ dependencies = [
  "gpui_linux",
  "gpui_macos",
  "gpui_web",
+ "gpui_wgpu",
  "gpui_windows",
 ]
 
