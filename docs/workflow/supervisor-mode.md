@@ -342,6 +342,16 @@ voxelcraft anti-pattern; same applies here).
 
 ### MCP smoke-test (UI / workspace / project / buffer change)
 
+**Two launch modes — pick by what you need to verify:**
+
+| Mode | Window | Use for | Limitation |
+|---|---|---|---|
+| `--debug --headless` | Hidden (Xvfb) | State ops: actions, MCP tool calls, `dump_visual_structure`, file edits, diagnostics | `workspace.screenshot` returns **blank** under Xvfb today — see [`findings/2026-05-headless-screenshot-blank.md`](../findings/2026-05-headless-screenshot-blank.md) |
+| `--debug --display` (or default) | Visible on user's desktop | Visual verification: `workspace.screenshot` of actual pixels | Window flashes on user's screen briefly |
+
+Default to `--headless` for state assertions; switch to `--display` only
+when a real screenshot is required.
+
 ```bash
 # 1. Make sure no stale editor process is holding the socket.
 pgrep -af "target/debug/spk-editor" | grep -v bash || echo "no leftover"
@@ -349,8 +359,12 @@ pgrep -af "target/debug/spk-editor" | grep -v bash || echo "no leftover"
 # can match the current bash and exit-144 yourself).
 
 # 2. Launch.
-script/run-mcp --debug &              # auto-builds if missing; sets SPK_EDITOR_HOME
-# Wait for socket.
+script/run-mcp --debug --headless &   # state-only verification (preferred)
+# OR:
+script/run-mcp --debug --display &    # when a screenshot is required
+# Both auto-build if missing, set SPK_EDITOR_HOME, and strip stale
+# socket/lock state up front (so a failing precheck doesn't leave a
+# half-ready state behind).
 until [ -S "$HOME/.spk/spk-editor-dev/config/mcp.sock" ]; do sleep 0.5; done
 
 # 3. Drive via a small Python (or socat) client over the JSON-RPC newline-delimited socket.
@@ -358,9 +372,10 @@ until [ -S "$HOME/.spk/spk-editor-dev/config/mcp.sock" ]; do sleep 0.5; done
 #    the plan doc. Use `windows.dispatch_action` over `windows.click_at` when
 #    a named action exists (geometry-independent).
 
-# 4. Visual assert: `workspace.screenshot` (PNG, returns offscreen-rendered window
-#    content — immune to occlusion by user's other windows). Read the PNG with the
-#    Read tool, eyeball the visual.
+# 4. Visual assert (`--display` mode only): `workspace.screenshot` returns
+#    a PNG of the offscreen-rendered window content (immune to occlusion by
+#    other windows on the same display). Read the PNG with the Read tool,
+#    eyeball the visual.
 
 # 5. Teardown.
 pkill -f target/debug/spk-editor      # OK by name here — exit 144 noise is harmless

@@ -77,7 +77,9 @@ Short, dated, single-fact notes from sessions: "ran a benchmark and got X",
 "found a crate Y", "noticed library Z behaves W in case V". Filename
 `YYYY-MM-<slug>.md`. 10–50 lines, no fluff.
 
-(Empty — first finding lands when a session produces one.)
+| Date | Status | Topic |
+|---|---|---|
+| 2026-05 | open | [`findings/2026-05-headless-screenshot-blank.md`](findings/2026-05-headless-screenshot-blank.md) — `workspace.screenshot` returns blank under `--headless` (Xvfb); root cause + workaround |
 
 ---
 
