@@ -9,6 +9,41 @@
 > work" reality. The playbook itself is **in scope to improve** — when a step
 > trips you twice, fix the doc, don't soldier through it.
 
+## 0. Bootstrap — resume from a paused session
+
+When the user types **"ты автономный супервизор"**, **"продолжай работу"**,
+**"continue work"**, **"resume"**, or any close paraphrase:
+
+1. `Glob "docs/findings/*-session-handoff.md"` → `Read` the latest one
+   (filenames are dated `YYYY-MM-DD`, lexicographic order = chronological).
+   That file is the previous session's pause snapshot.
+2. `git log --oneline -15` — confirm the commit chain matches what the
+   handoff claims (drift detection).
+3. Read this file's § 7 "NEXT" — the priority heuristic.
+4. Pick from the pool. Start in the **same turn**. No clarifying
+   questions, no priority polls (see `§ Anti-patterns`).
+
+No handoff finding exists? → read `docs/INDEX.md` first; the plans table
+shows what's open. Pick the highest-priority "ready to dispatch" row.
+
+When the user pauses a session ("сделай паузу", "пауза", "stop",
+"context reset"), the supervisor **must** write a fresh
+`docs/findings/YYYY-MM-DD-session-handoff.md` BEFORE the final response.
+Structure (see prior examples):
+
+- One-line status.
+- Cumulative table of phases shipped this session (with commit SHAs).
+- Findings + ADRs created.
+- Workflow rules established / updated.
+- **Outstanding pool** with priority recommendation.
+- Open architectural decisions (un-written ADRs).
+- Active gotchas the next session should know.
+- Resume recipe (one paragraph: read this → INDEX → git log → pick).
+
+Then update `docs/INDEX.md` § findings with the new row at the top
+(`status: handoff`). The handoff finding is the load-bearing artefact
+that makes the next session resume bootstrap-free.
+
 ---
 
 ## Two tracks

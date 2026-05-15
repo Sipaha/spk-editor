@@ -9,6 +9,45 @@ SPK Editor is a personal fork of [Zed](https://github.com/zed-industries/zed) ma
 - **Where do I write this?** → [`docs/workflow/doc-discipline.md`](docs/workflow/doc-discipline.md).
 - **What's different from upstream Zed?** → [`FORK.md`](FORK.md).
 
+## Resume protocol — "ты автономный супервизор. Продолжай работу"
+
+When the user says any of these (any language, any phrasing close to
+"continue work as the autonomous supervisor"):
+
+- `ты автономный супервизор`
+- `продолжай работу` / `продолжай`
+- `autonomous supervisor` / `continue work` / `continue`
+- `resume`
+
+…the supervisor **immediately** does this — no clarifying questions:
+
+1. `Glob` `docs/findings/*-session-handoff.md` → `Read` the
+   lexicographically-latest one. That file is the previous session's
+   pause snapshot — it lists the outstanding task pool, open
+   architectural decisions, and active gotchas.
+2. `Read` `docs/workflow/supervisor-mode.md` § 7 "NEXT" — the priority
+   heuristic for picking the next phase.
+3. `git log --oneline -15` — sanity-check the recent commit chain
+   matches what the handoff doc claims.
+4. **Pick the next phase** from the pool per § 7 heuristic (no
+   priority polling — `feedback_supervisor_no_priority_questions.md`
+   in memory) and start the work in the **same turn**:
+   - HEAVY → write plan-doc inline-friendly + commit + dispatch a
+     sub-agent in a worktree.
+   - LIGHT → just do it.
+
+If there is **no handoff finding** (first-ever session, or someone
+purged them): read `docs/INDEX.md` first, then start a sensible LIGHT
+or HEAVY pick based on what's at the top of the plans table.
+
+When the supervisor pauses a session (user says "сделай паузу",
+"приостанови", "пауза", "stop", "context reset"), it **must write a
+fresh `docs/findings/YYYY-MM-DD-session-handoff.md`** capturing:
+commit chain since the last handoff, what shipped, outstanding pool,
+open architectural decisions, active gotchas. Then update
+`docs/INDEX.md` § findings to add the new row at the top. This is what
+makes the next resume bootstrap-free.
+
 ## Fork philosophy — read this before suggesting changes
 
 There is **no scheduled `git merge upstream/main`** for this fork. Bug fixes
