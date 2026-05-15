@@ -43,6 +43,7 @@ impl QrPopover {
         secret_standard_base64: String,
         address: Option<String>,
         port: u16,
+        server_fingerprint: Option<[u8; 32]>,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -56,6 +57,12 @@ impl QrPopover {
             Some("Set the server address first.".into())
         } else if port == 0 {
             Some("Set a non-zero server port first.".into())
+        } else if server_fingerprint.is_none() {
+            // Without the cert fingerprint the Android client has nothing
+            // to pin the TLS handshake against. Force the user to toggle
+            // Remote Control ON first (which materialises the cert and
+            // exposes its SHA-256 via store.cert_fingerprint()).
+            Some("Enable Remote Control first so the server cert is generated.".into())
         } else {
             None
         };
@@ -66,6 +73,7 @@ impl QrPopover {
                 &secret_standard_base64,
                 address_trimmed.as_deref(),
                 port,
+                server_fingerprint,
             )
         } else {
             (None, None)
@@ -92,8 +100,15 @@ fn build_url_and_code(
     secret_standard_base64: &str,
     address: Option<&str>,
     port: u16,
+    server_fingerprint: Option<[u8; 32]>,
 ) -> (Option<SharedString>, Option<QrCode>) {
-    match build_url(client_name, secret_standard_base64, address, port) {
+    match build_url(
+        client_name,
+        secret_standard_base64,
+        address,
+        port,
+        server_fingerprint,
+    ) {
         Ok(url) => {
             // `QrCodeEcc::Medium` tolerates ~15% damage — comfortable
             // for a screen-captured-then-printed code while keeping the
@@ -113,12 +128,17 @@ fn build_url_and_code(
 /// Construct the `spk-remote://…` URL the Android client decodes. The
 /// secret IS base64 (StandardChars include `/` and `+`) — those break
 /// URL parsing, so we re-encode URL-SAFE for the `secret` query
-/// parameter. The client name is percent-encoded.
+/// parameter. The client name is percent-encoded. `server_fingerprint`,
+/// when present, is the SHA-256 of the live cert DER from
+/// `RemoteControlStore::cert_fingerprint`; it lands in the URL as
+/// `&server_fp=<URL_SAFE_NO_PAD-base64>` so the Android client can pin
+/// the TLS handshake against an exact known cert (ADR-0003).
 fn build_url(
     client_name: &str,
     secret_standard_base64: &str,
     address: Option<&str>,
     port: u16,
+    server_fingerprint: Option<[u8; 32]>,
 ) -> Result<String> {
     let address = address
         .map(str::trim)
@@ -132,9 +152,15 @@ fn build_url(
         .map_err(|err| anyhow::anyhow!("stored secret is not valid base64: {err}"))?;
     let url_safe_secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&raw_secret);
     let encoded_name = urlencoding::encode(client_name);
-    Ok(format!(
+    let mut url = format!(
         "spk-remote://{address}:{port}?secret={url_safe_secret}&client={encoded_name}"
-    ))
+    );
+    if let Some(fp) = server_fingerprint {
+        let fp_url_safe = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(fp);
+        url.push_str("&server_fp=");
+        url.push_str(&fp_url_safe);
+    }
+    Ok(url)
 }
 
 impl EventEmitter<DismissEvent> for QrPopover {}
@@ -303,10 +329,21 @@ mod tests {
         base64::engine::general_purpose::STANDARD.encode(raw)
     }
 
+    /// Test fixture: a deterministic 32-byte cert fingerprint.
+    fn fixture_fingerprint() -> [u8; 32] {
+        [0xA5u8; 32]
+    }
+
     #[test]
     fn url_contains_address_port_and_url_safe_secret() {
-        let url = build_url("Phone", &fixture_secret(), Some("203.0.113.1"), 7777)
-            .expect("build_url");
+        let url = build_url(
+            "Phone",
+            &fixture_secret(),
+            Some("203.0.113.1"),
+            7777,
+            Some(fixture_fingerprint()),
+        )
+        .expect("build_url");
         assert!(url.starts_with("spk-remote://203.0.113.1:7777"), "got {url}");
         assert!(url.contains("client=Phone"), "got {url}");
         // The URL-safe alphabet must not contain `+` or `/` (those are
@@ -327,7 +364,8 @@ mod tests {
     fn url_safe_secret_round_trips_back_to_original_bytes() {
         let raw = [0xABu8; 32];
         let standard = base64::engine::general_purpose::STANDARD.encode(raw);
-        let url = build_url("X", &standard, Some("1.2.3.4"), 7777).expect("build_url");
+        let url = build_url("X", &standard, Some("1.2.3.4"), 7777, Some(fixture_fingerprint()))
+            .expect("build_url");
 
         let secret_param = url
             .split('?')
@@ -347,6 +385,7 @@ mod tests {
             &fixture_secret(),
             Some("198.51.100.5"),
             8080,
+            Some(fixture_fingerprint()),
         )
         .expect("build_url");
         // Space → %20, & → %26.
@@ -357,21 +396,79 @@ mod tests {
     }
 
     #[test]
+    fn url_carries_server_fp_url_safe_base64() {
+        // Fingerprint bytes containing all-FF would round-trip through
+        // standard base64 as `////////...` — the URL-safe alphabet must
+        // produce `____...` instead. Verifies the encode path is the
+        // URL-safe one, not the default.
+        let fp = [0xFFu8; 32];
+        let url = build_url(
+            "Phone",
+            &fixture_secret(),
+            Some("203.0.113.1"),
+            7777,
+            Some(fp),
+        )
+        .expect("build_url");
+        let fp_param = url
+            .split_once('?')
+            .expect("has query")
+            .1
+            .split('&')
+            .find_map(|p| p.strip_prefix("server_fp="))
+            .expect("server_fp param present");
+        assert!(
+            !fp_param.contains('+') && !fp_param.contains('/') && !fp_param.contains('='),
+            "fingerprint param must be URL-safe base64 with no padding: {fp_param}"
+        );
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(fp_param.as_bytes())
+            .expect("decode url-safe");
+        assert_eq!(decoded, fp, "fingerprint round-trips back to original 32 bytes");
+    }
+
+    #[test]
+    fn url_omits_server_fp_when_fingerprint_missing() {
+        // R-2 ships a placeholder when the cert isn't ready, but
+        // `build_url` itself stays composable: no fingerprint → no
+        // server_fp param (callers above this layer guard the
+        // user-facing flow).
+        let url = build_url(
+            "Phone",
+            &fixture_secret(),
+            Some("203.0.113.1"),
+            7777,
+            None,
+        )
+        .expect("build_url");
+        assert!(!url.contains("server_fp="), "got {url}");
+    }
+
+    #[test]
     fn build_url_rejects_missing_address() {
-        assert!(build_url("Phone", &fixture_secret(), None, 7777).is_err());
-        assert!(build_url("Phone", &fixture_secret(), Some(""), 7777).is_err());
-        assert!(build_url("Phone", &fixture_secret(), Some("   "), 7777).is_err());
+        assert!(build_url("Phone", &fixture_secret(), None, 7777, Some(fixture_fingerprint())).is_err());
+        assert!(build_url("Phone", &fixture_secret(), Some(""), 7777, Some(fixture_fingerprint())).is_err());
+        assert!(build_url("Phone", &fixture_secret(), Some("   "), 7777, Some(fixture_fingerprint())).is_err());
     }
 
     #[test]
     fn build_url_rejects_zero_port() {
-        assert!(build_url("Phone", &fixture_secret(), Some("203.0.113.1"), 0).is_err());
+        assert!(
+            build_url("Phone", &fixture_secret(), Some("203.0.113.1"), 0, Some(fixture_fingerprint()))
+                .is_err()
+        );
     }
 
     #[test]
     fn qr_encode_succeeds_for_built_url() {
-        let url = build_url("Phone", &fixture_secret(), Some("203.0.113.1"), 7777)
-            .expect("build_url");
+        let url = build_url(
+            "Phone",
+            &fixture_secret(),
+            Some("203.0.113.1"),
+            7777,
+            Some(fixture_fingerprint()),
+        )
+        .expect("build_url");
         let code = QrCode::encode_text(&url, QrCodeEcc::Medium).expect("encode");
         assert!(code.size() > 0, "QR must have non-zero size");
         // Module-presence isn't deterministic across qrcodegen versions
@@ -391,15 +488,25 @@ mod tests {
 
     #[test]
     fn placeholder_used_when_address_missing() {
-        let (url, code) =
-            build_url_and_code("Phone", &fixture_secret(), None, 7777);
+        let (url, code) = build_url_and_code(
+            "Phone",
+            &fixture_secret(),
+            None,
+            7777,
+            Some(fixture_fingerprint()),
+        );
         assert!(url.is_none() && code.is_none());
     }
 
     #[test]
     fn placeholder_used_when_port_zero() {
-        let (url, code) =
-            build_url_and_code("Phone", &fixture_secret(), Some("203.0.113.1"), 0);
+        let (url, code) = build_url_and_code(
+            "Phone",
+            &fixture_secret(),
+            Some("203.0.113.1"),
+            0,
+            Some(fixture_fingerprint()),
+        );
         assert!(url.is_none() && code.is_none());
     }
 }

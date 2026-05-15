@@ -227,20 +227,29 @@ impl RemoteControlModal {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
-        let (address, port) = RemoteControlStore::try_global(cx)
+        let (address, port, server_fingerprint) = RemoteControlStore::try_global(cx)
             .map(|store| {
                 store.read_with(cx, |store, _| {
                     (
                         store.settings().server_address.clone(),
                         store.settings().server_port,
+                        store.cert_fingerprint(),
                     )
                 })
             })
-            .unwrap_or((None, 0));
+            .unwrap_or((None, 0, None));
         cx.emit(DismissEvent);
         workspace.update(cx, |workspace, cx| {
             workspace.toggle_modal(window, cx, |window, cx| {
-                QrPopover::new(client_name, secret_standard_base64, address, port, window, cx)
+                QrPopover::new(
+                    client_name,
+                    secret_standard_base64,
+                    address,
+                    port,
+                    server_fingerprint,
+                    window,
+                    cx,
+                )
             });
         });
     }
