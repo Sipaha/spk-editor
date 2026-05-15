@@ -45,25 +45,77 @@ pub struct Clickable {
 /// laid out on integer pixel boundaries already, so 8 px is a safe coarseness.
 const STABLE_ID_GRID_PX: i32 = 8;
 
-/// Walk the rendered frame's hitboxes and emit a [`Clickable`] for each one,
-/// with `kind` / `label` left `None` (callers that have a VisualNode tree
-/// post-process to fill those in).
+/// Walk the rendered frame's hitboxes and emit a [`Clickable`] for each one.
+///
+/// `label` and `kind` are populated from the per-hitbox `InspectorElementId`
+/// (source-location-derived identifier) that GPUI tracks in
+/// `inspector_hitboxes`. This gives every clickable a `file:line` label
+/// that is:
+///   - stable across re-renders (path depends on element-build source loc,
+///     not on per-frame slot ids),
+///   - meaningful to a developer-agent (it points at the Rust file that
+///     constructed the element),
+///   - free — GPUI already populates the map in debug builds (see
+///     `gpui::Window::insert_inspector_hitbox` in this fork).
+///
+/// `kind` is the file name without extension (e.g. `button`, `tab`,
+/// `context_menu`), a cheap heuristic for grouping clickables by component
+/// type. Callers that want richer semantic kind/label (e.g. tab title
+/// instead of file:line) can still post-process by cross-referencing
+/// against a `VisualNode` tree.
 pub fn enumerate_window_clickables(window_id: WindowId, window: &Window) -> Vec<Clickable> {
     let mut out = Vec::new();
     for hitbox in window.iter_hitboxes() {
         let bounds = hitbox.bounds;
         let arr = bounds_to_array(bounds);
-        let id = stable_id(window_id, None, None, arr);
+        let (kind, label) = inspector_kind_and_label(window, hitbox.id);
+        let id = stable_id(
+            window_id,
+            kind.as_deref(),
+            label.as_deref(),
+            arr,
+        );
         let focused = hitbox.is_hovered(window);
         out.push(Clickable {
             id,
             bounds: arr,
-            kind: None,
-            label: None,
+            kind,
+            label,
             focused,
         });
     }
     out
+}
+
+/// Look up the per-hitbox `InspectorElementId` and split it into a
+/// `(kind, label)` pair. `kind` is the source file's stem (a coarse
+/// component grouping); `label` is `file:line` (a stable, dev-meaningful
+/// pointer to the element's construction site).
+#[cfg(any(feature = "inspector", debug_assertions))]
+fn inspector_kind_and_label(
+    window: &Window,
+    hitbox_id: gpui::HitboxId,
+) -> (Option<String>, Option<String>) {
+    let Some(inspector_id) = window.inspector_id_for_hitbox(hitbox_id) else {
+        return (None, None);
+    };
+    let loc = inspector_id.path.source_location;
+    let file = loc.file();
+    let line = loc.line();
+    let kind = std::path::Path::new(file)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::to_owned);
+    let label = Some(format!("{file}:{line}"));
+    (kind, label)
+}
+
+#[cfg(not(any(feature = "inspector", debug_assertions)))]
+fn inspector_kind_and_label(
+    _window: &Window,
+    _hitbox_id: gpui::HitboxId,
+) -> (Option<String>, Option<String>) {
+    (None, None)
 }
 
 /// Compute the stable ID for a clickable, given the (kind, label) that the

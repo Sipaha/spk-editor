@@ -5273,17 +5273,38 @@ impl Window {
         &mut self,
         hitbox_id: HitboxId,
         inspector_id: Option<&crate::InspectorElementId>,
-        cx: &App,
+        _cx: &App,
     ) {
         self.invalidator.debug_assert_paint_or_prepaint();
-        if !self.is_inspector_picking(cx) {
-            return;
-        }
+        // SPK fork: populate `inspector_hitboxes` unconditionally in debug
+        // builds (the cfg gate on this fn keeps it out of release). Upstream
+        // gated this on `is_inspector_picking` to keep the map empty unless
+        // the user opened the inspector — but `mcp::clickables` reads the
+        // same map to attach source-location labels to hitboxes so agents
+        // can identify what they're about to click without pixel-coordinate
+        // guesswork. Memory cost is per-element `InspectorElementId` entries
+        // (cleared at frame start); CPU is one FxHashMap insert per painted
+        // hitbox. See `workspace::mcp::clickables`.
         if let Some(inspector_id) = inspector_id {
             self.next_frame
                 .inspector_hitboxes
                 .insert(hitbox_id, inspector_id.clone());
         }
+    }
+
+    /// Look up the `InspectorElementId` (source-location-derived identifier)
+    /// for a hitbox painted in the last completed frame. Returns `None` if
+    /// the hitbox isn't tracked or if the build doesn't include inspector
+    /// support (`#[cfg(any(feature = "inspector", debug_assertions))]`).
+    ///
+    /// Used by `workspace::mcp::clickables` to attach human-readable labels
+    /// (`file:line`) to clickables in the MCP dump.
+    #[cfg(any(feature = "inspector", debug_assertions))]
+    pub fn inspector_id_for_hitbox(
+        &self,
+        hitbox_id: HitboxId,
+    ) -> Option<&crate::InspectorElementId> {
+        self.rendered_frame.inspector_hitboxes.get(&hitbox_id)
     }
 
     #[cfg(any(feature = "inspector", debug_assertions))]
