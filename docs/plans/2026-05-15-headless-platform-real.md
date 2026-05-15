@@ -1,6 +1,15 @@
 # Real headless platform (no Xvfb)
 
-**Status:** in progress — sub-agent landed §A–§G + §I; supervisor runs the §H end-to-end MCP smoke-test at finalize.
+**Status:** complete (2026-05-15). §H supervisor smoke-test passed:
+`workspace.screenshot` returns a 1379×852 PNG of ~118 KB with the
+rendered Workspace (project panel, README.md tab, git diff, commit
+graph) — see [`2026-05-15-headless-platform-real-screenshot.png`](2026-05-15-headless-platform-real-screenshot.png).
+Supervisor also landed a follow-on hotfix commit `56d7fee51e` —
+`atlas.before_frame()` in offscreen `render_to_image` + calloop
+refresh timer in `HeadlessClient` — without which the
+sub-agent's path painted blank pixels (the first-frame scene was
+fully built but pending atlas uploads never flushed, and subsequent
+async state changes never re-rendered).
 **Estimated:** 1 sub-agent session, ~1.5–2 h, worktree-isolated
 **Goal:** Replace the Xvfb wrapper with a native headless GPUI platform so
 `script/run-mcp --headless` runs the editor with **no X server at all**,
