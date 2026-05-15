@@ -49,7 +49,8 @@ can read them.
 
 | Date | Status | Plan |
 |---|---|---|
-| 2026-05-15 | ready to dispatch | [`plans/2026-05-15-clickable-tree.md`](plans/2026-05-15-clickable-tree.md) — hitbox-based clickable enumeration + click-by-id MCP tool (phase 1 of "agent UI without screenshots") |
+| 2026-05-15 | scoping | [`plans/2026-05-15-remote-control.md`](plans/2026-05-15-remote-control.md) — Remote Control panel + Android client (multi-phase arc R-1 through R-6) |
+| 2026-05-15 | complete | [`plans/2026-05-15-clickable-tree.md`](plans/2026-05-15-clickable-tree.md) — hitbox-based clickable enumeration + click-by-id MCP tool (phase 1 + 1b labels) |
 | 2026-05-15 | complete | [`plans/2026-05-15-headless-platform-real.md`](plans/2026-05-15-headless-platform-real.md) — native headless GPUI platform (no Xvfb). Screenshot: [`plans/2026-05-15-headless-platform-real-screenshot.png`](plans/2026-05-15-headless-platform-real-screenshot.png). |
 
 ---
@@ -77,6 +78,7 @@ Short, dated, single-fact notes from sessions: "ran a benchmark and got X",
 
 | Date | Status | Topic |
 |---|---|---|
+| 2026-05 | active | [`findings/2026-05-agent-worktree-staleness.md`](findings/2026-05-agent-worktree-staleness.md) — Agent-tool `isolation: "worktree"` branches from session-start HEAD, NOT current HEAD; freshly-committed plan-docs aren't visible to sub-agents in the same session |
 | 2026-05 | resolved | [`findings/2026-05-headless-screenshot-blank.md`](findings/2026-05-headless-screenshot-blank.md) — `workspace.screenshot` returns blank under `--headless` (Xvfb); resolved by ADR-0002 (native headless platform) |
 
 ---

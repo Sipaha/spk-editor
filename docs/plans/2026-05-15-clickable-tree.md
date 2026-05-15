@@ -1,6 +1,15 @@
 # Clickable tree + click-by-id (phase 1: hitbox-based MVP)
 
-**Status:** ready to dispatch
+**Status:** complete (2026-05-15). Phase 1 sub-agent shipped the
+structural API (`Window::iter_hitboxes`, `Clickable` struct,
+`clickables: Vec<Clickable>` on dump result, `windows.click_id` tool,
+e2e test). Supervisor follow-on **phase 1b** (`3954269122`) populated
+`kind` + `label` from inspector source-loc data — 29% of clickables
+now labelled with `file:line` (covers all title-bar / tabs / panels /
+buttons). Sub-agent commits `1db0aff`, `6e3bf48`, `c3d8e90` merged as
+`07c3cee`. Remaining 71% anonymous (text spans / gutter / layout
+chrome built without `inspector_id`) — out of scope for phase 1;
+addressing them needs deeper GPUI instrumentation, defer to phase 2.
 **Estimated:** 1 sub-agent session, ~2 h, worktree-isolated
 **Goal:** Agents drive the editor's UI via stable element IDs and synthetic
 click-by-id, not pixel coordinates. Most LIGHT-track UI verifications stop

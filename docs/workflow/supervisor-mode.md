@@ -143,6 +143,16 @@ git commit -m "plan: <slug>
 <3–5 line description: scope, why this design over alternatives>"
 ```
 
+> **CRITICAL — worktree freshness trap.** The Claude Agent SDK's
+> `isolation: "worktree"` branches from **session-start HEAD**, not from
+> current `main` at dispatch time. Plans + rule updates made earlier in
+> the same session are **invisible** to dispatched sub-agents.
+> Workaround: paste the plan doc content INLINE into the sub-agent
+> dispatch prompt under a `## PLAN DOC (inline because the worktree is
+> pinned to session-start state)` header — they read it from the prompt,
+> not from disk. Same for recent rule changes in `.rules` / `CLAUDE.md` /
+> `FORK.md`. See [`docs/findings/2026-05-agent-worktree-staleness.md`](../findings/2026-05-agent-worktree-staleness.md).
+
 ---
 
 ## 4. DISPATCH — sub-agent prompt template
@@ -164,7 +174,10 @@ Agent({
 
 1. CLAUDE.md — the hard rules. Skim "What's disabled" and "Build conventions".
 2. FORK.md — § "Touched upstream files" + § "Fork-owned crates".
-3. docs/plans/YYYY-MM-DD-<slug>.md — THE FULL SPEC for this task.
+3. docs/plans/YYYY-MM-DD-<slug>.md — THE FULL SPEC for this task. If
+   this path doesn't exist in your worktree, the spec is inlined below
+   under `## PLAN DOC` — the worktree may be pinned to session-start
+   state.
 4. 1–3 related ADRs (give the paths if any).
 5. The existing files you'll edit (give the paths).
 
