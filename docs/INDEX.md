@@ -35,6 +35,7 @@ contracts, multi-crate invariants). Each ADR is dated `accepted`/`superseded`.
 |---|---|---|---|
 | 0001 | Fork philosophy: no scheduled upstream merge | accepted | [`architecture/decisions/0001-fork-philosophy.md`](architecture/decisions/0001-fork-philosophy.md) |
 | 0002 | Native headless GPUI platform for autonomous agent driving | accepted | [`architecture/decisions/0002-native-headless-platform.md`](architecture/decisions/0002-native-headless-platform.md) |
+| 0003 | Remote Control transport — WebSocket over TLS, fingerprint-pinned, secret-authenticated | accepted | [`architecture/decisions/0003-remote-control-protocol.md`](architecture/decisions/0003-remote-control-protocol.md) |
 
 ---
 
