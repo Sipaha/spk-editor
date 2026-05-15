@@ -432,9 +432,26 @@ impl RemoteControlStore {
                         if is_self_echo {
                             return;
                         }
-                        if this.settings != parsed {
-                            this.settings = parsed;
-                            this.notify_changed(cx);
+                        if this.settings == parsed {
+                            return;
+                        }
+                        // External edit reached us. Track what changed so
+                        // the listener can be started / stopped / pushed
+                        // new clients to mirror the in-memory mutator
+                        // path (`set_enabled` / `add_client` / …) —
+                        // without this the watcher silently desynced
+                        // disk state from the running listener (file says
+                        // `enabled: true` but no bind happens).
+                        let prev_enabled = this.settings.enabled;
+                        let prev_clients = this.settings.clients.clone();
+                        this.settings = parsed;
+                        this.notify_changed(cx);
+                        if this.settings.enabled && !prev_enabled {
+                            this.start_listener_async(cx);
+                        } else if !this.settings.enabled && prev_enabled {
+                            this.stop_listener(cx);
+                        } else if this.settings.clients != prev_clients {
+                            this.broadcast_clients_if_running();
                         }
                     })
                     .is_err()
