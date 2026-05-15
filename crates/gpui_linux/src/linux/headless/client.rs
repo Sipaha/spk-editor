@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
 use calloop::{EventLoop, LoopHandle};
 use util::ResultExt;
@@ -8,11 +9,25 @@ use crate::linux::headless::HeadlessDisplay;
 use crate::linux::{LinuxClient, LinuxCommon, LinuxKeyboardLayout};
 use gpui::{
     AnyWindowHandle, CursorStyle, DisplayId, HeadlessWindow, PlatformDisplay,
-    PlatformKeyboardLayout, PlatformWindow, WindowParams,
+    PlatformKeyboardLayout, PlatformWindow, RequestFrameOptions, WindowParams,
 };
 
 #[cfg(feature = "x11")]
 use gpui_wgpu::{DEFAULT_OFFSCREEN_HEIGHT, DEFAULT_OFFSCREEN_WIDTH, WgpuHeadlessRenderer};
+
+/// One open window's tracked state in `HeadlessClient`.
+///
+/// We retain the `HeadlessWindow` itself (not just the `AnyWindowHandle`) so
+/// the refresh timer can call `window.refresh()` directly — that fires the
+/// `request_frame` callback gpui registered, which drives `Window::draw` →
+/// scene build → atlas upload → `rendered_frame.scene` populated. Without
+/// the timer, gpui would paint once at startup and stay frozen on async
+/// state changes (file loads, git status arriving, etc.), and a subsequent
+/// `workspace.screenshot` would see a stale first-paint scene.
+struct TrackedWindow {
+    handle: AnyWindowHandle,
+    window: HeadlessWindow,
+}
 
 pub struct HeadlessClientState {
     pub(crate) _loop_handle: LoopHandle<'static, HeadlessClient>,
@@ -20,7 +35,7 @@ pub struct HeadlessClientState {
     pub(crate) common: LinuxCommon,
     /// Open windows, in z-order (single-window today, kept as a Vec so adding
     /// multi-window later is a one-line change).
-    windows: Vec<AnyWindowHandle>,
+    windows: Vec<TrackedWindow>,
     /// Cached display so multiple `displays()` calls return the same `Rc`.
     display: Rc<dyn PlatformDisplay>,
 }
@@ -43,6 +58,38 @@ impl HeadlessClient {
                 }
             })
             .ok();
+
+        // ~60Hz refresh — mirrors the X11 client's loop. Drives
+        // `HeadlessWindow::refresh()` on every open window so gpui's
+        // draw cycle fires whenever entities `cx.notify()`. Without
+        // this the editor paints once and stays frozen — async state
+        // changes (file loads, git status arriving) never re-render.
+        let refresh_rate = Duration::from_millis(16);
+        handle
+            .insert_source(
+                calloop::timer::Timer::immediate(),
+                move |mut instant, (), client: &mut HeadlessClient| {
+                    let windows: Vec<HeadlessWindow> = client
+                        .0
+                        .borrow()
+                        .windows
+                        .iter()
+                        .map(|tracked| tracked.window.clone())
+                        .collect();
+                    for window in windows {
+                        window.refresh(RequestFrameOptions {
+                            require_presentation: false,
+                            force_render: false,
+                        });
+                    }
+                    let now = std::time::Instant::now();
+                    while instant < now {
+                        instant += refresh_rate;
+                    }
+                    calloop::timer::TimeoutAction::ToInstant(instant)
+                },
+            )
+            .expect("Failed to register headless refresh timer");
 
         let display: Rc<dyn PlatformDisplay> = Rc::new(HeadlessDisplay::new());
 
@@ -100,12 +147,16 @@ impl LinuxClient for HeadlessClient {
         // most recently focused window is the "active" one. `dispatch_action`
         // routes through here, so returning `None` (the old stub) silently
         // dropped action dispatches in headless mode.
-        self.0.borrow().windows.last().copied()
+        self.0.borrow().windows.last().map(|t| t.handle)
     }
 
     fn window_stack(&self) -> Option<Vec<AnyWindowHandle>> {
-        let stack = self.0.borrow().windows.clone();
-        if stack.is_empty() { None } else { Some(stack) }
+        let state = self.0.borrow();
+        if state.windows.is_empty() {
+            None
+        } else {
+            Some(state.windows.iter().map(|t| t.handle).collect())
+        }
     }
 
     fn open_window(
@@ -149,8 +200,13 @@ impl LinuxClient for HeadlessClient {
         let window =
             HeadlessWindow::new(handle, params, display, /* scale_factor */ 1.0, renderer);
 
-        // Track the handle so `active_window` / `window_stack` reflect reality.
-        self.0.borrow_mut().windows.push(handle);
+        // Track the window (not just the handle) so the refresh timer can
+        // call `refresh()` on it directly — `AnyWindowHandle` alone won't
+        // let us reach the request_frame callback.
+        self.0.borrow_mut().windows.push(TrackedWindow {
+            handle,
+            window: window.clone(),
+        });
 
         Ok(Box::new(window))
     }

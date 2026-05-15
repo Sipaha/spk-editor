@@ -1442,10 +1442,21 @@ impl WgpuRenderer {
         }
         let format = self.surface_config.format;
 
-        // Deliberately *not* calling `atlas.before_frame()`: the scene we render
-        // here is the last frame's, which already went through `draw` (atlas
-        // uploads flushed), and re-running per-frame atlas bookkeeping
-        // out-of-band could desync the next real frame.
+        // Atlas housekeeping:
+        // - **With** an on-screen surface, `draw(scene)` has already run
+        //   `atlas.before_frame()` for this scene, flushing the pending
+        //   glyph/sprite uploads to the GPU. Re-running it here would
+        //   desync the next real frame, so we skip it.
+        // - **Without** a surface (the native headless platform — see
+        //   ADR-0002 / `HeadlessWindow::draw` which is a no-op), the
+        //   on-screen draw path NEVER runs, so the atlas's
+        //   `pending_uploads` queue is never flushed. Without this call
+        //   `render_to_image` sees an empty atlas and produces a
+        //   blank-clear image regardless of how much UI was painted into
+        //   the scene. Force the flush here in offscreen-only mode.
+        if self.resources().surface.is_none() {
+            self.atlas.before_frame();
+        }
         self.ensure_intermediate_textures();
 
         let device = self.resources().device.clone();

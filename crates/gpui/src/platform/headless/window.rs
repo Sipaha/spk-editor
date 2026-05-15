@@ -116,6 +116,24 @@ impl HeadlessWindow {
         self.0.lock().input_callback = Some(callback);
         !result.propagate
     }
+
+    /// Fire the `request_frame` callback so gpui runs its draw cycle
+    /// (build elements → paint scene → swap `next_frame` → `rendered_frame`).
+    /// The native headless platform's refresh timer calls this at
+    /// ~60Hz so async state changes (file loads, git status arriving,
+    /// etc.) get a chance to re-render — without it the editor would
+    /// paint exactly once at startup and never again.
+    ///
+    /// Equivalent to X11Window::refresh.
+    pub fn refresh(&self, options: RequestFrameOptions) {
+        let mut lock = self.0.lock();
+        let Some(mut callback) = lock.request_frame_callback.take() else {
+            return;
+        };
+        drop(lock);
+        callback(options);
+        self.0.lock().request_frame_callback = Some(callback);
+    }
 }
 
 impl HasWindowHandle for HeadlessWindow {
