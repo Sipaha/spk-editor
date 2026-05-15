@@ -14681,6 +14681,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "remote_control"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "fs",
+ "futures 0.3.32",
+ "gpui",
+ "log",
+ "paths",
+ "pretty_assertions",
+ "rand 0.9.3",
+ "serde",
+ "serde_json",
+ "settings",
+ "util",
+]
+
+[[package]]
+name = "remote_control_ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "editor",
+ "futures 0.3.32",
+ "gpui",
+ "http_client",
+ "log",
+ "menu",
+ "remote_control",
+ "serde",
+ "theme",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "remote_server"
 version = "0.1.0"
 dependencies = [
@@ -22789,6 +22828,8 @@ dependencies = [
  "recent_projects",
  "release_channel",
  "remote",
+ "remote_control",
+ "remote_control_ui",
  "repl",
  "reqwest_client",
  "rope",
