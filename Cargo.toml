@@ -165,6 +165,8 @@ members = [
     "crates/release_channel",
     "crates/remote",
     "crates/remote_connection",
+    "crates/remote_control",
+    "crates/remote_control_ui",
     "crates/remote_server",
     "crates/repl",
     "crates/reqwest_client",
@@ -430,6 +432,8 @@ refineable = { path = "crates/refineable" }
 release_channel = { path = "crates/release_channel" }
 remote = { path = "crates/remote" }
 remote_connection = { path = "crates/remote_connection" }
+remote_control = { path = "crates/remote_control" }
+remote_control_ui = { path = "crates/remote_control_ui" }
 remote_server = { path = "crates/remote_server" }
 repl = { path = "crates/repl" }
 reqwest_client = { path = "crates/reqwest_client" }

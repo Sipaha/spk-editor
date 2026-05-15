@@ -754,6 +754,8 @@ fn main() {
         solutions_ui::init(cx);
         run_config::init(cx);
         run_config_ui::init(cx);
+        remote_control::init(cx);
+        remote_control_ui::init(cx);
         git_conflict_ui::init(cx);
         let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
             enterprise_uri: language::language_settings::all_language_settings(None, cx)
