@@ -52,6 +52,7 @@ can read them.
 |---|---|---|
 | 2026-05-15 | complete | [`plans/2026-05-15-picker-and-panel-ui-tweaks.md`](plans/2026-05-15-picker-and-panel-ui-tweaks.md) — Picker dropdown polish + Project panel header. Screenshot: [`plans/2026-05-15-picker-and-panel-ui-tweaks-screenshot.png`](plans/2026-05-15-picker-and-panel-ui-tweaks-screenshot.png). |
 | 2026-05-15 | scoping | [`plans/2026-05-15-remote-control.md`](plans/2026-05-15-remote-control.md) — Remote Control panel + Android client (multi-phase arc R-1 through R-6) |
+| 2026-05-15 | complete | [`plans/2026-05-15-remote-control-R2.md`](plans/2026-05-15-remote-control-R2.md) — R-2: server listener + TLS 1.3 + HMAC challenge handshake + MinimalDispatcher; FS-watcher reconciles listener state. |
 | 2026-05-15 | complete | [`plans/2026-05-15-remote-control-R1-5.md`](plans/2026-05-15-remote-control-R1-5.md) — R-1.5: QR popover rendering replacing the R-1 toast stub |
 | 2026-05-15 | complete | [`plans/2026-05-15-remote-control-R1.md`](plans/2026-05-15-remote-control-R1.md) — R-1: settings + status-bar widget + modal panel UI. Screenshot: [`plans/2026-05-15-remote-control-R1-screenshot.png`](plans/2026-05-15-remote-control-R1-screenshot.png). |
 | 2026-05-15 | complete | [`plans/2026-05-15-clickable-tree.md`](plans/2026-05-15-clickable-tree.md) — hitbox-based clickable enumeration + click-by-id MCP tool (phase 1 + 1b labels) |

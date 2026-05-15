@@ -1,6 +1,14 @@
 # R-2: Remote Control server — listener + TLS + auth handshake
 
-**Status:** ready to dispatch
+**Status:** complete (2026-05-15). Sub-agent landed `5519f825b3`,
+`a38f34ea54`, `977bd292bb`. Supervisor follow-up `731a97cacb` reconciled
+the FS-watcher path with the listener bootstrap (toggling
+`remote-control.json:enabled` externally now starts/stops the listener,
+matching the modal-button path). 31 unit/integration tests passing,
+build + clippy clean. MCP smoke-test confirmed end-to-end: edit JSON
+`enabled:true` → `remote-control.cert.der` + `remote-control.key.der`
+generated, `ss -tln` shows port LISTEN, log emits "listener bound on
+0.0.0.0:17777". Edit `enabled:false` → port closes within ~3 s.
 **Estimated:** 1 sub-agent session, ~3–5 h, worktree-isolated
 **Goal:** Wire a real network listener behind the existing
 `RemoteControlStore::enabled` toggle. On ON, generate (or load) a
