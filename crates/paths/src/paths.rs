@@ -281,6 +281,12 @@ pub fn run_configurations_file() -> &'static PathBuf {
     RUN_CONFIGURATIONS_FILE.get_or_init(|| config_dir().join("run-configurations.json"))
 }
 
+/// Returns the path to the `remote-control.json` file.
+pub fn remote_control_settings_file() -> &'static PathBuf {
+    static REMOTE_CONTROL_SETTINGS_FILE: OnceLock<PathBuf> = OnceLock::new();
+    REMOTE_CONTROL_SETTINGS_FILE.get_or_init(|| config_dir().join("remote-control.json"))
+}
+
 /// Returns the path to the extensions directory.
 ///
 /// This is where installed extensions are stored.
