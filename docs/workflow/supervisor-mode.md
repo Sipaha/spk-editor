@@ -147,11 +147,22 @@ git commit -m "plan: <slug>
 > `isolation: "worktree"` branches from **session-start HEAD**, not from
 > current `main` at dispatch time. Plans + rule updates made earlier in
 > the same session are **invisible** to dispatched sub-agents.
-> Workaround: paste the plan doc content INLINE into the sub-agent
-> dispatch prompt under a `## PLAN DOC (inline because the worktree is
-> pinned to session-start state)` header — they read it from the prompt,
-> not from disk. Same for recent rule changes in `.rules` / `CLAUDE.md` /
-> `FORK.md`. See [`docs/findings/2026-05-agent-worktree-staleness.md`](../findings/2026-05-agent-worktree-staleness.md).
+>
+> Two workarounds, used together:
+>
+> 1. **Inline the plan-doc** in the sub-agent dispatch prompt under a
+>    `## PLAN DOC` header — they read it from the prompt, not from disk.
+>    Same for recent rule changes in `.rules` / `CLAUDE.md` / `FORK.md`.
+> 2. **Tell the sub-agent to `git rebase origin/main` at the start** if
+>    earlier-in-session commits would otherwise be missing from their
+>    base — e.g. when this phase depends on a prior phase's crates /
+>    files that landed on main in the same session. (Sub-agent for
+>    R-1.5 rediscovered this unprompted 2026-05-15; bake it in.) The
+>    rebase is a clean fast-forward if no in-flight work in the worktree
+>    has conflicting changes — sub-agents that hit a conflict should
+>    surface in REPORT rather than resolve blindly.
+>
+> See [`docs/findings/2026-05-agent-worktree-staleness.md`](../findings/2026-05-agent-worktree-staleness.md).
 
 ---
 

@@ -51,7 +51,7 @@ can read them.
 |---|---|---|
 | 2026-05-15 | complete | [`plans/2026-05-15-picker-and-panel-ui-tweaks.md`](plans/2026-05-15-picker-and-panel-ui-tweaks.md) — Picker dropdown polish + Project panel header. Screenshot: [`plans/2026-05-15-picker-and-panel-ui-tweaks-screenshot.png`](plans/2026-05-15-picker-and-panel-ui-tweaks-screenshot.png). |
 | 2026-05-15 | scoping | [`plans/2026-05-15-remote-control.md`](plans/2026-05-15-remote-control.md) — Remote Control panel + Android client (multi-phase arc R-1 through R-6) |
-| 2026-05-15 | ready to dispatch | [`plans/2026-05-15-remote-control-R1-5.md`](plans/2026-05-15-remote-control-R1-5.md) — R-1.5: real QR rendering replacing the R-1 toast stub |
+| 2026-05-15 | complete | [`plans/2026-05-15-remote-control-R1-5.md`](plans/2026-05-15-remote-control-R1-5.md) — R-1.5: QR popover rendering replacing the R-1 toast stub |
 | 2026-05-15 | complete | [`plans/2026-05-15-remote-control-R1.md`](plans/2026-05-15-remote-control-R1.md) — R-1: settings + status-bar widget + modal panel UI. Screenshot: [`plans/2026-05-15-remote-control-R1-screenshot.png`](plans/2026-05-15-remote-control-R1-screenshot.png). |
 | 2026-05-15 | complete | [`plans/2026-05-15-clickable-tree.md`](plans/2026-05-15-clickable-tree.md) — hitbox-based clickable enumeration + click-by-id MCP tool (phase 1 + 1b labels) |
 | 2026-05-15 | complete | [`plans/2026-05-15-headless-platform-real.md`](plans/2026-05-15-headless-platform-real.md) — native headless GPUI platform (no Xvfb). Screenshot: [`plans/2026-05-15-headless-platform-real-screenshot.png`](plans/2026-05-15-headless-platform-real-screenshot.png). |
@@ -81,6 +81,7 @@ Short, dated, single-fact notes from sessions: "ran a benchmark and got X",
 
 | Date | Status | Topic |
 |---|---|---|
+| 2026-05-15 | handoff | [`findings/2026-05-15-session-handoff.md`](findings/2026-05-15-session-handoff.md) — **READ FIRST on session resume.** Captures the 2026-05-15 supervisor session state: 20+ commits shipped, pool of outstanding tasks (E queued-message → claude, R-2 server protocol, R-3..R-6, F sub-agent UI, G spk-image://), open architectural decisions (ADR-0003 protocol choice), active gotchas |
 | 2026-05 | active | [`findings/2026-05-agent-worktree-staleness.md`](findings/2026-05-agent-worktree-staleness.md) — Agent-tool `isolation: "worktree"` branches from session-start HEAD, NOT current HEAD; freshly-committed plan-docs aren't visible to sub-agents in the same session |
 | 2026-05 | resolved | [`findings/2026-05-headless-screenshot-blank.md`](findings/2026-05-headless-screenshot-blank.md) — `workspace.screenshot` returns blank under `--headless` (Xvfb); resolved by ADR-0002 (native headless platform) |
 

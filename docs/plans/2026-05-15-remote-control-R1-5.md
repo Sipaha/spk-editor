@@ -1,6 +1,15 @@
 # R-1.5: QR code rendering for authorized clients
 
-**Status:** ready to dispatch
+**Status:** complete (2026-05-15). Sub-agent landed `d9fa51c0dd` —
+clean single commit, 9/9 tests in `remote_control_ui` (7 new QR tests
++ 2 pre-existing). Sub-agent caught the worktree-staleness trap
+(R-1's commits weren't in their base) and **rebased onto current
+main before starting** — this is the canonical workaround; future
+dispatches should expect sub-agents to do this proactively. Two
+implementation deviations from plan: (1) `urlencoding` crate
+preferred over `percent-encoding` (already in workspace deps, simpler
+API); (2) `gpui::svg()` only loads SVG from a file path, not an
+inline string, so QR is rendered as a `div`-per-module grid instead.
 **Estimated:** 1 sub-agent session, ~45 min, worktree-isolated
 **Goal:** Replace the "TODO R-1.5: QR rendering" toast from R-1 with an
 actual QR code popover. Each authorized client's "Show QR" button opens
