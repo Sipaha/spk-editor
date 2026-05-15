@@ -8,9 +8,47 @@ use util::ResultExt;
 use crate::linux::headless::HeadlessDisplay;
 use crate::linux::{LinuxClient, LinuxCommon, LinuxKeyboardLayout};
 use gpui::{
-    AnyWindowHandle, CursorStyle, DisplayId, HeadlessWindow, PlatformDisplay,
-    PlatformKeyboardLayout, PlatformWindow, RequestFrameOptions, WindowParams,
+    AnyWindowHandle, Bounds, CursorStyle, DisplayId, HeadlessWindow, Pixels, PlatformDisplay,
+    PlatformKeyboardLayout, PlatformWindow, Point, RequestFrameOptions, Size, WindowParams, px,
 };
+
+/// Default canonical viewport for the native headless platform. Matches
+/// `gpui_wgpu::{DEFAULT_OFFSCREEN_WIDTH, DEFAULT_OFFSCREEN_HEIGHT}` and the
+/// size baked into `HeadlessDisplay::new`. Overridable via env vars for
+/// sized-canvas tests (e.g. mobile-narrow simulation):
+///   - `SPK_HEADLESS_WIDTH=1280`
+///   - `SPK_HEADLESS_HEIGHT=720`
+const DEFAULT_HEADLESS_WIDTH: f32 = 1920.0;
+const DEFAULT_HEADLESS_HEIGHT: f32 = 1080.0;
+
+fn headless_window_bounds(display: &Rc<dyn PlatformDisplay>) -> Bounds<Pixels> {
+    let env_or = |key: &str, default: f32| -> f32 {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| *v > 0.0)
+            .unwrap_or(default)
+    };
+    // Prefer env override; fall back to the display's reported bounds (set
+    // by `HeadlessDisplay::new`); ultimate fallback hard-codes 1920×1080.
+    let display_bounds = display.bounds();
+    let default_w = if f32::from(display_bounds.size.width) > 0.0 {
+        f32::from(display_bounds.size.width)
+    } else {
+        DEFAULT_HEADLESS_WIDTH
+    };
+    let default_h = if f32::from(display_bounds.size.height) > 0.0 {
+        f32::from(display_bounds.size.height)
+    } else {
+        DEFAULT_HEADLESS_HEIGHT
+    };
+    let width = env_or("SPK_HEADLESS_WIDTH", default_w);
+    let height = env_or("SPK_HEADLESS_HEIGHT", default_h);
+    Bounds {
+        origin: Point::new(px(0.0), px(0.0)),
+        size: Size::new(px(width), px(height)),
+    }
+}
 
 #[cfg(feature = "x11")]
 use gpui_wgpu::{DEFAULT_OFFSCREEN_HEIGHT, DEFAULT_OFFSCREEN_WIDTH, WgpuHeadlessRenderer};
@@ -165,6 +203,18 @@ impl LinuxClient for HeadlessClient {
         params: WindowParams,
     ) -> anyhow::Result<Box<dyn PlatformWindow>> {
         let display = self.0.borrow().display.clone();
+
+        // Override the caller-supplied bounds with the full HeadlessDisplay
+        // surface. Workspace persistence restores the previous on-screen
+        // bounds (e.g. 1379×852 from the user's prior interactive session),
+        // which makes agent-driven layout assertions size-dependent. In
+        // headless mode every run gets the same canonical viewport so
+        // pixel-coordinate assertions, screenshot diffs, and clickable
+        // layouts are deterministic. Optionally overridable via env vars
+        // for sized-canvas tests (e.g. mobile-narrow simulation).
+        let bounds = headless_window_bounds(&display);
+        let mut params = params;
+        params.bounds = bounds;
 
         // The wgpu offscreen renderer is the *only* headless renderer the fork
         // ships. Gated on the `x11` feature for build-graph hygiene (that's
