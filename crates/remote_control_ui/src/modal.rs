@@ -14,7 +14,9 @@ use ui::{
     Tooltip, prelude::*,
 };
 use util::ResultExt as _;
-use workspace::{ModalView, Toast, Workspace, notifications::NotificationId};
+use workspace::{ModalView, Workspace};
+
+use crate::qr_popover::QrPopover;
 
 /// Address-detection endpoint. Returns the caller's public IP as plain text.
 const DETECT_ADDRESS_ENDPOINT: &str = "https://ifconfig.me";
@@ -209,22 +211,37 @@ impl RemoteControlModal {
         }
     }
 
-    fn show_qr_toast(&self, _client_name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        // R-1.5 will render an actual QR. For R-1 a toast keeps the click
-        // wired so reviewers see the intended flow.
+    fn show_qr_popover(
+        &mut self,
+        client_name: SharedString,
+        secret_standard_base64: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The QR popover replaces this modal on the workspace's
+        // single modal slot (the workspace only ever shows one modal
+        // at a time — see `ModalLayer::show_modal`). We dismiss
+        // ourselves first, then ask the workspace to mount the
+        // popover. Re-opening the Remote Control modal is a single
+        // click away on the status-bar entry.
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
-        let _ = window;
+        let (address, port) = RemoteControlStore::try_global(cx)
+            .map(|store| {
+                store.read_with(cx, |store, _| {
+                    (
+                        store.settings().server_address.clone(),
+                        store.settings().server_port,
+                    )
+                })
+            })
+            .unwrap_or((None, 0));
+        cx.emit(DismissEvent);
         workspace.update(cx, |workspace, cx| {
-            workspace.show_toast(
-                Toast::new(
-                    NotificationId::named("remote-control-qr".into()),
-                    "TODO R-1.5: QR rendering".to_string(),
-                )
-                .autohide(),
-                cx,
-            );
+            workspace.toggle_modal(window, cx, |window, cx| {
+                QrPopover::new(client_name, secret_standard_base64, address, port, window, cx)
+            });
         });
     }
 
@@ -269,31 +286,38 @@ impl Focusable for RemoteControlModal {
 impl Render for RemoteControlModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let store = RemoteControlStore::try_global(cx);
-        let (enabled, address_set, clients): (bool, bool, Vec<(SharedString, SharedString)>) =
-            match store.as_ref() {
-                Some(store) => store.read_with(cx, |store, _| {
-                    let settings = store.settings();
-                    let clients: Vec<(SharedString, SharedString)> = settings
-                        .clients
-                        .iter()
-                        .map(|client| {
-                            let prefix: String =
-                                client.secret_base64.chars().take(16).collect();
-                            let label = format!("{prefix}\u{2026}");
-                            (
-                                SharedString::from(client.name.clone()),
-                                SharedString::from(label),
-                            )
-                        })
-                        .collect();
-                    (
-                        settings.enabled,
-                        settings.server_address.is_some(),
-                        clients,
-                    )
-                }),
-                None => (false, false, Vec::new()),
-            };
+        // (name, secret_prefix_for_display, full_standard_base64_secret).
+        // The full secret is needed by the QR popover; the prefix is the
+        // muted label rendered next to the name in the clients list.
+        let (enabled, address_set, clients): (
+            bool,
+            bool,
+            Vec<(SharedString, SharedString, String)>,
+        ) = match store.as_ref() {
+            Some(store) => store.read_with(cx, |store, _| {
+                let settings = store.settings();
+                let clients: Vec<(SharedString, SharedString, String)> = settings
+                    .clients
+                    .iter()
+                    .map(|client| {
+                        let prefix: String =
+                            client.secret_base64.chars().take(16).collect();
+                        let label = format!("{prefix}\u{2026}");
+                        (
+                            SharedString::from(client.name.clone()),
+                            SharedString::from(label),
+                            client.secret_base64.clone(),
+                        )
+                    })
+                    .collect();
+                (
+                    settings.enabled,
+                    settings.server_address.is_some(),
+                    clients,
+                )
+            }),
+            None => (false, false, Vec::new()),
+        };
 
         let toggle_disabled = !address_set && !enabled;
         let toggle_style = if enabled {
@@ -451,7 +475,7 @@ impl RemoteControlModal {
 
     fn render_clients_section(
         &self,
-        clients: &[(SharedString, SharedString)],
+        clients: &[(SharedString, SharedString, String)],
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let mut section = v_flex()
@@ -465,8 +489,9 @@ impl RemoteControlModal {
                     .size(LabelSize::Small),
             );
         } else {
-            for (name, secret_prefix) in clients {
+            for (index, (name, secret_prefix, full_secret)) in clients.iter().enumerate() {
                 let name_for_btn = name.clone();
+                let secret_for_btn = full_secret.clone();
                 section = section.child(
                     h_flex()
                         .gap_3()
@@ -477,15 +502,24 @@ impl RemoteControlModal {
                                 .color(Color::Muted),
                         )
                         .child(
-                            IconButton::new("remote-control-show-qr", IconName::Maximize)
-                                .icon_size(IconSize::Small)
-                                .tooltip(Tooltip::text("Show QR (R-1.5)"))
-                                .on_click(cx.listener({
-                                    let name = name_for_btn.clone();
-                                    move |this, _, window, cx| {
-                                        this.show_qr_toast(name.as_ref(), window, cx);
-                                    }
-                                })),
+                            IconButton::new(
+                                ("remote-control-show-qr", index),
+                                IconName::Maximize,
+                            )
+                            .icon_size(IconSize::Small)
+                            .tooltip(Tooltip::text("Show QR"))
+                            .on_click(cx.listener({
+                                let name = name_for_btn.clone();
+                                let secret = secret_for_btn.clone();
+                                move |this, _, window, cx| {
+                                    this.show_qr_popover(
+                                        name.clone(),
+                                        secret.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            })),
                         ),
                 );
             }

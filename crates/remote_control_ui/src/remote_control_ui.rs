@@ -4,9 +4,11 @@
 //! R-1 wires only the UI + state plumbing — no listener, no QR.
 
 mod modal;
+mod qr_popover;
 mod status_item;
 
 pub use modal::RemoteControlModal;
+pub use qr_popover::QrPopover;
 pub use status_item::RemoteControlStatusItem;
 
 use gpui::App;
