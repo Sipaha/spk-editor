@@ -312,20 +312,25 @@ Acceptance:
 - [x] R-2 plan-doc committed and dispatched (sub-agent reads the
       inlined plan via `## PLAN DOC` in the dispatch prompt; the
       committed copy is for `git log` / future sessions).
-- [ ] `cargo build --bin spk-editor` passes from a clean target.
-- [ ] `cargo clippy -p remote_control --all-targets -- -D warnings`
+- [x] `cargo build --bin spk-editor` passes from a clean target.
+- [x] `cargo clippy -p remote_control --all-targets -- -D warnings`
       passes.
-- [ ] `cargo test -p remote_control` passes including the new
-      `listener_e2e` integration test.
+- [x] `cargo test -p remote_control` passes including the new
+      `listener_e2e` integration test (29 unit + 2 integration =
+      31 tests).
 - [ ] Toggling Remote Control ON in the modal (with a non-empty
       address) generates a cert at
       `~/.config/spk-editor/remote-control.cert.der` (the
       supervisor's post-merge MCP smoke-test will verify visually).
-- [ ] Toggling OFF cleanly tears down the listener; no zombie
-      tasks (verify via `netstat -tln | grep :7777` showing the
-      port closed).
-- [ ] FORK.md "Touched upstream files" gains a row for
-      `crates/paths/src/paths.rs` (already touched, just extending).
+- [x] Toggling OFF cleanly tears down the listener (covered by
+      `set_enabled_starts_and_stops_listener` unit test — drops the
+      `ListenerHandle`, which closes the accept loop and the
+      `Drop` impl aborts the task; reconnect attempt fails with
+      ECONNREFUSED in the e2e test).
+- [x] FORK.md "Touched upstream files" gains a row for
+      `crates/paths/src/paths.rs` (extended description), plus a
+      new row for `crates/gpui_tokio/src/gpui_tokio.rs`
+      (`try_handle` accessor added).
 
 ## When done
 
