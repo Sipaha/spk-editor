@@ -1,6 +1,15 @@
 # Picker dropdown + Project panel header tweaks
 
-**Status:** ready to dispatch
+**Status:** complete (2026-05-15). All 7 acceptance items verified via
+supervisor's headless MCP smoke-test. Commits `5b230b1` (picker) +
+`d9dcd0b` (active_project_selector) merged as `88a3fc7`. Root cause for
+the invisible-text bug: `Editor::single_line` uses
+`EditorMode::SingleLine` which hard-codes a transparent background; the
+picker was rendering it directly on the popover's
+`elevated_surface_background` so `editor_foreground` text had near-zero
+contrast. Fix: wrap the search input in an `h_flex` that paints
+`editor_background` (matches upstream `picker::PickerDelegate`).
+Screenshot: [`2026-05-15-picker-and-panel-ui-tweaks-screenshot.png`](2026-05-15-picker-and-panel-ui-tweaks-screenshot.png).
 **Estimated:** 1 sub-agent session, ~1 h, worktree-isolated
 **Goal:** Apply two batches of UI polish from the user's 2026-05-15
 playtest — both LIGHT-track tweaks in fork-owned crates, verifiable
