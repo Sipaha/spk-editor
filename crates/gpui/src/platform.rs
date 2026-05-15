@@ -9,6 +9,8 @@ pub mod layer_shell;
 #[cfg(any(test, feature = "test-support"))]
 mod test;
 
+mod headless;
+
 #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
 mod visual_test;
 
@@ -75,6 +77,8 @@ pub(crate) use test::*;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use test::{TestDispatcher, TestScreenCaptureSource, TestScreenCaptureStream};
+
+pub use headless::{HeadlessDisplay, HeadlessWindow};
 
 #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
 pub use visual_test::VisualTestPlatform;
@@ -709,7 +713,11 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
 }
 
 /// A renderer for headless windows that can produce real rendered output.
-#[cfg(any(test, feature = "test-support"))]
+///
+/// SPK fork: ungated (was `#[cfg(any(test, feature = "test-support"))]`).
+/// The trait is needed at runtime by the native headless platform path
+/// (see `gpui::HeadlessWindow` + `gpui_wgpu::WgpuHeadlessRenderer`) — not
+/// just by tests anymore.
 pub trait PlatformHeadlessRenderer {
     /// Render a scene and return the result as an RGBA image.
     fn render_scene_to_image(
