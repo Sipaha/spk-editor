@@ -2,6 +2,13 @@
 
 SPK Editor is a personal fork of [Zed](https://github.com/zed-industries/zed) maintained by Simonov Pavel ([@Sipaha](https://github.com/Sipaha)). Repo: <https://github.com/Sipaha/spk-editor>.
 
+## Entry points
+
+- **Doc bookshelf:** [`docs/INDEX.md`](docs/INDEX.md) — start here every session after this file.
+- **Supervisor workflow** (multi-agent dispatch, plan docs, verification ritual): [`docs/workflow/supervisor-mode.md`](docs/workflow/supervisor-mode.md).
+- **Where do I write this?** → [`docs/workflow/doc-discipline.md`](docs/workflow/doc-discipline.md).
+- **What's different from upstream Zed?** → [`FORK.md`](FORK.md).
+
 ## Fork philosophy — read this before suggesting changes
 
 There is **no scheduled `git merge upstream/main`** for this fork. Bug fixes
