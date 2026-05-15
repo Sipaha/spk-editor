@@ -37,37 +37,33 @@ contracts, multi-crate invariants). Each ADR is dated `accepted`/`superseded`.
 
 ---
 
-## superpowers/plans/ — HEAVY-track plan docs
+## plans/ — HEAVY-track plan docs (committed)
 
 Per-phase specs (acceptance criteria + verification + commit log). Filename
 format: `YYYY-MM-DD-<slug>.md`. Status flips from `ready to dispatch` →
 `in progress` → `complete`/`cancelled`.
 
-The folder is pre-populated with earlier plan docs from before this workflow
-landed; only post-2026-05-15 plans follow the supervisor-mode.md ritual.
-
-Recent plans (sorted by date, descending — most recent first):
+These are **committed to the repo** so sub-agents dispatched in a worktree
+can read them.
 
 | Date | Status | Plan |
 |---|---|---|
-| 2026-05-12 | complete | [`superpowers/plans/2026-05-12-run-configurations.md`](superpowers/plans/2026-05-12-run-configurations.md) |
-| 2026-05-07 | complete | [`superpowers/plans/2026-05-07-solutions-ui-overhaul-phase-3-panel-selectors.md`](superpowers/plans/2026-05-07-solutions-ui-overhaul-phase-3-panel-selectors.md) |
-| 2026-05-07 | complete | [`superpowers/plans/2026-05-07-solutions-ui-overhaul-phase-2-titlebar.md`](superpowers/plans/2026-05-07-solutions-ui-overhaul-phase-2-titlebar.md) |
-| 2026-05-07 | complete | [`superpowers/plans/2026-05-07-solutions-ui-overhaul-phase-1-persistence.md`](superpowers/plans/2026-05-07-solutions-ui-overhaul-phase-1-persistence.md) |
-| 2026-05-07 | complete | [`superpowers/plans/2026-05-07-status-row-context-menu.md`](superpowers/plans/2026-05-07-status-row-context-menu.md) |
-| 2026-05-07 | complete | [`superpowers/plans/2026-05-07-strip-and-status-bar-sizes.md`](superpowers/plans/2026-05-07-strip-and-status-bar-sizes.md) |
-| 2026-05-06 | complete | [`superpowers/plans/2026-05-06-solution-switch-in-place.md`](superpowers/plans/2026-05-06-solution-switch-in-place.md) |
-| undated | reference | [`superpowers/plans/git-panel-plan.md`](superpowers/plans/git-panel-plan.md) |
+| 2026-05-15 | ready to dispatch | [`plans/2026-05-15-headless-platform-real.md`](plans/2026-05-15-headless-platform-real.md) — native headless GPUI platform (no Xvfb) |
 
 ---
 
-## superpowers/specs/ — design specs
+## superpowers/ — personal local drafts (gitignored)
 
-Design documents that precede a plan (the "why this design"). One spec may
-feed multiple plans. Filename `YYYY-MM-DD-<slug>-design.md`.
+The folder `docs/superpowers/{plans,specs}/` is **gitignored** (.gitignore
+entry: "Personal agent plans / specs (kept locally, not committed)"). Use
+it for in-progress ideas before they're polished into a committed
+`docs/plans/` or `docs/specs/` entry.
 
-Existing specs are linked from their corresponding plan; no separate table
-maintained — browse the folder.
+Pre-existing local drafts (not visible to a fresh clone or worktree):
+- `docs/superpowers/plans/2026-05-{06,07,12}-*.md` — earlier rebrand work
+- `docs/superpowers/specs/2026-05-*-design.md` — earlier design notes
+
+Promote to `docs/plans/` (or `docs/specs/`) when ready to commit + dispatch.
 
 ---
 

@@ -28,7 +28,7 @@ LIGHT  (bugfix / small UI tweak / single-crate refactor)
 HEAVY  (new feature / architectural change / multi-crate / new public API)
   1. READ      → docs/INDEX.md, current spec(s) in docs/superpowers/, FORK.md,
                  1–2 related ADRs (when we have them)
-  2. PLAN-DOC  → docs/superpowers/plans/YYYY-MM-DD-<slug>.md (≥ 6 sections)
+  2. PLAN-DOC  → docs/plans/YYYY-MM-DD-<slug>.md (≥ 6 sections)
                  → commit "plan: <slug>"
   3. ADR       → docs/architecture/decisions/NNNN-<slug>.md if the decision
                  has long-term consequences (data format, public API contract,
@@ -95,7 +95,7 @@ Otherwise: HEAVY. When in doubt, HEAVY — the cost of an unnecessary plan doc
 
 ## 3. PLAN-DOC structure (HEAVY only)
 
-`docs/superpowers/plans/YYYY-MM-DD-<slug>.md`:
+`docs/plans/YYYY-MM-DD-<slug>.md`:
 
 ```markdown
 # <Title>
@@ -137,7 +137,7 @@ Commit the plan doc as a separate commit BEFORE dispatching — sub-agents read 
 and if the dispatch goes sideways the plan is still on the tree.
 
 ```bash
-git add docs/superpowers/plans/YYYY-MM-DD-<slug>.md
+git add docs/plans/YYYY-MM-DD-<slug>.md
 git commit -m "plan: <slug>
 
 <3–5 line description: scope, why this design over alternatives>"
@@ -164,7 +164,7 @@ Agent({
 
 1. CLAUDE.md — the hard rules. Skim "What's disabled" and "Build conventions".
 2. FORK.md — § "Touched upstream files" + § "Fork-owned crates".
-3. docs/superpowers/plans/YYYY-MM-DD-<slug>.md — THE FULL SPEC for this task.
+3. docs/plans/YYYY-MM-DD-<slug>.md — THE FULL SPEC for this task.
 4. 1–3 related ADRs (give the paths if any).
 5. The existing files you'll edit (give the paths).
 
@@ -389,7 +389,7 @@ dispatch a hotfix.
 
 ## 6. FINALIZE (HEAVY)
 
-### `docs/superpowers/plans/YYYY-MM-DD-<slug>.md`
+### `docs/plans/YYYY-MM-DD-<slug>.md`
 - Status → `complete`.
 - All acceptance items ticked `[x]`.
 - Final commit SHA appended at the bottom.
@@ -540,8 +540,8 @@ The supervisor's bookshelf — start every session at `docs/INDEX.md`:
 | `docs/workflow/adr-template.md` | ADR template. |
 | `docs/architecture/decisions/NNNN-<slug>.md` | ADRs (architectural decisions with long-term consequences). |
 | `docs/findings/YYYY-MM-<slug>.md` | Short, dated discovery notes (one fact each, no fluff). |
-| `docs/superpowers/plans/YYYY-MM-DD-<slug>.md` | Plan docs for HEAVY-track work (= voxelcraft's `roadmap/phase-N-*.md`). Already-populated folder; new plans go here. |
-| `docs/superpowers/specs/YYYY-MM-DD-<slug>.md` | Design specs that precede a plan (already-populated folder). |
+| `docs/plans/YYYY-MM-DD-<slug>.md` | Plan docs for HEAVY-track work (committed to the repo so sub-agents in worktree can read them). |
+| `docs/superpowers/{plans,specs}/` | **Personal / local drafts** — gitignored. Use for in-progress ideas before they're polished into a `docs/plans/` doc. |
 | `CLAUDE.md` | Hard rules + fork philosophy + locked rebrand identifiers. Always in context. |
 | `FORK.md` | Touched-upstream-files registry + fork-local crates list + numbered architectural decisions. Edit when first-touching an upstream file. |
 

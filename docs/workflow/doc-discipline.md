@@ -29,9 +29,10 @@ Discovered a non-obvious gotcha / library quirk / benchmark fact?
     └─ ≥3 findings on one topic? → consolidate into an ADR or a guide
 
 Doing HEAVY-track work?
-└─ Yes → docs/superpowers/plans/YYYY-MM-DD-<slug>.md before dispatch
+└─ Yes → docs/plans/YYYY-MM-DD-<slug>.md before dispatch (committed)
     └─ The design has non-trivial alternatives? → also a spec in
-       docs/superpowers/specs/YYYY-MM-DD-<slug>-design.md
+       docs/specs/YYYY-MM-DD-<slug>-design.md (or keep an in-progress
+       draft in the gitignored docs/superpowers/ until ready)
 
 Did you discover a recurring pattern (≥2 sessions doing the same thing)?
 └─ Yes → consider a guide (but not before the second time — premature
@@ -103,8 +104,13 @@ Suggested structure:
 **Create one for HEAVY-track work** (see `supervisor-mode.md` § "Two tracks").
 LIGHT-track work does NOT need a plan doc.
 
-Lives in `docs/superpowers/plans/YYYY-MM-DD-<slug>.md`. Structure is in
-`supervisor-mode.md` § 3 "PLAN-DOC structure".
+Lives in `docs/plans/YYYY-MM-DD-<slug>.md` — **committed** so sub-agents
+dispatched in a worktree can read it. Structure is in `supervisor-mode.md`
+§ 3 "PLAN-DOC structure".
+
+The gitignored `docs/superpowers/plans/` is for **personal in-progress
+drafts**; promote to `docs/plans/` when the plan is ready to commit and
+dispatch.
 
 ### Spec doc
 
@@ -112,8 +118,9 @@ Lives in `docs/superpowers/plans/YYYY-MM-DD-<slug>.md`. Structure is in
 recording for posterity (so a future session understands "why this design,
 not the other two").
 
-Lives in `docs/superpowers/specs/YYYY-MM-DD-<slug>-design.md`. Less
-prescriptive structure than a plan — it's a design exploration.
+Lives in `docs/specs/YYYY-MM-DD-<slug>-design.md` (committed). Less
+prescriptive structure than a plan — it's a design exploration. In-progress
+drafts can sit in `docs/superpowers/specs/` (gitignored) until ready.
 
 ### Guide
 
