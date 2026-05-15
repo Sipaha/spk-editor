@@ -28,7 +28,9 @@ pub use actions::{DeleteSolution, NewSolution, OpenSolution, RefreshCacheForCurr
 
 use gpui::{App, AppContext as _, Window};
 use solutions::{SolutionId, SolutionStore, SolutionStoreEvent};
+use std::path::PathBuf;
 use ui::SharedString;
+use util::ResultExt as _;
 use workspace::Workspace;
 
 use crate::actions::{
@@ -44,6 +46,34 @@ pub fn init(cx: &mut App) {
     cx.observe_new(register_member_sync_observer).detach();
     welcome::init(cx);
     switch::register_mcp(cx);
+}
+
+/// Remove a solution from the registry and (best-effort) wipe its
+/// `root` folder from disk. Callers that already showed their own
+/// confirmation modal should invoke this directly instead of
+/// re-dispatching the `DeleteSolution` action — `cx.dispatch_action`
+/// from inside a nested click/listener silently fails because the
+/// active window is already taken from `App::windows`, so the
+/// action never reaches the workspace handler that performs the
+/// delete.
+pub fn delete_solution_with_cleanup(id: SolutionId, root: PathBuf, cx: &mut App) {
+    let store = SolutionStore::global(cx);
+    let id_for_store = id.clone();
+    store
+        .update(cx, |s, cx| s.delete_solution(&id_for_store, cx))
+        .log_err();
+    cx.background_spawn(async move {
+        let result: std::io::Result<()> =
+            smol::unblock(move || std::fs::remove_dir_all(&root)).await;
+        if let Err(err) = result {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                log::warn!(
+                    "delete_solution: removing directory failed: {err} (orphaned files left in place)"
+                );
+            }
+        }
+    })
+    .detach();
 }
 
 /// Each new `Workspace` subscribes to `SolutionStore` so that adding
@@ -132,6 +162,7 @@ fn register_tab_actions(
             return;
         };
         let folder_label = SharedString::from(format!("Folder {}", root.display()));
+        let root_for_cleanup = root.clone();
         crate::delete_confirm_modal::open_delete_confirm(
             workspace,
             SharedString::from(format!("Delete solution \"{name}\"?")),
@@ -147,7 +178,7 @@ fn register_tab_actions(
                 },
             ],
             move |_window, cx| {
-                cx.dispatch_action(&crate::actions::DeleteSolution { id: id.0 });
+                delete_solution_with_cleanup(id, root_for_cleanup, cx);
             },
             window,
             cx,

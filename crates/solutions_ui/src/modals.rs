@@ -382,29 +382,12 @@ impl DeleteSolutionModal {
     }
 
     fn confirm(&mut self, _: &menu::Confirm, _window: &mut Window, cx: &mut Context<Self>) {
-        let store = SolutionStore::global(cx);
-        let id = self.id.clone();
-        store
-            .update(cx, |s, cx| s.delete_solution(&id, cx))
-            .log_err();
-        // Disk cleanup is best-effort and async — the directory can be huge
-        // (worktrees with full git histories), so we don't want to block the
-        // UI thread. Failures are logged but not surfaced: by this point the
-        // metadata entry is gone, so the user has effectively forgotten the
-        // solution either way.
-        let root = self.root.clone();
-        cx.background_spawn(async move {
-            let result: std::io::Result<()> =
-                smol::unblock(move || std::fs::remove_dir_all(&root)).await;
-            if let Err(err) = result {
-                if err.kind() != std::io::ErrorKind::NotFound {
-                    log::warn!(
-                        "delete_solution: removing directory failed: {err} (orphaned files left in place)"
-                    );
-                }
-            }
-        })
-        .detach();
+        // Disk cleanup is best-effort and async — the directory can be
+        // huge (worktrees with full git histories), so we don't want to
+        // block the UI thread. Failures are logged but not surfaced: by
+        // this point the metadata entry is gone, so the user has
+        // effectively forgotten the solution either way.
+        crate::delete_solution_with_cleanup(self.id.clone(), self.root.clone(), cx);
         cx.emit(DismissEvent);
     }
 

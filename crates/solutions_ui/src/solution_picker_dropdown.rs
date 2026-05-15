@@ -206,6 +206,7 @@ impl SolutionPickerDropdown {
         let ClosedSolutionRow { id, name, root } = row;
         workspace.update(cx, |workspace, cx| {
             let folder_label = SharedString::from(format!("Folder {}", root.display()));
+            let root_for_cleanup = root.clone();
             open_delete_confirm(
                 workspace,
                 SharedString::from(format!("Delete solution \"{name}\"?")),
@@ -221,7 +222,7 @@ impl SolutionPickerDropdown {
                     },
                 ],
                 move |_window, cx| {
-                    cx.dispatch_action(&crate::actions::DeleteSolution { id: id.0 });
+                    crate::delete_solution_with_cleanup(id, root_for_cleanup, cx);
                 },
                 window,
                 cx,
