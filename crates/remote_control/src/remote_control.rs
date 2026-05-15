@@ -1,10 +1,16 @@
-//! Remote Control: state model + JSON-file persistence for the editor's
-//! external Remote Control surface.
+//! Remote Control: state model + JSON-file persistence + network listener
+//! for the editor's external Remote Control surface.
 //!
-//! R-1 is the UI / state-management slice — there is no network listener,
-//! no QR rendering, no encryption. `RemoteControlStore::set_enabled(true)`
-//! merely flips the persisted bit; the listener arrives in R-2.
+//! R-1 shipped settings + UI; R-1.5 added the QR popover; R-2 (this slice)
+//! adds the network listener — TLS 1.3 + WebSocket upgrade + per-client
+//! HMAC challenge auth + JSON-RPC dispatch — driven by toggling
+//! `RemoteControlStore::set_enabled(true)`. Transport rationale is
+//! ADR-0003.
 
+pub mod auth;
+pub mod cert;
+pub mod dispatch;
+pub mod listener;
 mod model;
 mod settings;
 mod store;

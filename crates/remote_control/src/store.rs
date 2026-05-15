@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
@@ -8,6 +9,9 @@ use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Task};
 use rand::TryRngCore as _;
 use rand::rngs::OsRng;
 
+use crate::cert;
+use crate::dispatch::MinimalDispatcher;
+use crate::listener::{self, ListenerConfig, ListenerHandle};
 use crate::model::{AuthorizedClient, RemoteControlSettings};
 use crate::settings;
 
@@ -21,6 +25,34 @@ pub struct RemoteControlStore {
     fs: Option<Arc<dyn fs::Fs>>,
     /// Live FS watcher task (dropped → watcher stops).
     _watcher: Option<Task<()>>,
+    /// Set of payloads we've written to disk. The watcher fires once
+    /// per fs event — including the initial-state load and one per
+    /// `atomic_write` — and re-reads the *current* file content each
+    /// time, so multiple events may carry the same text. We don't want
+    /// any of those round-tripped back through `this.settings = parsed`
+    /// (the watcher races against newer in-memory mutations whose own
+    /// write hasn't yet flushed). The set retains every text we ever
+    /// rendered + wrote; an event whose text is in this set is by
+    /// definition our own echo and must be ignored. The set is bounded
+    /// at `MAX_ECHO_HISTORY` to keep memory finite under pathological
+    /// flapping; older entries are evicted by re-rendering eviction.
+    self_write_echoes: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Live listener handle, set while `enabled = true`. Dropping it
+    /// triggers the shutdown oneshot and tears down the accept loop +
+    /// in-flight per-connection tasks.
+    listener: Option<ListenerHandle>,
+    /// Live cert (fingerprint exposed via `cert_fingerprint`). Persisted
+    /// across set_enabled toggles so the fingerprint stays stable for the
+    /// QR code as long as the cert file on disk does.
+    cert_fingerprint: Option<[u8; 32]>,
+    /// Watch sender feeding the listener's per-connection auth path the
+    /// live client list. Present iff the listener is running.
+    clients_tx: Option<tokio::sync::watch::Sender<Vec<AuthorizedClient>>>,
+    /// In-flight listener bootstrap (Token bootstrap is async — TLS gen
+    /// can take ~250ms; we don't block the UI thread). Kept as a `Task`
+    /// so the store entity drop semantics cancel a pending bootstrap if
+    /// the user toggles OFF before bind completes.
+    _bootstrap: Option<Task<()>>,
 }
 
 #[derive(Clone, Debug)]
@@ -40,7 +72,37 @@ impl RemoteControlStore {
             settings: RemoteControlSettings::default(),
             fs: None,
             _watcher: None,
+            self_write_echoes: Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
+            listener: None,
+            cert_fingerprint: None,
+            clients_tx: None,
+            _bootstrap: None,
         }
+    }
+
+    /// SHA-256 fingerprint of the live TLS cert (set once the listener has
+    /// successfully bound). The R-3 QR generator reads this to embed
+    /// `server_fp=<base64>` in the spk-remote:// URL.
+    pub fn cert_fingerprint(&self) -> Option<[u8; 32]> {
+        self.cert_fingerprint
+    }
+
+    /// Address the listener is bound to (set once the listener has
+    /// successfully bound). The integration test reads this to know which
+    /// port to dial when `server_port` was 0 (OS-assigned).
+    pub fn bound_addr(&self) -> Option<SocketAddr> {
+        self.listener.as_ref().map(|handle| handle.bound_addr())
+    }
+
+    /// True once `set_enabled(true)` has run and the listener is bound.
+    /// Note this is decoupled from `settings.enabled` — `enabled` flips
+    /// synchronously, the listener takes a tokio bootstrap roundtrip to
+    /// start. UI code that wants "the listener is actually accepting
+    /// connections" should check this, not `settings.enabled`.
+    pub fn listener_is_running(&self) -> bool {
+        self.listener.is_some()
     }
 
     /// Build the global store and start watching the on-disk JSON file. The
@@ -84,7 +146,11 @@ impl RemoteControlStore {
         if settings == self.settings {
             return;
         }
+        let clients_changed = self.settings.clients != settings.clients;
         self.settings = settings;
+        if clients_changed {
+            self.broadcast_clients_if_running();
+        }
         self.notify_changed(cx);
         self.save_to_disk(cx).detach();
     }
@@ -96,6 +162,113 @@ impl RemoteControlStore {
         self.settings.enabled = enabled;
         self.notify_changed(cx);
         self.save_to_disk(cx).detach();
+        if enabled {
+            self.start_listener_async(cx);
+        } else {
+            self.stop_listener(cx);
+        }
+    }
+
+    /// Async bootstrap: load-or-generate the TLS cert, build the watch
+    /// channel for the live client list, then call into `listener::start_listener`
+    /// on the shared tokio runtime (from `gpui_tokio`). Hops back to the
+    /// foreground entity to store the resulting `ListenerHandle`.
+    fn start_listener_async(&mut self, cx: &mut Context<Self>) {
+        if self.listener.is_some() {
+            return;
+        }
+        let Some(fs) = self.fs.clone() else {
+            log::warn!(
+                target: "remote_control",
+                "no fs registered; can't start listener",
+            );
+            return;
+        };
+        if gpui_tokio::Tokio::try_handle(cx).is_none() {
+            log::warn!(
+                target: "remote_control",
+                "gpui_tokio runtime not initialised; can't start listener",
+            );
+            return;
+        }
+        let server_address = self.settings.server_address.clone();
+        let port = self.settings.server_port;
+        let clients = self.settings.clients.clone();
+
+        // Build the watch channel up front; even though the listener
+        // hasn't started, holding `clients_tx` on the store lets later
+        // `add_client` / `remove_client` calls send fresh snapshots
+        // through it without an Option-juggling race.
+        let (clients_tx, clients_rx) = tokio::sync::watch::channel(clients);
+        self.clients_tx = Some(clients_tx);
+
+        // Spawn the tokio-side bootstrap on the global Tokio runtime;
+        // `gpui_tokio::Tokio::spawn_result` returns a gpui Task that
+        // properly bridges the wake-from-tokio-thread back to the gpui
+        // foreground scheduler. Without this bridge, GPUI's test
+        // scheduler panics on cross-thread wake (and the production
+        // scheduler may silently mis-schedule).
+        let bootstrap = gpui_tokio::Tokio::spawn_result(cx, async move {
+            bootstrap_listener(fs, server_address.as_deref(), port, clients_rx).await
+        });
+
+        let task = cx.spawn(async move |this, cx| {
+            let bootstrap_result = bootstrap.await;
+            let _ = this.update(cx, |this, cx| match bootstrap_result {
+                Ok((handle, fingerprint)) => {
+                    if !this.settings.enabled {
+                        // Toggled off while we were starting up; drop the
+                        // freshly-built handle immediately.
+                        log::info!(
+                            target: "remote_control",
+                            "listener started but enabled was toggled off; dropping",
+                        );
+                        return;
+                    }
+                    log::info!(
+                        target: "remote_control",
+                        "listener bound on {}",
+                        handle.bound_addr(),
+                    );
+                    this.listener = Some(handle);
+                    this.cert_fingerprint = Some(fingerprint);
+                    this.notify_changed(cx);
+                }
+                Err(err) => {
+                    log::warn!(
+                        target: "remote_control",
+                        "listener start failed: {err:#}",
+                    );
+                    this.settings.enabled = false;
+                    this.clients_tx = None;
+                    this.notify_changed(cx);
+                    this.save_to_disk(cx).detach();
+                }
+            });
+        });
+        self._bootstrap = Some(task);
+    }
+
+    fn stop_listener(&mut self, cx: &mut Context<Self>) {
+        if self.listener.take().is_some() {
+            self.cert_fingerprint = None;
+            self.clients_tx = None;
+            self._bootstrap = None;
+            self.notify_changed(cx);
+        }
+    }
+
+    /// Push the current client list through the watch channel, if the
+    /// listener is alive. Called whenever `clients[]` changes so any
+    /// future handshake sees the up-to-date set.
+    fn broadcast_clients_if_running(&self) {
+        let Some(tx) = self.clients_tx.as_ref() else {
+            return;
+        };
+        // `send_replace` doesn't error even if there are no receivers —
+        // the listener task always holds one. Ignore the error case
+        // defensively (e.g. listener died after a bind failure we logged).
+        let _ = tx.send(self.settings.clients.clone());
     }
 
     pub fn set_address(&mut self, address: Option<String>, cx: &mut Context<Self>) {
@@ -148,6 +321,7 @@ impl RemoteControlStore {
             created_at: Utc::now(),
         };
         self.settings.clients.push(client.clone());
+        self.broadcast_clients_if_running();
         self.notify_changed(cx);
         self.save_to_disk(cx).detach();
         Ok(client)
@@ -158,6 +332,7 @@ impl RemoteControlStore {
         self.settings.clients.retain(|client| client.name != name);
         let removed = self.settings.clients.len() < before;
         if removed {
+            self.broadcast_clients_if_running();
             self.notify_changed(cx);
             self.save_to_disk(cx).detach();
         }
@@ -176,6 +351,26 @@ impl RemoteControlStore {
         };
         let path = paths::remote_control_settings_file().clone();
         let text = settings::render(&self.settings);
+        // Stash the to-be-written text BEFORE the async write so the
+        // watcher can identify the echo when it fires. The watcher emits
+        // one initial-state read + one per atomic-write, each carrying
+        // the file's current content — so the same text can be replayed
+        // multiple times for a single write. We use a content-set
+        // (rather than a FIFO) so re-emissions are all squelched. The
+        // set is bounded to defend against rare-but-finite
+        // mutation-flood scenarios; eviction is LRU-on-insert.
+        const MAX_ECHO_HISTORY: usize = 32;
+        if let Ok(mut guard) = self.self_write_echoes.lock() {
+            if guard.len() >= MAX_ECHO_HISTORY {
+                // Drop an arbitrary entry — HashSet has no order, but
+                // worst case we miss-squelch a single stale event, which
+                // is harmless (the parsed `==` settings means no apply).
+                if let Some(arbitrary) = guard.iter().next().cloned() {
+                    guard.remove(&arbitrary);
+                }
+            }
+            guard.insert(text.clone());
+        }
         cx.background_spawn(async move {
             if let Some(parent) = path.parent() {
                 if let Err(err) = fs.create_dir(parent).await {
@@ -198,6 +393,11 @@ impl RemoteControlStore {
             let (mut contents_rx, _watcher) =
                 ::settings::watch_config_file(cx.background_executor(), fs, path);
             while let Some(text) = contents_rx.next().await {
+                if text.trim().is_empty() {
+                    // Spurious initial-empty read (file doesn't exist yet);
+                    // nothing to apply.
+                    continue;
+                }
                 let parsed = match settings::parse(&text) {
                     Ok(parsed) => parsed,
                     Err(err) => {
@@ -205,8 +405,33 @@ impl RemoteControlStore {
                         continue;
                     }
                 };
+                // Squelch the watcher's echo of our own writes. Without
+                // this guard the watcher fires after every `save_to_disk`
+                // and the apply-from-disk path can run AFTER a newer
+                // in-memory mutation has happened (rapid sequences of
+                // `set_address` → `set_port` → `add_client` → `set_enabled`
+                // all dispatch async writes; the watcher catches up out of
+                // order with respect to our in-memory edits). We detect
+                // "this is our own write coming back" by checking the
+                // parsed value against what the entity currently holds
+                // and against the most recently saved snapshot. If the
+                // parsed settings equal the last value we wrote, the
+                // event is our echo — drop it.
                 if this
                     .update(cx, |this, cx| {
+                        // An event whose text is in the echo set is by
+                        // construction one of our own writes coming back
+                        // through the watcher; ignore it (the in-memory
+                        // settings are by definition at or ahead of it).
+                        let is_self_echo = this
+                            .self_write_echoes
+                            .lock()
+                            .ok()
+                            .map(|guard| guard.contains(text.as_str()))
+                            .unwrap_or(false);
+                        if is_self_echo {
+                            return;
+                        }
                         if this.settings != parsed {
                             this.settings = parsed;
                             this.notify_changed(cx);
@@ -220,6 +445,40 @@ impl RemoteControlStore {
         });
         self._watcher = Some(task);
     }
+}
+
+async fn bootstrap_listener(
+    fs: Arc<dyn fs::Fs>,
+    server_address: Option<&str>,
+    port: u16,
+    clients_rx: tokio::sync::watch::Receiver<Vec<AuthorizedClient>>,
+) -> Result<(ListenerHandle, [u8; 32])> {
+    let cert = cert::load_or_generate(&fs, server_address).await?;
+    let fingerprint = cert.fingerprint_sha256;
+
+    // Per ADR-0003 anti-pattern §"Don't bind to 0.0.0.0 by default": the
+    // user toggled ON explicitly, so binding `0.0.0.0` is fine here — the
+    // anti-pattern is about not auto-binding when the toggle is off. We
+    // bind `0.0.0.0` so the listener is LAN-reachable; the
+    // `server_address` field is for QR advertising only.
+    let bind_addr: SocketAddr = SocketAddr::from(([0, 0, 0, 0], port));
+
+    let dispatcher: Arc<dyn crate::dispatch::RemoteDispatcher> =
+        MinimalDispatcher::new();
+
+    let cfg = ListenerConfig {
+        bind_addr,
+        cert,
+        clients_rx,
+        dispatcher,
+    };
+
+    // `start_listener` calls `TcpListener::bind` which needs to be on a
+    // tokio runtime — `gpui_tokio::Tokio::spawn_result` (the caller)
+    // ensures this future runs on the tokio worker threads, so the
+    // implicit runtime is already in scope.
+    let handle = listener::start_listener(cfg).await?;
+    Ok((handle, fingerprint))
 }
 
 fn generate_secret() -> Result<String> {
@@ -360,6 +619,69 @@ mod tests {
             store.set_port(9090, cx);
             assert_eq!(store.settings().server_port, 9090);
         });
+    }
+
+    #[gpui::test]
+    async fn set_enabled_starts_and_stops_listener(cx: &mut TestAppContext) {
+        // The listener bootstrap spawns work on tokio's worker threads;
+        // wakeups arrive cross-thread, which the deterministic test
+        // scheduler refuses by default. `allow_parking` is the supported
+        // escape hatch — used widely in tree (`db`, `acp_thread`,
+        // `git_graph`, etc.) for the same shape: external runtime work
+        // crossing into a test gpui executor.
+        cx.executor().allow_parking();
+        cx.update(gpui_tokio::init);
+        let fs: Arc<dyn fs::Fs> = fs::FakeFs::new(cx.background_executor.clone());
+        let store = cx.new(|cx| RemoteControlStore::new_with_fs(fs, cx));
+
+        store.update(cx, |store, cx| {
+            store.set_address(Some("127.0.0.1".into()), cx);
+            store.set_port(0, cx);
+            store.add_client("Test".into(), cx).expect("add");
+        });
+
+        store.update(cx, |store, cx| store.set_enabled(true, cx));
+
+        // Bootstrap is async — poll until the listener handle materialises.
+        let bound_addr = poll_until(cx, &store, |store| store.bound_addr()).await;
+        let bound_addr = bound_addr.expect("listener must bind");
+        assert!(bound_addr.port() > 0, "port must be OS-assigned");
+        let fingerprint = store
+            .read_with(cx, |store, _| store.cert_fingerprint())
+            .expect("fingerprint must be set when listener is running");
+        assert_eq!(fingerprint.len(), 32);
+
+        // Toggling off drops the listener.
+        store.update(cx, |store, cx| store.set_enabled(false, cx));
+        cx.run_until_parked();
+        store.read_with(cx, |store, _| {
+            assert!(!store.listener_is_running());
+            assert!(store.cert_fingerprint().is_none());
+            assert!(store.bound_addr().is_none());
+        });
+    }
+
+    async fn poll_until<T, F>(
+        cx: &mut TestAppContext,
+        store: &Entity<RemoteControlStore>,
+        mut predicate: F,
+    ) -> Option<T>
+    where
+        F: FnMut(&RemoteControlStore) -> Option<T>,
+    {
+        // Generous: the bootstrap path does TLS keypair gen which is
+        // single-digit-ms but the executor still has to flush.
+        for _ in 0..200 {
+            cx.run_until_parked();
+            let snapshot = store.read_with(cx, |store, _| predicate(store));
+            if snapshot.is_some() {
+                return snapshot;
+            }
+            cx.background_executor
+                .timer(std::time::Duration::from_millis(25))
+                .await;
+        }
+        None
     }
 
     #[gpui::test]
