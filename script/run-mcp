@@ -82,31 +82,11 @@ else
     cargo_flags=(--release --bin spk-editor)
 fi
 
-if [[ ! -x "$binary" ]]; then
-    echo "[run-mcp] building $binary (profile: $profile) ..."
-    (cd "$repo_root" && cargo build "${cargo_flags[@]}")
-fi
-
-# Decide whether to wrap with Xvfb. If $DISPLAY is unset and mode wasn't
-# forced to "display", use Xvfb. If Xvfb is missing on a headless box we
-# fail loudly so the user installs it instead of getting a cryptic GPUI
-# panic later.
-use_xvfb=0
-if [[ "$mode" == "headless" ]]; then
-    use_xvfb=1
-elif [[ "$mode" == "display" ]]; then
-    use_xvfb=0
-elif [[ -z "${DISPLAY:-}" ]]; then
-    use_xvfb=1
-fi
-
-if (( use_xvfb )) && ! command -v xvfb-run >/dev/null 2>&1; then
-    echo "[run-mcp] xvfb-run is not installed." >&2
-    echo "[run-mcp] On Debian/Ubuntu: sudo apt-get install xvfb" >&2
-    echo "[run-mcp] On Fedora:       sudo dnf install xorg-x11-server-Xvfb" >&2
-    exit 1
-fi
-
+# Resolve socket_dir + socket_path UP FRONT (before build / xvfb checks /
+# any other early-exit path), then strip stale state immediately. If we
+# fail-fast later (e.g. xvfb-run missing), we don't leave a stale socket
+# symlink around to fool a follow-up `until [ -S "$socket_path" ]` wait
+# into thinking the editor is ready.
 if [[ -n "$runtime_dir" ]]; then
     # Full isolation: editor's config / data / cache all land under
     # $runtime_dir. The editor uses its standard XDG-derived paths, which
@@ -132,10 +112,47 @@ else
     export SPK_EDITOR_HOME="$HOME"
 fi
 socket_path="$socket_dir/mcp.sock"
+lock_path="$socket_dir/mcp.lock"
 mkdir -p "$socket_dir"
 
-# Remove a stale socket so the wait loop below sees a fresh one.
+# Strip stale socket (symlink to a /tmp/zed-mcp*/mcp.sock that no live
+# process owns) and stale lock (PID file pointing at a dead process). Done
+# unconditionally and BEFORE any check that could exit non-zero — so a
+# failed precheck never leaves the door open for a follow-up wait-loop to
+# false-positive on the corpse of a previous run.
 [[ -L "$socket_path" || -S "$socket_path" ]] && rm -f "$socket_path"
+if [[ -f "$lock_path" ]]; then
+    lock_pid="$(cat "$lock_path" 2>/dev/null || true)"
+    if [[ -n "$lock_pid" ]] && ! kill -0 "$lock_pid" 2>/dev/null; then
+        rm -f "$lock_path"
+    fi
+fi
+
+if [[ ! -x "$binary" ]]; then
+    echo "[run-mcp] building $binary (profile: $profile) ..."
+    (cd "$repo_root" && cargo build "${cargo_flags[@]}")
+fi
+
+# Decide whether to wrap with Xvfb. If $DISPLAY is unset and mode wasn't
+# forced to "display", use Xvfb. If Xvfb is missing on a headless box we
+# fail loudly so the user installs it instead of getting a cryptic GPUI
+# panic later.
+use_xvfb=0
+if [[ "$mode" == "headless" ]]; then
+    use_xvfb=1
+elif [[ "$mode" == "display" ]]; then
+    use_xvfb=0
+elif [[ -z "${DISPLAY:-}" ]]; then
+    use_xvfb=1
+fi
+
+if (( use_xvfb )) && ! command -v xvfb-run >/dev/null 2>&1; then
+    echo "[run-mcp] xvfb-run is not installed — required for headless mode." >&2
+    echo "[run-mcp] On Debian/Ubuntu: sudo apt-get install xvfb" >&2
+    echo "[run-mcp] On Fedora:       sudo dnf install xorg-x11-server-Xvfb" >&2
+    echo "[run-mcp] To force a visible window instead, pass --display." >&2
+    exit 1
+fi
 
 if (( skip_onboarding )); then
     if ! command -v sqlite3 >/dev/null 2>&1; then

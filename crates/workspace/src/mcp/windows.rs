@@ -67,7 +67,16 @@ fn collect_windows(cx: &mut App) -> Vec<WindowInfo> {
     // Prefer Z-ordered window stack for stable, meaningful ordering. SlotMap
     // iteration via `cx.windows()` is unstable across calls, which the
     // fallback compensates for with a deterministic sort by window id.
-    let handles = cx.window_stack().unwrap_or_else(|| cx.windows());
+    //
+    // `window_stack()` reads `_NET_CLIENT_LIST_STACKING` from the X11 root;
+    // under Xvfb (no window manager) that property is empty and the call
+    // returns `Some(vec![])`. Treat an empty stack the same as `None` —
+    // otherwise headless mode silently reports "0 windows" while editor
+    // windows are actually open.
+    let handles = cx
+        .window_stack()
+        .filter(|stack| !stack.is_empty())
+        .unwrap_or_else(|| cx.windows());
     let mut out = Vec::new();
     for handle in handles {
         let Some(window_handle) = handle.downcast::<crate::MultiWorkspace>() else {
@@ -662,8 +671,12 @@ fn dispatch_mouse_click(
 fn find_window_by_id(window_id: &str, cx: &mut App) -> anyhow::Result<gpui::AnyWindowHandle> {
     // Mirror the iteration order used by `windows.list`: prefer Z-ordered
     // stack, fall back to the unstable slot-map iteration so both tools
-    // observe the same set of handles.
-    let candidates = cx.window_stack().unwrap_or_else(|| cx.windows());
+    // observe the same set of handles. An empty stack (Xvfb / no WM) is
+    // treated as no stack at all — see `collect_windows`.
+    let candidates = cx
+        .window_stack()
+        .filter(|stack| !stack.is_empty())
+        .unwrap_or_else(|| cx.windows());
     for handle in candidates {
         if editor_mcp::format_window_id(handle.window_id()) == window_id {
             return Ok(handle);
