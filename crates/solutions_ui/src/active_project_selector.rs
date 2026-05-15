@@ -209,9 +209,20 @@ impl Render for ActiveProjectSelector {
         let selected = self.selected_catalog_id.clone();
         let change_counts = self.change_counts.clone();
 
+        // Bigger label + right-aligned chevron. The chevron is a child of
+        // the Button (end_icon) — the playtest report flagged the
+        // previous leading ChevronRight as misleading (looked like a
+        // disclosure triangle for collapsing the project). A right-side
+        // ChevronDown matches the dropdown convention.
         let trigger = Button::new("active-project-selector-trigger", label_text)
-            .start_icon(Icon::new(IconName::ChevronDown).size(IconSize::XSmall).color(Color::Muted))
-            .style(ButtonStyle::Subtle);
+            .label_size(LabelSize::Default)
+            .end_icon(
+                Icon::new(IconName::ChevronDown)
+                    .size(IconSize::Small)
+                    .color(Color::Muted),
+            )
+            .style(ButtonStyle::Subtle)
+            .full_width();
 
         let solution_id_for_add = solution_id.clone();
 
@@ -219,26 +230,29 @@ impl Render for ActiveProjectSelector {
             .id("active-project-selector")
             .w_full()
             .child(
-                PopoverMenu::new("active-project-member-picker")
-                    .trigger(trigger)
-                    .menu(move |window, cx| {
-                        let Some(solution_id) = solution_id.clone() else {
-                            return None;
-                        };
-                        Some(cx.new(|cx| {
-                            member_picker::MemberPicker::new(
-                                panel_kind,
-                                solution_id,
-                                members.clone(),
-                                selected.clone(),
-                                change_counts.clone(),
-                                window,
-                                cx,
-                            )
-                        }))
-                    })
-                    .anchor(gpui::Anchor::TopLeft)
-                    .attach(gpui::Anchor::BottomLeft),
+                div().flex_1().min_w_0().child(
+                    PopoverMenu::new("active-project-member-picker")
+                        .full_width(true)
+                        .trigger(trigger)
+                        .menu(move |window, cx| {
+                            let Some(solution_id) = solution_id.clone() else {
+                                return None;
+                            };
+                            Some(cx.new(|cx| {
+                                member_picker::MemberPicker::new(
+                                    panel_kind,
+                                    solution_id,
+                                    members.clone(),
+                                    selected.clone(),
+                                    change_counts.clone(),
+                                    window,
+                                    cx,
+                                )
+                            }))
+                        })
+                        .anchor(gpui::Anchor::TopLeft)
+                        .attach(gpui::Anchor::BottomLeft),
+                ),
             )
             .child(
                 PopoverMenu::new("active-project-add-picker")
@@ -450,6 +464,43 @@ mod tests {
 
         // Run the event loop so the picker's render pass doesn't panic.
         cx.run_until_parked();
+    }
+
+    /// Pinned guarantee for the playtest tweak: the trigger button must
+    /// render the chevron on the right via `end_icon`, NOT a leading
+    /// chevron via `start_icon` — the latter looked like a disclosure
+    /// triangle (collapse/expand the project) to playtesters. Tested as
+    /// a source-level invariant: full UI rendering of
+    /// `ActiveProjectSelector` requires a `WeakEntity<Workspace>` which
+    /// is heavier than the value the test would add. The Button API
+    /// itself distinguishes `start_icon` vs `end_icon` at compile time;
+    /// this asserts the call site never silently flips back.
+    #[test]
+    fn trigger_chevron_is_right_aligned_via_end_icon() {
+        // Source of this very file.
+        let src = include_str!("active_project_selector.rs");
+        // Locate the active-project-selector-trigger Button source span.
+        let start = src
+            .find("\"active-project-selector-trigger\"")
+            .expect("trigger button construction must exist");
+        let span_end = src[start..]
+            .find(".style(ButtonStyle::Subtle)")
+            .expect("trigger Button chain ends with .style(...)");
+        let span = &src[start..start + span_end];
+        assert!(
+            span.contains(".end_icon("),
+            "trigger Button must use `.end_icon(...)` for a right-aligned chevron — got:\n{span}",
+        );
+        assert!(
+            !span.contains(".start_icon("),
+            "trigger Button must NOT use `.start_icon(...)` (the playtest \
+             flagged the leading chevron as misleading) — got:\n{span}",
+        );
+        assert!(
+            span.contains("IconName::ChevronDown"),
+            "trigger Button must use `ChevronDown` (matches dropdown \
+             convention) — got:\n{span}",
+        );
     }
 
     /// Tests that AddProjectPicker filters the catalog correctly:

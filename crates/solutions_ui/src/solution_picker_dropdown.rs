@@ -24,10 +24,19 @@ use crate::delete_confirm_modal::{DeleteConfirmItem, open_delete_confirm};
 use crate::open::{OpenIntent, open_solution};
 use crate::window_helpers::is_solution_open_anywhere;
 
+/// Width of the popover. Rows fill this width so the trash icon sits
+/// flush against the right edge instead of hugging the (short) label.
+const POPOVER_WIDTH: f32 = 320.0;
+
 pub struct SolutionPickerDropdown {
     workspace: WeakEntity<Workspace>,
     multi_workspace: WeakEntity<MultiWorkspace>,
     search_editor: Entity<Editor>,
+    /// Cached at construction time so render reads it without re-borrowing
+    /// the search editor (and so `track_focus` on the outer container can
+    /// be set without calling `search_editor.focus_handle(cx)` during the
+    /// render pass).
+    focus_handle: FocusHandle,
     closed_solutions: Vec<ClosedSolutionRow>,
     _store_subscription: Subscription,
     _search_subscription: Subscription,
@@ -79,10 +88,12 @@ impl SolutionPickerDropdown {
             },
         );
 
+        let focus_handle = search_editor.focus_handle(cx);
         let mut this = Self {
             workspace,
             multi_workspace,
             search_editor,
+            focus_handle,
             closed_solutions: Vec::new(),
             _store_subscription: store_subscription,
             _search_subscription: search_subscription,
@@ -242,8 +253,8 @@ impl EventEmitter<DismissEvent> for SolutionPickerDropdown {}
 impl Focusable for SolutionPickerDropdown {
     // Hand the search editor's focus handle out so the modal layer can
     // park focus on it on open — that's the autofocus contract.
-    fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.search_editor.focus_handle(cx)
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
     }
 }
 
@@ -273,6 +284,7 @@ impl Render for SolutionPickerDropdown {
                 h_flex()
                     .id(row_id)
                     .group(group_id.clone())
+                    .w_full()
                     .px_2()
                     .py_1p5()
                     .gap_2()
@@ -303,6 +315,7 @@ impl Render for SolutionPickerDropdown {
             })
             .chain((row_count == 0).then(|| {
                 div()
+                    .w_full()
                     .px_2()
                     .py_2()
                     .child(
@@ -320,17 +333,49 @@ impl Render for SolutionPickerDropdown {
 
         v_flex()
             .key_context("SolutionPickerDropdown")
-            .track_focus(&self.search_editor.focus_handle(cx))
+            .track_focus(&self.focus_handle)
             .on_action(cx.listener(|_, _: &menu::Cancel, _, cx| {
                 cx.emit(DismissEvent);
             }))
-            .min_w(px(280.0))
+            .w(px(POPOVER_WIDTH))
             .max_h(px(360.0))
             .bg(cx.theme().colors().elevated_surface_background)
             .border_1()
             .border_color(cx.theme().colors().border)
             .rounded_md()
-            .child(div().p_2().child(self.search_editor.clone()))
+            .child(
+                // Compact search row. The h_flex carries fixed height + the
+                // editor's background/border — `Editor::single_line` paints
+                // on a transparent background, so without this wrapper the
+                // typed text overlaid on `elevated_surface_background` was
+                // barely visible. Also matches the `picker::render_editor`
+                // pattern (`flex_none().h_7().overflow_hidden()`), which
+                // guarantees the EditorElement gets a non-zero height even
+                // when the popover's `max_h` clamps the column.
+                h_flex()
+                    .m_1p5()
+                    .px_2()
+                    .h_7()
+                    .gap_1p5()
+                    .flex_none()
+                    .items_center()
+                    .overflow_hidden()
+                    .rounded_sm()
+                    .bg(cx.theme().colors().editor_background)
+                    .border_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(self.search_editor.clone()),
+                    )
+                    .child(
+                        Icon::new(IconName::MagnifyingGlass)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    ),
+            )
             .child(
                 div()
                     .h_px()
@@ -339,6 +384,7 @@ impl Render for SolutionPickerDropdown {
             .child(
                 h_flex()
                     .id("solution-picker-create")
+                    .w_full()
                     .px_2()
                     .py_1p5()
                     .gap_2()
@@ -365,6 +411,7 @@ impl Render for SolutionPickerDropdown {
             .child(
                 div()
                     .id("solution-picker-list")
+                    .w_full()
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -406,6 +453,51 @@ mod tests {
         assert_eq!(
             order,
             vec!["a-newest", "b-middle", "c-oldest", "d-never-1", "e-never-2"]
+        );
+    }
+
+    /// Pinned guarantee for the playtest tweak: the magnifier icon must
+    /// render to the RIGHT of the editor inside the search row, AND the
+    /// editor must sit inside a wrapper with an explicit `editor_background`
+    /// (so the typed text doesn't sink into the popover's elevated surface,
+    /// which was the cause of the "filter fires but text invisible" bug —
+    /// `EditorMode::SingleLine` paints on a transparent background, so the
+    /// container needs to supply contrast).
+    #[test]
+    fn search_row_has_magnifier_after_editor_and_uses_editor_background() {
+        let src = include_str!("solution_picker_dropdown.rs");
+        // The search row spans from its m_1p5 marker (the first occurrence
+        // after the `// Compact search row` comment) up to the next sibling
+        // child — a `div().h_px()` divider.
+        let row_start = src
+            .find("// Compact search row")
+            .expect("search row comment exists");
+        let row_segment = &src[row_start..];
+        let end_marker = row_segment
+            .find(".child(\n                div()\n                    .h_px()")
+            .expect("search row ends before the divider div");
+        let row = &row_segment[..end_marker];
+        let editor_pos = row
+            .find("self.search_editor.clone()")
+            .expect("editor must be a child of the search row");
+        let magnifier_pos = row
+            .find("IconName::MagnifyingGlass")
+            .expect("magnifier icon must be a child of the search row");
+        assert!(
+            magnifier_pos > editor_pos,
+            "magnifier icon must come AFTER the editor in the children chain so it renders on the right edge of the row"
+        );
+        assert!(
+            row.contains("bg(cx.theme().colors().editor_background)"),
+            "search row must paint editor_background for typed-text contrast"
+        );
+        assert!(
+            row.contains(".h_7()"),
+            "search row must pin an explicit height so EditorElement gets a non-zero layout"
+        );
+        assert!(
+            row.contains(".flex_none()"),
+            "search row must be flex_none so the popover's max_h doesn't collapse it"
         );
     }
 
