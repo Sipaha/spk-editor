@@ -58,9 +58,8 @@ pub fn init(cx: &mut App) {
 /// delete.
 pub fn delete_solution_with_cleanup(id: SolutionId, root: PathBuf, cx: &mut App) {
     let store = SolutionStore::global(cx);
-    let id_for_store = id.clone();
     store
-        .update(cx, |s, cx| s.delete_solution(&id_for_store, cx))
+        .update(cx, |s, cx| s.delete_solution(&id, cx))
         .log_err();
     cx.background_spawn(async move {
         let result: std::io::Result<()> =
