@@ -1,6 +1,6 @@
 # R-5a: Android client bootstrap — repo + `:core` connection lib
 
-**Status:** complete (sibling-repo commit `77eb966`)
+**Status:** complete (sibling-repo commits `77eb966` → `4e478f1`)
 **Estimated:** 1 sub-agent session, ~3–5 h, sibling-repo dispatch (no spk-editor worktree)
 **Goal:** Stand up `spk-editor-android-client` as a sibling repo of `spk-editor`. Land a two-module Kotlin/Gradle layout (`:core` JVM lib + `:app` Android Compose stub). The `:core` module implements the WS+TLS+HMAC handshake matching the server side that R-2 + R-3 + R-4 ship, and is verifiable with JDK alone (no Android SDK required). `:app` is a thin Compose UI surface that depends on `:core` — its files are written but it won't fully build on this machine until the Android SDK is installed.
 
@@ -227,6 +227,23 @@ worktree is used for R-5a — the work is entirely in a new repo.
 5. **HMAC reference vectors locked locally** via `javax.crypto.Mac` on JDK 25: `secret=32×0x42, nonce=0x00..0x0f → 3c11ddd5996bab20165bb16079e1303302bee56f1479bbebf802ba9a51980cbb`; `secret=0x00..0x1f, nonce=0xff..0xf0 → 1570e414c43bc8fdad1098ba0b3a6aec1a107d271fe6af665c737032cb0a515b`. Reproducible from the test source. The spk-editor side's HMAC vectors can be cross-checked against these when R-5a's integration test is wired up.
 6. **JSON-RPC serialiser keeps `encodeDefaults=true`** so `"jsonrpc":"2.0"` is always on the wire. `explicitNulls=false` to drop nullable `params`/`result`/`error` when null.
 7. **JDK 17 toolchain pinned** via `kotlin { jvmToolchain(17) }` on both modules; Gradle auto-downloads Temurin 17 if absent.
+
+## Follow-up commit (2026-05-16) — `4e478f1` `:cli` + integration test
+
+Background sub-agent landed a sub-1-hour additive change on top of the R-5a base, riding on this plan-doc:
+
+- `LiveEditorIntegrationTest` grew from a stub into a six-step end-to-end probe: `connect` → `remote.editor.capabilities` (assert `protocol_version`) → `remote.solutions.list` (empty allowed) → `remote.lsp.start` (assert `-32601` proving R-4 allow-list works) → `remote.editor.subscribe { kinds: [...] }` → post-`close` call must not succeed. Still `@Tag("integration")` — opt-in via `-DincludeTags=integration` + `SPK_EDITOR_PAIRING_URL`, default `:core:test` keeps the test invisible.
+- New `:cli` JVM module — pure-JVM smoke client over `:core`. Reads pairing URL from argv or `SPK_EDITOR_PAIRING_URL`, optional JSON-RPC method + params; pretty-prints the response. `./gradlew :cli:run --args="<pairing> <method> <params>"` is the entrypoint. No-args prints usage and exits 1.
+
+Supervisor-verified:
+- `:core:test --rerun-tasks` → 30 PASSED, 0 failed. R-5a baseline preserved.
+- `:cli:build` → BUILD SUCCESSFUL.
+- `:core:test -DincludeTags=integration --rerun-tasks` → discovers `LiveEditorIntegrationTest > connects, probes allow-list, subscribes()`, which then SKIPS via JUnit `Assumptions.assumeTrue` because `SPK_EDITOR_PAIRING_URL` isn't set in the verifier's environment. Tag gate confirmed working in both directions.
+
+Sub-agent-flagged follow-up (deferred, not blocking):
+
+- **`:core` exposes `OkHttpClient.Builder` via constructor default arg → leaks the symbol onto the API surface.** Visible because `:cli` had to redeclare `okhttp` as its own `implementation` dep to compile. Two ways to fix: (a) change `:core`'s okhttp dep from `implementation` to `api` so consumers see it transitively; (b) hide the type — refactor the constructor signature so OkHttp is an internal detail. (b) is cleaner — pick that next time a `:core` refactor is on the agenda. Filed here, not as a new plan-doc.
+- **`@ExperimentalCoroutinesApi` warning on `RemoteClient.kt:86`** (calling `getCompleted()`) — pre-existing from R-5a, untouched by the follow-up. Same disposition: roll into a future `:core` cleanup pass.
 
 **Follow-ups for next phases:**
 
