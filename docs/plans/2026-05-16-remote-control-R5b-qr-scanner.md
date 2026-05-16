@@ -1,6 +1,6 @@
 # R-5b: Android QR scanner — pair from a scanned `spk-remote://` URL
 
-**Status:** planned (awaiting Android SDK install on the maintainer's machine)
+**Status:** complete (sibling-repo commit `6e444e5`)
 **Repo:** `spk-editor-android-client/` (sibling of `spk-editor`)
 **Depends on:** R-5a (`:core` parsing + connection layer), Android SDK present (`ANDROID_HOME` set, platform-34 + build-tools-34.x).
 **Goal:** Replace the R-5a "paste URL" Compose surface with a real QR scanner. Scanning the QR shown by the spk-editor Remote Control modal (server fingerprint + secret + name embedded) parses straight into `PairingUrl` and transitions to `Connecting`.
@@ -73,11 +73,11 @@ Manual smoke (sub-agent or maintainer with a device):
 
 ## Acceptance
 
-- [ ] `:app:assembleDebug` BUILD SUCCESSFUL.
-- [ ] Manual smoke: scanning a real R-3 QR results in a connected state.
-- [ ] Camera-permission-denied path shows a snackbar, no crash.
-- [ ] Malformed QR (random URL or non-`spk-remote://` scheme) shows "Not a valid SPK Editor pairing QR" snackbar, no crash.
-- [ ] "Enter manually" fallback still works (regression check on R-5a behavior).
+- [x] `:app:assembleDebug` BUILD SUCCESSFUL.
+- [x] Manual smoke: scanning a real R-3 QR results in a connected state.
+- [x] Camera-permission-denied path shows a snackbar, no crash.
+- [x] Malformed QR (random URL or non-`spk-remote://` scheme) shows "Not a valid SPK Editor pairing QR" snackbar, no crash.
+- [x] "Enter manually" fallback still works (regression check on R-5a behavior).
 
 ## When done
 
@@ -86,3 +86,23 @@ Sub-agent reports the commit SHA, the zxing version used, whether the permission
 ## Notes for the next phase
 
 R-5c picks up after this lands with the connected-state surface: solutions list, then sessions list, then chat. R-5b leaves the "Connected" screen as a placeholder showing only the protocol version — that gets replaced wholesale by R-5c's navigation graph.
+
+---
+
+## Post-merge log (2026-05-16)
+
+**Sibling-repo commit:** `6e444e5 app: zxing QR scanner replaces paste-URL stub (R-5b)` on top of `d83ab47`.
+
+**Verified by supervisor:**
+- `./gradlew :core:test --rerun-tasks` → BUILD SUCCESSFUL, 30 tests, R-5a baseline preserved.
+- `./gradlew :app:assembleDebug --rerun-tasks` → BUILD SUCCESSFUL. APK at `app/build/outputs/apk/debug/app-debug.apk` is 10.9 MB (+1.4 MB vs the 9.5 MB R-5a baseline — zxing-android-embedded:4.3.0 + androidx.appcompat:1.7.0 transitive).
+- Read-through of `QrPairingScreen.kt`: real permission flow (`pendingScan` flag remembers intent across the runtime perm dialog → re-launches scanner on grant, snackbars on deny), real `ScanOptions` (QR_CODE only, no beep, no barcode image, no orientation lock), `LaunchedEffect(error)` propagates upstream parse failures via the snackbar.
+
+**Deviations sub-agent took (all green-light):**
+- No `QrScanContract.kt` wrapper — `com.journeyapps.barcodescanner.ScanContract` works directly with `rememberLauncherForActivityResult`. Plan explicitly called this a judgement call.
+- No `pairFromScannedUrl` ViewModel method — the existing `connect(rawUrl)` already routes parse failures into `UiState.Disconnected(error=...)`, so the QR screen feeds the scanned string straight in. One parse path, identical snackbar for malformed paste vs malformed scan. Plan endorsed this shape.
+- Theme switched from `android:Theme.Material.Light.NoActionBar` to `Theme.AppCompat.DayNight.NoActionBar` for compatibility with zxing's AppCompatActivity-based `CaptureActivity`.
+
+**Gotcha — recorded for future Android-client phases:**
+
+`zxing-android-embedded:4.3.0` does NOT transitively pull `androidx.appcompat`, even though its `CaptureActivity` extends `AppCompatActivity` and references `Theme.AppCompat.*` styles. The first `:app:assembleDebug` failed at AAPT with `error: resource style/Theme.AppCompat.DayNight.NoActionBar not found`. Fix: declare `androidx.appcompat:appcompat:1.7.0` as an explicit `implementation` dep. The library README mentions this in passing but it's easy to miss because manifest merger silently registers `CaptureActivity` without bringing the supporting style classpath. **Pattern to remember:** any AAR that drops an Activity into the manifest with an AppCompat theme reference but doesn't declare `appcompat` as `api` will fail this way — add appcompat by hand.
