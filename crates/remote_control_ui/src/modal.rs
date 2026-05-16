@@ -224,10 +224,13 @@ impl RemoteControlModal {
     ) {
         // The QR popover replaces this modal on the workspace's
         // single modal slot (the workspace only ever shows one modal
-        // at a time — see `ModalLayer::show_modal`). We dismiss
-        // ourselves first, then ask the workspace to mount the
-        // popover. Re-opening the Remote Control modal is a single
-        // click away on the status-bar entry.
+        // at a time — see `ModalLayer::show_modal`). `toggle_modal`
+        // hides the currently-active modal as its first step, which
+        // would re-enter THIS modal's entity update if we called it
+        // synchronously from a listener — `EntityMap::lease` panics
+        // with "cannot update RemoteControlModal while it is already
+        // being updated". Defer via `window.defer` so the swap runs
+        // after the click handler returns.
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
@@ -242,18 +245,19 @@ impl RemoteControlModal {
                 })
             })
             .unwrap_or((None, 0, None));
-        cx.emit(DismissEvent);
-        workspace.update(cx, |workspace, cx| {
-            workspace.toggle_modal(window, cx, |window, cx| {
-                QrPopover::new(
-                    client_name,
-                    secret_standard_base64,
-                    address,
-                    port,
-                    server_fingerprint,
-                    window,
-                    cx,
-                )
+        window.defer(cx, move |window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.toggle_modal(window, cx, |window, cx| {
+                    QrPopover::new(
+                        client_name,
+                        secret_standard_base64,
+                        address,
+                        port,
+                        server_fingerprint,
+                        window,
+                        cx,
+                    )
+                });
             });
         });
     }
