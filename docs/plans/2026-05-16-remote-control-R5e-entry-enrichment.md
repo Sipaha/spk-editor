@@ -1,6 +1,6 @@
 # R-5e: Server-side enrichment of `EntrySummary` + `agent_session_message_appended` payload
 
-**Status:** ready to dispatch
+**Status:** complete (commit `d8592b05dc`)
 **Estimated:** 1 sub-agent session, ~3–4 h, worktree-isolated
 **Depends on:** R-4 (proxy), R-5d closure (so the consumer's shape is locked).
 **Goal:** Enrich the data spk-editor's MCP server exposes per agent-session entry so the Android client (and any future remote consumer) can render real chat — full message text, image content blocks, tool-call args/results — without 200-char truncation. Additive only — old field shapes preserved, old clients keep working.
@@ -209,13 +209,13 @@ grep "test result:" /tmp/r5e_proxy.txt
 
 Acceptance:
 
-- [ ] `cargo build --bin spk-editor` passes.
-- [ ] `cargo clippy -p solution_agent --all-targets -- -D warnings` clean.
-- [ ] `cargo test -p solution_agent` — pre-existing tests still green + ~8-10 new tests passing.
-- [ ] `cargo test -p remote_control proxy_e2e` — still passes (allow-list addition didn't break the R-4 proxy test).
-- [ ] `EntrySummary` field order is the same when `include_full_content=false` as before R-5e (verify by snapshot or by reading the JSON output of an existing test).
-- [ ] FORK.md `solution_agent` row mentions the additive enrichment (one-line note; full detail lives in the plan-doc).
-- [ ] Allow-list addition for `remote.solution_agent.get_session_entry` in `remote_control::allow_list`.
+- [x] `cargo build --bin spk-editor` passes.
+- [x] `cargo clippy -p solution_agent --all-targets -- -D warnings` clean.
+- [x] `cargo test -p solution_agent` — pre-existing tests still green + ~8-10 new tests passing.
+- [x] `cargo test -p remote_control proxy_e2e` — still passes (allow-list addition didn't break the R-4 proxy test).
+- [x] `EntrySummary` field order is the same when `include_full_content=false` as before R-5e (verify by snapshot or by reading the JSON output of an existing test).
+- [x] FORK.md `solution_agent` row mentions the additive enrichment (one-line note; full detail lives in the plan-doc).
+- [x] Allow-list addition for `remote.solution_agent.get_session_entry` in `remote_control::allow_list`.
 
 ## When done
 
@@ -230,3 +230,38 @@ Supervisor:
 1. Verify per above.
 2. Update INDEX status + tick acceptance + append SHAs in the post-merge log.
 3. Hand off to R-5e-client (Android side consumes the new fields) as the next natural phase. Or R-6 if the user prefers Android polish first.
+
+---
+
+## Post-merge log (2026-05-16)
+
+**Commit:** `d8592b05dc solution_agent: enrich EntrySummary + agent_session_message_appended (R-5e)` — fast-forwarded from worktree branch into `main`.
+
+**Files changed:** `FORK.md`, `crates/remote_control/src/allow_list.rs`, `crates/solution_agent/src/event_sources.rs`, `crates/solution_agent/src/mcp.rs`, `crates/solution_agent/src/store.rs`, `crates/solution_agent/src/store/tests.rs` — 876 insertions / 16 deletions.
+
+**Supervisor-verified on main after merge:**
+- `cargo test -p solution_agent --no-fail-fast` → 90 tests passed (R-5d baseline was 83; +7 new). Plus the 2 integration tests both pass.
+- `cargo test -p remote_control --test proxy_e2e` → `end_to_end_proxy_round_trip` still green (1 test, additive allow-list change didn't break R-4's proxy gate).
+- `cargo check --workspace --all-targets` → only 2 pre-existing warnings in `crates/editor_mcp/tests/run_config_e2e_test.rs` (`UpdateGlobal` + `Settings` imports with `as _` aliasing but still flagged because the traits are unused). Pre-date R-5e — last touched by commits `1c2a33c` and `cc0db2b`. Not blocking.
+
+**Wire sizes on a synthetic 9-entry session (5 chat + 3 tool_calls + 1 plan, 2 fake 15 KB images):**
+
+| Mode | Size |
+|---|---|
+| preview-only (default) | ~1.77 KB |
+| `include_full_content: true` | ~6.32 KB (3.6×) |
+| `include_full_content + include_images: true` | ~46.5 KB (26×) |
+
+Documented in `GetSessionParams`'s doc comment so consumers can pick wisely. For image-heavy sessions the new `solution_agent.get_session_entry` tool fetches one entry at a time.
+
+**Architectural choice — entry_index wiring:** sub-agent extended `SolutionAgentStoreEvent::SessionMessageAppended(SolutionSessionId)` to `SessionMessageAppended(SolutionSessionId, usize)`. Index captured at the emit site in `store.rs::handle_acp_event` under the same mutable-borrow window as the live `AcpThread` → no race vs the alternative "look up at notification time in the coordinator subscribe". Two call sites of the variant existed, both in-crate, so the type change rippled cleanly.
+
+**Image-extraction sharing — sub-agent decision:** duplicated rather than shared. `conversation_render.rs::decode_image_local` decodes to `Arc<gpui::Image>` for desktop render; the new MCP path needs raw base64 + mime back for the wire. Two extraction loops have different output types and different walk paths (`acp::ContentBlock::Image` vs local `ContentBlock::Image { image: Arc<gpui::Image> }`); factoring would require an "output-flavor" trait. Both under 40 lines — keeping separate is cleaner.
+
+**Status string note:** `tool_call_status_text()` returns `"pending" | "waiting for confirmation" | "running" | "done" | "failed" | "rejected" | "canceled"` (spaces, "running"/"done", plus "rejected"/"canceled"). Plan-doc speculated `"pending" | "waiting_for_confirmation" | "in_progress" | "completed" | "failed"` — wrong. Sub-agent followed the plan-doc's "reuse, don't invent a parallel mapping" rule and emitted what the helper actually returns. Wire strings match desktop UI labels.
+
+**Diagnostic noise during verification (worth recording):** rust-analyzer flycheck on the worktree surfaced a phantom E0061 pointing at `agent-client-protocol-schema-0.12.0/src/tool_call.rs:63:12` (an external dep). `cargo check --workspace --all-targets` had no E0061 — RA stale state. Pattern: don't trust RA diagnostics that point at external crates' definition sites without a matching cargo error.
+
+## Follow-up
+
+- **R-5e-client (Android-side update)** — extend `:core` DTOs in `spk-editor-android-client` to consume the new `markdown` / `images` / `tool_call` / `plan` fields. `MainViewModel.openSession` to pass `include_full_content: true, include_images: true`. Render rich markdown (CommonMark renderer like `compose-multiplatform-markdown` or roll a simple `Text` with inline image lookups). Wire `Icon`/expand for tool_call rows. Plan-doc to be written when picked up.
