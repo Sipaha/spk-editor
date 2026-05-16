@@ -1,6 +1,6 @@
 # R-5a: Android client bootstrap — repo + `:core` connection lib
 
-**Status:** complete (sibling-repo commits `77eb966` → `4e478f1`)
+**Status:** complete (sibling-repo commits `77eb966` → `4e478f1` → `d83ab47`)
 **Estimated:** 1 sub-agent session, ~3–5 h, sibling-repo dispatch (no spk-editor worktree)
 **Goal:** Stand up `spk-editor-android-client` as a sibling repo of `spk-editor`. Land a two-module Kotlin/Gradle layout (`:core` JVM lib + `:app` Android Compose stub). The `:core` module implements the WS+TLS+HMAC handshake matching the server side that R-2 + R-3 + R-4 ship, and is verifiable with JDK alone (no Android SDK required). `:app` is a thin Compose UI surface that depends on `:core` — its files are written but it won't fully build on this machine until the Android SDK is installed.
 
@@ -242,8 +242,12 @@ Supervisor-verified:
 
 Sub-agent-flagged follow-up (deferred, not blocking):
 
-- **`:core` exposes `OkHttpClient.Builder` via constructor default arg → leaks the symbol onto the API surface.** Visible because `:cli` had to redeclare `okhttp` as its own `implementation` dep to compile. Two ways to fix: (a) change `:core`'s okhttp dep from `implementation` to `api` so consumers see it transitively; (b) hide the type — refactor the constructor signature so OkHttp is an internal detail. (b) is cleaner — pick that next time a `:core` refactor is on the agenda. Filed here, not as a new plan-doc.
-- **`@ExperimentalCoroutinesApi` warning on `RemoteClient.kt:86`** (calling `getCompleted()`) — pre-existing from R-5a, untouched by the follow-up. Same disposition: roll into a future `:core` cleanup pass.
+- ~~**`:core` exposes `OkHttpClient.Builder` via constructor default arg → leaks the symbol onto the API surface.**~~ **Resolved 2026-05-16 in sibling commit `d83ab47`** when Android SDK was installed and `:app:compileDebugKotlin` started failing with "Unresolved reference 'serialization'" + "Cannot access class 'okhttp3.OkHttpClient.Builder'". The `:app/vm/MainViewModel.kt` was already using `JsonObject` + `jsonPrimitive` directly, so option (b) "hide the types" wasn't viable — the API leak is intentional in this design. Picked option (a): promoted `okhttp`, `kotlinx-coroutines-core`, `kotlinx-serialization-json` in `:core/build.gradle.kts` from `implementation` to `api`. Dropped the now-redundant `:cli` redeclarations. Verified `:app:assembleDebug` produces a 9.5 MB APK at `app/build/outputs/apk/debug/app-debug.apk`, `:cli:build` SUCCESSFUL, `:core:test --rerun-tasks` 30 PASSED.
+- **`@ExperimentalCoroutinesApi` warning on `RemoteClient.kt:86`** (calling `getCompleted()`) — pre-existing from R-5a, untouched. Roll into a future `:core` cleanup pass.
+
+## R-5a acceptance update (after `d83ab47`)
+
+The acceptance gate "`:app:assembleDebug` fails only with SDK error" was a *toolchain-state-dependent* gate — it was the right answer when Android SDK wasn't installed. With SDK installed by the maintainer 2026-05-16, the gate flipped: `:app:assembleDebug` is now BUILD SUCCESSFUL and produces a real APK. The `:app` Kotlin sources are validated by real type-checking, not just "look right by eye". This is the stronger gate; the old wording stays in the acceptance list above for historical accuracy.
 
 **Follow-ups for next phases:**
 
