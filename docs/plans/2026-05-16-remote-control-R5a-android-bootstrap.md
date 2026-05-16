@@ -1,6 +1,6 @@
 # R-5a: Android client bootstrap — repo + `:core` connection lib
 
-**Status:** ready to dispatch
+**Status:** complete (sibling-repo commit `77eb966`)
 **Estimated:** 1 sub-agent session, ~3–5 h, sibling-repo dispatch (no spk-editor worktree)
 **Goal:** Stand up `spk-editor-android-client` as a sibling repo of `spk-editor`. Land a two-module Kotlin/Gradle layout (`:core` JVM lib + `:app` Android Compose stub). The `:core` module implements the WS+TLS+HMAC handshake matching the server side that R-2 + R-3 + R-4 ship, and is verifiable with JDK alone (no Android SDK required). `:app` is a thin Compose UI surface that depends on `:core` — its files are written but it won't fully build on this machine until the Android SDK is installed.
 
@@ -175,13 +175,13 @@ grep -E "SDK location not found|ANDROID_HOME" /tmp/r5a_app.txt
 
 Acceptance:
 
-- [ ] `git init` + initial commit in `spk-editor-android-client/`.
-- [ ] `./gradlew --version` reports Gradle ≥ 8.10 and uses the wrapper-distributed Gradle (no system gradle required).
-- [ ] `./gradlew :core:build :core:test` — BUILD SUCCESSFUL, all unit tests green.
-- [ ] `./gradlew :app:tasks --dry-run` — fails *only* with "SDK location not found" or equivalent. **NOT** with a Kotlin syntax error or unresolved dependency.
-- [ ] All four `:core` source classes (`PairingUrl`, `FingerprintPinningTrustManager`, `HmacChallengeAuth`, `RemoteClient`) compile and have at least one unit test each.
-- [ ] `README.md` documents: how to run `:core` tests (just `./gradlew :core:test`), how to wire the integration test (`SPK_EDITOR_PAIRING_URL=spk-remote://... ./gradlew :core:integrationTest`), and that `:app` needs `ANDROID_HOME` to build.
-- [ ] License is GPL-3.0-or-later with `Copyright (c) 2026 Pavel Simonov`.
+- [x] `git init` + initial commit in `spk-editor-android-client/`.
+- [x] `./gradlew --version` reports Gradle ≥ 8.10 and uses the wrapper-distributed Gradle (no system gradle required).
+- [x] `./gradlew :core:build :core:test` — BUILD SUCCESSFUL, all unit tests green.
+- [x] `./gradlew :app:tasks --dry-run` — fails *only* with "SDK location not found" or equivalent. **NOT** with a Kotlin syntax error or unresolved dependency.
+- [x] All four `:core` source classes (`PairingUrl`, `FingerprintPinningTrustManager`, `HmacChallengeAuth`, `RemoteClient`) compile and have at least one unit test each.
+- [x] `README.md` documents: how to run `:core` tests (just `./gradlew :core:test`), how to wire the integration test (`SPK_EDITOR_PAIRING_URL=spk-remote://... ./gradlew :core:integrationTest`), and that `:app` needs `ANDROID_HOME` to build.
+- [x] License is GPL-3.0-or-later with `Copyright (c) 2026 Pavel Simonov`.
 
 ## When done
 
@@ -206,3 +206,37 @@ The full plan above is the dispatch context. Sub-agent operates in the
 sibling directory `/home/spk/.spk/spk-editor/solutions/spk-solutions/spk-editor-android-client/`,
 which the supervisor has created (empty) before dispatch. No spk-editor
 worktree is used for R-5a — the work is entirely in a new repo.
+
+---
+
+## Post-merge log (2026-05-16)
+
+**Sibling-repo commit:** `77eb966 Bootstrap spk-editor-android-client (R-5a)` — single commit, 31 files, 2582 insertions.
+
+**Verified by supervisor:**
+- `./gradlew --version` → Gradle 8.11.1, Kotlin 2.0.20, Launcher JVM 21.0.10 (Temurin). Wrapper-only, no system gradle. ✓
+- `./gradlew :core:test --rerun-tasks` → BUILD SUCCESSFUL. 30 tests, 0 failed, 0 skipped, split across 5 classes (`PairingUrlTest` 10, `HmacChallengeAuthTest` 7, `JsonRpcEnvelopeTest` 6, `FingerprintPinningTrustManagerTest` 5, `RemoteClientSmokeTest` 2). `LiveEditorIntegrationTest` is `@Tag("integration")`-excluded by default — opt-in via `-DincludeTags=integration` + `SPK_EDITOR_PAIRING_URL`. ✓
+- `./gradlew :app:assembleDebug` → BUILD FAILED with the *expected* `SDK location not found` configuration error, zero Kotlin/source diagnostics — i.e. the `:app` sources compile as written; only the Android SDK path is unset. ✓
+- Spot-checked tests for non-tautology: `HmacChallengeAuthTest::vector 1/2 matches reference` compare against precomputed 32-byte hex outputs; `FingerprintPinningTrustManagerTest::accepts matching leaf fingerprint` and `rejects mismatching fingerprint` compute real SHA-256 against a hand-rolled DER X.509 cert. Real behavioural assertions, not `assertTrue(true)`. ✓
+
+**Deviations from plan (sub-agent judgement, accepted):**
+1. **JDK 21, not 25, for build/test invocations.** Gradle 8.11.1 doesn't accept JDK 25's version string. `JAVA_HOME=$HOME/.jdks/temurin-21.0.10` is the standard invocation. README says "JDK 17+" which is honest about target compat.
+2. **Kotlin 2.0.21 + dedicated `org.jetbrains.kotlin.plugin.compose`.** Kotlin 2.0's Compose support moved out of `composeOptions.kotlinCompilerExtensionVersion` and into its own plugin. The plan's reference to the old property is obsolete.
+3. **AGP 8.7.2** (current stable).
+4. **`:app:assembleDebug` is the real verification target, not `:app:tasks --dry-run`.** AGP 8.7.2 defers the SDK check; `tasks --dry-run` succeeds even without SDK. The plan's verification snippet was wrong on this point.
+5. **HMAC reference vectors locked locally** via `javax.crypto.Mac` on JDK 25: `secret=32×0x42, nonce=0x00..0x0f → 3c11ddd5996bab20165bb16079e1303302bee56f1479bbebf802ba9a51980cbb`; `secret=0x00..0x1f, nonce=0xff..0xf0 → 1570e414c43bc8fdad1098ba0b3a6aec1a107d271fe6af665c737032cb0a515b`. Reproducible from the test source. The spk-editor side's HMAC vectors can be cross-checked against these when R-5a's integration test is wired up.
+6. **JSON-RPC serialiser keeps `encodeDefaults=true`** so `"jsonrpc":"2.0"` is always on the wire. `explicitNulls=false` to drop nullable `params`/`result`/`error` when null.
+7. **JDK 17 toolchain pinned** via `kotlin { jvmToolchain(17) }` on both modules; Gradle auto-downloads Temurin 17 if absent.
+
+**Follow-ups for next phases:**
+
+- **R-5b — QR scanner.** zxing-android-embedded or CameraX + ML Kit; parse the `spk-remote://` URL into the existing `PairingUrl.parse`. Persist last-used pairing in `SharedPreferences` (encrypted-shared-prefs if available).
+- **R-5c — Solutions/sessions list UI.** Drive `remote.solutions.list`, `remote.solution_agent.list_sessions`. Compose lazy lists. Pull-to-refresh.
+- **R-5d — Chat UI with streaming.** `remote.solution_agent.send_message` + subscribe to `agent_session_message_appended`. Bubble layout. Cancel button → `remote.solution_agent.cancel_turn`.
+- **Cross-side verification** — when the live spk-editor server is started by the maintainer, run `./gradlew :core:test -DincludeTags=integration -DSPK_EDITOR_PAIRING_URL='spk-remote://...'` to confirm the wire-level HMAC + TLS pinning round-trip works end-to-end. This is the first time spk-editor's R-2/R-3/R-4 surface gets exercised by an actually-independent client.
+- **Conscrypt provider** — defer until integration test reveals whether the default Sun JSSE accepts the self-signed server cert under TLS 1.3 pinning. If the JVM provider misbehaves, swap to Conscrypt.
+
+**Toolchain prerequisites surfaced for the maintainer:**
+- To build `:app` locally, install Android SDK + set `ANDROID_HOME`, then `./gradlew :app:assembleDebug`. Minimum: command-line tools + platform-34 + build-tools 34.x. No emulator required for build; running on a physical device or emulator is a separate setup.
+- Wrapper-distributed Gradle (8.11.1) handles everything else; no system-wide install needed.
+
