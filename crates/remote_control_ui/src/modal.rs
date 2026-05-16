@@ -18,8 +18,12 @@ use workspace::{ModalView, Workspace};
 
 use crate::qr_popover::QrPopover;
 
-/// Address-detection endpoint. Returns the caller's public IP as plain text.
-const DETECT_ADDRESS_ENDPOINT: &str = "https://ifconfig.me";
+/// Address-detection endpoint. The `/ip` path always returns the caller's
+/// public IP as plain text, regardless of `User-Agent`. The bare host
+/// (`https://ifconfig.me`) content-negotiates and returns an HTML page
+/// to any non-curl-like UA — pasting that into the address field was a
+/// real bug observed in the wild.
+const DETECT_ADDRESS_ENDPOINT: &str = "https://ifconfig.me/ip";
 
 /// Workspace modal for editing Remote Control settings: address / port,
 /// on/off toggle, authorized-client list. R-1 surfaces the state model
