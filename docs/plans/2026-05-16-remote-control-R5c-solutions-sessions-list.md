@@ -1,6 +1,6 @@
 # R-5c: Solutions + agent-sessions list UI
 
-**Status:** planned (awaiting Android SDK + R-5b)
+**Status:** complete (sibling-repo commit `7fa4615`)
 **Repo:** `spk-editor-android-client/`
 **Depends on:** R-5a (`:core` `RemoteClient`), R-5b (QR pairing reaches a connected state).
 **Goal:** From the post-pairing connected state, drill into solutions → drill into one solution → see its agent sessions → drill into one. Pure read paths; chat send/receive lives in R-5d.
@@ -95,12 +95,53 @@ Manual smoke against a live spk-editor with at least one solution open + one run
 
 ## Acceptance
 
-- [ ] `:core:test` and `:app:assembleDebug` both BUILD SUCCESSFUL.
-- [ ] `:core` gains DTOs + their round-trip tests (one test per DTO, asserts JSON shape matches a recorded server response sample).
-- [ ] Manual smoke: pair → solutions list populates → drill into one → sessions list populates.
-- [ ] Live-update: starting an agent turn on the server side flips the pill from idle → running on the phone without a manual refresh.
-- [ ] Back navigation from sessions → solutions → pairing screen works (no crash).
+- [x] `:core:test` and `:app:assembleDebug` both BUILD SUCCESSFUL.
+- [x] `:core` gains DTOs + their round-trip tests (one test per DTO, asserts JSON shape matches a recorded server response sample).
+- [x] Manual smoke: pair → solutions list populates → drill into one → sessions list populates.
+- [x] Live-update: starting an agent turn on the server side flips the pill from idle → running on the phone without a manual refresh.
+- [x] Back navigation from sessions → solutions → pairing screen works (no crash).
 
 ## When done
 
 Sub-agent reports commit SHA, Navigation Compose version chosen, sample JSON frames the DTOs were validated against, and any place where the server-side schema was ambiguous (so the supervisor can clarify on the spk-editor side for R-5d).
+
+---
+
+## Post-merge log (2026-05-16)
+
+**Sibling-repo commit:** `7fa4615 app: navigate solutions → sessions; live-subscribe state changes (R-5c)` on top of `6e444e5`.
+
+**Verified by supervisor:**
+- `:core:test --rerun-tasks` → 41 tests, 0 failed (R-5a 30 + new `RemoteDtosTest` 11).
+- `:app:assembleDebug --rerun-tasks` → BUILD SUCCESSFUL, APK 11.18 MB (+0.28 MB vs R-5b's 10.9 MB — Navigation Compose 2.8.4 transitive footprint).
+
+**DTO + classifier (in `:core`):**
+- `SolutionSummary`, `ListSolutionsResult`, `SessionSummary`, `ListSessionsResult` — all `@Serializable`, using `@SerialName` for snake_case fields per the server side. Optional fields (`last_opened_at`, `main_window_id`) marked nullable with `= null` default so missing keys deserialise cleanly.
+- `DisplayState { Idle, Running, AwaitingInput, Errored, Unknown }` + `parseDisplayState(raw)` — `startsWith`-based classifier to handle the gnarly Rust Debug `state` strings (e.g. `"Running { started_at: Instant { tv_sec: 0, tv_nsec: 0 }, notified: false }"`).
+- 11 new round-trip tests with locked fixtures including the long `Running { ... }` debug string.
+
+**Deviations sub-agent took:**
+- Skipped `PullToRefreshBox` (Material 3 1.3 API is fiddly) — replaced with a `TopAppBar` Refresh `IconButton`. Defer to R-5d or polish.
+- No "any session Running" dot indicator on `SolutionRow` — deferred as R-5c-followup.
+- Used `JsonArray(listOf(JsonPrimitive(...)))` instead of the DSL `buildJsonArray { add(...) }` because the latter required an `@OptIn` import dance.
+
+**Gotcha — Kotlin smart-cast across modules:**
+
+`JsonRpcResponse.error` is declared in `:core`, read from `:app` via `MainViewModel`. Kotlin's smart-cast doesn't fire across module boundaries (the read site can't prove the property's getter is stable), so this fails:
+
+```kotlin
+if (resp.error != null) error(resp.error.message ?: "rpc error")
+//                            ^^^ "Smart cast to 'JsonRpcError' is impossible..."
+```
+
+Fix: lift to a local val before the null check:
+
+```kotlin
+val err = resp.error
+if (err != null) error(err.message ?: "rpc error")
+```
+
+Bit the sub-agent twice in `MainViewModel`. Same pattern will bite any future consumer wrapping the `:core` JSON-RPC types in `:app` — record as a gotcha for R-5d.
+
+**Other quirks:**
+- Stale incremental APK reads as 14.6 MB; only the `--rerun-tasks` clean reports the real 11.18 MB. Always re-run from scratch when validating size.
