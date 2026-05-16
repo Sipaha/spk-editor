@@ -10,7 +10,7 @@ use rand::TryRngCore as _;
 use rand::rngs::OsRng;
 
 use crate::cert;
-use crate::dispatch::MinimalDispatcher;
+use crate::dispatch::ProxyDispatcher;
 use crate::listener::{self, ListenerConfig, ListenerHandle};
 use crate::model::{AuthorizedClient, RemoteControlSettings};
 use crate::settings;
@@ -481,7 +481,7 @@ async fn bootstrap_listener(
     let bind_addr: SocketAddr = SocketAddr::from(([0, 0, 0, 0], port));
 
     let dispatcher: Arc<dyn crate::dispatch::RemoteDispatcher> =
-        MinimalDispatcher::new();
+        ProxyDispatcher::new();
 
     let cfg = ListenerConfig {
         bind_addr,

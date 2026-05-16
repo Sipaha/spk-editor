@@ -7,11 +7,13 @@
 //! `RemoteControlStore::set_enabled(true)`. Transport rationale is
 //! ADR-0003.
 
+pub mod allow_list;
 pub mod auth;
 pub mod cert;
 pub mod dispatch;
 pub mod listener;
 mod model;
+pub mod proxy;
 mod settings;
 mod store;
 

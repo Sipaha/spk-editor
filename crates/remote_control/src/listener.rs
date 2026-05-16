@@ -25,9 +25,12 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
+use crate::allow_list;
 use crate::auth;
 use crate::cert::ServerCert;
-use crate::dispatch::{JsonRpcResponse, RemoteDispatcher, parse_request};
+use crate::dispatch::{
+    ConnectionDispatcher, JsonRpcResponse, RemoteDispatcher, parse_request,
+};
 use crate::model::AuthorizedClient;
 
 /// Max time (seconds) the client has to reply to the challenge frame
@@ -247,7 +250,7 @@ async fn handle_conn(
         .context("sending welcome")?;
 
     // 5. Request loop.
-    run_request_loop(&mut ws, &client_name, dispatcher).await?;
+    run_request_loop(&mut ws, &client_name, dispatcher.as_ref()).await?;
     Ok(())
 }
 
@@ -282,31 +285,156 @@ fn parse_handshake_response(text: &str) -> Result<[u8; 32]> {
 async fn run_request_loop<S>(
     ws: &mut tokio_tungstenite::WebSocketStream<S>,
     client_name: &str,
-    dispatcher: Arc<dyn RemoteDispatcher>,
+    dispatcher: &dyn RemoteDispatcher,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    loop {
-        let next = tokio::time::timeout(
-            Duration::from_secs(IDLE_READ_TIMEOUT_SECS),
-            ws.next(),
-        )
-        .await;
+    // Per-connection dispatcher state (lazy: opened on first request). On
+    // open, immediately `take_notifications()` so the select! arm sees
+    // the receiver. If opening fails (e.g. local MCP socket missing) we
+    // surface -32603 per-request and keep the WS alive — the client may
+    // retry, and a flapping editor restart shouldn't kick paired phones.
+    let mut conn: Option<Box<dyn ConnectionDispatcher>> = None;
+    let mut notifications_rx: Option<tokio::sync::mpsc::Receiver<serde_json::Value>> =
+        None;
 
-        let frame = match next {
-            Ok(Some(Ok(frame))) => frame,
-            Ok(Some(Err(err))) => {
-                return Err(anyhow!("ws read error: {err}"));
+    loop {
+        // Tokio `select!` here arbitrates between WS-read, notification
+        // pump, and idle timeout. Without `biased;` the runtime picks a
+        // random-ready arm — biased keeps WS reads ordering-stable
+        // relative to notifications interleaved at the same wake.
+        let select_outcome = if let Some(rx) = notifications_rx.as_mut() {
+            tokio::select! {
+                biased;
+                next = ws.next() => SelectOutcome::Frame(next),
+                notification = rx.recv() => SelectOutcome::Notification(notification),
+                _ = tokio::time::sleep(Duration::from_secs(IDLE_READ_TIMEOUT_SECS)) => {
+                    SelectOutcome::Idle
+                }
             }
-            Ok(None) => {
+        } else {
+            tokio::select! {
+                biased;
+                next = ws.next() => SelectOutcome::Frame(next),
+                _ = tokio::time::sleep(Duration::from_secs(IDLE_READ_TIMEOUT_SECS)) => {
+                    SelectOutcome::Idle
+                }
+            }
+        };
+
+        match select_outcome {
+            SelectOutcome::Frame(None) => {
                 log::debug!(
                     target: "remote_control",
                     "client {client_name:?} closed connection",
                 );
                 return Ok(());
             }
-            Err(_) => {
+            SelectOutcome::Frame(Some(Err(err))) => {
+                return Err(anyhow!("ws read error: {err}"));
+            }
+            SelectOutcome::Frame(Some(Ok(frame))) => {
+                match frame {
+                    Message::Text(text) => {
+                        let response = match parse_request(text.as_ref()) {
+                            Ok(req) => {
+                                // Lazily open the proxy. On first call we
+                                // also grab the notifications receiver.
+                                if conn.is_none() {
+                                    match dispatcher.open_connection().await {
+                                        Ok(mut c) => {
+                                            notifications_rx = c.take_notifications();
+                                            conn = Some(c);
+                                        }
+                                        Err(err) => {
+                                            let response = JsonRpcResponse::error(
+                                                req.id.clone(),
+                                                -32603,
+                                                format!(
+                                                    "opening local MCP proxy: {err}"
+                                                ),
+                                            );
+                                            write_response(ws, &response).await?;
+                                            continue;
+                                        }
+                                    }
+                                }
+                                // Safe: `conn` is Some here.
+                                let dispatcher_ref = conn.as_mut().ok_or_else(|| {
+                                    anyhow!("connection dispatcher disappeared")
+                                })?;
+                                dispatcher_ref.dispatch(client_name, req).await
+                            }
+                            Err(parse_err_response) => *parse_err_response,
+                        };
+                        write_response(ws, &response).await?;
+                    }
+                    Message::Ping(payload) => {
+                        ws.send(Message::Pong(payload))
+                            .await
+                            .context("sending pong")?;
+                    }
+                    Message::Pong(_) => {}
+                    Message::Binary(_) => {
+                        let err = JsonRpcResponse::error(
+                            serde_json::Value::Null,
+                            -32600,
+                            "binary frames not supported on this protocol version",
+                        );
+                        write_response(ws, &err).await?;
+                    }
+                    Message::Close(frame) => {
+                        log::debug!(
+                            target: "remote_control",
+                            "client {client_name:?} sent close frame: {frame:?}",
+                        );
+                        let _ = ws.send(Message::Close(None)).await;
+                        return Ok(());
+                    }
+                    Message::Frame(_) => {}
+                }
+            }
+            SelectOutcome::Notification(None) => {
+                // Notifications channel closed (proxy reader dropped).
+                // Stop pumping; keep the WS alive so the client can
+                // still issue RPC calls (each call opens its own
+                // upstream frame; the dispatcher will re-fail cleanly).
+                notifications_rx = None;
+            }
+            SelectOutcome::Notification(Some(payload)) => {
+                let kind = payload
+                    .pointer("/params/kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if !allow_list::should_forward_event(kind) {
+                    continue;
+                }
+                let envelope = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "remote/notification",
+                    "params": payload
+                        .get("params")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                });
+                let serialized = match serde_json::to_string(&envelope) {
+                    Ok(text) => text,
+                    Err(err) => {
+                        log::warn!(
+                            target: "remote_control",
+                            "serialising notification: {err:#}; dropping",
+                        );
+                        continue;
+                    }
+                };
+                if let Err(err) = ws.send(Message::Text(serialized.into())).await {
+                    return Err(anyhow!(
+                        "sending notification to client {client_name:?}: {err}"
+                    ));
+                }
+            }
+            SelectOutcome::Idle => {
                 log::info!(
                     target: "remote_control",
                     "client {client_name:?} idle for {IDLE_READ_TIMEOUT_SECS}s, closing",
@@ -318,64 +446,34 @@ where
                 let _ = ws.send(Message::Close(Some(close))).await;
                 return Ok(());
             }
-        };
-
-        match frame {
-            Message::Text(text) => {
-                let response = match parse_request(text.as_ref()) {
-                    Ok(req) => dispatcher.dispatch(client_name, req).await,
-                    Err(parse_err_response) => *parse_err_response,
-                };
-                let payload = match serde_json::to_string(&response) {
-                    Ok(payload) => payload,
-                    Err(err) => {
-                        // Serialising our own response shouldn't fail; if
-                        // it does, the connection's state is hosed — bail.
-                        return Err(anyhow!(
-                            "serialising response: {err}"
-                        ));
-                    }
-                };
-                ws.send(Message::Text(payload.into()))
-                    .await
-                    .context("sending response")?;
-            }
-            Message::Ping(payload) => {
-                // tungstenite auto-replies to ping with pong if configured;
-                // we send manually for clarity.
-                ws.send(Message::Pong(payload))
-                    .await
-                    .context("sending pong")?;
-            }
-            Message::Pong(_) => {
-                // Ignore client-initiated pong frames.
-            }
-            Message::Binary(_) => {
-                // R-2 doesn't define a binary protocol; respond with a
-                // method-not-found-equivalent error and continue. The
-                // application protocol is text-only for now.
-                let err = JsonRpcResponse::error(
-                    serde_json::Value::Null,
-                    -32600,
-                    "binary frames not supported on this protocol version",
-                );
-                let payload = serde_json::to_string(&err)
-                    .map_err(|e| anyhow!("serialising error: {e}"))?;
-                ws.send(Message::Text(payload.into()))
-                    .await
-                    .context("sending binary-rejected error")?;
-            }
-            Message::Close(frame) => {
-                log::debug!(
-                    target: "remote_control",
-                    "client {client_name:?} sent close frame: {frame:?}",
-                );
-                let _ = ws.send(Message::Close(None)).await;
-                return Ok(());
-            }
-            Message::Frame(_) => {
-                // Raw frame variant not produced by our reader path.
-            }
         }
     }
+}
+
+enum SelectOutcome {
+    Frame(
+        Option<
+            Result<
+                tokio_tungstenite::tungstenite::Message,
+                tokio_tungstenite::tungstenite::Error,
+            >,
+        >,
+    ),
+    Notification(Option<serde_json::Value>),
+    Idle,
+}
+
+async fn write_response<S>(
+    ws: &mut tokio_tungstenite::WebSocketStream<S>,
+    response: &JsonRpcResponse,
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let payload = serde_json::to_string(response)
+        .map_err(|err| anyhow!("serialising response: {err}"))?;
+    ws.send(Message::Text(payload.into()))
+        .await
+        .context("sending response")?;
+    Ok(())
 }
