@@ -555,6 +555,26 @@ result.** The pattern matches the current bash → exit 144. The kill happens
 but the next command in the same chain sees noise. Prefer `kill <pid>` by PID,
 or split the kill into its own command.
 
+❌ **`pgrep -f "<pattern>"` in a watch-loop, where `<pattern>` literally appears
+in the loop body.** `pgrep -f` matches on the full command line of every
+process, *including the bash that's running the loop* — the bash inherits the
+loop body as its `argv[2]`. So the loop matches itself, the exit-condition is
+never satisfied, and the watcher polls forever after the real target has long
+since exited. We hit this once with `until ! pgrep -f "cargo test -p remote_control_ui" > /dev/null; do sleep 2; done`
+self-matching for **8h41m** after the cargo test had finished in 1m53s.
+Two safe shapes:
+
+  ```bash
+  # 1. Wait on a marker line in the output file the target writes to —
+  #    no pgrep at all, no self-match risk:
+  until grep -q '^EXIT: ' /tmp/.../task.output; do sleep 2; done
+
+  # 2. If you really need pgrep, exclude self by pid:
+  until [ -z "$(pgrep -f 'cargo test -p remote_control_ui' | grep -v $$)" ]; do
+      sleep 2
+  done
+  ```
+
 ❌ **Re-enabling a disabled subsystem to "fix" a missing feature.** auto_update
 / telemetry / collab / Zeta / native cloud LLM / upstream AgentPanel are
 disabled deliberately (CLAUDE.md § "What's disabled"). They are not bugs.
