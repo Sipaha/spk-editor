@@ -22,7 +22,6 @@ use ui::{ButtonLike, Divider, DividerColor, IconButtonShape, prelude::*};
 use util::ResultExt as _;
 use workspace::welcome::{WelcomeWindow, register_welcome_section};
 
-use crate::actions::DeleteSolution;
 use crate::open::{OpenIntent, open_solution};
 
 /// Welcome-window-scoped state for the inline name prompt used by both
@@ -40,6 +39,13 @@ enum WelcomeEditMode {
     Idle,
     Creating,
     Renaming(SolutionId),
+    /// Trash was clicked on a row; the row's pencil + trash icons are
+    /// swapped for "Delete?" + [Yes][Cancel]. WelcomeWindow isn't a
+    /// `Workspace`, so the regular `DeleteSolution` action never
+    /// reaches `workspace.register_action` (handler is in `modals.rs`),
+    /// and the click-to-trash silently no-op'd. This in-row confirm
+    /// is the launcher-local replacement for `DeleteSolutionModal`.
+    ConfirmingDelete(SolutionId),
 }
 
 impl Global for WelcomeEditState {}
@@ -128,11 +134,54 @@ fn finish_edit(commit: bool, window: &mut Window, cx: &mut App) {
                         .update(cx, |s, cx| s.rename_solution(&id, &name, cx))
                         .log_err();
                 }
-                WelcomeEditMode::Idle => {}
+                WelcomeEditMode::Idle | WelcomeEditMode::ConfirmingDelete(_) => {}
             }
         }
     }
     reset_edit_state(&editor, window, cx);
+}
+
+/// Switch the launcher into "are you sure you want to delete?" mode for
+/// a specific row. Doesn't touch the inline editor — the prompt is just
+/// a label + two buttons rendered in place of the row's pencil + trash
+/// icons.
+fn enter_confirm_delete(id: SolutionId, cx: &mut App) {
+    if cx.try_global::<WelcomeEditState>().is_none() {
+        return;
+    }
+    cx.update_global::<WelcomeEditState, _>(|state, _| {
+        state.mode = WelcomeEditMode::ConfirmingDelete(id);
+    });
+    refresh_welcome(cx);
+}
+
+/// Resolve the in-row delete confirmation. `commit == true` runs the
+/// actual delete via `delete_solution_with_cleanup`; `commit == false`
+/// just exits confirm mode.
+fn finish_confirm_delete(commit: bool, cx: &mut App) {
+    let mode = cx
+        .try_global::<WelcomeEditState>()
+        .map(|s| s.mode.clone())
+        .unwrap_or(WelcomeEditMode::Idle);
+    if let WelcomeEditMode::ConfirmingDelete(id) = mode {
+        if commit {
+            let root = SolutionStore::try_global(cx).and_then(|store| {
+                store.read_with(cx, |s, _| {
+                    s.solutions()
+                        .iter()
+                        .find(|sol| sol.id == id)
+                        .map(|sol| sol.root.clone())
+                })
+            });
+            if let Some(root) = root {
+                crate::delete_solution_with_cleanup(id, root, cx);
+            }
+        }
+    }
+    cx.update_global::<WelcomeEditState, _>(|state, _| {
+        state.mode = WelcomeEditMode::Idle;
+    });
+    refresh_welcome(cx);
 }
 
 fn reset_edit_state(editor: &Entity<Editor>, window: &mut Window, cx: &mut App) {
@@ -200,7 +249,15 @@ fn render_section(cx: &mut App) -> Option<AnyElement> {
     } else {
         for (index, entry) in entries.into_iter().enumerate() {
             let renaming = matches!(&mode, WelcomeEditMode::Renaming(id) if id == &entry.id);
-            list = list.child(render_card(index, entry, renaming, cx));
+            let confirming_delete =
+                matches!(&mode, WelcomeEditMode::ConfirmingDelete(id) if id == &entry.id);
+            list = list.child(render_card(
+                index,
+                entry,
+                renaming,
+                confirming_delete,
+                cx,
+            ));
         }
     }
     if matches!(mode, WelcomeEditMode::Creating) {
@@ -266,8 +323,16 @@ fn render_create_button() -> impl IntoElement {
 }
 
 /// IDEA-style card: colored avatar, name, path, last-opened ago.
-/// Trash + rename buttons on hover.
-fn render_card(index: usize, entry: RecentSolution, renaming: bool, cx: &App) -> impl IntoElement {
+/// Trash + rename buttons on hover. When `confirming_delete` is true,
+/// pencil + trash are replaced by a "Delete?" label and Yes/Cancel
+/// buttons — see `WelcomeEditMode::ConfirmingDelete`.
+fn render_card(
+    index: usize,
+    entry: RecentSolution,
+    renaming: bool,
+    confirming_delete: bool,
+    cx: &App,
+) -> impl IntoElement {
     let entry_id = entry.id.clone();
     let entry_id_for_delete = entry.id.clone();
     let entry_id_for_rename = entry.id.clone();
@@ -395,6 +460,21 @@ fn render_card(index: usize, entry: RecentSolution, renaming: bool, cx: &App) ->
                     ui::Button::new(("rename-cancel", index), "Cancel")
                         .on_click(|_, window, cx| finish_edit(false, window, cx)),
                 )
+            } else if confirming_delete {
+                row.child(
+                    Label::new("Delete?")
+                        .size(LabelSize::Small)
+                        .color(Color::Error),
+                )
+                .child(
+                    ui::Button::new(("delete-confirm", index), "Yes")
+                        .style(ui::ButtonStyle::Filled)
+                        .on_click(|_, _window, cx| finish_confirm_delete(true, cx)),
+                )
+                .child(
+                    ui::Button::new(("delete-cancel", index), "Cancel")
+                        .on_click(|_, _window, cx| finish_confirm_delete(false, cx)),
+                )
             } else {
                 row.child(
                     IconButton::new(("rename-solution", index), IconName::Pencil)
@@ -417,13 +497,8 @@ fn render_card(index: usize, entry: RecentSolution, renaming: bool, cx: &App) ->
                         .icon_size(IconSize::Small)
                         .icon_color(Color::Muted)
                         .tooltip(ui::Tooltip::text("Delete solution"))
-                        .on_click(move |_, window, cx| {
-                            window.dispatch_action(
-                                Box::new(DeleteSolution {
-                                    id: entry_id_for_delete.0.clone(),
-                                }),
-                                cx,
-                            );
+                        .on_click(move |_, _window, cx| {
+                            enter_confirm_delete(entry_id_for_delete.clone(), cx);
                         }),
                 )
             }
