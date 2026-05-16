@@ -51,7 +51,8 @@ can read them.
 | Date | Status | Plan |
 |---|---|---|
 | 2026-05-15 | complete | [`plans/2026-05-15-picker-and-panel-ui-tweaks.md`](plans/2026-05-15-picker-and-panel-ui-tweaks.md) — Picker dropdown polish + Project panel header. Screenshot: [`plans/2026-05-15-picker-and-panel-ui-tweaks-screenshot.png`](plans/2026-05-15-picker-and-panel-ui-tweaks-screenshot.png). |
-| 2026-05-15 | scoping | [`plans/2026-05-15-remote-control.md`](plans/2026-05-15-remote-control.md) — Remote Control panel + Android client (multi-phase arc R-1 through R-6) |
+| 2026-05-15 | scoping | [`plans/2026-05-15-remote-control.md`](plans/2026-05-15-remote-control.md) — Remote Control panel + Android client (multi-phase arc R-1 through R-6). R-1, R-1.5, R-2, R-3, R-4 shipped; R-5/R-6 belong in a separate `spk-editor-android-client` repo. |
+| 2026-05-16 | complete | [`plans/2026-05-16-remote-control-R4.md`](plans/2026-05-16-remote-control-R4.md) — R-4: `remote.*` proxy to the embedded MCP Unix socket (per-WS `UnixMcpProxy`, allow-list, agent_session_* notification fan-out). |
 | 2026-05-15 | complete | [`plans/2026-05-15-remote-control-R2.md`](plans/2026-05-15-remote-control-R2.md) — R-2: server listener + TLS 1.3 + HMAC challenge handshake + MinimalDispatcher; FS-watcher reconciles listener state. |
 | 2026-05-15 | complete | [`plans/2026-05-15-remote-control-R1-5.md`](plans/2026-05-15-remote-control-R1-5.md) — R-1.5: QR popover rendering replacing the R-1 toast stub |
 | 2026-05-15 | complete | [`plans/2026-05-15-remote-control-R1.md`](plans/2026-05-15-remote-control-R1.md) — R-1: settings + status-bar widget + modal panel UI. Screenshot: [`plans/2026-05-15-remote-control-R1-screenshot.png`](plans/2026-05-15-remote-control-R1-screenshot.png). |
@@ -83,7 +84,10 @@ Short, dated, single-fact notes from sessions: "ran a benchmark and got X",
 
 | Date | Status | Topic |
 |---|---|---|
-| 2026-05-15 | handoff | [`findings/2026-05-15-session-handoff.md`](findings/2026-05-15-session-handoff.md) — **READ FIRST on session resume.** Captures the 2026-05-15 supervisor session state: 20+ commits shipped, pool of outstanding tasks (E queued-message → claude, R-2 server protocol, R-3..R-6, F sub-agent UI, G spk-image://), open architectural decisions (ADR-0003 protocol choice), active gotchas |
+| 2026-05-16 | handoff | [`findings/2026-05-16-session-handoff.md`](findings/2026-05-16-session-handoff.md) — **READ FIRST on session resume.** Supersedes 2026-05-15 handoff. R-2/R-3/R-4 shipped, queued-message phase E confirmed already-shipped pre-handoff. Remaining pool (R-5/R-6 Android, F/G cockpit) is all out-of-tree. In-tree pool is empty. |
+| 2026-05-15 | superseded | [`findings/2026-05-15-session-handoff.md`](findings/2026-05-15-session-handoff.md) — Original supervisor-session handoff. Listed pool items (E, R-2..R-6, F, G) that have since shipped or moved out-of-tree. See 2026-05-16 handoff for authoritative state. |
+| 2026-05 | gotcha | [`findings/2026-05-remote-control-r4-mcp-envelope.md`](findings/2026-05-remote-control-r4-mcp-envelope.md) — Embedded `editor_mcp` over Unix socket needs `tools/call { name, arguments }` envelope; bare `{"method": ..}` returns -32601. Discovered building R-4 proxy. |
+| 2026-05 | gotcha | [`findings/2026-05-remote-control-watcher-echo.md`](findings/2026-05-remote-control-watcher-echo.md) — `remote_control::store` FS-watcher echo loop on settings writes; resolution `self_write_echoes` counter. |
 | 2026-05 | active | [`findings/2026-05-agent-worktree-staleness.md`](findings/2026-05-agent-worktree-staleness.md) — Agent-tool `isolation: "worktree"` branches from session-start HEAD, NOT current HEAD; freshly-committed plan-docs aren't visible to sub-agents in the same session |
 | 2026-05 | resolved | [`findings/2026-05-headless-screenshot-blank.md`](findings/2026-05-headless-screenshot-blank.md) — `workspace.screenshot` returns blank under `--headless` (Xvfb); resolved by ADR-0002 (native headless platform) |
 
