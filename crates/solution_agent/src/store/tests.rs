@@ -289,7 +289,7 @@ async fn parallel_create_session_for_same_pair_spawns_only_once(cx: &mut TestApp
 /// Create a real session (via `create_session`) backed by `MockAgentServer`/
 /// `MockConnection`, then return both its id and a clone of the underlying
 /// `Entity<AcpThread>` so tests can emit synthetic `AcpThreadEvent`s.
-async fn create_session_with_thread(
+pub(crate) async fn create_session_with_thread(
     cx: &mut TestAppContext,
 ) -> (
     SolutionSessionId,

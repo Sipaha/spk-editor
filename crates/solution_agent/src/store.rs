@@ -56,7 +56,14 @@ pub enum SolutionAgentStoreEvent {
     SessionClosed(SolutionSessionId),
     SessionStateChanged(SolutionSessionId),
     SessionTitleChanged(SolutionSessionId),
-    SessionMessageAppended(SolutionSessionId),
+    /// Carries the entry index that was appended / updated so external
+    /// MCP consumers (the WS proxy + Android client) can render the new
+    /// entry without a follow-up `get_session` round-trip. The index is
+    /// captured at emit time from the live `AcpThread.entries().len()
+    /// - 1`, so a tight burst of appends can race — the consumer should
+    /// treat the index as a hint and re-fetch the full session if the
+    /// numbers don't line up.
+    SessionMessageAppended(SolutionSessionId, usize),
     SessionNotified(SolutionSessionId, notifier::NotifyKind),
 }
 
@@ -1483,7 +1490,15 @@ impl SolutionAgentStore {
                 // First user message appends a NewEntry — refresh DB so the
                 // History popover preview stops being NULL.
                 self.persist_session_row(session_id, cx);
-                cx.emit(SolutionAgentStoreEvent::SessionMessageAppended(session_id));
+                let entry_index = session_entity
+                    .read(cx)
+                    .acp_thread()
+                    .map(|thread| thread.read(cx).entries().len().saturating_sub(1))
+                    .unwrap_or(0);
+                cx.emit(SolutionAgentStoreEvent::SessionMessageAppended(
+                    session_id,
+                    entry_index,
+                ));
             }
             acp_thread::AcpThreadEvent::Stopped(_) => {
                 // Snapshot the Running turn's elapsed time BEFORE the
