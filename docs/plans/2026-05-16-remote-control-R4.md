@@ -207,18 +207,23 @@ grep "proxy_e2e" /tmp/r4_test.txt
 
 Acceptance:
 
-- [ ] `cargo build --bin spk-editor` passes.
-- [ ] `cargo clippy -p remote_control --all-targets -- -D warnings` passes.
-- [ ] `cargo test -p remote_control` ≥ 31 tests (R-2 baseline) + new
+- [x] `cargo build --bin spk-editor` passes.
+- [x] `cargo clippy -p remote_control --all-targets -- -D warnings` passes.
+- [x] `cargo test -p remote_control` ≥ 31 tests (R-2 baseline) + new
       proxy unit tests + the `proxy_e2e` integration test, all green.
-- [ ] `proxy_e2e::end_to_end_proxy_round_trip` reaches the assertion
+      (40 tests: 37 unit + 2 listener_e2e + 1 proxy_e2e.)
+- [x] `proxy_e2e::end_to_end_proxy_round_trip` reaches the assertion
       that the embedded server's `editor.capabilities` was returned
-      via the WS surface unchanged.
-- [ ] `proxy_e2e::method_outside_allow_list_returns_method_not_found`
-      asserts -32601 for `remote.lsp.start`.
-- [ ] FORK.md remote_control row mentions the proxy (existing row is
-      fine to extend; no new touched-upstream entries expected since
-      we're avoiding `context_server` changes).
+      via the WS surface unchanged. (Asserts `protocol_version =
+      "2024-11-05"` — the real `CapabilitiesTool` output, not the
+      R-2 stub's `protocol_version: 1`.)
+- [x] `remote.lsp.start` returns -32601 (asserted in the same
+      `proxy_e2e` test — single integration test covers both
+      acceptance items).
+- [x] FORK.md remote_control row mentions the proxy (extended in
+      place; no new touched-upstream entries — `context_server`
+      stayed untouched per the architectural choice that motivated
+      the proxy).
 
 ## When done
 
