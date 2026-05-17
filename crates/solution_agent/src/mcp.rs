@@ -20,6 +20,9 @@ pub fn register(cx: &mut App) {
         server.add_tool(ListSessionsTool);
     });
     editor_mcp::register_tool(cx, |server| {
+        server.add_tool(ListAgentsTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
         server.add_tool(GetSessionTool);
     });
     editor_mcp::register_tool(cx, |server| {
@@ -142,6 +145,72 @@ fn session_summary(session: &SolutionSession) -> SessionSummary {
         state: format!("{:?}", session.state),
         created_at: session.created_at.timestamp_millis(),
         last_activity_at: session.last_activity_at.timestamp_millis(),
+    }
+}
+
+// =====================================================================
+// solution_agent.list_agents
+// =====================================================================
+
+/// List registered agent adapters. The `id` is what `create_session`'s
+/// `agent_id` param accepts; `display_name` is what a client picker
+/// (e.g. the Android client's "New session" dialog) should show.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct ListAgentsParams {}
+
+impl<'de> Deserialize<'de> for ListAgentsParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let _ = serde::de::IgnoredAny::deserialize(de)?;
+        Ok(ListAgentsParams {})
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct AgentSummary {
+    pub id: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ListAgentsResult {
+    pub agents: Vec<AgentSummary>,
+}
+
+#[derive(Clone)]
+pub struct ListAgentsTool;
+
+impl McpServerTool for ListAgentsTool {
+    type Input = ListAgentsParams;
+    type Output = ListAgentsResult;
+    const NAME: &'static str = "solution_agent.list_agents";
+
+    async fn run(
+        &self,
+        _input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        let summaries = cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.read_with(cx, |store, _| {
+                store
+                    .adapters
+                    .supported_ids()
+                    .iter()
+                    .filter_map(|id| {
+                        store.adapters.get(id).map(|adapter| AgentSummary {
+                            id: id.to_string(),
+                            display_name: adapter.display_name().to_string(),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+        });
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("{} agent(s)", summaries.len()),
+            }],
+            structured_content: ListAgentsResult { agents: summaries },
+        })
     }
 }
 
@@ -1660,6 +1729,35 @@ mod tests {
         });
         cx.executor().run_until_parked();
         (session_id, image_b64, tmp)
+    }
+
+    #[gpui::test]
+    async fn list_agents_returns_empty_when_no_adapters_registered(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // create_session_with_thread builds an empty AdapterRegistry —
+        // mock-agent gets registered via `register_agent_server`, not
+        // via `AdapterRegistry::register`. So list_agents (which reads
+        // the adapter registry) returns []. Asserts the wire shape and
+        // the empty-list code path; the registry itself is covered by
+        // `adapter::tests`.
+        let (_session_id, _img, _tmp) = seed_session_with_image(cx).await;
+        let result = cx
+            .update(|cx| {
+                let cx = cx.to_async();
+                async move {
+                    ListAgentsTool
+                        .run(ListAgentsParams {}, &mut cx.clone())
+                        .await
+                }
+            })
+            .await
+            .expect("list_agents tool should run");
+        assert_eq!(result.structured_content.agents.len(), 0);
+        match &result.content[0] {
+            ToolResponseContent::Text { text } => assert_eq!(text, "0 agent(s)"),
+            _ => panic!("expected text content"),
+        }
     }
 
     #[gpui::test]

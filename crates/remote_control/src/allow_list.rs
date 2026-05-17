@@ -25,6 +25,7 @@ pub fn translate(method: &str) -> Option<&'static str> {
         "remote.solutions.list" => Some("solutions.list"),
         "remote.solutions.get" => Some("solutions.get"),
         "remote.solutions.open" => Some("solutions.open"),
+        "remote.solution_agent.list_agents" => Some("solution_agent.list_agents"),
         "remote.solution_agent.list_sessions" => Some("solution_agent.list_sessions"),
         "remote.solution_agent.get_session" => Some("solution_agent.get_session"),
         "remote.solution_agent.get_session_entry" => Some("solution_agent.get_session_entry"),
@@ -70,6 +71,10 @@ mod tests {
             ("remote.solutions.list", "solutions.list"),
             ("remote.solutions.get", "solutions.get"),
             ("remote.solutions.open", "solutions.open"),
+            (
+                "remote.solution_agent.list_agents",
+                "solution_agent.list_agents",
+            ),
             (
                 "remote.solution_agent.list_sessions",
                 "solution_agent.list_sessions",
