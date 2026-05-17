@@ -1,6 +1,15 @@
 # R-6f: WebSocket permessage-deflate compression
 
-**Status:** ready to dispatch (server-side first)
+**Status:** **cancelled (upstream gap)** — see
+[`../findings/2026-05-17-remote-control-r6f-upstream-gap.md`](../findings/2026-05-17-remote-control-r6f-upstream-gap.md).
+The pinned `tokio-tungstenite 0.28` and its dependency `tungstenite 0.28`
+(and the latest 0.29 release) do **not** implement `permessage-deflate` —
+no Cargo feature, no `WebSocketConfig` knob, no extensions API. The
+plan-doc's "option 3: punt" applies. Listener stays uncompressed; R-2 /
+R-4 wire protocol is unaffected. Re-open when upstream lands the
+extension (long-open issue on `snapview/tungstenite-rs`) or when we
+migrate the WS stack.
+
 **Repos:** spk-editor (server) → `spk-editor-android-client` (client verify).
 **Depends on:** R-6e shipped (so the wire payloads that benefit are already minimised, and compression layers on top).
 **Goal:** Enable RFC 7692 `permessage-deflate` on the WebSocket so the JSON-RPC text frames (markdown, tool-call previews, list responses) compress on the wire. Image content blocks are pre-compressed and won't benefit much; text payloads typically shrink 5-10×.
