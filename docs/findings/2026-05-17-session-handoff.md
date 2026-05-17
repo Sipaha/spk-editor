@@ -42,15 +42,25 @@ End-state: `:core` 72 tests green, debug APK 12.0 MB, release APK 2.12 MB.
 Build commands and pairing instructions live in the sibling repo's README.
 No CI yet.
 
-## Open follow-ups (filed but not started)
+## Additional 2026-05-17 phases (after the 1st handoff cut)
+
+| Phase | Commit | Summary |
+|---|---|---|
+| R-6d disk persistence | sibling `ff9ca8c` | `QueueStore` interface in `:core` + `EncryptedQueueStore` in `:app` (FIFO, .commit() synchronous so "Send → force-kill" path is durable); TTL **5 min → 24 h**; `DraftRepository` per session (debounced 500ms saves; read-and-clear `bouncedFor` channel); `LastSeenRepository` per session; `NavStateRepository` with route-template resolver; single shared `AppMasterKey` singleton. `:core` tests 72 → 82. |
+| R-6e server pagination | spk-editor `b756392b52` | Cursor params on `get_session` (`before_index` / `after_index` / `count`) + `list_sessions` (`before_last_activity_at_ms` / `count`); always-populated `EntrySummary.index`; `total_count` on both results. Additive, back-compat. `solution_agent` tests 91 → 99. |
+| R-6e client pagination | sibling `c7fbddc` | Paginated initial pull (`count=50`), `loadOlder` via `before_index=oldestLoaded` with LazyColumn auto-trigger, `resumeSession` on `Disconnected→Connected` via `after_index=lastSeenRepository.get()` with gap-detect safety net falling back to full `openSession`. `:core` tests 82 → 87. APK 2.22 → 2.24 MB. |
+| R-6f WS compression | spk-editor `2b22c9557c` | **Cancelled (upstream gap)** — `tokio-tungstenite 0.28` and `0.29` parse `permessage-deflate` headers but don't implement the codec. Listener stays uncompressed. Sub-agent refused to fake-ship; committed docs-only deferral + finding (`docs/findings/2026-05-17-remote-control-r6f-upstream-gap.md`). R-6e's diff streaming + pagination remains the load-bearing bandwidth win. Re-open when upstream lands the extension or when we migrate the WS stack. |
+
+## Open follow-ups
 
 | Item | Track | Notes |
 |---|---|---|
 | **R-6c** FCM push + multi-server | HEAVY (sibling) | Push notifications when an agent finishes a turn (needs Firebase project setup by the maintainer); support multiple paired workstations from one phone app. Defer until single-server v1 has real-world use feedback. |
-| **Outbound queue disk persistence** | LIGHT (sibling) | R-6a's queue is in-memory; force-killing the app drops queued `send_message`. Document accepted, persisting to encrypted disk is a future refinement. |
 | **Crash reporting** | LIGHT-MEDIUM (sibling) | No Crashlytics / Sentry yet by design. Add a local-log fallback if shipping reveals visibility gaps. |
 | **F** Sub-agent indication UI | HEAVY (spk-editor) | Was in original 2026-05-15 pool; user clarified 2026-05-16 it's spk-editor, not cockpit. No design pinned. Show running sub-agents (Claude Task tool dispatches) inside a session with progress/tokens/interrupt. Design discussion needed before scope. |
-| **G** `spk-image://` in queued message | LIGHT (spk-editor) | Audit 2026-05-16 showed `spk-image://` IS wired in 3 places (`render_queue.rs`, `conversation_render.rs`, `session_view.rs`). Bug from 2026-05-15 likely already fixed; needs user repro to confirm there's still a remaining failure mode. |
+| **G** `spk-image://` in queued message | LIGHT (spk-editor) | Audit 2026-05-16 showed `spk-image://` IS wired in 3 places. Bug from 2026-05-15 likely already fixed; needs user repro to confirm there's still a remaining failure mode. |
+| **R-6f re-open** | HEAVY (deferred) | When `tokio-tungstenite` ships permessage-deflate (long-open upstream issue) OR when we migrate the WS stack to a compression-capable alternative (`fastwebsockets`, OkHttp + custom extension, etc.). |
+| **`list_sessions` UI pagination** | LIGHT (sibling) | R-6e wired the wire-side `total_count` for list_sessions; UI infinite-scroll on solutions/sessions list deferred until needed. |
 
 ## Architectural decisions worth carrying forward
 
