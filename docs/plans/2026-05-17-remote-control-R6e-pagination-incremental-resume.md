@@ -1,6 +1,6 @@
 # R-6e: Pagination on `get_session` + incremental resume via `lastSeenEntryIndex`
 
-**Status:** ready to dispatch (server-side first)
+**Status:** complete (server commit `b756392b52`, client commit `c7fbddc`)
 **Repos:** spk-editor (server) → `spk-editor-android-client` (client). Two sub-agent dispatches.
 **Depends on:** R-5e (`get_session` shape) + R-6d (`lastSeenEntryIndex` persisted on the client side).
 **Goal:** Stop sending entire session histories on every reconnect / screen entry. A 200-entry chat with embedded images can be 50+ MB on the wire; on a flaky LTE link, that's the difference between "instant" and "30-second waits + frequent timeouts". Add cursor-style pagination to `get_session` + wire the client to fetch only the delta on reconnect.
@@ -175,12 +175,12 @@ grep "test result:" /tmp/r6e_test.txt
 cargo test -p remote_control proxy_e2e 2>&1 | grep "test result:"
 ```
 
-- [ ] `cargo build` passes.
-- [ ] `cargo clippy -p solution_agent -- -D warnings` clean.
-- [ ] `solution_agent` tests grow by 6-8 (current baseline 91).
-- [ ] `remote_control proxy_e2e` still passes.
-- [ ] `EntrySummary.index` is always populated; backwards-compat callers (no pagination params) see the full response in original order.
-- [ ] FORK.md `solution_agent` row mentions the pagination extension (one line).
+- [x] `cargo build` passes.
+- [x] `cargo clippy -p solution_agent -- -D warnings` clean.
+- [x] `solution_agent` tests grow by 6-8 (current baseline 91).
+- [x] `remote_control proxy_e2e` still passes.
+- [x] `EntrySummary.index` is always populated; backwards-compat callers (no pagination params) see the full response in original order.
+- [x] FORK.md `solution_agent` row mentions the pagination extension (one line).
 
 ## Acceptance (client side, after server lands)
 
@@ -190,11 +190,11 @@ ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=$HOME/.jdks/temurin-21.0.10 ./gradlew :
 grep -E "BUILD SUCCESSFUL|FAILURE:" /tmp/r6e_client.txt
 ```
 
-- [ ] `:core:test` BUILD SUCCESSFUL — ~85-88 tests.
-- [ ] `:app:assembleRelease` BUILD SUCCESSFUL — APK ≤ 2.5 MB.
-- [ ] Initial fetch is paginated (count=50, no `before_index`).
-- [ ] Load-older affordance fires when scrolling near top of loaded entries.
-- [ ] Resume on reconnect uses `after_index=lastSeen` instead of full refetch.
+- [x] `:core:test` BUILD SUCCESSFUL — ~85-88 tests.
+- [x] `:app:assembleRelease` BUILD SUCCESSFUL — APK ≤ 2.5 MB.
+- [x] Initial fetch is paginated (count=50, no `before_index`).
+- [x] Load-older affordance fires when scrolling near top of loaded entries.
+- [x] Resume on reconnect uses `after_index=lastSeen` instead of full refetch.
 
 ## When done
 
