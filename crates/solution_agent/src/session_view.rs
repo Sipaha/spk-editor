@@ -1354,6 +1354,7 @@ impl SolutionSessionView {
             total_tokens: None,
             context_count: session.context_count,
             cwd: session.cwd.clone(),
+            parent_session_id: session.parent_session_id,
         };
         let store = SolutionAgentStore::global(cx);
         let task = store.update(cx, |store, cx| store.resume_session(meta, project, cx));

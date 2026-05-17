@@ -52,6 +52,9 @@ pub fn register(cx: &mut App) {
     editor_mcp::register_tool(cx, |server| {
         server.add_tool(ReadSessionHistoryTool);
     });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(GetSessionChildrenTool);
+    });
 }
 
 // =====================================================================
@@ -68,6 +71,11 @@ pub fn register(cx: &mut App) {
 pub struct ListSessionsParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solution_id: Option<String>,
+    /// F: filter by parent session id. When set, returns only sessions
+    /// whose `parent_session_id` matches — i.e. the immediate children
+    /// of the named session. Stacks with `solution_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
     /// R-6e: exclusive upper bound on `last_activity_at` (millis since
     /// epoch). `None` = no upper bound (current behavior).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -85,12 +93,14 @@ impl<'de> Deserialize<'de> for ListSessionsParams {
         #[serde(default, deny_unknown_fields)]
         struct Helper {
             solution_id: Option<String>,
+            parent_session_id: Option<String>,
             before_last_activity_at_ms: Option<i64>,
             count: Option<usize>,
         }
         let helper = Option::<Helper>::deserialize(de)?.unwrap_or_default();
         Ok(Self {
             solution_id: helper.solution_id,
+            parent_session_id: helper.parent_session_id,
             before_last_activity_at_ms: helper.before_last_activity_at_ms,
             count: helper.count,
         })
@@ -106,6 +116,19 @@ pub struct SessionSummary {
     pub state: String,
     pub created_at: i64,
     pub last_activity_at: i64,
+    /// F: cumulative tokens reported by the agent for this session.
+    /// Sourced from the live `AcpThread::token_usage().used_tokens` when
+    /// a thread is attached, falling back to
+    /// `SolutionSession::cached_total_tokens` (populated from persistent
+    /// metadata) for cold tabs. `None` when neither source has a value
+    /// yet — e.g. a fresh session whose first turn hasn't shipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    /// F: parent session reference for sub-agent indication. `None` for
+    /// top-level sessions. Set at creation time via
+    /// `solution_agent.create_session({parent_session_id})`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -130,6 +153,17 @@ impl McpServerTool for ListSessionsTool {
         input: Self::Input,
         cx: &mut AsyncApp,
     ) -> Result<ToolResponse<Self::Output>> {
+        // F: optional parent filter. Parse once up-front so a malformed
+        // id surfaces a clear error rather than silently producing an
+        // empty result. Done outside the `cx.update` because the
+        // read-only closure has no clean error-propagation shape.
+        let want_parent = match input.parent_session_id.as_deref() {
+            Some(s) => Some(
+                SolutionSessionId::parse(s)
+                    .map_err(|e| anyhow!("bad parent_session_id: {e}"))?,
+            ),
+            None => None,
+        };
         let (sessions, total_count) = cx.update(|cx| {
             let store = SolutionAgentStore::global(cx);
             store.read_with(cx, |store, cx| {
@@ -143,7 +177,12 @@ impl McpServerTool for ListSessionsTool {
                                 return None;
                             }
                         }
-                        Some(session_summary(session))
+                        if let Some(want) = want_parent {
+                            if session.parent_session_id != Some(want) {
+                                return None;
+                            }
+                        }
+                        Some(session_summary(session, cx))
                     })
                     .collect();
                 // R-6e: order DESC by last_activity_at so `count=N` returns
@@ -173,7 +212,16 @@ impl McpServerTool for ListSessionsTool {
     }
 }
 
-fn session_summary(session: &SolutionSession) -> SessionSummary {
+fn session_summary(session: &SolutionSession, cx: &App) -> SessionSummary {
+    // Prefer the live thread's `TokenUsage.used_tokens` so an active
+    // session reports the current count (R-5/R-6 token tracking already
+    // writes through to `cached_total_tokens` on every
+    // `TokenUsageUpdated` event, but live > cached when the two
+    // disagree). Cold tabs fall back to the persisted cache.
+    let total_tokens = session
+        .acp_thread()
+        .and_then(|thread| thread.read(cx).token_usage().map(|usage| usage.used_tokens))
+        .or(session.cached_total_tokens);
     SessionSummary {
         id: session.id.to_string(),
         solution_id: session.solution_id.0.clone(),
@@ -182,6 +230,100 @@ fn session_summary(session: &SolutionSession) -> SessionSummary {
         state: format!("{:?}", session.state),
         created_at: session.created_at.timestamp_millis(),
         last_activity_at: session.last_activity_at.timestamp_millis(),
+        total_tokens,
+        parent_session_id: session.parent_session_id.map(|id| id.to_string()),
+    }
+}
+
+// =====================================================================
+// solution_agent.get_session_children
+// =====================================================================
+
+/// F: list the immediate children of a session — sessions whose
+/// `parent_session_id` equals the input. Used by the desktop /
+/// phone "sub-agents" strip to fetch siblings in a single round-trip
+/// instead of running a filtered `list_sessions`. Returns an empty
+/// list when the session has no children. Errors with
+/// `unknown_parent_session` when the parent itself is unknown.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct GetSessionChildrenParams {
+    pub session_id: String,
+}
+
+impl<'de> Deserialize<'de> for GetSessionChildrenParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            session_id: String,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            session_id: inner.session_id,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct GetSessionChildrenResult {
+    /// Immediate children ordered by `created_at` ASC, so the consumer
+    /// renders the oldest child first (matches the desktop strip layout
+    /// described in the F plan-doc: "main → first spawn → second
+    /// spawn").
+    pub children: Vec<SessionSummary>,
+}
+
+#[derive(Clone)]
+pub struct GetSessionChildrenTool;
+
+impl McpServerTool for GetSessionChildrenTool {
+    type Input = GetSessionChildrenParams;
+    type Output = GetSessionChildrenResult;
+    const NAME: &'static str = "solution_agent.get_session_children";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.session_id.is_empty(),
+            "invalid_params: session_id is required"
+        );
+        let parent_id = SolutionSessionId::parse(&input.session_id)
+            .map_err(|e| anyhow!("bad session id: {e}"))?;
+
+        let children = cx.update(|cx| -> Result<Vec<SessionSummary>> {
+            let store = SolutionAgentStore::global(cx);
+            store.read_with(cx, |store, cx| -> Result<Vec<SessionSummary>> {
+                // Verify the parent itself exists so an unknown id
+                // surfaces a clear error instead of an empty list (the
+                // latter is ambiguous: "no children" vs. "no parent").
+                store
+                    .session(parent_id)
+                    .ok_or_else(|| anyhow!("unknown_parent_session: {parent_id}"))?;
+                let mut children: Vec<SessionSummary> = store
+                    .all_sessions()
+                    .filter_map(|entity| {
+                        let session = entity.read(cx);
+                        if session.parent_session_id == Some(parent_id) {
+                            Some(session_summary(session, cx))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                children.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+                Ok(children)
+            })
+        })?;
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("{} child session(s)", children.len()),
+            }],
+            structured_content: GetSessionChildrenResult { children },
+        })
     }
 }
 
@@ -408,6 +550,15 @@ pub struct GetSessionResult {
     pub state: String,
     pub created_at: i64,
     pub last_activity_at: i64,
+    /// F: cumulative tokens for the session (live thread > cached
+    /// metadata fall-back). `None` until the agent reports its first
+    /// usage update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    /// F: parent session reference for sub-agent indication. `None` for
+    /// top-level sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
     pub entries: Vec<EntrySummary>,
     /// R-6e: total entry count of the underlying thread, regardless of
     /// pagination filters applied to `entries`. Lets the client render a
@@ -492,7 +643,7 @@ impl McpServerTool for GetSessionTool {
                     (kept, total)
                 })
                 .unwrap_or((Vec::new(), 0));
-            let summary = session_summary(session);
+            let summary = session_summary(session, cx);
             Ok(GetSessionResult {
                 id: summary.id,
                 solution_id: summary.solution_id,
@@ -501,6 +652,8 @@ impl McpServerTool for GetSessionTool {
                 state: summary.state,
                 created_at: summary.created_at,
                 last_activity_at: summary.last_activity_at,
+                total_tokens: summary.total_tokens,
+                parent_session_id: summary.parent_session_id,
                 entries,
                 total_count,
             })
@@ -874,6 +1027,13 @@ pub struct CreateSessionParams {
     pub agent_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_message: Option<String>,
+    /// F: parent session reference for sub-agent indication. When set,
+    /// the new session is registered as a child of `parent_session_id`
+    /// and surfaces in the session-view's sub-agents strip. The parent
+    /// MUST exist in the same solution — otherwise the tool errors
+    /// (`unknown_parent_session` or `parent_session_in_different_solution`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for CreateSessionParams {
@@ -884,12 +1044,14 @@ impl<'de> Deserialize<'de> for CreateSessionParams {
             solution_id: String,
             agent_id: String,
             initial_message: Option<String>,
+            parent_session_id: Option<String>,
         }
         let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
         Ok(Self {
             solution_id: inner.solution_id,
             agent_id: inner.agent_id,
             initial_message: inner.initial_message,
+            parent_session_id: inner.parent_session_id,
         })
     }
 }
@@ -923,6 +1085,37 @@ impl McpServerTool for CreateSessionTool {
         let solution_id = SolutionId(input.solution_id.clone());
         let agent_id: crate::model::AgentServerId = input.agent_id.clone().into();
 
+        // F: parent validation. Parse the id, then look it up in the
+        // store. Reject when missing (`unknown_parent_session`) or when
+        // the parent lives in a different solution
+        // (`parent_session_in_different_solution`) — sub-agents are
+        // intentionally same-solution-only (see plan-doc §I).
+        let parent_session_id = match input.parent_session_id.as_deref() {
+            Some(raw) => {
+                let parsed = SolutionSessionId::parse(raw)
+                    .map_err(|e| anyhow!("bad parent_session_id: {e}"))?;
+                let parent_solution = cx.update(|cx| {
+                    let store = SolutionAgentStore::global(cx);
+                    store.read_with(cx, |store, cx| {
+                        store
+                            .session(parsed)
+                            .map(|entity| entity.read(cx).solution_id.clone())
+                    })
+                });
+                let parent_solution = parent_solution
+                    .ok_or_else(|| anyhow!("unknown_parent_session: {raw}"))?;
+                if parent_solution != solution_id {
+                    anyhow::bail!(
+                        "parent_session_in_different_solution: {} != {}",
+                        parent_solution.0,
+                        solution_id.0
+                    );
+                }
+                Some(parsed)
+            }
+            None => None,
+        };
+
         let project = cx
             .update(|cx| project_for_solution(&input.solution_id, cx))
             .ok_or_else(|| {
@@ -936,7 +1129,14 @@ impl McpServerTool for CreateSessionTool {
         let create_task = cx.update(|cx| {
             let store = SolutionAgentStore::global(cx);
             store.update(cx, |store, cx| {
-                store.create_session(solution_id, agent_id, project, cx)
+                store.create_session_with_parent(
+                    solution_id,
+                    agent_id,
+                    project,
+                    None,
+                    parent_session_id,
+                    cx,
+                )
             })
         });
         let session_id = create_task.await?;
@@ -2475,6 +2675,7 @@ mod tests {
             .run(
                 ListSessionsParams {
                     solution_id: Some(solution_id.0.clone()),
+                    parent_session_id: None,
                     count: Some(1),
                     before_last_activity_at_ms: None,
                 },
@@ -2493,6 +2694,314 @@ mod tests {
         assert_eq!(
             result.structured_content.total_count, 3,
             "total_count reflects all matching sessions, pre-pagination"
+        );
+    }
+
+    // =================================================================
+    // F: sub-agent indication coverage
+    //
+    // Validates the `parent_session_id` field plumbing across the MCP
+    // wire shape and the new `solution_agent.get_session_children` tool.
+    // =================================================================
+
+    /// Spawn a sub-session under `parent_id`. Stays at the store layer
+    /// to avoid the `MultiWorkspace` requirement of `CreateSessionTool`;
+    /// the tool-layer create_session paths are covered separately in
+    /// the dedicated F validation tests below.
+    async fn create_child_session(
+        cx: &mut gpui::TestAppContext,
+        parent_id: crate::model::SolutionSessionId,
+    ) -> crate::model::SolutionSessionId {
+        let (solution_id, agent_id, project) = cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            let session = store
+                .read(cx)
+                .session(parent_id)
+                .expect("parent session exists");
+            let session_ref = session.read(cx);
+            (
+                session_ref.solution_id.clone(),
+                session_ref.agent_id.clone(),
+                session_ref
+                    .project
+                    .clone()
+                    .expect("parent has project"),
+            )
+        });
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| {
+                store.create_session_with_parent(
+                    solution_id,
+                    agent_id,
+                    project,
+                    None,
+                    Some(parent_id),
+                    cx,
+                )
+            })
+        })
+        .await
+        .expect("create child session")
+    }
+
+    #[gpui::test]
+    async fn create_session_with_parent_sets_parent_session_id_on_child(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (parent_id, _thread, _tmp) = create_session_with_thread(cx).await;
+        let child_id = create_child_session(cx, parent_id).await;
+
+        // GetSession surfaces parent_session_id on the child.
+        let result = GetSessionTool
+            .run(
+                GetSessionParams {
+                    session_id: child_id.to_string(),
+                    ..Default::default()
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session(child)");
+        assert_eq!(
+            result.structured_content.parent_session_id.as_deref(),
+            Some(parent_id.to_string().as_str()),
+            "child reports parent_session_id"
+        );
+
+        // Top-level parent reports no parent_session_id.
+        let parent_result = GetSessionTool
+            .run(
+                GetSessionParams {
+                    session_id: parent_id.to_string(),
+                    ..Default::default()
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session(parent)");
+        assert!(
+            parent_result.structured_content.parent_session_id.is_none(),
+            "top-level parent has no parent_session_id"
+        );
+    }
+
+    #[gpui::test]
+    async fn create_session_with_unknown_parent_errors_with_named_code(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // Seed the store + solution_id so the "unknown parent" branch
+        // is reached. We don't need a real workspace because parent
+        // validation runs before `project_for_solution`.
+        let (real_session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+        let solution_id = cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store
+                .read(cx)
+                .session(real_session_id)
+                .expect("session")
+                .read(cx)
+                .solution_id
+                .clone()
+        });
+        // A short id that's well-formed (`[a-z0-9]{8}`) but not in the
+        // store. `parse` will accept it; the store lookup will reject.
+        let unknown_parent = "abcd1234";
+        let err = CreateSessionTool
+            .run(
+                CreateSessionParams {
+                    solution_id: solution_id.0.clone(),
+                    agent_id: "mock-agent".into(),
+                    initial_message: None,
+                    parent_session_id: Some(unknown_parent.to_string()),
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect_err("expected unknown_parent_session error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown_parent_session"),
+            "expected unknown_parent_session in {msg:?}"
+        );
+        assert!(
+            msg.contains(unknown_parent),
+            "expected error to include the bad id; got {msg:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn create_session_with_parent_in_different_solution_errors(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (parent_id, _thread, _tmp) = create_session_with_thread(cx).await;
+        // CreateSession against a *different* solution id — the parent
+        // belongs to solution-A; we pass solution-B. Validation fires
+        // before workspace lookup so we don't need solution-B to have
+        // an open window.
+        let other_solution = "sol-OTHER-not-the-parents";
+        let err = CreateSessionTool
+            .run(
+                CreateSessionParams {
+                    solution_id: other_solution.into(),
+                    agent_id: "mock-agent".into(),
+                    initial_message: None,
+                    parent_session_id: Some(parent_id.to_string()),
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect_err("expected parent_session_in_different_solution error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("parent_session_in_different_solution"),
+            "expected parent_session_in_different_solution in {msg:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn get_session_children_returns_child_with_summary_fields(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (parent_id, _thread, _tmp) = create_session_with_thread(cx).await;
+        let child_id = create_child_session(cx, parent_id).await;
+
+        let result = GetSessionChildrenTool
+            .run(
+                GetSessionChildrenParams {
+                    session_id: parent_id.to_string(),
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session_children");
+        let children = &result.structured_content.children;
+        assert_eq!(children.len(), 1, "exactly one child");
+        assert_eq!(children[0].id, child_id.to_string());
+        assert_eq!(
+            children[0].parent_session_id.as_deref(),
+            Some(parent_id.to_string().as_str()),
+            "child summary echoes parent_session_id"
+        );
+        // Text content carries a stable count summary for log scraping.
+        match &result.content[0] {
+            ToolResponseContent::Text { text } => {
+                assert_eq!(text, "1 child session(s)");
+            }
+            _ => panic!("expected text content"),
+        }
+    }
+
+    #[gpui::test]
+    async fn get_session_children_returns_empty_list_for_leaf_session(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (leaf_id, _thread, _tmp) = create_session_with_thread(cx).await;
+
+        let result = GetSessionChildrenTool
+            .run(
+                GetSessionChildrenParams {
+                    session_id: leaf_id.to_string(),
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session_children on a leaf");
+        assert!(
+            result.structured_content.children.is_empty(),
+            "leaf session has no children"
+        );
+    }
+
+    #[gpui::test]
+    async fn list_sessions_filters_by_parent_session_id(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (parent_id, _thread, _tmp) = create_session_with_thread(cx).await;
+        let child_id = create_child_session(cx, parent_id).await;
+        // Add a second sibling so the filter has more than one row to
+        // partition.
+        let sibling_id = create_child_session(cx, parent_id).await;
+
+        let solution_id = cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store
+                .read(cx)
+                .session(parent_id)
+                .expect("parent")
+                .read(cx)
+                .solution_id
+                .clone()
+        });
+
+        // parent_session_id=parent → both children come back, parent itself excluded.
+        let filtered = ListSessionsTool
+            .run(
+                ListSessionsParams {
+                    solution_id: Some(solution_id.0.clone()),
+                    parent_session_id: Some(parent_id.to_string()),
+                    before_last_activity_at_ms: None,
+                    count: None,
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("list_sessions filtered by parent");
+        let ids: std::collections::HashSet<String> = filtered
+            .structured_content
+            .sessions
+            .iter()
+            .map(|s| s.id.clone())
+            .collect();
+        assert_eq!(
+            ids,
+            [child_id.to_string(), sibling_id.to_string()].into_iter().collect(),
+            "exactly the two children are returned",
+        );
+        assert!(
+            !ids.contains(&parent_id.to_string()),
+            "parent itself is excluded"
+        );
+    }
+
+    #[gpui::test]
+    async fn session_summary_total_tokens_populated_from_cached_value(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+        // Seed `cached_total_tokens` directly so the fallback path is
+        // exercised even without a live `TokenUsageUpdated` event.
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            let session = store
+                .read(cx)
+                .session(session_id)
+                .expect("session exists");
+            session.update(cx, |s, _| s.cached_total_tokens = Some(42_000));
+        });
+
+        let result = ListSessionsTool
+            .run(
+                ListSessionsParams::default(),
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("list_sessions");
+        let summary = result
+            .structured_content
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id.to_string())
+            .expect("session present");
+        // The live thread's `token_usage()` may be None at this stage,
+        // so the fallback to `cached_total_tokens` is what we're
+        // verifying. Either path yielding >= 42_000 is acceptable
+        // (live could update past the seed); the contract is "non-None
+        // when we have a value".
+        assert!(
+            summary.total_tokens.is_some_and(|t| t >= 42_000),
+            "total_tokens should fall back to cached_total_tokens; got {:?}",
+            summary.total_tokens,
         );
     }
 }

@@ -111,6 +111,14 @@ impl SolutionAgentDb {
         // `update_tab_orders` whenever the user reorders, opens,
         // or closes a tab.
         apply_idempotent_add_column(&connection, "tab_order INTEGER");
+        // F: sub-agent parent reference. NULL = top-level session;
+        // non-NULL = child of the referenced session id, surfaced in
+        // the session-view "sub-agents" strip. No FK constraint so a
+        // dangling pointer (parent later deleted) degrades to "looks
+        // like top-level" instead of corrupting the row — the in-
+        // memory store + the create_session validation enforce the
+        // same-solution constraint at write time.
+        apply_idempotent_add_column(&connection, "parent_session_id TEXT");
 
         connection.exec(indoc! {"
             CREATE INDEX IF NOT EXISTS idx_session_by_solution
@@ -284,29 +292,40 @@ fn insert_or_update_metadata(
     // doesn't have those fields populated yet (e.g. fresh-session insert at
     // create time) doesn't clobber values an event-driven update wrote
     // earlier in the same session.
+    //
     // Nested tuple shape because `sqlez::Bind` only implements tuples up
-    // to size 10; we have 11 columns now that `cwd` is persisted.
+    // to size 10; we have 12 columns now that `parent_session_id` is
+    // persisted (5 + 7).
     let mut insert = connection.exec_bound::<(
         (String, String, String, Arc<str>, String),
-        (i64, i64, Option<String>, Option<i64>, i64, Option<String>),
+        (
+            i64,
+            i64,
+            Option<String>,
+            Option<i64>,
+            i64,
+            Option<String>,
+            Option<String>,
+        ),
     )>(indoc! {"
         INSERT INTO solution_sessions (
             id, solution_id, agent_id, acp_session_id, title,
             created_at, last_activity_at, preview, total_tokens,
-            context_count, cwd
+            context_count, cwd, parent_session_id
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
         ON CONFLICT(id) DO UPDATE SET
-            solution_id      = excluded.solution_id,
-            agent_id         = excluded.agent_id,
-            acp_session_id   = excluded.acp_session_id,
-            title            = excluded.title,
-            created_at       = excluded.created_at,
-            last_activity_at = excluded.last_activity_at,
-            preview          = COALESCE(excluded.preview, preview),
-            total_tokens     = COALESCE(excluded.total_tokens, total_tokens),
-            context_count    = excluded.context_count,
-            cwd              = COALESCE(excluded.cwd, cwd)
+            solution_id        = excluded.solution_id,
+            agent_id           = excluded.agent_id,
+            acp_session_id     = excluded.acp_session_id,
+            title              = excluded.title,
+            created_at         = excluded.created_at,
+            last_activity_at   = excluded.last_activity_at,
+            preview            = COALESCE(excluded.preview, preview),
+            total_tokens       = COALESCE(excluded.total_tokens, total_tokens),
+            context_count      = excluded.context_count,
+            cwd                = COALESCE(excluded.cwd, cwd),
+            parent_session_id  = COALESCE(excluded.parent_session_id, parent_session_id)
     "})?;
 
     let cwd_str = if meta.cwd.as_os_str().is_empty() {
@@ -329,6 +348,7 @@ fn insert_or_update_metadata(
             meta.total_tokens.map(|t| t as i64),
             meta.context_count as i64,
             cwd_str,
+            meta.parent_session_id.map(|id| id.to_string()),
         ),
     ))?;
 
@@ -448,14 +468,22 @@ fn select_metadata_for_solution(
     solution_id: &SolutionId,
 ) -> Result<Vec<SolutionSessionMetadata>> {
     // Same nested-tuple shape as the INSERT side — `sqlez::Column` only
-    // implements tuples up to size 10.
+    // implements tuples up to size 10; we have 12 columns now.
     let mut select = connection.select_bound::<String, (
         (String, String, String, Arc<str>, String),
-        (i64, i64, Option<String>, Option<i64>, i64, Option<String>),
+        (
+            i64,
+            i64,
+            Option<String>,
+            Option<i64>,
+            i64,
+            Option<String>,
+            Option<String>,
+        ),
     )>(indoc! {"
         SELECT id, solution_id, agent_id, acp_session_id, title,
                created_at, last_activity_at, preview, total_tokens,
-               context_count, cwd
+               context_count, cwd, parent_session_id
         FROM solution_sessions
         WHERE solution_id = ?
         ORDER BY last_activity_at DESC
@@ -465,7 +493,15 @@ fn select_metadata_for_solution(
     let mut out = Vec::with_capacity(rows.len());
     for (
         (id, solution_id, agent_id, acp_session_id, title),
-        (created_at, last_activity_at, preview, total_tokens, context_count, cwd),
+        (
+            created_at,
+            last_activity_at,
+            preview,
+            total_tokens,
+            context_count,
+            cwd,
+            parent_session_id,
+        ),
     ) in rows
     {
         let id = SolutionSessionId::parse(&id)
@@ -474,6 +510,16 @@ fn select_metadata_for_solution(
             .ok_or_else(|| anyhow!("invalid created_at timestamp: {created_at}"))?;
         let last_activity_at = DateTime::<Utc>::from_timestamp_millis(last_activity_at)
             .ok_or_else(|| anyhow!("invalid last_activity_at timestamp: {last_activity_at}"))?;
+        // A dangling `parent_session_id` (parent later deleted) parses
+        // fine here — the dangling pointer is silently treated as
+        // top-level by the surfaces that read it (status row, MCP).
+        let parent_session_id = match parent_session_id {
+            Some(raw) => Some(
+                SolutionSessionId::parse(&raw)
+                    .map_err(|e| anyhow!("invalid parent_session_id in db: {e}"))?,
+            ),
+            None => None,
+        };
 
         out.push(SolutionSessionMetadata {
             id,
@@ -487,6 +533,7 @@ fn select_metadata_for_solution(
             total_tokens: total_tokens.map(|t| t as u64),
             context_count: context_count.max(1) as u32,
             cwd: cwd.map(std::path::PathBuf::from).unwrap_or_default(),
+            parent_session_id,
         });
     }
     Ok(out)
@@ -514,6 +561,7 @@ mod tests {
             total_tokens: None,
             context_count: 1,
             cwd: std::path::PathBuf::new(),
+            parent_session_id: None,
         }
     }
 

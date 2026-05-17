@@ -43,11 +43,21 @@ pub fn install(cx: &mut App) {
     coordinator.update(cx, |this, cx| {
         this.subscriptions.push(
             cx.subscribe(&store, |_this, _store, event, cx| match event {
-                SolutionAgentStoreEvent::SessionCreated(id) => {
+                SolutionAgentStoreEvent::SessionCreated {
+                    id,
+                    parent_session_id,
+                } => {
                     editor_mcp::emit_notification(
                         cx,
                         "agent_session_created",
-                        json!({ "session_id": id.to_string() }),
+                        json!({
+                            "session_id": id.to_string(),
+                            // `null` (not omitted) for top-level sessions
+                            // so the wire shape is self-documenting: a
+                            // missing field looks like "old server"; an
+                            // explicit null looks like "top-level".
+                            "parent_session_id": parent_session_id.map(|p| p.to_string()),
+                        }),
                     );
                 }
                 SolutionAgentStoreEvent::SessionClosed(id) => {
@@ -181,9 +191,10 @@ mod tests {
             // Emit an event via the store. No MCP server is connected — emit
             // is a no-op, but we exercise the subscription path end-to-end.
             store.update(cx, |_s, cx| {
-                cx.emit(SolutionAgentStoreEvent::SessionCreated(
-                    crate::model::SolutionSessionId::new(),
-                ));
+                cx.emit(SolutionAgentStoreEvent::SessionCreated {
+                    id: crate::model::SolutionSessionId::new(),
+                    parent_session_id: None,
+                });
             });
         });
         cx.run_until_parked();

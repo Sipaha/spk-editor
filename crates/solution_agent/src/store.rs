@@ -52,7 +52,15 @@ pub struct SolutionAgentStore {
 
 #[derive(Debug)]
 pub enum SolutionAgentStoreEvent {
-    SessionCreated(SolutionSessionId),
+    /// A new session was registered in the store. `parent_session_id`
+    /// is `Some` for sub-agent sessions (F: sub-agent indication) —
+    /// the sub-agents-strip event coordinator forwards this through
+    /// the wire payload so remote clients can update their tree
+    /// without a follow-up `get_session_children` round-trip.
+    SessionCreated {
+        id: SolutionSessionId,
+        parent_session_id: Option<SolutionSessionId>,
+    },
     SessionClosed(SolutionSessionId),
     SessionStateChanged(SolutionSessionId),
     SessionTitleChanged(SolutionSessionId),
@@ -350,6 +358,24 @@ impl SolutionAgentStore {
         cwd: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) -> Task<Result<SolutionSessionId>> {
+        self.create_session_with_parent(solution_id, agent_id, project, cwd, None, cx)
+    }
+
+    /// Full variant. `parent_session_id` (F: sub-agent indication) marks
+    /// the new session as a child of `parent_session_id` so the session-
+    /// view's sub-agents strip renders it under its parent. The parent
+    /// MUST already exist in the same solution — the caller is
+    /// responsible for that validation; the in-process store accepts
+    /// any value here and only writes it through.
+    pub fn create_session_with_parent(
+        &mut self,
+        solution_id: SolutionId,
+        agent_id: AgentServerId,
+        project: Entity<project::Project>,
+        cwd: Option<PathBuf>,
+        parent_session_id: Option<SolutionSessionId>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<SolutionSessionId>> {
         let pair = (solution_id.clone(), agent_id.clone());
 
         cx.spawn(async move |this, cx: &mut AsyncApp| {
@@ -436,6 +462,7 @@ impl SolutionAgentStore {
                     s.title = title;
                     s.project = Some(project.clone());
                     s.cwd = session_cwd.clone();
+                    s.parent_session_id = parent_session_id;
                     s.set_acp_thread(Some(acp_thread.clone()), cx);
                     s
                 });
@@ -451,7 +478,10 @@ impl SolutionAgentStore {
                     .ok_or_else(|| anyhow!("session vanished after insert"))?
                     .update(cx, |s, _| s._acp_subscription = Some(sub));
                 store.persist_session_row(session_id, cx);
-                cx.emit(SolutionAgentStoreEvent::SessionCreated(session_id));
+                cx.emit(SolutionAgentStoreEvent::SessionCreated {
+                    id: session_id,
+                    parent_session_id,
+                });
                 cx.notify();
                 anyhow::Ok(session_id)
             })??;
@@ -542,6 +572,7 @@ impl SolutionAgentStore {
             total_tokens,
             context_count: s.context_count,
             cwd: s.cwd.clone(),
+            parent_session_id: s.parent_session_id,
         };
         db.save_metadata(meta).detach_and_log_err(cx);
     }
@@ -793,6 +824,7 @@ impl SolutionAgentStore {
                         // agent state.
                         s.cwd = resume_cwd.clone();
                         s.cached_total_tokens = meta.total_tokens;
+                        s.parent_session_id = meta.parent_session_id;
                         s.set_acp_thread(Some(acp_thread.clone()), cx);
                         s
                     });
@@ -836,7 +868,10 @@ impl SolutionAgentStore {
                 if let Some(db) = &store.persistence {
                     db.mark_closed(session_id, None).detach_and_log_err(cx);
                 }
-                cx.emit(SolutionAgentStoreEvent::SessionCreated(session_id));
+                cx.emit(SolutionAgentStoreEvent::SessionCreated {
+                    id: session_id,
+                    parent_session_id: meta.parent_session_id,
+                });
                 cx.notify();
                 anyhow::Ok(session_id)
             })??;
@@ -875,10 +910,14 @@ impl SolutionAgentStore {
     ) -> SolutionSessionId {
         let id = session.id;
         let solution_id = session.solution_id.clone();
+        let parent_session_id = session.parent_session_id;
         let entity = cx.new(|_| session);
         self.sessions.insert(id, entity);
         self.by_solution.entry(solution_id).or_default().push(id);
-        cx.emit(SolutionAgentStoreEvent::SessionCreated(id));
+        cx.emit(SolutionAgentStoreEvent::SessionCreated {
+            id,
+            parent_session_id,
+        });
         cx.notify();
         id
     }
@@ -1027,6 +1066,7 @@ impl SolutionAgentStore {
                         // `TokenUsage`). The live path refreshes this
                         // on every `TokenUsageUpdated` event.
                         s.cached_total_tokens = meta.total_tokens;
+                        s.parent_session_id = meta.parent_session_id;
                         s
                     });
                     this.sessions.insert(meta.id, entity);
@@ -1034,7 +1074,10 @@ impl SolutionAgentStore {
                         .entry(solution_id.clone())
                         .or_default()
                         .push(meta.id);
-                    cx.emit(SolutionAgentStoreEvent::SessionCreated(meta.id));
+                    cx.emit(SolutionAgentStoreEvent::SessionCreated {
+                        id: meta.id,
+                        parent_session_id: meta.parent_session_id,
+                    });
                     hydrated.push(meta.id);
                 }
                 cx.notify();

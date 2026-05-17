@@ -838,6 +838,7 @@ async fn restore_open_tabs_hydrates_cold_sessions(cx: &mut TestAppContext) {
         total_tokens: None,
         context_count: 1,
         cwd: PathBuf::new(),
+        parent_session_id: None,
     };
     let meta_b = crate::model::SolutionSessionMetadata {
         id: id_b,

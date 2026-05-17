@@ -32,6 +32,9 @@ pub fn translate(method: &str) -> Option<&'static str> {
         "remote.solution_agent.create_session" => Some("solution_agent.create_session"),
         "remote.solution_agent.send_message" => Some("solution_agent.send_message"),
         "remote.solution_agent.cancel_turn" => Some("solution_agent.cancel_turn"),
+        "remote.solution_agent.get_session_children" => {
+            Some("solution_agent.get_session_children")
+        }
         _ => None,
     }
 }
@@ -98,6 +101,10 @@ mod tests {
             (
                 "remote.solution_agent.cancel_turn",
                 "solution_agent.cancel_turn",
+            ),
+            (
+                "remote.solution_agent.get_session_children",
+                "solution_agent.get_session_children",
             ),
         ];
         for (wire, bare) in cases {

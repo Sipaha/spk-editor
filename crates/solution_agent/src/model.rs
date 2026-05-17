@@ -275,6 +275,14 @@ pub struct SolutionSession {
     /// the cached value stays in sync until the next cold restore.
     /// `None` for fresh sessions whose first turn hasn't shipped yet.
     pub cached_total_tokens: Option<u64>,
+    /// F: parent session reference for sub-agent indication. `None` for
+    /// top-level sessions. Set at creation time via
+    /// `solution_agent.create_session({parent_session_id})` and
+    /// persisted in `solution_sessions.parent_session_id` so the
+    /// parent / child link survives editor restarts. The session view's
+    /// sub-agents strip uses this to render a child under its parent
+    /// (and to navigate up from a child to its parent).
+    pub parent_session_id: Option<SolutionSessionId>,
 }
 
 impl SolutionSession {
@@ -314,6 +322,7 @@ impl SolutionSession {
             cold_entries: Vec::new(),
             last_turn_duration: None,
             cached_total_tokens: None,
+            parent_session_id: None,
         }
     }
 
@@ -391,6 +400,10 @@ pub struct SolutionSessionMetadata {
     /// written before the column existed; the resume path treats
     /// empty as "use `solution.root`".
     pub cwd: PathBuf,
+    /// F: persisted copy of [`SolutionSession::parent_session_id`].
+    /// `None` for top-level sessions and for legacy rows written
+    /// before the column existed.
+    pub parent_session_id: Option<SolutionSessionId>,
 }
 
 #[cfg(test)]
@@ -420,6 +433,7 @@ mod tests {
             cold_entries: Vec::new(),
             last_turn_duration: None,
             cached_total_tokens: None,
+            parent_session_id: None,
         }
     }
 
