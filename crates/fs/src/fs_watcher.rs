@@ -372,16 +372,37 @@ impl GlobalWatcher {
     fn unwatch(&self, path: &Path, mode: WatcherMode) -> anyhow::Result<()> {
         use notify::Watcher;
 
-        match mode {
-            WatcherMode::Native => {
-                if let Some(watcher) = self.native_watcher.lock().as_mut() {
-                    watcher.unwatch(path)?;
-                }
-            }
-            WatcherMode::Poll => {
-                if let Some(watcher) = self.poll_watcher.lock().as_mut() {
-                    watcher.unwatch(path)?;
-                }
+        let result = match mode {
+            WatcherMode::Native => self
+                .native_watcher
+                .lock()
+                .as_mut()
+                .map(|watcher| watcher.unwatch(path)),
+            WatcherMode::Poll => self
+                .poll_watcher
+                .lock()
+                .as_mut()
+                .map(|watcher| watcher.unwatch(path)),
+        };
+
+        if let Some(Err(err)) = result {
+            // `WatchNotFound` / `PathNotFound` from the underlying notify
+            // crate mean "the thing you wanted to stop watching is already
+            // gone." That's a benign race: a watched directory got removed
+            // (e.g. a `git worktree remove`, a `rm -rf`, a tempdir teardown)
+            // and the inotify watch was invalidated by the kernel before
+            // we got around to unregistering it. Logging this as ERROR
+            // floods the log with one line per nested subdir of the
+            // removed tree. Downgrade to debug — our bookkeeping is
+            // already correct (the registration was popped before
+            // calling unwatch), there's no real work left.
+            if matches!(
+                err.kind,
+                notify::ErrorKind::WatchNotFound | notify::ErrorKind::PathNotFound
+            ) {
+                log::debug!("unwatch {} skipped: {}", path.display(), err);
+            } else {
+                return Err(err.into());
             }
         }
 
