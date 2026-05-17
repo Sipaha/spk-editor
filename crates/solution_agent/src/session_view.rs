@@ -37,6 +37,7 @@ use crate::store::SolutionAgentStore;
 
 mod recall;
 mod render_queue;
+mod subagent_strip;
 #[cfg(test)]
 mod tests;
 
@@ -260,6 +261,16 @@ pub struct SolutionSessionView {
     /// transient UI affordance: switching tabs / restarting the editor
     /// resets it; nothing about the conversation changes.
     expanded_queue_markers: HashSet<usize>,
+    /// Subscription to `SolutionAgentStore` events that affect the
+    /// sub-agents bubble strip — `SessionCreated` (new child appears),
+    /// `SessionClosed` (child vanishes), `SessionStateChanged` /
+    /// `SessionTitleChanged` (visible label / status pill on a strip
+    /// row), `SessionMessageAppended` (live token-count refresh). The
+    /// callback only re-renders this view; it doesn't filter for the
+    /// strip's exact tree because compute is cheap (a single
+    /// `sessions_for(&solution_id)` pass) and a false-positive notify
+    /// just paints the same frame again.
+    _store_subscription: Option<Subscription>,
 }
 
 impl SolutionSessionView {
@@ -377,6 +388,27 @@ impl SolutionSessionView {
                 }
             },
         );
+        // Watch the store for events that move sub-agents bubbles
+        // around: a new child being created / closed, a visible
+        // row's status / title flipping, a streaming turn inflating
+        // the token count. The strip recomputes on every render so
+        // the callback only needs to `cx.notify()` — the actual
+        // filtering happens in `compute_strip_rows`.
+        let store_subscription = SolutionAgentStore::try_global(cx).map(|store| {
+            cx.subscribe(
+                &store,
+                |_this, _store, event, cx| match event {
+                    crate::store::SolutionAgentStoreEvent::SessionCreated { .. }
+                    | crate::store::SolutionAgentStoreEvent::SessionClosed(_)
+                    | crate::store::SolutionAgentStoreEvent::SessionStateChanged(_)
+                    | crate::store::SolutionAgentStoreEvent::SessionTitleChanged(_)
+                    | crate::store::SolutionAgentStoreEvent::SessionMessageAppended(_, _) => {
+                        cx.notify();
+                    }
+                    _ => {}
+                },
+            )
+        });
         let mut view = Self {
             session_id,
             session,
@@ -422,6 +454,7 @@ impl SolutionSessionView {
             _thread_subscription: None,
             last_thread_entity_id: None,
             _session_event_subscription: Some(session_event_subscription),
+            _store_subscription: store_subscription,
             image_count_so_far: 0,
             queue_collapsed: true,
             pending_send: None,
@@ -1841,6 +1874,20 @@ impl Render for SolutionSessionView {
         // while the `session.read(cx)` borrow held for the conversation body
         // section is immutable. Borrow checker rejects nesting them.
         let find_bar = self.render_find_bar(cx);
+        // Sub-agents bubble strip: rendered between the conversation
+        // list and the status row when the current session has at
+        // least one sibling / ancestor / child in the same solution.
+        // Returns `None` when the tree is a single top-level node so
+        // the layout never reserves space for an empty band. Computed
+        // here (alongside `find_bar`) because the renderer needs `&mut
+        // cx` for click listeners and the `session.read(cx)` borrow
+        // held further down the function would otherwise conflict.
+        let subagent_strip = {
+            let session = self.session.clone();
+            SolutionAgentStore::try_global(cx).and_then(|store| {
+                subagent_strip::render_subagent_strip(&session, &store, window, cx)
+            })
+        };
 
         // Pre-pass: build the list of (entry_idx, span_idx) → markdown
         // entity mappings. Done up-front so the borrow on `cx` released by
@@ -2207,6 +2254,7 @@ impl Render for SolutionSessionView {
                     .when_some(pending_section, |this, section| this.child(section))
                     .when_some(resuming_section, |this, section| this.child(section))
             })
+            .when_some(subagent_strip, |this, strip| this.child(strip))
             .children({
                 // Status row sits directly above the compose box: token
                 // meter / agent / model / "Thinking… 3m12s" / "Done in

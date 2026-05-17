@@ -461,7 +461,7 @@ impl SolutionSessionsNavigator {
         None
     }
 
-    fn open_session(
+    pub(crate) fn open_session(
         &mut self,
         session_id: crate::model::SolutionSessionId,
         session: Entity<SolutionSession>,
