@@ -1651,6 +1651,12 @@
     "**/Thumbs.db",
     "**/.classpath",
     "**/.settings",
+    // SPK Editor fork: skip the Claude harness's per-session
+    // directory. Includes the agent-worktree checkouts that come
+    // and go as sub-agents finish — leaving them in the scan tree
+    // floods fs_watcher with "No watch was found" errors when the
+    // worktree is removed mid-session.
+    "**/.claude",
   ],
   // Files or globs of files that will be included by Zed, even when ignored by git. This is useful
   // for files that are not tracked by git, but are still important to your project. Note that globs

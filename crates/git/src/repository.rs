@@ -1755,11 +1755,28 @@ impl GitRepository for RealGitRepository {
             .spawn(async move {
                 let (working_directory, git_binary) = working_directory_and_git_binary?;
 
-                let output = git_binary
+                let output = match git_binary
                     .build_command(&["config", "--get", "commit.template"])
                     .output()
                     .await
-                    .context("failed to run git config --get commit.template")?;
+                {
+                    Ok(output) => output,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        // ENOENT here means the working directory disappeared
+                        // mid-session (e.g. a git worktree that was just
+                        // removed) or the git binary path is gone. Neither is
+                        // actionable for "is there a commit template?" — treat
+                        // as "no template", log at debug level so it doesn't
+                        // flood the log alongside the fs_watcher noise that
+                        // surfaces the same root cause.
+                        log::debug!("git config --get commit.template skipped: {err}");
+                        return Ok(None);
+                    }
+                    Err(err) => {
+                        return Err(err)
+                            .context("failed to run git config --get commit.template");
+                    }
+                };
 
                 let raw_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !output.status.success() || raw_path.is_empty() {
