@@ -1,6 +1,6 @@
 # R-6d: Disk persistence for Android — outbound queue, drafts, lastSeenEntryIndex, nav state, bounce-to-input
 
-**Status:** ready to dispatch
+**Status:** complete (sibling-repo commit `ff9ca8c`)
 **Repo:** `spk-editor-android-client` (sibling)
 **Depends on:** R-6a (in-memory queue) + R-6b (EncryptedSharedPreferences + Settings screen).
 **Goal:** Everything that a user-visible action produced must survive a force-kill of the app. The R-6a in-memory queue + R-6b's pairing-only persistence aren't enough — typed-but-unsent messages, queued sends, last-seen indices, and the active nav route should all live on disk.
@@ -150,16 +150,16 @@ grep -E "BUILD SUCCESSFUL|FAILURE:" /tmp/r6d.txt
 ls -la app/build/outputs/apk/release/*.apk
 ```
 
-- [ ] `:core:test` BUILD SUCCESSFUL — ~75-78 tests (R-6a baseline 72 + new `QueueStore` interface tests).
-- [ ] `:app:assembleDebug` + `:app:assembleRelease` BUILD SUCCESSFUL.
-- [ ] Release APK ≤ 3.0 MB (R-6b was 2.12 MB; the new repositories should add <500 KB).
-- [ ] No regressions on R-5b/R-5c/R-5d/R-5f/R-5g/R-6a/R-6b flows.
-- [ ] `QueueStore` interface in `:core` + disk-backed impl in `:app` (`QueuedMessageRepository`); FIFO order preserved across simulated restart in test.
-- [ ] `DraftRepository` round-trip works (save → load → match); cleared on successful Send.
-- [ ] `LastSeenRepository` persists across simulated process death in test.
-- [ ] `NavStateRepository` saves the current route on every nav change; cold start restores when route resolves.
-- [ ] Bounce-to-input: TTL-expired message goes to `DraftRepository(sessionId)` and the next time `SessionDetailScreen` opens for that sessionId, the OutlinedTextField shows the bounced text + snackbar fires once.
-- [ ] TTL changed from 5 min to **24 hours** in `RemoteClient.queueCall` default.
+- [x] `:core:test` BUILD SUCCESSFUL — ~75-78 tests (R-6a baseline 72 + new `QueueStore` interface tests).
+- [x] `:app:assembleDebug` + `:app:assembleRelease` BUILD SUCCESSFUL.
+- [x] Release APK ≤ 3.0 MB (R-6b was 2.12 MB; the new repositories should add <500 KB).
+- [x] No regressions on R-5b/R-5c/R-5d/R-5f/R-5g/R-6a/R-6b flows.
+- [x] `QueueStore` interface in `:core` + disk-backed impl in `:app` (`QueuedMessageRepository`); FIFO order preserved across simulated restart in test.
+- [x] `DraftRepository` round-trip works (save → load → match); cleared on successful Send.
+- [x] `LastSeenRepository` persists across simulated process death in test.
+- [x] `NavStateRepository` saves the current route on every nav change; cold start restores when route resolves.
+- [x] Bounce-to-input: TTL-expired message goes to `DraftRepository(sessionId)` and the next time `SessionDetailScreen` opens for that sessionId, the OutlinedTextField shows the bounced text + snackbar fires once.
+- [x] TTL changed from 5 min to **24 hours** in `RemoteClient.queueCall` default.
 
 ## Commit message
 
