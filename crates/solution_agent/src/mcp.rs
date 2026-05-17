@@ -59,22 +59,40 @@ pub fn register(cx: &mut App) {
 // =====================================================================
 
 /// List Solution-scoped AI sessions, optionally filtered by `solution_id`.
+///
+/// R-6e: paginated. Sessions are ordered by `last_activity_at` DESC and
+/// `before_last_activity_at_ms` / `count` carve a time-anchored window.
+/// `total_count` on the result reflects the unfiltered count (subject to
+/// `solution_id` only), so the client can decide whether to fetch more.
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct ListSessionsParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub solution_id: Option<String>,
+    /// R-6e: exclusive upper bound on `last_activity_at` (millis since
+    /// epoch). `None` = no upper bound (current behavior).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_last_activity_at_ms: Option<i64>,
+    /// R-6e: take only the first N sessions after ordering DESC by
+    /// `last_activity_at` and applying `before_last_activity_at_ms`.
+    /// `None` = unbounded (current behavior).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<usize>,
 }
 
 impl<'de> Deserialize<'de> for ListSessionsParams {
     fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
         struct Helper {
-            #[serde(default)]
             solution_id: Option<String>,
+            before_last_activity_at_ms: Option<i64>,
+            count: Option<usize>,
         }
-        let helper = Helper::deserialize(de).unwrap_or(Helper { solution_id: None });
+        let helper = Option::<Helper>::deserialize(de)?.unwrap_or_default();
         Ok(Self {
             solution_id: helper.solution_id,
+            before_last_activity_at_ms: helper.before_last_activity_at_ms,
+            count: helper.count,
         })
     }
 }
@@ -93,6 +111,10 @@ pub struct SessionSummary {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ListSessionsResult {
     pub sessions: Vec<SessionSummary>,
+    /// R-6e: total session count matching `solution_id` only (i.e. before
+    /// `before_last_activity_at_ms` / `count` are applied). Lets a paginated
+    /// client decide whether to fetch an older page.
+    pub total_count: usize,
 }
 
 #[derive(Clone)]
@@ -108,29 +130,44 @@ impl McpServerTool for ListSessionsTool {
         input: Self::Input,
         cx: &mut AsyncApp,
     ) -> Result<ToolResponse<Self::Output>> {
-        let summaries = cx.update(|cx| {
+        let (sessions, total_count) = cx.update(|cx| {
             let store = SolutionAgentStore::global(cx);
             store.read_with(cx, |store, cx| {
-                let mut out = Vec::new();
                 let want_solution = input.solution_id.as_ref().map(|s| SolutionId(s.clone()));
-                for entity in store.all_sessions() {
-                    let session = entity.read(cx);
-                    if let Some(want) = &want_solution {
-                        if &session.solution_id != want {
-                            continue;
+                let mut matching: Vec<SessionSummary> = store
+                    .all_sessions()
+                    .filter_map(|entity| {
+                        let session = entity.read(cx);
+                        if let Some(want) = &want_solution {
+                            if &session.solution_id != want {
+                                return None;
+                            }
                         }
-                    }
-                    out.push(session_summary(session));
+                        Some(session_summary(session))
+                    })
+                    .collect();
+                // R-6e: order DESC by last_activity_at so `count=N` returns
+                // the most-recent N sessions. `total_count` is the count
+                // BEFORE before_last_activity_at_ms / count filtering, so
+                // the client knows if a "load older" page exists.
+                matching.sort_by(|a, b| b.last_activity_at.cmp(&a.last_activity_at));
+                let total = matching.len();
+                if let Some(before) = input.before_last_activity_at_ms {
+                    matching.retain(|s| s.last_activity_at < before);
                 }
-                out
+                if let Some(count) = input.count {
+                    matching.truncate(count);
+                }
+                (matching, total)
             })
         });
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text {
-                text: format!("{} session(s)", summaries.len()),
+                text: format!("{} session(s)", sessions.len()),
             }],
             structured_content: ListSessionsResult {
-                sessions: summaries,
+                sessions,
+                total_count,
             },
         })
     }
@@ -244,6 +281,23 @@ pub struct GetSessionParams {
     /// case.
     #[serde(default)]
     pub include_images: bool,
+    /// R-6e: return only entries with absolute index < `before_index`.
+    /// `None` = no upper bound (current behavior). Combine with
+    /// `after_index` for a slice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_index: Option<usize>,
+    /// R-6e: return only entries with absolute index > `after_index`.
+    /// `None` = no lower bound (current behavior). This is the param
+    /// the client uses for incremental resume — pass the last seen
+    /// entry index and get only what's new.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_index: Option<usize>,
+    /// R-6e: take only the LAST `count` entries after applying
+    /// `after_index` / `before_index`. "Last" — not first — because the
+    /// dominant client query (initial session-detail open) wants the
+    /// newest N entries, not the oldest. `None` = unbounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<usize>,
 }
 
 impl<'de> Deserialize<'de> for GetSessionParams {
@@ -252,16 +306,20 @@ impl<'de> Deserialize<'de> for GetSessionParams {
         #[serde(default, deny_unknown_fields)]
         struct Inner {
             session_id: String,
-            #[serde(default)]
             include_full_content: bool,
-            #[serde(default)]
             include_images: bool,
+            before_index: Option<usize>,
+            after_index: Option<usize>,
+            count: Option<usize>,
         }
         let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
         Ok(Self {
             session_id: inner.session_id,
             include_full_content: inner.include_full_content,
             include_images: inner.include_images,
+            before_index: inner.before_index,
+            after_index: inner.after_index,
+            count: inner.count,
         })
     }
 }
@@ -270,6 +328,11 @@ impl<'de> Deserialize<'de> for GetSessionParams {
 pub struct EntrySummary {
     /// One of "user" | "assistant" | "tool_call" | "plan".
     pub role: String,
+    /// R-6e: absolute 0-based index in the session, stable across
+    /// paginated calls. Always populated regardless of whether the
+    /// caller requested a slice — lets the client reassemble a sparse
+    /// map from multiple paginated responses.
+    pub index: usize,
     /// Markdown rendering of the entry, truncated to roughly 200 chars.
     pub preview: String,
     /// Full untruncated markdown rendering. Populated only when the
@@ -346,6 +409,10 @@ pub struct GetSessionResult {
     pub created_at: i64,
     pub last_activity_at: i64,
     pub entries: Vec<EntrySummary>,
+    /// R-6e: total entry count of the underlying thread, regardless of
+    /// pagination filters applied to `entries`. Lets the client render a
+    /// "Load older" affordance and detect resume-time gaps.
+    pub total_count: usize,
 }
 
 #[derive(Clone)]
@@ -374,26 +441,57 @@ impl McpServerTool for GetSessionTool {
                 .read_with(cx, |store, _| store.session(session_id))
                 .with_context(|| format!("session_not_found: {}", session_id))?;
             let session = entity.read(cx);
-            let entries = session
+            let (entries, total_count) = session
                 .acp_thread()
                 .map(|thread| {
                     let thread_ref = thread.read(cx);
                     let entries_ref = thread_ref.entries();
+                    let total = entries_ref.len();
+                    // R-6e: index-anchored slice. `after_index` /
+                    // `before_index` are exclusive bounds and `count`
+                    // takes the LAST n entries within the bound (so the
+                    // common "show me the newest 50" query is just
+                    // `count=50` with no bounds).
+                    //
+                    // We walk every entry (not just the kept ones) so
+                    // `image_cursor` stays in lock-step with what a
+                    // non-paginated call would have produced — that
+                    // keeps `EntryImage.index` stable across paginated
+                    // calls, which is the contract that lets the client
+                    // rely on `spk-image://N` URLs in markdown.
+                    let after = input.after_index;
+                    let before = input.before_index;
                     let mut image_cursor = 0usize;
-                    entries_ref
-                        .iter()
-                        .map(|entry| {
-                            summarize_entry(
+                    let mut kept: Vec<EntrySummary> = Vec::new();
+                    for (index, entry) in entries_ref.iter().enumerate() {
+                        let in_range = after.map_or(true, |a| index > a)
+                            && before.map_or(true, |b| index < b);
+                        if in_range {
+                            kept.push(summarize_entry(
                                 entry,
+                                index,
                                 input.include_full_content,
                                 input.include_images,
                                 &mut image_cursor,
                                 cx,
-                            )
-                        })
-                        .collect()
+                            ));
+                        } else {
+                            image_cursor += count_images_in_entry(entry);
+                        }
+                    }
+                    if let Some(n) = input.count {
+                        if kept.len() > n {
+                            // Take the last n. `EntrySummary.index`
+                            // preserves the absolute position so the
+                            // client can still tell where it sits in
+                            // the session timeline.
+                            let drop_count = kept.len() - n;
+                            kept.drain(..drop_count);
+                        }
+                    }
+                    (kept, total)
                 })
-                .unwrap_or_default();
+                .unwrap_or((Vec::new(), 0));
             let summary = session_summary(session);
             Ok(GetSessionResult {
                 id: summary.id,
@@ -404,6 +502,7 @@ impl McpServerTool for GetSessionTool {
                 created_at: summary.created_at,
                 last_activity_at: summary.last_activity_at,
                 entries,
+                total_count,
             })
         })?;
 
@@ -444,6 +543,10 @@ const FIELD_PREVIEW_MAX_CHARS: usize = 500;
 
 /// Builds the per-entry `EntrySummary` for the MCP wire shape.
 ///
+/// `index` is the entry's absolute position in the session — set on the
+/// returned `EntrySummary` so the client can reassemble paginated
+/// responses into a sparse map without computing offsets itself.
+///
 /// `include_full_content` controls whether the untruncated markdown is
 /// populated on every variant. `include_images` controls whether image
 /// content blocks get inlined as base64 (caller pays the wire cost).
@@ -454,6 +557,7 @@ const FIELD_PREVIEW_MAX_CHARS: usize = 500;
 /// when an entry holds multiple images.
 fn summarize_entry(
     entry: &acp_thread::AgentThreadEntry,
+    index: usize,
     include_full_content: bool,
     include_images: bool,
     image_cursor: &mut usize,
@@ -494,6 +598,7 @@ fn summarize_entry(
 
     EntrySummary {
         role: role.to_string(),
+        index,
         preview,
         markdown,
         images,
@@ -728,7 +833,14 @@ impl McpServerTool for GetSessionEntryTool {
             let entry = entries
                 .get(want_index)
                 .ok_or_else(|| anyhow!("entry vanished mid-read"))?;
-            let summary = summarize_entry(entry, true, include_images, &mut image_cursor, cx);
+            let summary = summarize_entry(
+                entry,
+                want_index,
+                true,
+                include_images,
+                &mut image_cursor,
+                cx,
+            );
             Ok(GetSessionEntryResult { entry: summary })
         })?;
 
@@ -1770,6 +1882,7 @@ mod tests {
                     session_id: session_id.to_string(),
                     include_full_content: false,
                     include_images: false,
+                    ..Default::default()
                 },
                 &mut cx.to_async(),
             )
@@ -1808,6 +1921,7 @@ mod tests {
                     session_id: session_id.to_string(),
                     include_full_content: true,
                     include_images: false,
+                    ..Default::default()
                 },
                 &mut cx.to_async(),
             )
@@ -1840,6 +1954,7 @@ mod tests {
                     session_id: session_id.to_string(),
                     include_full_content: true,
                     include_images: true,
+                    ..Default::default()
                 },
                 &mut cx.to_async(),
             )
@@ -1891,6 +2006,8 @@ mod tests {
 
         let entry = result.structured_content.entry;
         assert_eq!(entry.role, "user");
+        // R-6e: every EntrySummary carries its absolute index.
+        assert_eq!(entry.index, 0);
         let md = entry
             .markdown
             .expect("markdown is always populated for single-entry fetch");
@@ -1949,6 +2066,7 @@ mod tests {
                     session_id: session_id.to_string(),
                     include_full_content: false,
                     include_images: false,
+                    ..Default::default()
                 },
                 &mut cx.to_async(),
             )
@@ -2011,6 +2129,7 @@ mod tests {
                     session_id: session_id.to_string(),
                     include_full_content: false,
                     include_images: false,
+                    ..Default::default()
                 },
                 &mut cx.to_async(),
             )
@@ -2033,5 +2152,347 @@ mod tests {
         // Soft assertion — if the synthetic plan didn't get promoted to
         // CompletedPlan we still want the test to exercise the wire
         // path without panicking.
+    }
+
+    // =================================================================
+    // R-6e pagination coverage (`solution_agent.get_session` +
+    // `solution_agent.list_sessions`).
+    // =================================================================
+
+    /// Seed a session with exactly 5 plain text entries — alternating
+    /// user/assistant — so pagination tests have stable indices 0..=4.
+    /// No images, no tool calls; the only thing under test is
+    /// before/after/count filtering on a known entry shape.
+    async fn seed_session_with_n_entries(
+        cx: &mut gpui::TestAppContext,
+        n: usize,
+    ) -> (crate::model::SolutionSessionId, tempfile::TempDir) {
+        let (session_id, acp_thread, tmp) = create_session_with_thread(cx).await;
+        cx.update(|cx| {
+            acp_thread.update(cx, |thread, cx| {
+                for i in 0..n {
+                    let text = format!("entry-{i}");
+                    if i % 2 == 0 {
+                        thread.push_user_content_block(
+                            None,
+                            fake_user_text_chunk(&text),
+                            cx,
+                        );
+                    } else {
+                        thread.push_assistant_content_block(
+                            fake_user_text_chunk(&text),
+                            false,
+                            cx,
+                        );
+                    }
+                }
+            });
+        });
+        cx.executor().run_until_parked();
+        (session_id, tmp)
+    }
+
+    #[gpui::test]
+    async fn get_session_no_pagination_returns_all_entries_with_total_count(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (session_id, _tmp) = seed_session_with_n_entries(cx, 5).await;
+
+        let result = GetSessionTool
+            .run(
+                GetSessionParams {
+                    session_id: session_id.to_string(),
+                    ..Default::default()
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session");
+
+        let entries = &result.structured_content.entries;
+        assert_eq!(entries.len(), 5, "no pagination → all 5 entries");
+        assert_eq!(result.structured_content.total_count, 5);
+        for (expected, entry) in entries.iter().enumerate() {
+            assert_eq!(
+                entry.index, expected,
+                "EntrySummary.index must match absolute position"
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn get_session_count_returns_last_n_entries(cx: &mut gpui::TestAppContext) {
+        let (session_id, _tmp) = seed_session_with_n_entries(cx, 5).await;
+
+        let result = GetSessionTool
+            .run(
+                GetSessionParams {
+                    session_id: session_id.to_string(),
+                    count: Some(2),
+                    ..Default::default()
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session");
+
+        let entries = &result.structured_content.entries;
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries.iter().map(|e| e.index).collect::<Vec<_>>(),
+            vec![3, 4],
+            "count=2 returns the LAST two entries (indices 3,4)"
+        );
+        assert_eq!(result.structured_content.total_count, 5);
+    }
+
+    #[gpui::test]
+    async fn get_session_before_index_drops_newer(cx: &mut gpui::TestAppContext) {
+        let (session_id, _tmp) = seed_session_with_n_entries(cx, 5).await;
+
+        let result = GetSessionTool
+            .run(
+                GetSessionParams {
+                    session_id: session_id.to_string(),
+                    before_index: Some(3),
+                    ..Default::default()
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session");
+
+        let entries = &result.structured_content.entries;
+        assert_eq!(
+            entries.iter().map(|e| e.index).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "before_index=3 keeps strictly-less indices 0,1,2"
+        );
+        assert_eq!(result.structured_content.total_count, 5);
+    }
+
+    #[gpui::test]
+    async fn get_session_after_index_drops_older(cx: &mut gpui::TestAppContext) {
+        let (session_id, _tmp) = seed_session_with_n_entries(cx, 5).await;
+
+        let result = GetSessionTool
+            .run(
+                GetSessionParams {
+                    session_id: session_id.to_string(),
+                    after_index: Some(2),
+                    ..Default::default()
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session");
+
+        let entries = &result.structured_content.entries;
+        assert_eq!(
+            entries.iter().map(|e| e.index).collect::<Vec<_>>(),
+            vec![3, 4],
+            "after_index=2 keeps strictly-greater indices 3,4"
+        );
+        assert_eq!(result.structured_content.total_count, 5);
+    }
+
+    #[gpui::test]
+    async fn get_session_before_and_after_index_select_slice(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (session_id, _tmp) = seed_session_with_n_entries(cx, 5).await;
+
+        let result = GetSessionTool
+            .run(
+                GetSessionParams {
+                    session_id: session_id.to_string(),
+                    after_index: Some(2),
+                    before_index: Some(4),
+                    ..Default::default()
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session");
+
+        let entries = &result.structured_content.entries;
+        assert_eq!(
+            entries.iter().map(|e| e.index).collect::<Vec<_>>(),
+            vec![3],
+            "after=2, before=4 leaves only index 3"
+        );
+        assert_eq!(result.structured_content.total_count, 5);
+    }
+
+    #[gpui::test]
+    async fn get_session_after_index_then_count_takes_last_within_filter(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (session_id, _tmp) = seed_session_with_n_entries(cx, 5).await;
+
+        let result = GetSessionTool
+            .run(
+                GetSessionParams {
+                    session_id: session_id.to_string(),
+                    after_index: Some(2),
+                    count: Some(1),
+                    ..Default::default()
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session");
+
+        let entries = &result.structured_content.entries;
+        // After filter: indices 3,4. count=1 keeps the LAST = index 4.
+        // Wait — plan says "entries are index 3 (last after filter)". Let's
+        // re-read: "after_index=2, count=1 → entries are index 3 (last
+        // after filter)". That's odd — the filter keeps {3,4} and "last"
+        // would be 4. The plan likely meant "the slice has cardinality 1
+        // — exactly one entry — at the most-recent position 4". But the
+        // plan-doc literal says "index 3". Re-check: the plan-doc text in
+        // the user prompt says exactly: "after_index=2, count=1 → entries
+        // are index 3 (last after filter)". That contradicts the
+        // count semantics ("LAST n") defined earlier in the SAME prompt.
+        //
+        // Resolving in favor of the LAST-N semantics defined in scope B
+        // step 5 (`take(n)` on the reversed iterator), so count=1 of
+        // {3,4} = {4}. The plan-doc's example is a typo.
+        assert_eq!(
+            entries.iter().map(|e| e.index).collect::<Vec<_>>(),
+            vec![4],
+            "after=2 keeps {{3,4}}, count=1 then takes the LAST → index 4"
+        );
+        assert_eq!(result.structured_content.total_count, 5);
+    }
+
+    #[gpui::test]
+    async fn get_session_after_index_past_end_returns_empty(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (session_id, _tmp) = seed_session_with_n_entries(cx, 5).await;
+
+        let result = GetSessionTool
+            .run(
+                GetSessionParams {
+                    session_id: session_id.to_string(),
+                    after_index: Some(99),
+                    ..Default::default()
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session");
+
+        assert!(
+            result.structured_content.entries.is_empty(),
+            "after_index past end → empty"
+        );
+        assert_eq!(
+            result.structured_content.total_count, 5,
+            "total_count still reflects the underlying thread"
+        );
+    }
+
+    #[gpui::test]
+    async fn list_sessions_pagination_orders_desc_and_caps_to_count(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // Reuse the first session's setup (it primes globals + the mock
+        // adapter), then create two more sessions in the same solution
+        // with slightly later activity timestamps so the DESC ordering
+        // is observable.
+        let (first_session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+
+        let (solution_id, agent_id, project) = cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            let session = store
+                .read(cx)
+                .session(first_session_id)
+                .expect("first session exists");
+            let session_ref = session.read(cx);
+            (
+                session_ref.solution_id.clone(),
+                session_ref.agent_id.clone(),
+                session_ref
+                    .project
+                    .clone()
+                    .expect("create_session populates project"),
+            )
+        });
+
+        let second_session_id = cx
+            .update(|cx| {
+                let store = SolutionAgentStore::global(cx);
+                store.update(cx, |store, cx| {
+                    store.create_session(
+                        solution_id.clone(),
+                        agent_id.clone(),
+                        project.clone(),
+                        cx,
+                    )
+                })
+            })
+            .await
+            .expect("create second session");
+
+        let third_session_id = cx
+            .update(|cx| {
+                let store = SolutionAgentStore::global(cx);
+                store.update(cx, |store, cx| {
+                    store.create_session(
+                        solution_id.clone(),
+                        agent_id.clone(),
+                        project.clone(),
+                        cx,
+                    )
+                })
+            })
+            .await
+            .expect("create third session");
+
+        // The third is the most-recently-created; bump its
+        // last_activity_at explicitly so the DESC sort puts it first
+        // even on machines where Utc::now()'s resolution lets two
+        // creates land in the same tick.
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            let (second, third) = store.read_with(cx, |store, _| {
+                (
+                    store.session(second_session_id).expect("second"),
+                    store.session(third_session_id).expect("third"),
+                )
+            });
+            second.update(cx, |s, _| {
+                s.last_activity_at = chrono::Utc::now() + chrono::Duration::seconds(1);
+            });
+            third.update(cx, |s, _| {
+                s.last_activity_at = chrono::Utc::now() + chrono::Duration::seconds(2);
+            });
+        });
+
+        let result = ListSessionsTool
+            .run(
+                ListSessionsParams {
+                    solution_id: Some(solution_id.0.clone()),
+                    count: Some(1),
+                    before_last_activity_at_ms: None,
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("list_sessions");
+
+        let sessions = &result.structured_content.sessions;
+        assert_eq!(sessions.len(), 1, "count=1 caps to one entry");
+        assert_eq!(
+            sessions[0].id,
+            third_session_id.to_string(),
+            "DESC ordering surfaces the most-recent session first"
+        );
+        assert_eq!(
+            result.structured_content.total_count, 3,
+            "total_count reflects all matching sessions, pre-pagination"
+        );
     }
 }
