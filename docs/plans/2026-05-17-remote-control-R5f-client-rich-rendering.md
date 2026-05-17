@@ -1,6 +1,6 @@
 # R-5f: Android client consumes R-5e enriched fields + diff streaming
 
-**Status:** ready to dispatch
+**Status:** complete (sibling-repo commit `ee804aa`)
 **Repo:** `spk-editor-android-client` (sibling of spk-editor)
 **Depends on:** R-5e (server enrichment shipped on `main` as `d8592b05dc`).
 **Goal:** Replace truncated-preview rendering with rich markdown + inline images + structured tool-call rows. Switch the chat surface from "full `get_session` re-fetch on every notification" to diff streaming via `get_session_entry { index }` keyed by the new `entry_index` in `agent_session_message_appended` payloads.
@@ -116,12 +116,12 @@ cd /home/spk/.spk/spk-editor/solutions/spk-solutions/spk-editor-android-client
 ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=$HOME/.jdks/temurin-21.0.10 ./gradlew :core:test :app:assembleDebug --rerun-tasks 2>&1 | tail -10
 ```
 
-- [ ] `:core:test` BUILD SUCCESSFUL with ~50-55 tests (R-5d baseline 45 + new EntryImage / ToolCallSummary / PlanSummary round-trips + enriched EntrySummary round-trip).
-- [ ] `:app:assembleDebug` BUILD SUCCESSFUL, APK ≤ 12.5 MB (R-5d baseline 11.2 + ~0.5 MB markdown lib + ~0.5 MB Coil).
-- [ ] No regressions on R-5b QR scanner / R-5c solutions/sessions list flows.
-- [ ] Rich-mode renders markdown via `multiplatform-markdown-renderer-m3` with `spk-image://` URLs routed to inline image rendering.
-- [ ] Diff-streaming wired: `get_session_entry` is called on each `agent_session_message_appended` notification instead of full `get_session`. Initial full pull on screen entry still uses `get_session(include_full_content=true, include_images=true)`.
-- [ ] Tool-call rows render with collapsed/expandable state and show status pill matching one of the seven server strings ("pending" / "waiting for confirmation" / "running" / "done" / "failed" / "rejected" / "canceled").
+- [x] `:core:test` BUILD SUCCESSFUL with ~50-55 tests (R-5d baseline 45 + new EntryImage / ToolCallSummary / PlanSummary round-trips + enriched EntrySummary round-trip).
+- [x] `:app:assembleDebug` BUILD SUCCESSFUL, APK ≤ 12.5 MB (R-5d baseline 11.2 + ~0.5 MB markdown lib + ~0.5 MB Coil).
+- [x] No regressions on R-5b QR scanner / R-5c solutions/sessions list flows.
+- [x] Rich-mode renders markdown via `multiplatform-markdown-renderer-m3` with `spk-image://` URLs routed to inline image rendering.
+- [x] Diff-streaming wired: `get_session_entry` is called on each `agent_session_message_appended` notification instead of full `get_session`. Initial full pull on screen entry still uses `get_session(include_full_content=true, include_images=true)`.
+- [x] Tool-call rows render with collapsed/expandable state and show status pill matching one of the seven server strings ("pending" / "waiting for confirmation" / "running" / "done" / "failed" / "rejected" / "canceled").
 
 ## When done
 
