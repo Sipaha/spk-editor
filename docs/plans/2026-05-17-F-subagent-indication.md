@@ -1,6 +1,6 @@
 # F: Sub-agent indication UI
 
-**Status:** ready to dispatch (server-side first)
+**Status:** complete — F-server `104881302c`, F-desktop `cd8a6aebb5`, F-phone (sibling) `1af444b`
 **Repos:** spk-editor (server + desktop UI) → `spk-editor-android-client` (phone UI).
 **Depends on:** R-5e (`get_session` enriched shape), R-5g (`create_session`), R-6e (pagination + index).
 **Goal:** Surface "sub-agents" — independent AI sessions spawned from a parent session — in both the desktop session view and the phone client. Inspired by Claude Code's running-agents bar: a horizontal strip of bubbles above the status row, click a bubble to drill into that session's chat. Auto-hides when no sub-agents exist.
@@ -195,11 +195,11 @@ grep "test result:" /tmp/F_test.txt
 cargo test -p remote_control proxy_e2e 2>&1 | grep "test result:"
 ```
 
-- [ ] cargo build passes.
-- [ ] clippy clean.
-- [ ] solution_agent tests grow by 5-6 (99 → ~105).
-- [ ] proxy_e2e still passes.
-- [ ] Allow-list extended; FORK.md row updated.
+- [x] cargo build passes.
+- [x] clippy clean.
+- [x] solution_agent tests grow by 5-6 (99 → ~105).
+- [x] proxy_e2e still passes.
+- [x] Allow-list extended; FORK.md row updated.
 
 ## Acceptance — F-phone (after F-server merges)
 
@@ -209,11 +209,11 @@ ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=$HOME/.jdks/temurin-21.0.10 ./gradlew :
 grep -E "BUILD SUCCESSFUL|FAILURE:" /tmp/F_phone.txt
 ```
 
-- [ ] :core:test BUILD SUCCESSFUL — ~89-91 tests.
-- [ ] :app:assembleRelease BUILD SUCCESSFUL.
-- [ ] Release APK ≤ 2.4 MB.
-- [ ] Sub-agents chip row renders when children exist + collapses when empty.
-- [ ] Tap chip navigates to child session via existing route.
+- [x] :core:test BUILD SUCCESSFUL — ~89-91 tests.
+- [x] :app:assembleRelease BUILD SUCCESSFUL.
+- [x] Release APK ≤ 2.4 MB.
+- [x] Sub-agents chip row renders when children exist + collapses when empty.
+- [x] Tap chip navigates to child session via existing route.
 
 ## When done
 
