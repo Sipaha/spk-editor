@@ -93,27 +93,30 @@ pub struct ListenerConfig {
     /// Open connections from a revoked client are NOT kicked — that's a
     /// future improvement.
     pub clients_rx: watch::Receiver<Vec<AuthorizedClient>>,
-    /// Live cap on concurrent authorized client sockets. Updated via
-    /// `tx.send(n)` whenever the user changes the value in the modal —
-    /// the accept loop reads it on every accept so changes take effect
-    /// immediately for new connections (already-open ones aren't
-    /// retroactively kicked when the cap shrinks).
-    pub max_connections_rx: watch::Receiver<u32>,
     pub dispatcher: Arc<dyn RemoteDispatcher>,
 }
 
-/// Per-connection registration. The accept loop keeps a Vec of these to
-/// (a) enforce the connection budget by evicting the longest-idle entry
-/// and (b) report observability if we ever surface it.
+/// Per-connection registration. We hold one slot per authenticated
+/// client name (1-client-1-connection policy): a fresh authenticated
+/// connection from client X always kicks any previous slot whose
+/// `client_name` matches X. This eliminates the need for a user-facing
+/// "max connections" knob — the budget is implicit (= number of paired
+/// clients).
 struct ConnectionSlot {
     peer: SocketAddr,
-    /// Unix-millis timestamp of the last activity on this connection.
-    /// Updated by the per-conn task on every inbound frame; read by the
-    /// accept loop when picking an LRU victim. Atomic so the read side
-    /// doesn't need a lock.
+    /// The authenticated client's name. Two slots can never share the
+    /// same name simultaneously; the accept loop enforces this on
+    /// post-auth slot insertion.
+    client_name: String,
+    /// Unix-millis timestamp of the last inbound frame on this
+    /// connection. Updated by the per-conn task; read by debug logging
+    /// + future observability surfaces.
     last_activity: Arc<AtomicI64>,
     /// Drop-on-eviction signal. The connection task selects against
-    /// `kill_rx`; firing it sends a clean close frame and exits.
+    /// `kill_rx`; firing it sends a clean close frame and exits. We
+    /// fire it in three places: (a) a same-client new connection
+    /// replacing this one, (b) a revoke that removes this client from
+    /// `clients_rx`'s list, (c) future ops affordances.
     kill: Option<oneshot::Sender<()>>,
 }
 
@@ -280,11 +283,19 @@ pub async fn start_listener(cfg: ListenerConfig) -> Result<ListenerHandle> {
 
     let state = Arc::new(ListenerState::default());
 
+    // Spawn the kick-on-revoke watcher: when the authorized-client
+    // list changes, close any live sessions for clients that no
+    // longer appear in it. Without this, a deleted phone would keep
+    // its socket alive until the next 60 s idle timeout AND would
+    // hammer the ban-list on every retry attempt with the freshly-
+    // invalidated secret (catching collateral devices on the same
+    // /24 in the cooldown).
+    tokio::spawn(watch_revocations(cfg.clients_rx.clone(), state.clone()));
+
     let task = tokio::spawn(accept_loop(
         listener,
         acceptor,
         cfg.clients_rx,
-        cfg.max_connections_rx,
         cfg.dispatcher,
         state,
         shutdown_rx,
@@ -313,7 +324,6 @@ async fn accept_loop(
     listener: TcpListener,
     acceptor: TlsAcceptor,
     clients_rx: watch::Receiver<Vec<AuthorizedClient>>,
-    max_connections_rx: watch::Receiver<u32>,
     dispatcher: Arc<dyn RemoteDispatcher>,
     state: Arc<ListenerState>,
     mut shutdown_rx: oneshot::Receiver<()>,
@@ -357,7 +367,6 @@ async fn accept_loop(
 
                         let acceptor = acceptor.clone();
                         let clients_rx = clients_rx.clone();
-                        let max_connections_rx = max_connections_rx.clone();
                         let dispatcher = dispatcher.clone();
                         let state = state.clone();
                         tokio::spawn(async move {
@@ -366,7 +375,6 @@ async fn accept_loop(
                                 peer,
                                 acceptor,
                                 clients_rx,
-                                max_connections_rx,
                                 dispatcher,
                                 state,
                             )
@@ -470,37 +478,67 @@ async fn record_auth_success(state: &ListenerState, ip: IpAddr) {
     }
 }
 
-/// If the active connection count is `>= budget`, evict the slot with
-/// the OLDEST `last_activity` timestamp (LRU). Triggered before admitting
-/// each new connection.
-///
-/// `budget == 0` is treated as "no limit" — useful escape hatch if the
-/// user sets the setting to 0 (although the UI clamps to >= 1).
-async fn evict_if_over_budget(state: &ListenerState, budget: u32) {
-    if budget == 0 {
-        return;
-    }
+/// Kick any existing slot whose `client_name` matches `name`. Enforces
+/// the 1-client-1-connection invariant — the freshly-authenticated
+/// connection always wins, the older one gets a clean close.
+async fn kick_existing_for_client(state: &ListenerState, name: &str) {
     let mut conns = state.active_conns.lock().await;
-    while conns.len() >= budget as usize {
-        // argmin by last_activity; ties → first match (stable).
-        let Some((idx, _)) = conns
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, c)| c.last_activity.load(Ordering::Relaxed))
-        else {
-            break;
-        };
-        let mut victim = conns.swap_remove(idx);
-        let victim_peer = victim.peer;
-        if let Some(kill) = victim.kill.take() {
-            // Receiver may have already exited (race with natural
-            // close); ignoring the error is correct.
-            let _ = kill.send(());
+    let mut i = 0;
+    while i < conns.len() {
+        if conns[i].client_name == name {
+            let mut victim = conns.swap_remove(i);
+            let victim_peer = victim.peer;
+            if let Some(kill) = victim.kill.take() {
+                let _ = kill.send(());
+            }
+            log::info!(
+                target: "remote_control",
+                "kicking previous connection for client {name:?} ({victim_peer}) — replaced by a fresh auth",
+            );
+        } else {
+            i += 1;
         }
-        log::info!(
-            target: "remote_control",
-            "evicting longest-idle connection {victim_peer} to make room (budget={budget})",
-        );
+    }
+}
+
+/// Watch the authorized-clients list and kick any live sessions whose
+/// `client_name` is no longer in the list. Spawned once at start_listener;
+/// exits when the clients_rx watch sender drops (i.e. the listener is
+/// being shut down).
+async fn watch_revocations(
+    mut clients_rx: watch::Receiver<Vec<AuthorizedClient>>,
+    state: Arc<ListenerState>,
+) {
+    // Drop the initial snapshot — we want to act on CHANGES only,
+    // not on the value present when the watcher boots.
+    clients_rx.borrow_and_update();
+    loop {
+        if clients_rx.changed().await.is_err() {
+            return;
+        }
+        let allowed: std::collections::HashSet<String> = clients_rx
+            .borrow()
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
+        let mut conns = state.active_conns.lock().await;
+        let mut i = 0;
+        while i < conns.len() {
+            if !allowed.contains(&conns[i].client_name) {
+                let mut victim = conns.swap_remove(i);
+                let victim_name = victim.client_name.clone();
+                let victim_peer = victim.peer;
+                if let Some(kill) = victim.kill.take() {
+                    let _ = kill.send(());
+                }
+                log::info!(
+                    target: "remote_control",
+                    "kicking revoked client {victim_name:?} ({victim_peer})",
+                );
+            } else {
+                i += 1;
+            }
+        }
     }
 }
 
@@ -509,7 +547,6 @@ async fn handle_conn(
     peer: SocketAddr,
     acceptor: TlsAcceptor,
     clients_rx: watch::Receiver<Vec<AuthorizedClient>>,
-    max_connections_rx: watch::Receiver<u32>,
     dispatcher: Arc<dyn RemoteDispatcher>,
     state: Arc<ListenerState>,
 ) -> Result<()> {
@@ -605,17 +642,20 @@ async fn handle_conn(
     // user who fat-fingered their first attempt clears their record.
     record_auth_success(&state, peer.ip()).await;
 
-    // 4. Register the slot AFTER auth (not before) — that way a failed
-    //    handshake never costs a legitimate client their connection,
-    //    and the connection budget only counts real connections.
-    let budget = *max_connections_rx.borrow();
-    evict_if_over_budget(&state, budget).await;
+    // 4. Register the slot AFTER auth (not before). A failed handshake
+    //    never costs a legitimate client their connection. Then enforce
+    //    1-client-1-connection: kick any existing slot with the same
+    //    client_name BEFORE pushing the new one, so a reconnect from
+    //    the same phone cleanly replaces the previous (likely stale)
+    //    socket.
+    kick_existing_for_client(&state, &client_name).await;
     let last_activity = Arc::new(AtomicI64::new(now_millis()));
     let (kill_tx, kill_rx) = oneshot::channel::<()>();
     {
         let mut conns = state.active_conns.lock().await;
         conns.push(ConnectionSlot {
             peer,
+            client_name: client_name.clone(),
             last_activity: last_activity.clone(),
             kill: Some(kill_tx),
         });

@@ -4,12 +4,6 @@ use serde::{Deserialize, Serialize};
 /// Default port the (future) Remote Control listener binds to.
 pub const DEFAULT_PORT: u16 = 21772;
 
-/// Default cap on concurrent authorized clients holding a live socket.
-/// Single connection covers the single-phone-paired-with-one-desktop
-/// case; users with multiple paired clients (laptop + phone, two
-/// phones, etc.) can bump it from the Remote Control modal.
-pub const DEFAULT_MAX_CONNECTIONS: u32 = 1;
-
 /// Persisted shape of `~/.config/spk-editor/remote-control.json`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RemoteControlSettings {
@@ -28,12 +22,6 @@ pub struct RemoteControlSettings {
     /// Authorized client list. Empty by default.
     #[serde(default)]
     pub clients: Vec<AuthorizedClient>,
-    /// Cap on concurrent authenticated client sockets. New connections
-    /// over the budget evict the longest-idle existing connection (LRU
-    /// by last frame time) so a freshly-tapped phone always gets in.
-    /// Defaults to [`DEFAULT_MAX_CONNECTIONS`].
-    #[serde(default = "default_max_connections")]
-    pub max_connections: u32,
 }
 
 impl Default for RemoteControlSettings {
@@ -43,17 +31,12 @@ impl Default for RemoteControlSettings {
             server_port: DEFAULT_PORT,
             enabled: false,
             clients: Vec::new(),
-            max_connections: DEFAULT_MAX_CONNECTIONS,
         }
     }
 }
 
 fn default_port() -> u16 {
     DEFAULT_PORT
-}
-
-fn default_max_connections() -> u32 {
-    DEFAULT_MAX_CONNECTIONS
 }
 
 /// A client allowed to connect to the (future) Remote Control listener.
@@ -93,7 +76,6 @@ mod tests {
                 created_at: DateTime::<Utc>::from_timestamp(1_700_000_000, 0)
                     .expect("valid timestamp"),
             }],
-            max_connections: 3,
         };
         let text = serde_json::to_string(&original).expect("serialize");
         let parsed: RemoteControlSettings = serde_json::from_str(&text).expect("deserialize");

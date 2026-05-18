@@ -180,12 +180,10 @@ async fn full_handshake_and_minimal_dispatcher_round_trip() -> Result<()> {
     let dispatcher: Arc<dyn remote_control::dispatch::RemoteDispatcher> =
         MinimalDispatcher::new();
 
-    let (_max_conn_tx, max_connections_rx) = tokio::sync::watch::channel(u32::MAX);
     let cfg = ListenerConfig {
         bind_addr: ([127, 0, 0, 1], 0).into(),
         cert,
         clients_rx,
-        max_connections_rx,
         dispatcher,
     };
     let handle = listener::start_listener(cfg).await?;
@@ -333,12 +331,10 @@ async fn handshake_rejects_unauthorized_client() -> Result<()> {
     let dispatcher: Arc<dyn remote_control::dispatch::RemoteDispatcher> =
         MinimalDispatcher::new();
 
-    let (_max_conn_tx, max_connections_rx) = tokio::sync::watch::channel(u32::MAX);
     let cfg = ListenerConfig {
         bind_addr: ([127, 0, 0, 1], 0).into(),
         cert,
         clients_rx,
-        max_connections_rx,
         dispatcher,
     };
     let handle = listener::start_listener(cfg).await?;

@@ -49,7 +49,6 @@ mod tests {
                 created_at: DateTime::<Utc>::from_timestamp(1_700_000_000, 0)
                     .expect("valid timestamp"),
             }],
-            max_connections: 2,
         };
         let text = render(&settings);
         assert!(text.ends_with('\n'));

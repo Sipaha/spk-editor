@@ -48,10 +48,6 @@ pub struct RemoteControlStore {
     /// Watch sender feeding the listener's per-connection auth path the
     /// live client list. Present iff the listener is running.
     clients_tx: Option<tokio::sync::watch::Sender<Vec<AuthorizedClient>>>,
-    /// Sender for the live `max_connections` budget. Held on the store
-    /// so `set_max_connections` can publish updates to the running
-    /// listener without rebuilding the listener.
-    max_connections_tx: Option<tokio::sync::watch::Sender<u32>>,
     /// In-flight listener bootstrap (Token bootstrap is async — TLS gen
     /// can take ~250ms; we don't block the UI thread). Kept as a `Task`
     /// so the store entity drop semantics cancel a pending bootstrap if
@@ -82,7 +78,6 @@ impl RemoteControlStore {
             listener: None,
             cert_fingerprint: None,
             clients_tx: None,
-            max_connections_tx: None,
             _bootstrap: None,
         }
     }
@@ -206,9 +201,6 @@ impl RemoteControlStore {
         // through it without an Option-juggling race.
         let (clients_tx, clients_rx) = tokio::sync::watch::channel(clients);
         self.clients_tx = Some(clients_tx);
-        let (max_conn_tx, max_conn_rx) =
-            tokio::sync::watch::channel(self.settings.max_connections);
-        self.max_connections_tx = Some(max_conn_tx);
 
         // Spawn the tokio-side bootstrap on the global Tokio runtime;
         // `gpui_tokio::Tokio::spawn_result` returns a gpui Task that
@@ -217,14 +209,7 @@ impl RemoteControlStore {
         // scheduler panics on cross-thread wake (and the production
         // scheduler may silently mis-schedule).
         let bootstrap = gpui_tokio::Tokio::spawn_result(cx, async move {
-            bootstrap_listener(
-                fs,
-                server_address.as_deref(),
-                port,
-                clients_rx,
-                max_conn_rx,
-            )
-            .await
+            bootstrap_listener(fs, server_address.as_deref(), port, clients_rx).await
         });
 
         let task = cx.spawn(async move |this, cx| {
@@ -308,27 +293,6 @@ impl RemoteControlStore {
         self.save_to_disk(cx).detach();
     }
 
-    /// Update the live cap on concurrent authenticated client sockets.
-    /// 0 is rejected (would cause every accept to immediately evict
-    /// itself); 1 is the minimum useful value. If the listener is
-    /// running, the change publishes through `max_connections_tx` and
-    /// takes effect on the NEXT accept — existing sockets aren't
-    /// retroactively kicked when the cap shrinks (they age out via
-    /// idle timeout or LRU eviction by a future accept).
-    pub fn set_max_connections(&mut self, value: u32, cx: &mut Context<Self>) {
-        let clamped = value.max(1);
-        if self.settings.max_connections == clamped {
-            return;
-        }
-        self.settings.max_connections = clamped;
-        if let Some(tx) = self.max_connections_tx.as_ref() {
-            // Send-on-disconnected just means the listener already exited
-            // (race between toggle-off and a settings write); benign.
-            let _ = tx.send(clamped);
-        }
-        self.notify_changed(cx);
-        self.save_to_disk(cx).detach();
-    }
 
     /// Add a new authorized client with the given name. Returns the freshly
     /// constructed client (so the UI can show its secret prefix immediately).
@@ -506,7 +470,6 @@ async fn bootstrap_listener(
     server_address: Option<&str>,
     port: u16,
     clients_rx: tokio::sync::watch::Receiver<Vec<AuthorizedClient>>,
-    max_connections_rx: tokio::sync::watch::Receiver<u32>,
 ) -> Result<(ListenerHandle, [u8; 32])> {
     let cert = cert::load_or_generate(&fs, server_address).await?;
     let fingerprint = cert.fingerprint_sha256;
@@ -525,7 +488,6 @@ async fn bootstrap_listener(
         bind_addr,
         cert,
         clients_rx,
-        max_connections_rx,
         dispatcher,
     };
 

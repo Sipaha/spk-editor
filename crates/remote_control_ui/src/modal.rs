@@ -32,7 +32,6 @@ pub struct RemoteControlModal {
     workspace: WeakEntity<Workspace>,
     address_editor: Entity<Editor>,
     port_editor: Entity<Editor>,
-    max_connections_editor: Entity<Editor>,
     new_client_editor: Entity<Editor>,
     detect_task: Option<Task<()>>,
     /// Inline error displayed under the address row when "Detect" fails or
@@ -61,7 +60,6 @@ impl RemoteControlModal {
     ) -> Self {
         let address_editor = cx.new(|cx| Editor::single_line(window, cx));
         let port_editor = cx.new(|cx| Editor::single_line(window, cx));
-        let max_connections_editor = cx.new(|cx| Editor::single_line(window, cx));
         let new_client_editor = cx.new(|cx| Editor::single_line(window, cx));
         let focus_handle = cx.focus_handle();
         let store_subscription = RemoteControlStore::try_global(cx).map(|store| {
@@ -71,7 +69,6 @@ impl RemoteControlModal {
             workspace,
             address_editor,
             port_editor,
-            max_connections_editor,
             new_client_editor,
             detect_task: None,
             inline_error: None,
@@ -86,11 +83,10 @@ impl RemoteControlModal {
         let Some(store) = RemoteControlStore::try_global(cx) else {
             return;
         };
-        let (address, port, max_connections) = store.read_with(cx, |store, _| {
+        let (address, port) = store.read_with(cx, |store, _| {
             (
                 store.settings().server_address.clone().unwrap_or_default(),
                 store.settings().server_port,
-                store.settings().max_connections,
             )
         });
         self.address_editor.update(cx, |editor, cx| {
@@ -104,33 +100,6 @@ impl RemoteControlModal {
                 editor.set_text(port_text, window, cx);
             }
         });
-        let max_text = max_connections.to_string();
-        self.max_connections_editor.update(cx, |editor, cx| {
-            if editor.text(cx) != max_text {
-                editor.set_text(max_text, window, cx);
-            }
-        });
-    }
-
-    fn save_max_connections_from_editor(&mut self, cx: &mut Context<Self>) {
-        let Some(store) = RemoteControlStore::try_global(cx) else {
-            return;
-        };
-        let text = self.max_connections_editor.read(cx).text(cx);
-        match text.trim().parse::<u32>() {
-            Ok(value) if value >= 1 => {
-                store.update(cx, |store, cx| store.set_max_connections(value, cx));
-                self.inline_error = None;
-            }
-            Ok(_) => {
-                self.inline_error =
-                    Some("Max connections must be at least 1.".into());
-            }
-            Err(err) => {
-                self.inline_error =
-                    Some(format!("Max connections must be a positive integer: {err}").into());
-            }
-        }
     }
 
     fn save_address_from_editor(&mut self, cx: &mut Context<Self>) {
@@ -173,7 +142,6 @@ impl RemoteControlModal {
         // and the change is lost.
         self.save_address_from_editor(cx);
         self.save_port_from_editor(cx);
-        self.save_max_connections_from_editor(cx);
         if self.inline_error.is_some() {
             return;
         }
@@ -416,7 +384,6 @@ impl Render for RemoteControlModal {
                     .gap_3()
                     .child(self.render_address_row(cx))
                     .child(self.render_port_row(cx))
-                    .child(self.render_max_connections_row(cx))
                     .child(self.render_toggle_row(toggle_style, toggle_label, toggle_disabled, cx))
                     .when_some(self.inline_error.clone(), |this, err| {
                         this.child(Label::new(err).color(Color::Error).size(LabelSize::Small))
@@ -502,39 +469,6 @@ impl RemoteControlModal {
                                 this.save_port_from_editor(cx);
                             })),
                     ),
-            )
-    }
-
-    fn render_max_connections_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .gap_1()
-            .child(Label::new("Max concurrent connections").size(LabelSize::Small))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .w(px(120.))
-                            .border_1()
-                            .rounded_md()
-                            .border_color(cx.theme().colors().border)
-                            .px_2()
-                            .py_1()
-                            .child(self.max_connections_editor.clone()),
-                    )
-                    .child(
-                        Button::new("remote-control-save-max-connections", "Save")
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.save_max_connections_from_editor(cx);
-                            })),
-                    ),
-            )
-            .child(
-                Label::new(
-                    "If a new client connects while the cap is full, the longest-idle existing connection is dropped.",
-                )
-                .size(LabelSize::Small)
-                .color(Color::Muted),
             )
     }
 
