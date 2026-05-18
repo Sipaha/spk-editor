@@ -1,6 +1,6 @@
 # Per-tool elapsed timer for InProgress tool calls
 
-**Status:** ready to dispatch
+**Status:** complete
 **Estimated:** 1 sub-agent session, ~45–75 min (HEAVY)
 **Goal:** Each tool call that's currently running shows a live "Xs" elapsed badge next to its status, so the user can see at a glance how long a tool has been hanging vs. just finished.
 
@@ -80,13 +80,21 @@ Manual visual smoke-test (supervisor does this after merge):
 
 ## When done
 
-- [ ] `acp_thread::ToolCall.status_started_at` field present + populated in `from_acp` + `update_fields`.
-- [ ] `FORK.md` updated — new row for `crates/acp_thread/src/acp_thread.rs`.
-- [ ] `solution_agent::mcp` tool-call summary payload carries `tool_status_started_at_ms`.
-- [ ] `solution_agent::conversation_render::render_tool_call` shows the elapsed badge for InProgress.
-- [ ] `solution_agent::session_view` ticks once per second while any visible tool is InProgress.
-- [ ] 2+ new tests (acp_thread init+update; mcp wire field).
-- [ ] cargo build / clippy / test all green for `acp_thread` and `solution_agent`.
+- [x] `acp_thread::ToolCall.status_started_at` field present + populated in `from_acp` + `update_fields`. Monotonic-stamp: only the genuine `Pending → InProgress` transition stamps (repeated InProgress flips ignored), so the elapsed counter doesn't reset on adapter status churn.
+- [x] `FORK.md` updated — new row for `crates/acp_thread/src/acp_thread.rs`.
+- [x] `solution_agent::mcp` tool-call summary payload carries `tool_status_started_at_ms`.
+- [x] `solution_agent::conversation_render::render_tool_call` shows the elapsed badge for InProgress (via `status_row::format_elapsed` promoted to `pub(crate)` so both surfaces share the `Xs / 1m02s / 1h05m` format).
+- [x] `solution_agent::session_view` ticks once per second while any visible tool is InProgress.
+- [x] 2+ new tests (acp_thread `test_status_started_at_set_when_tool_call_enters_in_progress`; mcp `tool_call_entry_surfaces_status_started_at_when_in_progress` + existing Pending test updated to assert None).
+- [x] cargo build / clippy / test all green for `acp_thread` (50 passing) and `solution_agent` (117 unit + 2 e2e = 119 passing; combined 169).
 
-## Final commit SHA
-_appended at finalize_
+## Final commit SHAs
+- `198c04de94` acp_thread: track when tool-call status becomes InProgress (+FORK.md row)
+- `ed689dba9f` solution_agent: surface tool_status_started_at_ms on MCP wire
+- `53c5bc193d` solution_agent: render elapsed "Xs" badge next to InProgress tool calls
+
+## Implementation notes worth carrying forward
+
+- The plan said "two tool-call summary builder sites at mcp.rs:562 and :921" — actually a single shared helper `tool_call_summary` is invoked from `build_entry_summary_for_index` and covers both surfaces. Plan's mental model was stale; one edit was sufficient.
+- `cold_persistence` needed a one-line addition: hydrate sets `status_started_at: None` because cold blobs only carry terminal statuses (no on-disk schema change).
+- Visual smoke-test (live editor + slow tool call) deferred to the maintainer's next editor restart — running release-fast process is stale relative to these commits.
