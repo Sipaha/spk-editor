@@ -572,6 +572,15 @@ pub struct ToolCallSummary {
     /// output.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub result_preview: String,
+    /// Unix epoch in milliseconds captured the first time this tool
+    /// call's status transitioned into `InProgress`. Preserved across
+    /// the transition to terminal statuses so clients can render
+    /// "ran for Xs" on a completed call too. `None` for tool calls
+    /// that have never entered `InProgress` (e.g. cold-rehydrated
+    /// entries restored straight into a terminal status, or pending
+    /// calls that haven't started yet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_status_started_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -931,11 +940,13 @@ fn tool_call_summary(call: &acp_thread::ToolCall, cx: &App) -> ToolCallSummary {
         .map(|v| serde_json::to_string(v).unwrap_or_default())
         .map(|s| truncate_preview(&s, FIELD_PREVIEW_MAX_CHARS))
         .unwrap_or_default();
+    let tool_status_started_at_ms = call.status_started_at.map(|t| t.timestamp_millis());
     ToolCallSummary {
         name,
         status,
         args_preview,
         result_preview,
+        tool_status_started_at_ms,
     }
 }
 
@@ -2469,6 +2480,64 @@ mod tests {
             tool.args_preview.contains("\"cmd\""),
             "args_preview should serialize raw_input JSON, got: {}",
             tool.args_preview
+        );
+        assert!(
+            tool.tool_status_started_at_ms.is_none(),
+            "Pending tool call should not surface a started_at timestamp, got: {:?}",
+            tool.tool_status_started_at_ms,
+        );
+    }
+
+    #[gpui::test]
+    async fn tool_call_entry_surfaces_status_started_at_when_in_progress(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+
+        let before_ms = chrono::Utc::now().timestamp_millis();
+        cx.update(|cx| {
+            acp_thread.update(cx, |thread, cx| {
+                let tool_call = acp::ToolCall::new(
+                    acp::ToolCallId::new("call-1".to_string()),
+                    "Bash".to_string(),
+                )
+                .kind(acp::ToolKind::Execute)
+                .status(acp::ToolCallStatus::InProgress);
+                thread
+                    .upsert_tool_call(tool_call, cx)
+                    .expect("upsert_tool_call");
+            });
+        });
+        cx.executor().run_until_parked();
+        let after_ms = chrono::Utc::now().timestamp_millis();
+
+        let result = GetSessionTool
+            .run(
+                GetSessionParams {
+                    session_id: session_id.to_string(),
+                    include_full_content: false,
+                    include_images: false,
+                    ..Default::default()
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session");
+
+        let tool = result
+            .structured_content
+            .entries
+            .iter()
+            .find(|e| e.role == "tool_call")
+            .and_then(|e| e.tool_call.as_ref())
+            .expect("tool_call summary populated");
+        assert_eq!(tool.status, "running");
+        let stamp = tool
+            .tool_status_started_at_ms
+            .expect("InProgress tool call must surface a started_at timestamp");
+        assert!(
+            stamp >= before_ms && stamp <= after_ms,
+            "tool_status_started_at_ms {stamp} should fall between {before_ms} and {after_ms}",
         );
     }
 
