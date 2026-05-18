@@ -275,6 +275,16 @@ pub struct SolutionSession {
     /// the cached value stays in sync until the next cold restore.
     /// `None` for fresh sessions whose first turn hasn't shipped yet.
     pub cached_total_tokens: Option<u64>,
+    /// Last-known max context window for the conversation. Sibling to
+    /// `cached_total_tokens` — populated on every live `TokenUsageUpdated`
+    /// event so MCP consumers (the phone client's context-fill meter)
+    /// can read a model-specific limit even when the live `AcpThread`
+    /// hasn't shipped a token usage yet. NOT persisted to disk: the
+    /// agent re-emits `TokenUsageUpdated` (with `max_tokens`) on the
+    /// first turn of any cold-resumed session, so the cache rebuilds
+    /// itself naturally. `None` when no live event has been observed
+    /// since the session entity was hydrated.
+    pub cached_max_tokens: Option<u64>,
     /// F: parent session reference for sub-agent indication. `None` for
     /// top-level sessions. Set at creation time via
     /// `solution_agent.create_session({parent_session_id})` and
@@ -322,6 +332,7 @@ impl SolutionSession {
             cold_entries: Vec::new(),
             last_turn_duration: None,
             cached_total_tokens: None,
+            cached_max_tokens: None,
             parent_session_id: None,
         }
     }
@@ -433,6 +444,7 @@ mod tests {
             cold_entries: Vec::new(),
             last_turn_duration: None,
             cached_total_tokens: None,
+            cached_max_tokens: None,
             parent_session_id: None,
         }
     }

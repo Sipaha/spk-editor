@@ -50,6 +50,9 @@ pub fn register(cx: &mut App) {
         server.add_tool(CompactSessionTool);
     });
     editor_mcp::register_tool(cx, |server| {
+        server.add_tool(StartCompactTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
         server.add_tool(ReadSessionHistoryTool);
     });
     editor_mcp::register_tool(cx, |server| {
@@ -124,6 +127,17 @@ pub struct SessionSummary {
     /// yet — e.g. a fresh session whose first turn hasn't shipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u64>,
+    /// Model context window in tokens (`used_tokens / max_tokens` is the
+    /// percentage the desktop's status-row meter shows). Live thread's
+    /// `TokenUsage::max_tokens` when hot, falling back to the in-memory
+    /// `SolutionSession::cached_max_tokens` mirrored from the last
+    /// observed live event. `None` when no live event has arrived yet —
+    /// clients should choose their own default rather than assume a
+    /// specific window size (the desktop picks `DEFAULT_CONTEXT_WINDOW`,
+    /// but a phone client might prefer a smaller assumption for an
+    /// unknown model).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
     /// F: parent session reference for sub-agent indication. `None` for
     /// top-level sessions. Set at creation time via
     /// `solution_agent.create_session({parent_session_id})`.
@@ -233,10 +247,21 @@ fn session_summary(session: &SolutionSession, cx: &App) -> SessionSummary {
     // writes through to `cached_total_tokens` on every
     // `TokenUsageUpdated` event, but live > cached when the two
     // disagree). Cold tabs fall back to the persisted cache.
-    let total_tokens = session
+    let live_usage = session
         .acp_thread()
-        .and_then(|thread| thread.read(cx).token_usage().map(|usage| usage.used_tokens))
+        .and_then(|thread| thread.read(cx).token_usage().cloned());
+    let total_tokens = live_usage
+        .as_ref()
+        .map(|usage| usage.used_tokens)
         .or(session.cached_total_tokens);
+    // `max_tokens == 0` is the "agent didn't fill it in yet" sentinel
+    // claude-acp ships under beta-gated paths. Treat that as None so
+    // clients can apply their own default instead of dividing by zero.
+    let max_tokens = live_usage
+        .as_ref()
+        .map(|usage| usage.max_tokens)
+        .filter(|m| *m > 0)
+        .or(session.cached_max_tokens);
     SessionSummary {
         id: session.id.to_string(),
         solution_id: session.solution_id.0.clone(),
@@ -246,6 +271,7 @@ fn session_summary(session: &SolutionSession, cx: &App) -> SessionSummary {
         created_at: session.created_at.timestamp_millis(),
         last_activity_at: session.last_activity_at.timestamp_millis(),
         total_tokens,
+        max_tokens,
         parent_session_id: session.parent_session_id.map(|id| id.to_string()),
     }
 }
@@ -570,6 +596,11 @@ pub struct GetSessionResult {
     /// usage update.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u64>,
+    /// Model context window in tokens; mirrors `SessionSummary::max_tokens`.
+    /// `None` until the agent emits its first `TokenUsageUpdated` with a
+    /// non-zero `max_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
     /// F: parent session reference for sub-agent indication. `None` for
     /// top-level sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -675,6 +706,7 @@ impl McpServerTool for GetSessionTool {
                 created_at: summary.created_at,
                 last_activity_at: summary.last_activity_at,
                 total_tokens: summary.total_tokens,
+                max_tokens: summary.max_tokens,
                 parent_session_id: summary.parent_session_id,
                 entries,
                 total_count,
@@ -1801,6 +1833,96 @@ impl McpServerTool for CompactSessionTool {
             structured_content: CompactSessionResult {
                 new_session_id: old_session_id.to_string(),
                 prompt_bytes,
+            },
+        })
+    }
+}
+
+// =====================================================================
+// solution_agent.start_compact
+// =====================================================================
+
+/// Kick off the "Compact context" workflow on a hot session — the same
+/// orchestration the desktop's status-row popover "Compact context"
+/// entry runs. Sends the compact-instructions template as a user
+/// message; the agent then writes its handoff files and calls back
+/// into the lower-level `solution_agent.compact_session` to rotate.
+///
+/// Surface contract: this tool is what a human client (e.g. the phone)
+/// invokes from a "Compact" button. `compact_session` is what Claude
+/// Code itself invokes after producing the handoff dump. Don't mix
+/// them up — `compact_session` rotates the ACP thread immediately and
+/// would discard the user's intent on a hot conversation.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct StartCompactParams {
+    pub session_id: String,
+}
+
+impl<'de> Deserialize<'de> for StartCompactParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            session_id: String,
+        }
+        Ok(Self {
+            session_id: Option::<Inner>::deserialize(de)?
+                .unwrap_or_default()
+                .session_id,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct StartCompactResult {
+    /// `true` when the compact prompt was enqueued on the agent.
+    /// `false` when a precondition wasn't met (e.g. session busy,
+    /// context below 20%, less than 30k tokens of headroom, or session
+    /// is cold) — `message` carries the reason.
+    pub queued: bool,
+    /// Human-readable explanation when `queued == false`. `None` on
+    /// success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct StartCompactTool;
+
+impl McpServerTool for StartCompactTool {
+    type Input = StartCompactParams;
+    type Output = StartCompactResult;
+    const NAME: &'static str = "solution_agent.start_compact";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.session_id.is_empty(),
+            "invalid_params: session_id is required"
+        );
+        let session_id = SolutionSessionId::parse(&input.session_id)
+            .map_err(|e| anyhow!("bad session id: {e}"))?;
+
+        let outcome = cx.update(|cx| -> Result<crate::compact::StartCompactOutcome> {
+            crate::compact::start_compact_for_session(session_id, cx)
+        })?;
+
+        let text = if outcome.queued {
+            format!("compact queued for {session_id}")
+        } else {
+            outcome
+                .reason
+                .clone()
+                .unwrap_or_else(|| "compact declined".to_string())
+        };
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text { text }],
+            structured_content: StartCompactResult {
+                queued: outcome.queued,
+                message: outcome.reason,
             },
         })
     }
@@ -3063,6 +3185,179 @@ mod tests {
             summary.total_tokens.is_some_and(|t| t >= 42_000),
             "total_tokens should fall back to cached_total_tokens; got {:?}",
             summary.total_tokens,
+        );
+    }
+
+    /// Phone client reads `SessionSummary::max_tokens` to size its
+    /// context-fill meter the same way the desktop does — without it,
+    /// it would have to guess the model's window. Live thread's
+    /// `TokenUsage::max_tokens` is the source when hot; the cache
+    /// fallback is exercised separately in
+    /// `session_summary_max_tokens_falls_back_to_cached`.
+    #[gpui::test]
+    async fn session_summary_max_tokens_from_live_thread(cx: &mut gpui::TestAppContext) {
+        let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+        // Drive a TokenUsageUpdated through the live thread. The store's
+        // event handler mirrors max_tokens onto cached_max_tokens, and
+        // session_summary should surface it.
+        cx.update(|cx| {
+            acp_thread.update(cx, |t, cx| {
+                t.update_token_usage(
+                    Some(acp_thread::TokenUsage {
+                        used_tokens: 5_000,
+                        max_tokens: 200_000,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            });
+        });
+        cx.executor().run_until_parked();
+
+        let result = ListSessionsTool
+            .run(ListSessionsParams::default(), &mut cx.to_async())
+            .await
+            .expect("list_sessions");
+        let summary = result
+            .structured_content
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id.to_string())
+            .expect("session present");
+        assert_eq!(
+            summary.max_tokens,
+            Some(200_000),
+            "max_tokens should be reported from the live thread",
+        );
+        assert_eq!(
+            summary.total_tokens,
+            Some(5_000),
+            "total_tokens should be reported alongside max",
+        );
+    }
+
+    /// Cold tab path: no live `acp_thread`, but `cached_max_tokens` was
+    /// stamped during an earlier live event. `session_summary` must
+    /// fall through to the cache so the phone meter keeps rendering a
+    /// realistic window size even on sleeping sessions.
+    #[gpui::test]
+    async fn session_summary_max_tokens_falls_back_to_cached(cx: &mut gpui::TestAppContext) {
+        let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            let session = store
+                .read(cx)
+                .session(session_id)
+                .expect("session exists");
+            session.update(cx, |s, _| s.cached_max_tokens = Some(180_000));
+        });
+
+        let result = ListSessionsTool
+            .run(ListSessionsParams::default(), &mut cx.to_async())
+            .await
+            .expect("list_sessions");
+        let summary = result
+            .structured_content
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id.to_string())
+            .expect("session present");
+        // A live max may have been picked up in the meantime; the
+        // contract is "non-None when the cache holds a value".
+        assert!(
+            summary.max_tokens.is_some_and(|m| m >= 180_000),
+            "max_tokens should fall back to cached_max_tokens; got {:?}",
+            summary.max_tokens,
+        );
+    }
+
+    /// `start_compact` MCP tool refuses on a fresh session whose
+    /// context usage is well below the 20% threshold — mirrors the
+    /// desktop status-row gate. The structured `queued=false` + reason
+    /// is the contract the phone client renders on its button.
+    #[gpui::test]
+    async fn start_compact_declines_below_threshold(cx: &mut gpui::TestAppContext) {
+        let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+        // Seed a low usage well below 20% so the precondition fails.
+        cx.update(|cx| {
+            acp_thread.update(cx, |t, cx| {
+                t.update_token_usage(
+                    Some(acp_thread::TokenUsage {
+                        used_tokens: 1_000,
+                        max_tokens: 1_000_000,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            });
+        });
+        cx.executor().run_until_parked();
+
+        let result = StartCompactTool
+            .run(
+                StartCompactParams {
+                    session_id: session_id.to_string(),
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("start_compact dispatches");
+        assert!(
+            !result.structured_content.queued,
+            "expected queued=false, got {:?}",
+            result.structured_content
+        );
+        let msg = result
+            .structured_content
+            .message
+            .as_deref()
+            .unwrap_or_default();
+        assert!(
+            msg.contains("short") || msg.contains("%"),
+            "expected reason mentioning short context or percentage; got {msg:?}"
+        );
+    }
+
+    /// `start_compact` queues a user message on the agent when the
+    /// session is Idle and context exceeds 20%. We check that
+    /// `send_message` was forwarded by inspecting the prompts the mock
+    /// connection received.
+    #[gpui::test]
+    async fn start_compact_queues_prompt_when_idle(cx: &mut gpui::TestAppContext) {
+        let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+        cx.update(|cx| {
+            acp_thread.update(cx, |t, cx| {
+                t.update_token_usage(
+                    Some(acp_thread::TokenUsage {
+                        // 25% of 1M = 250 000 (above the 20% gate)
+                        used_tokens: 250_000,
+                        max_tokens: 1_000_000,
+                        ..Default::default()
+                    }),
+                    cx,
+                );
+            });
+        });
+        cx.executor().run_until_parked();
+
+        let result = StartCompactTool
+            .run(
+                StartCompactParams {
+                    session_id: session_id.to_string(),
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("start_compact dispatches");
+        assert!(
+            result.structured_content.queued,
+            "expected queued=true; reason={:?}",
+            result.structured_content.message
+        );
+        assert!(
+            result.structured_content.message.is_none(),
+            "no decline reason on success; got {:?}",
+            result.structured_content.message
         );
     }
 }

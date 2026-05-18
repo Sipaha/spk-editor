@@ -1,68 +1,80 @@
 //! "Compact context" workflow: dump the current session's running summary to handoff files, then continue in a fresh ACP session.
 
-use gpui::{AppContext as _, Context, SharedString};
+use anyhow::{Result, anyhow};
+use gpui::{App, AppContext as _, Context, SharedString};
 use solutions::SolutionStore;
 use workspace::notifications::{NotificationId, simple_message_notification::MessageNotification};
 
-use crate::model::SessionState;
+use crate::model::{SessionState, SolutionSessionId};
 use crate::navigator::SolutionSessionsNavigator;
 use crate::status_row::DEFAULT_CONTEXT_WINDOW;
 use crate::store::SolutionAgentStore;
 
-impl SolutionSessionsNavigator {
-    /// Renders the current compact-instruction template, creates the
-    /// per-rotation handoff directory, and ships the rendered prompt as
-    /// a regular user message. The agent then writes its summary files
-    /// into that directory and (after we've handed it `compact_dir`)
-    /// calls back via `solution_agent.compact_session`.
-    pub(crate) fn start_compact(
-        &self,
-        session_id: crate::model::SolutionSessionId,
-        cx: &mut Context<Self>,
-    ) {
-        let store = SolutionAgentStore::global(cx);
-        let Some(session_entity) = store.read_with(cx, |s, _| s.session(session_id)) else {
-            return;
-        };
-        if !matches!(session_entity.read(cx).state, SessionState::Idle) {
-            return;
-        }
-        let Some(rendered) = self.render_compact_prompt(session_id, cx) else {
-            return;
-        };
-        store.update(cx, |store, cx| {
-            store
-                .send_message(session_id, rendered, cx)
-                .detach_and_log_err(cx);
-        });
-    }
+/// Outcome of [`start_compact_for_session`] — distinguishes "we ran the
+/// orchestration and the prompt is now queued on the agent" from "we
+/// declined to compact and here's why". Errors out only when the
+/// session id is unknown or the underlying filesystem refuses to create
+/// the dump directory (the two cases that no client retry can fix
+/// without operator intervention).
+#[derive(Debug, Clone)]
+pub(crate) struct StartCompactOutcome {
+    pub queued: bool,
+    /// Human-readable reason when `queued == false`. `None` when queued
+    /// successfully — keeps the success path cheap on the wire.
+    pub reason: Option<String>,
+}
 
-    /// Render the compact-instruction template for `session_id` and create
-    /// the `<root>/.agents/<sid>/c<NN>/` dump directory. Returns the rendered
-    /// prompt body. Surfaces a workspace toast and returns `None` on the
-    /// same failure modes the inline path used to handle (unknown solution,
-    /// mkdir failure).
-    pub(crate) fn render_compact_prompt(
-        &self,
-        session_id: crate::model::SolutionSessionId,
-        cx: &mut Context<Self>,
-    ) -> Option<String> {
-        let store = SolutionAgentStore::global(cx);
-        let session_entity = store.read_with(cx, |s, _| s.session(session_id))?;
+/// Shared orchestration: precondition gate → render the compact prompt
+/// (creates the `<root>/.agents/<sid>/c<NN>/` dump dir as a side effect)
+/// → enqueue the rendered prompt as a user message on the live
+/// `AcpThread`. Driven by both the desktop status-row popover and the
+/// `solution_agent.start_compact` MCP tool so the two surfaces share a
+/// single notion of "is this session compactable right now".
+///
+/// The cold-session branch is intentionally NOT in here: queueing on a
+/// `SolutionSessionView` requires `&mut Window`, which the MCP path
+/// doesn't have. The desktop entry point handles cold separately via
+/// `start_compact_from_cold` on the navigator.
+pub(crate) fn start_compact_for_session(
+    session_id: SolutionSessionId,
+    cx: &mut App,
+) -> Result<StartCompactOutcome> {
+    let store = SolutionAgentStore::global(cx);
+    let session_entity = store
+        .read_with(cx, |s, _| s.session(session_id))
+        .ok_or_else(|| anyhow!("unknown session {session_id}"))?;
+
+    // Precondition: must be Idle. A Running/AwaitingInput session would
+    // race with the in-flight turn (claude-acp queues prompts in
+    // `pending_messages`, which would deliver the compact instructions
+    // AFTER the active turn — possibly minutes later — and surprise
+    // the user). Cold sessions can't be compacted via MCP either
+    // (no Window to drive the wake-flush hook).
+    {
         let s = session_entity.read(cx);
-        let solution_id = s.solution_id.clone();
-        let agent_id = s.agent_id.clone();
-        let started_at = s.created_at;
-        // Snapshot the count *before* rotation: the dump dir captures
-        // the context being closed (`c01` for the first compact, `c02`
-        // for the second, …). After the agent finishes writing files
-        // and `compact_session` runs, the session's context_count
-        // increments to count + 1 for the next round.
-        let context_count = s.context_count;
-        // Live `token_usage` when hot, else fall back to `cached_total_tokens`
-        // so a cold caller still gets a meaningful prompt header. No live
-        // `max_tokens` from cold — fall back to `DEFAULT_CONTEXT_WINDOW`,
-        // matching `render_status_row`'s meter logic.
+        if s.is_cold() {
+            return Ok(StartCompactOutcome {
+                queued: false,
+                reason: Some(
+                    "session is cold; open it in the editor first so the agent can receive the \
+                     compact prompt"
+                        .into(),
+                ),
+            });
+        }
+        if !matches!(s.state, SessionState::Idle) {
+            return Ok(StartCompactOutcome {
+                queued: false,
+                reason: Some(format!(
+                    "session is busy ({:?}); wait for the current turn to finish",
+                    s.state
+                )),
+            });
+        }
+
+        // Precondition: meaningful context to compact AND headroom to
+        // dump the summary. Matches `status_row::render_status_row`'s
+        // gate so MCP and the desktop UI agree on "compactable".
         let usage = s
             .acp_thread()
             .and_then(|thread| thread.read(cx).token_usage().cloned());
@@ -75,64 +87,175 @@ impl SolutionSessionsNavigator {
             .as_ref()
             .map(|u| u.max_tokens)
             .filter(|m| *m > 0)
+            .or(s.cached_max_tokens)
             .unwrap_or(DEFAULT_CONTEXT_WINDOW);
-        let _ = s;
+        let pct = if max == 0 {
+            0.0
+        } else {
+            (used as f64 / max as f64).clamp(0.0, 1.0)
+        };
+        let remaining = max.saturating_sub(used);
+        if pct < COMPACT_BUTTON_MIN_PCT {
+            return Ok(StartCompactOutcome {
+                queued: false,
+                reason: Some(format!(
+                    "conversation is short ({:.1}%); compact later",
+                    pct * 100.0
+                )),
+            });
+        }
+        if remaining < COMPACT_HEADROOM_MIN_TOKENS {
+            return Ok(StartCompactOutcome {
+                queued: false,
+                reason: Some(format!(
+                    "only {} tokens of headroom left — start a fresh session manually",
+                    remaining
+                )),
+            });
+        }
+    }
 
-        let solution_root = match SolutionStore::try_global(cx).and_then(|store| {
+    let rendered = render_compact_prompt_inner(session_id, cx)?;
+    store.update(cx, |store, cx| {
+        store
+            .send_message(session_id, rendered, cx)
+            .detach_and_log_err(cx);
+    });
+    Ok(StartCompactOutcome {
+        queued: true,
+        reason: None,
+    })
+}
+
+/// Render the compact-instruction template for `session_id` and create
+/// the per-rotation dump directory. Free-function counterpart of the
+/// navigator's `render_compact_prompt` — returns an `anyhow::Error` so
+/// MCP callers get a structured error instead of a workspace toast.
+pub(crate) fn render_compact_prompt_inner(
+    session_id: SolutionSessionId,
+    cx: &mut App,
+) -> Result<String> {
+    let store = SolutionAgentStore::global(cx);
+    let session_entity = store
+        .read_with(cx, |s, _| s.session(session_id))
+        .ok_or_else(|| anyhow!("unknown session {session_id}"))?;
+    let (solution_id, agent_id, started_at, context_count, used, max) = {
+        let s = session_entity.read(cx);
+        let context_count = s.context_count;
+        // Live `token_usage` when hot, else fall back to `cached_total_tokens`
+        // so a cold caller still gets a meaningful prompt header.
+        let usage = s
+            .acp_thread()
+            .and_then(|thread| thread.read(cx).token_usage().cloned());
+        let used = usage
+            .as_ref()
+            .map(|u| u.used_tokens)
+            .or(s.cached_total_tokens)
+            .unwrap_or(0);
+        let max = usage
+            .as_ref()
+            .map(|u| u.max_tokens)
+            .filter(|m| *m > 0)
+            .or(s.cached_max_tokens)
+            .unwrap_or(DEFAULT_CONTEXT_WINDOW);
+        (
+            s.solution_id.clone(),
+            s.agent_id.clone(),
+            s.created_at,
+            context_count,
+            used,
+            max,
+        )
+    };
+
+    let solution_root = SolutionStore::try_global(cx)
+        .and_then(|store| {
             store.read_with(cx, |s, _| {
                 s.solutions()
                     .iter()
                     .find(|sol| sol.id == solution_id)
                     .map(|sol| sol.root.clone())
             })
-        }) {
-            Some(root) => root,
-            None => {
-                self.toast_error(
-                    SharedString::from(format!(
-                        "Compact failed: solution {:?} not registered",
-                        solution_id.0
-                    )),
-                    cx,
-                );
-                return None;
+        })
+        .ok_or_else(|| anyhow!("Compact failed: solution {:?} not registered", solution_id.0))?;
+
+    // `<root>/.agents/<sid>/c<count>/` — `c01`, `c02`, … so a
+    // single `<sid>` directory groups every rotation of one
+    // logical conversation. The leading `c` keeps the names from
+    // accidentally colliding with the legacy timestamp scheme.
+    let context_label = format!("c{context_count:02}");
+    let compact_dir = solution_root
+        .join(".agents")
+        .join(session_id.to_string())
+        .join(&context_label);
+    std::fs::create_dir_all(&compact_dir).map_err(|err| {
+        anyhow!(
+            "Compact failed: cannot create {}: {err}",
+            compact_dir.display()
+        )
+    })?;
+
+    let mut compact_dir_str = compact_dir.to_string_lossy().to_string();
+    if !compact_dir_str.ends_with(std::path::MAIN_SEPARATOR) {
+        compact_dir_str.push(std::path::MAIN_SEPARATOR);
+    }
+
+    Ok(COMPACT_INSTRUCTIONS_TEMPLATE
+        .replace("{{session_id}}", &session_id.to_string())
+        .replace("{{compact_dir}}", &compact_dir_str)
+        .replace("{{solution_id}}", solution_id.0.as_str())
+        .replace("{{agent_id}}", agent_id.as_ref())
+        .replace("{{started_at_iso}}", &started_at.to_rfc3339())
+        .replace("{{tokens_used}}", &used.to_string())
+        .replace("{{tokens_max}}", &max.to_string()))
+}
+
+impl SolutionSessionsNavigator {
+    /// Renders the current compact-instruction template, creates the
+    /// per-rotation handoff directory, and ships the rendered prompt as
+    /// a regular user message. The agent then writes its summary files
+    /// into that directory and (after we've handed it `compact_dir`)
+    /// calls back via `solution_agent.compact_session`.
+    pub(crate) fn start_compact(
+        &self,
+        session_id: crate::model::SolutionSessionId,
+        cx: &mut Context<Self>,
+    ) {
+        match start_compact_for_session(session_id, cx) {
+            Ok(StartCompactOutcome { queued: true, .. }) => {}
+            Ok(StartCompactOutcome {
+                queued: false,
+                reason: Some(reason),
+            }) => {
+                log::info!("solution_agent compact declined: {reason}");
             }
-        };
-
-        // `<root>/.agents/<sid>/c<count>/` — `c01`, `c02`, … so a
-        // single `<sid>` directory groups every rotation of one
-        // logical conversation. The leading `c` keeps the names from
-        // accidentally colliding with the legacy timestamp scheme.
-        let context_label = format!("c{context_count:02}");
-        let compact_dir = solution_root
-            .join(".agents")
-            .join(session_id.to_string())
-            .join(&context_label);
-        if let Err(err) = std::fs::create_dir_all(&compact_dir) {
-            self.toast_error(
-                SharedString::from(format!(
-                    "Compact failed: cannot create {}: {err}",
-                    compact_dir.display()
-                )),
-                cx,
-            );
-            return None;
+            Ok(StartCompactOutcome {
+                queued: false,
+                reason: None,
+            }) => {}
+            Err(err) => {
+                self.toast_error(SharedString::from(format!("Compact failed: {err}")), cx);
+            }
         }
+    }
 
-        let mut compact_dir_str = compact_dir.to_string_lossy().to_string();
-        if !compact_dir_str.ends_with(std::path::MAIN_SEPARATOR) {
-            compact_dir_str.push(std::path::MAIN_SEPARATOR);
+    /// Render the compact-instruction template for `session_id` and create
+    /// the `<root>/.agents/<sid>/c<NN>/` dump directory. Returns the rendered
+    /// prompt body. Surfaces a workspace toast and returns `None` on the
+    /// same failure modes the inline path used to handle (unknown solution,
+    /// mkdir failure).
+    pub(crate) fn render_compact_prompt(
+        &self,
+        session_id: crate::model::SolutionSessionId,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        match render_compact_prompt_inner(session_id, cx) {
+            Ok(rendered) => Some(rendered),
+            Err(err) => {
+                self.toast_error(SharedString::from(err.to_string()), cx);
+                None
+            }
         }
-
-        let rendered = COMPACT_INSTRUCTIONS_TEMPLATE
-            .replace("{{session_id}}", &session_id.to_string())
-            .replace("{{compact_dir}}", &compact_dir_str)
-            .replace("{{solution_id}}", solution_id.0.as_str())
-            .replace("{{agent_id}}", agent_id.as_ref())
-            .replace("{{started_at_iso}}", &started_at.to_rfc3339())
-            .replace("{{tokens_used}}", &used.to_string())
-            .replace("{{tokens_max}}", &max.to_string());
-        Some(rendered)
     }
 
     /// Cold-state compact: render the prompt now, queue it on the

@@ -1821,11 +1821,24 @@ impl SolutionAgentStore {
                 // entity bypassing the live thread) sees the latest
                 // figure without the meter regressing to zero.
                 if let Some(s) = self.sessions.get(&session_id).cloned() {
-                    let total = s
+                    let usage = s
                         .read(cx)
                         .acp_thread()
-                        .and_then(|t| t.read(cx).token_usage().map(|u| u.used_tokens));
-                    s.update(cx, |s, _| s.cached_total_tokens = total);
+                        .and_then(|t| t.read(cx).token_usage().cloned());
+                    let total = usage.as_ref().map(|u| u.used_tokens);
+                    // `max_tokens == 0` is the "agent didn't fill it in"
+                    // sentinel claude-acp ships under some beta paths.
+                    // Treat that as None so MCP consumers can fall back
+                    // to `DEFAULT_CONTEXT_WINDOW` instead of rendering
+                    // "X / 0" on the meter.
+                    let max = usage
+                        .as_ref()
+                        .map(|u| u.max_tokens)
+                        .filter(|m| *m > 0);
+                    s.update(cx, |s, _| {
+                        s.cached_total_tokens = total;
+                        s.cached_max_tokens = max;
+                    });
                 }
                 self.persist_session_row(session_id, cx);
             }
