@@ -173,7 +173,7 @@ No migration step required. No version bump.
 - Image deduplication across entries (each `EntryImage` payload duplicates if the same image is in multiple entries — accept the wire cost).
 - Compression (the MCP framing layer doesn't currently compress; add later if profiling shows it matters).
 - Schema versioning headers (JSON-RPC's tolerance for unknown keys covers us for now).
-- Updating the Android client (`spk-editor-android-client`) to consume the new fields — that's R-5e-client / R-5f, a separate phase.
+- Updating the Android client (`spk-editor-mobile`) to consume the new fields — that's R-5e-client / R-5f, a separate phase.
 
 ## Architectural decisions (this phase)
 
@@ -264,4 +264,4 @@ Documented in `GetSessionParams`'s doc comment so consumers can pick wisely. For
 
 ## Follow-up
 
-- **R-5e-client (Android-side update)** — extend `:core` DTOs in `spk-editor-android-client` to consume the new `markdown` / `images` / `tool_call` / `plan` fields. `MainViewModel.openSession` to pass `include_full_content: true, include_images: true`. Render rich markdown (CommonMark renderer like `compose-multiplatform-markdown` or roll a simple `Text` with inline image lookups). Wire `Icon`/expand for tool_call rows. Plan-doc to be written when picked up.
+- **R-5e-client (Android-side update)** — extend `:core` DTOs in `spk-editor-mobile` to consume the new `markdown` / `images` / `tool_call` / `plan` fields. `MainViewModel.openSession` to pass `include_full_content: true, include_images: true`. Render rich markdown (CommonMark renderer like `compose-multiplatform-markdown` or roll a simple `Text` with inline image lookups). Wire `Icon`/expand for tool_call rows. Plan-doc to be written when picked up.

@@ -1,7 +1,7 @@
 # R-5c: Solutions + agent-sessions list UI
 
 **Status:** complete (sibling-repo commit `7fa4615`)
-**Repo:** `spk-editor-android-client/`
+**Repo:** `spk-editor-mobile/`
 **Depends on:** R-5a (`:core` `RemoteClient`), R-5b (QR pairing reaches a connected state).
 **Goal:** From the post-pairing connected state, drill into solutions → drill into one solution → see its agent sessions → drill into one. Pure read paths; chat send/receive lives in R-5d.
 
@@ -83,7 +83,7 @@ Map from the actual `remote.solutions.list` / `remote.solution_agent.list_sessio
 ## Verification
 
 ```bash
-cd /home/spk/.spk/spk-editor/solutions/spk-solutions/spk-editor-android-client
+cd /home/spk/.spk/spk-editor/solutions/spk-solutions/spk-editor-mobile
 JAVA_HOME=$HOME/.jdks/temurin-21.0.10 ./gradlew :app:assembleDebug :core:test --rerun-tasks 2>&1 | tee /tmp/r5c.txt
 grep -E "BUILD SUCCESSFUL|FAILURE:" /tmp/r5c.txt
 ```

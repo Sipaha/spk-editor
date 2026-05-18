@@ -21,7 +21,7 @@ flaky LTE/Wi-Fi, renders rich chat with images + tool-calls.
 | Remote Control QR popover crash | spk-editor `900e894942` | `workspace.toggle_modal` from inside the modal's own listener double-borrowed; now deferred via `window.defer(...)`. |
 | Welcome window delete | spk-editor `8c7d87c931` | (Same as the line above — duplicated bullet here is intentional, the welcome delete bug is the third of the three small bug fixes from the start of this session.) |
 
-## Cumulative state of the Android client (sibling `spk-editor-android-client`)
+## Cumulative state of the Android client (sibling `spk-editor-mobile`)
 
 Six R-5 phases + two R-6 phases shipped over 2026-05-16 → 2026-05-17. Sibling-repo chain:
 
@@ -41,7 +41,7 @@ d83ab47 R-5a fixup (:core api configuration after SDK install)
 End-state: `:core` 72 tests green, debug APK 12.0 MB, release APK 2.12 MB.
 Build commands and pairing instructions live in the sibling repo's README.
 
-**Sibling repo remote** (added 2026-05-18): `git@github.com:Sipaha/spk-editor-mobile.git`. Push uses the same `github.com-sipaha` SSH host-alias as the spk-editor remote (config in `~/.ssh/config`). Note local directory name (`spk-editor-android-client`) differs from the GitHub repo name (`spk-editor-mobile`) — both refer to the same project.
+**Sibling repo remote** (added 2026-05-18): `git@github.com:Sipaha/spk-editor-mobile.git`. Push uses the same `github.com-sipaha` SSH host-alias as the spk-editor remote (config in `~/.ssh/config`). The local directory was renamed from `spk-editor-android-client` to `spk-editor-mobile` on 2026-05-18 to match the GitHub repo name; older plan-docs (R-5a..R-5e historical record) still use the original name in their commit-message quotes but the project is now uniformly `spk-editor-mobile`.
 No CI yet.
 
 ## Additional 2026-05-17 phases (after the 1st handoff cut)
@@ -72,7 +72,7 @@ No CI yet.
 4. **`RemoteTransport` seam in `:core`** — `OkHttpRemoteTransport` for prod + `FakeRemoteTransport` for tests. Lets us drive virtual-time reconnect/queue scenarios without a real server.
 5. **5-min outbound queue TTL** — long enough to survive elevator / metro signal drops, short enough that a stale "Send" from yesterday doesn't fire after the user pockets the phone for hours.
 6. **`androidx.security:security-crypto:1.1.0-alpha06`** is the right choice despite the alpha tag — stable 1.0 still drags a deprecated Tink and breaks under AGP 8+.
-7. **Locked rebrand identifiers** still apply on the sibling repo: package root `ru.sipaha.spkremote`, GPL-3.0-or-later, `© 2026 Pavel Simonov`.
+7. **Locked rebrand identifiers** still apply on the sibling repo: package root `ru.sipaha.spkremote`, Apache 2.0 (changed 2026-05-18 from GPL-3.0-or-later — the sibling is a clean implementation and doesn't inherit upstream Zed's license obligations), `© 2026 Pavel Simonov`.
 
 ## Active gotchas
 
@@ -96,7 +96,7 @@ snapshots; this is authoritative for current state.
 2. Read `docs/INDEX.md`.
 3. Read `docs/workflow/supervisor-mode.md`.
 4. `git log --oneline -25` for the spk-editor side.
-5. `cd ../spk-editor-android-client && git log --oneline -10` for the sibling.
+5. `cd ../spk-editor-mobile && git log --oneline -10` for the sibling.
 6. The R-5/R-6 arc closes here. Pool of named items: R-6c (push + multi-server), outbound-queue disk persistence, crash reporting, F (sub-agent indication UI), G (`spk-image://` repro). User direction expected before picking up F/G; the others are LIGHT-MEDIUM polish work.
 
 If the user gives a direction in their first message, that overrides the pool ordering.

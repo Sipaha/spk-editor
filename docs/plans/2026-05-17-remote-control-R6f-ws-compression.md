@@ -10,7 +10,7 @@ R-4 wire protocol is unaffected. Re-open when upstream lands the
 extension (long-open issue on `snapview/tungstenite-rs`) or when we
 migrate the WS stack.
 
-**Repos:** spk-editor (server) → `spk-editor-android-client` (client verify).
+**Repos:** spk-editor (server) → `spk-editor-mobile` (client verify).
 **Depends on:** R-6e shipped (so the wire payloads that benefit are already minimised, and compression layers on top).
 **Goal:** Enable RFC 7692 `permessage-deflate` on the WebSocket so the JSON-RPC text frames (markdown, tool-call previews, list responses) compress on the wire. Image content blocks are pre-compressed and won't benefit much; text payloads typically shrink 5-10×.
 

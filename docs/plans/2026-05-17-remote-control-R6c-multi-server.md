@@ -1,7 +1,7 @@
 # R-6c-multi: Multi-server pairing storage + Servers screen
 
 **Status:** ready to dispatch
-**Repo:** `spk-editor-android-client` (sibling)
+**Repo:** `spk-editor-mobile` (sibling)
 **Depends on:** R-6b (`EncryptedSharedPreferences` pairing) + R-6a (`ConnectionState` per-client) + R-6d (`AppMasterKey` singleton).
 **Goal:** Support multiple paired workstations from one phone app. PairingRepository moves from one-URL to a keyed map. New Servers screen as the entry point when ≥2 servers exist; single-server case keeps the R-6b cold-start auto-resume behavior unchanged.
 
@@ -9,7 +9,7 @@ FCM push notifications are explicitly out of this phase — that's the OTHER hal
 
 ## Why this phase exists
 
-Original 2026-05-15 user ask: "Также нужно создать проект `spk-editor-android-client`... также нужны множественные пары". The single-server R-6b shipping took priority; multi-server is the follow-up.
+Original 2026-05-15 user ask: "Также нужно создать проект `spk-editor-mobile`... также нужны множественные пары". The single-server R-6b shipping took priority; multi-server is the follow-up.
 
 Realistic scenario: user has a desktop at home + a laptop on the go + a server at the office. One Android phone connects to whichever is online. Currently the phone can only pair with ONE server at a time — re-pairing erases the previous.
 
@@ -126,7 +126,7 @@ If the sub-agent wants to add minimal repository tests via Robolectric, that's a
 ## Acceptance
 
 ```bash
-cd /home/spk/.spk/spk-editor/solutions/spk-solutions/spk-editor-android-client
+cd /home/spk/.spk/spk-editor/solutions/spk-solutions/spk-editor-mobile
 ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=$HOME/.jdks/temurin-21.0.10 ./gradlew :core:test :app:assembleDebug :app:assembleRelease --rerun-tasks 2>&1 | tee /tmp/r6c-multi.txt | tail -10
 grep -E "BUILD SUCCESSFUL|FAILURE:" /tmp/r6c-multi.txt
 ls -la app/build/outputs/apk/release/*.apk

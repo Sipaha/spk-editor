@@ -1,7 +1,7 @@
 # R-5d: Chat UI with streaming responses + cancel-turn
 
 **Status:** complete (sibling-repo commit `6ef0cd7`) — closes the R-5 arc
-**Repo:** `spk-editor-android-client/`
+**Repo:** `spk-editor-mobile/`
 **Depends on:** R-5a (`:core`), R-5b (pairing), R-5c (sessions list).
 **Goal:** The session detail screen lights up as a real chat. User types → message goes to the agent → reply streams in bubble-by-bubble. Cancel button stops a turn. Closes the R-5 arc.
 
@@ -80,7 +80,7 @@ If a message contains `Image` content blocks, render them inline (`Coil` for bas
 ## Verification
 
 ```bash
-cd /home/spk/.spk/spk-editor/solutions/spk-solutions/spk-editor-android-client
+cd /home/spk/.spk/spk-editor/solutions/spk-solutions/spk-editor-mobile
 JAVA_HOME=$HOME/.jdks/temurin-21.0.10 ./gradlew :core:test :app:assembleDebug --rerun-tasks 2>&1 | tee /tmp/r5d.txt
 grep -E "BUILD SUCCESSFUL|FAILURE:" /tmp/r5d.txt
 ```

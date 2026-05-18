@@ -27,7 +27,7 @@ progress when away from the workstation.
 > новые. Главное внутри — доступ к диалогам с агентами (раздавать
 > команды + следить за прогрессом, когда не у компа).
 >
-> Также нужно создать проект `spk-editor-android-client` для клиента,
+> Также нужно создать проект `spk-editor-mobile` для клиента,
 > чтобы с Android-телефона управлять и следить за прогрессом агентов в
 > солюшенах.
 
@@ -87,7 +87,7 @@ scoping notes; the per-phase plan docs land as the phases start.
 - Auth: every request signed/authenticated by the client's secret.
 - Throttling: rate limits per client.
 
-### Phase R-5 — Android client scaffold (`spk-editor-android-client`)
+### Phase R-5 — Android client scaffold (`spk-editor-mobile`)
 
 - New project, OUTSIDE the spk-editor repo (or as a sibling crate? unlikely —
   Android needs Gradle/Kotlin, not Cargo; separate repo).

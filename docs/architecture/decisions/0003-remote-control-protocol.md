@@ -39,7 +39,7 @@ Existing inputs that constrain the decision:
 - Workspace already depends on `rustls = 0.23` (declared workspace-wide)
   and pulls `tokio-tungstenite` transitively through other crates.
   Adding **no** new heavy crates is preferable.
-- `spk-editor-android-client` will be Kotlin + Jetpack Compose + OkHttp
+- `spk-editor-mobile` will be Kotlin + Jetpack Compose + OkHttp
   (R-5 plan). OkHttp ships first-class WebSocket + TLS + cert-pinning
   support out of the box. Anything Noise-based would require porting a
   Noise implementation to Kotlin or pulling in `noise-java` (dormant

@@ -1,7 +1,7 @@
 # R-6d: Disk persistence for Android — outbound queue, drafts, lastSeenEntryIndex, nav state, bounce-to-input
 
 **Status:** complete (sibling-repo commit `ff9ca8c`)
-**Repo:** `spk-editor-android-client` (sibling)
+**Repo:** `spk-editor-mobile` (sibling)
 **Depends on:** R-6a (in-memory queue) + R-6b (EncryptedSharedPreferences + Settings screen).
 **Goal:** Everything that a user-visible action produced must survive a force-kill of the app. The R-6a in-memory queue + R-6b's pairing-only persistence aren't enough — typed-but-unsent messages, queued sends, last-seen indices, and the active nav route should all live on disk.
 
@@ -144,7 +144,7 @@ Pick Option 1 — keeps the existing surface contract and tests.
 ## Acceptance
 
 ```bash
-cd /home/spk/.spk/spk-editor/solutions/spk-solutions/spk-editor-android-client
+cd /home/spk/.spk/spk-editor/solutions/spk-solutions/spk-editor-mobile
 ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=$HOME/.jdks/temurin-21.0.10 ./gradlew :core:test :app:assembleDebug :app:assembleRelease --rerun-tasks 2>&1 | tee /tmp/r6d.txt | tail -15
 grep -E "BUILD SUCCESSFUL|FAILURE:" /tmp/r6d.txt
 ls -la app/build/outputs/apk/release/*.apk

@@ -1,7 +1,7 @@
 # F: Sub-agent indication UI
 
 **Status:** complete — F-server `104881302c`, F-desktop `cd8a6aebb5`, F-phone (sibling) `1af444b`
-**Repos:** spk-editor (server + desktop UI) → `spk-editor-android-client` (phone UI).
+**Repos:** spk-editor (server + desktop UI) → `spk-editor-mobile` (phone UI).
 **Depends on:** R-5e (`get_session` enriched shape), R-5g (`create_session`), R-6e (pagination + index).
 **Goal:** Surface "sub-agents" — independent AI sessions spawned from a parent session — in both the desktop session view and the phone client. Inspired by Claude Code's running-agents bar: a horizontal strip of bubbles above the status row, click a bubble to drill into that session's chat. Auto-hides when no sub-agents exist.
 
@@ -149,7 +149,7 @@ Data flow: subscribe to `SolutionAgentStoreEvent::SessionCreated` / `SessionStat
 
 **9. Tests for the desktop UI:** add at least one rendering test that asserts the strip appears when children exist + is absent otherwise. Use the existing `solution_agent` test infra.
 
-### Phase F-phone (`spk-editor-android-client`)
+### Phase F-phone (`spk-editor-mobile`)
 
 After F-server lands, the wire shape is stable. Phone UI:
 
@@ -204,7 +204,7 @@ cargo test -p remote_control proxy_e2e 2>&1 | grep "test result:"
 ## Acceptance — F-phone (after F-server merges)
 
 ```bash
-cd /home/spk/.spk/spk-editor/solutions/spk-solutions/spk-editor-android-client
+cd /home/spk/.spk/spk-editor/solutions/spk-solutions/spk-editor-mobile
 ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=$HOME/.jdks/temurin-21.0.10 ./gradlew :core:test :app:assembleRelease --rerun-tasks 2>&1 | tee /tmp/F_phone.txt | tail -10
 grep -E "BUILD SUCCESSFUL|FAILURE:" /tmp/F_phone.txt
 ```

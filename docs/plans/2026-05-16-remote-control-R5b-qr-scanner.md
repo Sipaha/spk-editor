@@ -1,7 +1,7 @@
 # R-5b: Android QR scanner — pair from a scanned `spk-remote://` URL
 
 **Status:** complete (sibling-repo commit `6e444e5`)
-**Repo:** `spk-editor-android-client/` (sibling of `spk-editor`)
+**Repo:** `spk-editor-mobile/` (sibling of `spk-editor`)
 **Depends on:** R-5a (`:core` parsing + connection layer), Android SDK present (`ANDROID_HOME` set, platform-34 + build-tools-34.x).
 **Goal:** Replace the R-5a "paste URL" Compose surface with a real QR scanner. Scanning the QR shown by the spk-editor Remote Control modal (server fingerprint + secret + name embedded) parses straight into `PairingUrl` and transitions to `Connecting`.
 
@@ -61,7 +61,7 @@ app/src/main/kotlin/ru/sipaha/spkremote/app/
 ## Verification
 
 ```bash
-cd /home/spk/.spk/spk-editor/solutions/spk-solutions/spk-editor-android-client
+cd /home/spk/.spk/spk-editor/solutions/spk-solutions/spk-editor-mobile
 JAVA_HOME=$HOME/.jdks/temurin-21.0.10 ./gradlew :app:assembleDebug 2>&1 | tee /tmp/r5b.txt
 grep -E "BUILD SUCCESSFUL|FAILURE:" /tmp/r5b.txt
 ```

@@ -2,13 +2,13 @@
 
 **Status:** complete (sibling-repo commits `77eb966` → `4e478f1` → `d83ab47`)
 **Estimated:** 1 sub-agent session, ~3–5 h, sibling-repo dispatch (no spk-editor worktree)
-**Goal:** Stand up `spk-editor-android-client` as a sibling repo of `spk-editor`. Land a two-module Kotlin/Gradle layout (`:core` JVM lib + `:app` Android Compose stub). The `:core` module implements the WS+TLS+HMAC handshake matching the server side that R-2 + R-3 + R-4 ship, and is verifiable with JDK alone (no Android SDK required). `:app` is a thin Compose UI surface that depends on `:core` — its files are written but it won't fully build on this machine until the Android SDK is installed.
+**Goal:** Stand up `spk-editor-mobile` as a sibling repo of `spk-editor`. Land a two-module Kotlin/Gradle layout (`:core` JVM lib + `:app` Android Compose stub). The `:core` module implements the WS+TLS+HMAC handshake matching the server side that R-2 + R-3 + R-4 ship, and is verifiable with JDK alone (no Android SDK required). `:app` is a thin Compose UI surface that depends on `:core` — its files are written but it won't fully build on this machine until the Android SDK is installed.
 
 ## Context
 
 R-4 finished the server-side surface: `remote.*` proxy over TLS+WS+HMAC, fingerprint-pinned by the QR shown in R-3. The Android client side has been arc-planned since 2026-05-15 (see [`plans/2026-05-15-remote-control.md`](2026-05-15-remote-control.md) phase R-5) but the repo didn't exist. The user just directed: place it as a sibling of `spk-editor`.
 
-**Where:** `/home/spk/.spk/spk-editor/solutions/spk-solutions/spk-editor-android-client/` (sibling of `spk-editor`, `spk-cockpit`, `spk-mail`). The empty directory has been created by the supervisor; the sub-agent runs `git init` as part of its first commit.
+**Where:** `/home/spk/.spk/spk-editor/solutions/spk-solutions/spk-editor-mobile/` (sibling of `spk-editor`, `spk-cockpit`, `spk-mail`). The empty directory has been created by the supervisor; the sub-agent runs `git init` as part of its first commit.
 
 **Toolchain available on this machine:**
 - JDK 25 (Temurin) — at `~/.jdks/temurin-25.0.2/`.
@@ -29,7 +29,7 @@ This dictates the two-module split — the JVM `:core` library can be fully buil
 
 ### A. Repository init
 
-Working directory: `spk-editor-android-client/` (sibling of `spk-editor`).
+Working directory: `spk-editor-mobile/` (sibling of `spk-editor`).
 
 - `git init` (default branch `main`).
 - Top-level files:
@@ -41,8 +41,8 @@ Working directory: `spk-editor-android-client/` (sibling of `spk-editor`).
 ### B. Gradle multi-module layout
 
 ```
-spk-editor-android-client/
-  settings.gradle.kts          # rootProject.name = "spk-editor-android-client", includes(":core", ":app")
+spk-editor-mobile/
+  settings.gradle.kts          # rootProject.name = "spk-editor-mobile", includes(":core", ":app")
   build.gradle.kts             # top-level, plugins block with apply false for android + kotlin
   gradle.properties            # org.gradle.jvmargs, kotlin.code.style=official, android.useAndroidX=true
   gradlew, gradlew.bat         # wrapper scripts (verbatim from a Gradle 8.10+ wrapper init)
@@ -156,7 +156,7 @@ Don't add CI yet — the R-1..R-4 work in spk-editor is also CI-free per the use
 
 ## Verification
 
-Working directory: `/home/spk/.spk/spk-editor/solutions/spk-solutions/spk-editor-android-client/`.
+Working directory: `/home/spk/.spk/spk-editor/solutions/spk-solutions/spk-editor-mobile/`.
 
 ```bash
 ./gradlew --version 2>&1 | tee /tmp/r5a_gradle_version.txt
@@ -175,7 +175,7 @@ grep -E "SDK location not found|ANDROID_HOME" /tmp/r5a_app.txt
 
 Acceptance:
 
-- [x] `git init` + initial commit in `spk-editor-android-client/`.
+- [x] `git init` + initial commit in `spk-editor-mobile/`.
 - [x] `./gradlew --version` reports Gradle ≥ 8.10 and uses the wrapper-distributed Gradle (no system gradle required).
 - [x] `./gradlew :core:build :core:test` — BUILD SUCCESSFUL, all unit tests green.
 - [x] `./gradlew :app:tasks --dry-run` — fails *only* with "SDK location not found" or equivalent. **NOT** with a Kotlin syntax error or unresolved dependency.
@@ -186,7 +186,7 @@ Acceptance:
 ## When done
 
 Sub-agent reports:
-- The initial-commit SHA in `spk-editor-android-client`.
+- The initial-commit SHA in `spk-editor-mobile`.
 - Test counts for `:core`.
 - Confirmation that `:app` Kotlin sources compile *as files* (the agent reads them back, no syntax errors visible) even though Gradle's Android plugin won't configure without SDK.
 - Whether OkHttp's `X509ExtendedTrustManager` API change bit the agent.
@@ -203,7 +203,7 @@ Supervisor:
 ## Inline summary for the sub-agent (worktree-staleness safeguard)
 
 The full plan above is the dispatch context. Sub-agent operates in the
-sibling directory `/home/spk/.spk/spk-editor/solutions/spk-solutions/spk-editor-android-client/`,
+sibling directory `/home/spk/.spk/spk-editor/solutions/spk-solutions/spk-editor-mobile/`,
 which the supervisor has created (empty) before dispatch. No spk-editor
 worktree is used for R-5a — the work is entirely in a new repo.
 
@@ -211,7 +211,7 @@ worktree is used for R-5a — the work is entirely in a new repo.
 
 ## Post-merge log (2026-05-16)
 
-**Sibling-repo commit:** `77eb966 Bootstrap spk-editor-android-client (R-5a)` — single commit, 31 files, 2582 insertions.
+**Sibling-repo commit:** `77eb966 Bootstrap spk-editor-mobile (R-5a)` — single commit, 31 files, 2582 insertions.
 
 **Verified by supervisor:**
 - `./gradlew --version` → Gradle 8.11.1, Kotlin 2.0.20, Launcher JVM 21.0.10 (Temurin). Wrapper-only, no system gradle. ✓

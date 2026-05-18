@@ -1,7 +1,7 @@
 # R-6e: Pagination on `get_session` + incremental resume via `lastSeenEntryIndex`
 
 **Status:** complete (server commit `b756392b52`, client commit `c7fbddc`)
-**Repos:** spk-editor (server) → `spk-editor-android-client` (client). Two sub-agent dispatches.
+**Repos:** spk-editor (server) → `spk-editor-mobile` (client). Two sub-agent dispatches.
 **Depends on:** R-5e (`get_session` shape) + R-6d (`lastSeenEntryIndex` persisted on the client side).
 **Goal:** Stop sending entire session histories on every reconnect / screen entry. A 200-entry chat with embedded images can be 50+ MB on the wire; on a flaky LTE link, that's the difference between "instant" and "30-second waits + frequent timeouts". Add cursor-style pagination to `get_session` + wire the client to fetch only the delta on reconnect.
 
@@ -185,7 +185,7 @@ cargo test -p remote_control proxy_e2e 2>&1 | grep "test result:"
 ## Acceptance (client side, after server lands)
 
 ```bash
-cd /home/spk/.spk/spk-editor/solutions/spk-solutions/spk-editor-android-client
+cd /home/spk/.spk/spk-editor/solutions/spk-solutions/spk-editor-mobile
 ANDROID_HOME=$HOME/Android/Sdk JAVA_HOME=$HOME/.jdks/temurin-21.0.10 ./gradlew :core:test :app:assembleRelease --rerun-tasks 2>&1 | tee /tmp/r6e_client.txt | tail -10
 grep -E "BUILD SUCCESSFUL|FAILURE:" /tmp/r6e_client.txt
 ```
