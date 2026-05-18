@@ -174,7 +174,14 @@ impl RemoteControlStore {
     /// on the shared tokio runtime (from `gpui_tokio`). Hops back to the
     /// foreground entity to store the resulting `ListenerHandle`.
     fn start_listener_async(&mut self, cx: &mut Context<Self>) {
-        if self.listener.is_some() {
+        // Guard against double-start. Check BOTH the live handle and
+        // the in-flight bootstrap task: a rapid toggle-off-then-on
+        // sequence may have a bootstrap already running but no handle
+        // yet (the bootstrap_listener future is in progress). Without
+        // the `_bootstrap` half of this guard, two parallel bootstrap
+        // tasks can race in `cert::load_or_generate` and both end up
+        // writing different cert/key pairs to disk.
+        if self.listener.is_some() || self._bootstrap.is_some() {
             return;
         }
         let Some(fs) = self.fs.clone() else {
@@ -214,35 +221,42 @@ impl RemoteControlStore {
 
         let task = cx.spawn(async move |this, cx| {
             let bootstrap_result = bootstrap.await;
-            let _ = this.update(cx, |this, cx| match bootstrap_result {
-                Ok((handle, fingerprint)) => {
-                    if !this.settings.enabled {
-                        // Toggled off while we were starting up; drop the
-                        // freshly-built handle immediately.
+            let _ = this.update(cx, |this, cx| {
+                // Clear the in-flight marker BEFORE handling the
+                // result — the start-guard at the top of this method
+                // checks `_bootstrap.is_some()`, and leaving it set
+                // here would block subsequent toggle-on calls.
+                this._bootstrap = None;
+                match bootstrap_result {
+                    Ok((handle, fingerprint)) => {
+                        if !this.settings.enabled {
+                            // Toggled off while we were starting up; drop the
+                            // freshly-built handle immediately.
+                            log::info!(
+                                target: "remote_control",
+                                "listener started but enabled was toggled off; dropping",
+                            );
+                            return;
+                        }
                         log::info!(
                             target: "remote_control",
-                            "listener started but enabled was toggled off; dropping",
+                            "listener bound on {}",
+                            handle.bound_addr(),
                         );
-                        return;
+                        this.listener = Some(handle);
+                        this.cert_fingerprint = Some(fingerprint);
+                        this.notify_changed(cx);
                     }
-                    log::info!(
-                        target: "remote_control",
-                        "listener bound on {}",
-                        handle.bound_addr(),
-                    );
-                    this.listener = Some(handle);
-                    this.cert_fingerprint = Some(fingerprint);
-                    this.notify_changed(cx);
-                }
-                Err(err) => {
-                    log::warn!(
-                        target: "remote_control",
-                        "listener start failed: {err:#}",
-                    );
-                    this.settings.enabled = false;
-                    this.clients_tx = None;
-                    this.notify_changed(cx);
-                    this.save_to_disk(cx).detach();
+                    Err(err) => {
+                        log::warn!(
+                            target: "remote_control",
+                            "listener start failed: {err:#}",
+                        );
+                        this.settings.enabled = false;
+                        this.clients_tx = None;
+                        this.notify_changed(cx);
+                        this.save_to_disk(cx).detach();
+                    }
                 }
             });
         });

@@ -193,8 +193,17 @@ impl TokenBucket {
     }
 
     /// Refill from elapsed wall time. Returns the wait duration the
-    /// caller should sleep for if no tokens are available, or `Duration::ZERO`
-    /// if a token was taken.
+    /// caller should sleep for before proceeding, or `Duration::ZERO`
+    /// if a token was already available.
+    ///
+    /// Important: in the wait branch we DECREMENT `tokens` (going
+    /// negative) so concurrent callers serialise on the bucket's
+    /// shared deficit. Without that, two callers contending on an
+    /// empty bucket each independently compute the same wait, sleep
+    /// in parallel, and BOTH proceed — silently doubling the
+    /// effective rate. With the deficit, the second caller's
+    /// `1.0 - self.tokens` is larger, so its wait is correspondingly
+    /// longer, restoring the documented rate invariant.
     fn try_take(&mut self) -> Duration {
         let now = Instant::now();
         let elapsed = now.saturating_duration_since(self.last_refill);
@@ -205,9 +214,11 @@ impl TokenBucket {
             self.tokens -= 1.0;
             Duration::ZERO
         } else {
-            // Need (1.0 - self.tokens) more tokens at refill_per_sec rate.
             let needed = 1.0 - self.tokens;
             let wait_secs = needed / self.refill_per_sec as f64;
+            // Reserve the next token by debiting the bucket NOW.
+            // Subsequent callers see the deficit and wait longer.
+            self.tokens -= 1.0;
             Duration::from_secs_f64(wait_secs)
         }
     }
@@ -232,6 +243,14 @@ fn subnet_key(ip: IpAddr) -> IpAddr {
 }
 
 fn now_millis() -> i64 {
+    // `duration_since(UNIX_EPOCH)` fails iff the system clock is set
+    // before 1970. In that absurd case the fallback collapses every
+    // last_activity to epoch — harmless for LRU comparisons (still
+    // monotonic within a stuck-clock session), and the next clock
+    // tick after the user fixes their system clock will sort the
+    // distortion out on its own. Not worth promoting to Instant
+    // (which would require typed plumbing through the slot struct);
+    // wall-clock millis are good enough for "show me the staler one".
     let dur = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
@@ -352,7 +371,10 @@ async fn accept_loop(
                         // 2. Global accept-rate limit. Sleep until a
                         //    token is available so a burst of probes
                         //    can't drag the editor's CPU into TLS-
-                        //    handshake exhaustion.
+                        //    handshake exhaustion. The sleep races
+                        //    against `shutdown_rx` so a shutdown
+                        //    request never has to wait up to 1/RATE
+                        //    seconds for the bucket to refill.
                         let wait = {
                             let mut bucket = state.accept_bucket.lock().await;
                             bucket.try_take()
@@ -362,7 +384,14 @@ async fn accept_loop(
                                 target: "remote_control",
                                 "accept-rate limit: deferring {peer} by {wait:?}",
                             );
-                            tokio::time::sleep(wait).await;
+                            tokio::select! {
+                                biased;
+                                _ = &mut shutdown_rx => {
+                                    log::info!(target: "remote_control", "listener shutdown interrupted accept-rate sleep");
+                                    break;
+                                }
+                                _ = tokio::time::sleep(wait) => {}
+                            }
                         }
 
                         let acceptor = acceptor.clone();
@@ -437,10 +466,13 @@ async fn record_auth_failure(state: &ListenerState, ip: IpAddr) {
     // counter at 0 → step below makes it 1 (= first offense, 30 s).
     entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
     entry.last_seen = now;
-    let step = BAN_BACKOFF_SECS
-        .get((entry.consecutive_failures as usize).saturating_sub(1))
-        .copied()
-        .unwrap_or_else(|| *BAN_BACKOFF_SECS.last().unwrap_or(&86_400));
+    // Clamp index into the const backoff table — past the end of the
+    // schedule we stay at the longest step (currently 24 h). The
+    // const-assert at module load (via `unwrap()` here) catches the
+    // accidental-empty-slice regression at first call.
+    let idx = ((entry.consecutive_failures as usize).saturating_sub(1))
+        .min(BAN_BACKOFF_SECS.len() - 1);
+    let step = BAN_BACKOFF_SECS[idx];
     entry.banned_until = Some(now + Duration::from_secs(step));
     log::info!(
         target: "remote_control",
@@ -449,7 +481,11 @@ async fn record_auth_failure(state: &ListenerState, ip: IpAddr) {
     );
     // Capacity bound: evict LRU record if we just blew past the cap.
     // Worst-case overshoot is 1 (we just inserted) so a single pop is
-    // enough.
+    // enough. The eviction scan is O(BAN_LIST_MAX_ENTRIES); at the
+    // current 10k cap + ≤ 5 inserts/sec from the accept-rate limit,
+    // that's ≤ 50k comparisons/sec — negligible. Tied `last_seen`
+    // values resolve by HashMap iteration order, which is non-
+    // deterministic but acceptable for an LRU approximation.
     if bans.len() > BAN_LIST_MAX_ENTRIES {
         if let Some(victim) = bans
             .iter()
@@ -465,14 +501,24 @@ async fn record_auth_failure(state: &ListenerState, ip: IpAddr) {
     }
 }
 
-/// Successful auth from `ip` resets its subnet's failure counter. Lets
-/// a legit user who fat-fingered the QR scan reset to a clean slate
-/// once they get one good handshake through.
+/// Successful auth from `ip` lifts any active ban on its subnet but
+/// **preserves the failure counter** within the memory window.
+///
+/// The /24 granularity means the legit user's phone shares a subnet
+/// with everything else behind their home NAT (printer, smart-TV,
+/// roommate's laptop). If we fully zeroed the counter on every
+/// successful auth, an attacker repeatedly probing from the same /24
+/// (e.g. a compromised IoT device on the LAN) would get their
+/// escalating ban reset every time the legit user's phone reconnects.
+/// Lifting just the active ban window while keeping the counter means:
+///   - The legit user immediately regains access (good UX).
+///   - The next bad-auth attempt from the same subnet picks up where
+///     the counter left off — a persistent attacker still ratchets
+///     into hour/day-long bans.
 async fn record_auth_success(state: &ListenerState, ip: IpAddr) {
     let mut bans = state.bans.lock().await;
     let key = subnet_key(ip);
     if let Some(rec) = bans.get_mut(&key) {
-        rec.consecutive_failures = 0;
         rec.banned_until = None;
         rec.last_seen = Instant::now();
     }
@@ -521,23 +567,34 @@ async fn watch_revocations(
             .iter()
             .map(|c| c.name.clone())
             .collect();
-        let mut conns = state.active_conns.lock().await;
-        let mut i = 0;
-        while i < conns.len() {
-            if !allowed.contains(&conns[i].client_name) {
-                let mut victim = conns.swap_remove(i);
-                let victim_name = victim.client_name.clone();
-                let victim_peer = victim.peer;
-                if let Some(kill) = victim.kill.take() {
-                    let _ = kill.send(());
+        // Collect the kill senders + log info under the active_conns
+        // lock, then release the lock BEFORE firing the oneshot
+        // sends. Send itself is non-blocking, but releasing first
+        // minimises the window where a concurrent
+        // `kick_existing_for_client` or accept-side slot push would
+        // contend with us.
+        let to_kill: Vec<(oneshot::Sender<()>, String, SocketAddr)> = {
+            let mut conns = state.active_conns.lock().await;
+            let mut kills = Vec::new();
+            let mut i = 0;
+            while i < conns.len() {
+                if !allowed.contains(&conns[i].client_name) {
+                    let mut victim = conns.swap_remove(i);
+                    if let Some(kill) = victim.kill.take() {
+                        kills.push((kill, victim.client_name.clone(), victim.peer));
+                    }
+                } else {
+                    i += 1;
                 }
-                log::info!(
-                    target: "remote_control",
-                    "kicking revoked client {victim_name:?} ({victim_peer})",
-                );
-            } else {
-                i += 1;
             }
+            kills
+        };
+        for (kill, name, peer) in to_kill {
+            let _ = kill.send(());
+            log::info!(
+                target: "remote_control",
+                "kicking revoked client {name:?} ({peer})",
+            );
         }
     }
 }
@@ -550,31 +607,86 @@ async fn handle_conn(
     dispatcher: Arc<dyn RemoteDispatcher>,
     state: Arc<ListenerState>,
 ) -> Result<()> {
-    // Disable Nagle: WS frames are small and latency-sensitive.
-    let _ = stream.set_nodelay(true);
+    // Disable Nagle: WS frames are small and latency-sensitive. Rare
+    // platforms refuse this (already-closed sockets, exotic kernels);
+    // log at debug rather than dying — the connection still works,
+    // just with slightly worse interactive latency.
+    if let Err(err) = stream.set_nodelay(true) {
+        log::debug!(
+            target: "remote_control",
+            "set_nodelay({peer}) failed: {err:#}",
+        );
+    }
 
     // Bound concurrent TLS handshakes — a flood gets queued on the
-    // semaphore instead of trampling CPU. Held until the handshake
-    // completes (the permit is released by drop at the end of this
-    // block via the `_permit` binding).
-    let _permit = state
+    // semaphore instead of trampling CPU. `tls_permit` is released by
+    // drop at function exit OR explicitly after the WS upgrade
+    // succeeds (whichever happens first) — the explicit drop on the
+    // happy path lets the next queued connection begin TLS work in
+    // parallel with our HMAC handshake + request loop. Do NOT rename
+    // to `_permit`: the leading-underscore convention signals
+    // "unused" and would invite future contributors to delete it
+    // wholesale.
+    let tls_permit = state
         .tls_handshake_slots
         .acquire()
         .await
         .map_err(|err| anyhow!("tls semaphore closed: {err}"))?;
 
-    let tls_stream = acceptor
-        .accept(stream)
-        .await
-        .context("TLS handshake")?;
+    // Bound TLS + WS handshake wall-time. Without these timeouts, a
+    // slow-loris peer can trickle TLS bytes forever and hold its
+    // permit (and its TCP/TLS state) indefinitely; with the semaphore
+    // capped at 4 slots, 4 such peers would lock out all legit
+    // pairings. Failures here also count as auth failures so the
+    // subnet ban-escalation ladder catches deliberate flooders.
+    let tls_stream = match tokio::time::timeout(
+        Duration::from_secs(HANDSHAKE_TIMEOUT_SECS),
+        acceptor.accept(stream),
+    )
+    .await
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(err)) => {
+            record_auth_failure(&state, peer.ip()).await;
+            return Err(err).context("TLS handshake");
+        }
+        Err(_) => {
+            record_auth_failure(&state, peer.ip()).await;
+            return Err(anyhow!(
+                "TLS handshake timeout after {HANDSHAKE_TIMEOUT_SECS}s"
+            ));
+        }
+    };
 
-    let mut ws = tokio_tungstenite::accept_async(tls_stream)
-        .await
-        .context("WebSocket upgrade")?;
+    // Cap the pre-auth message size: tungstenite's defaults are 64 MiB
+    // frame / 64 MiB message, which is a free memory amplifier for an
+    // unauth'd peer. The challenge response is ≤ 200 bytes; 64 KiB is
+    // generous headroom for any framing overhead.
+    let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_frame_size(Some(64 * 1024))
+        .max_message_size(Some(64 * 1024));
+    let mut ws = match tokio::time::timeout(
+        Duration::from_secs(HANDSHAKE_TIMEOUT_SECS),
+        tokio_tungstenite::accept_async_with_config(tls_stream, Some(ws_config)),
+    )
+    .await
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(err)) => {
+            record_auth_failure(&state, peer.ip()).await;
+            return Err(err).context("WebSocket upgrade");
+        }
+        Err(_) => {
+            record_auth_failure(&state, peer.ip()).await;
+            return Err(anyhow!(
+                "WebSocket upgrade timeout after {HANDSHAKE_TIMEOUT_SECS}s"
+            ));
+        }
+    };
     // After the WS handshake the TLS handshake is over; release the
     // semaphore early so the next queued connection can begin its
     // own TLS work in parallel with our HMAC handshake + request loop.
-    drop(_permit);
+    drop(tls_permit);
 
     // 1. Send challenge.
     let challenge = auth::make_challenge().context("make_challenge")?;
@@ -662,6 +774,15 @@ async fn handle_conn(
     }
     // Ensure the slot is removed when this function returns, no matter
     // which exit path. Identity is by Arc::ptr_eq on `last_activity`.
+    //
+    // Drop fires `tokio::spawn`, which panics if the runtime has
+    // already shut down — possible if the editor process is exiting
+    // and the runtime is torn down before the per-connection task.
+    // `Handle::try_current()` returns None in that case, in which
+    // case we fall back to a blocking_lock-style cleanup attempt;
+    // if that also fails we just log and let the slot leak (process
+    // is exiting anyway, the leak is bounded by the runtime's
+    // lifetime).
     struct SlotGuard {
         state: Arc<ListenerState>,
         last_activity: Arc<AtomicI64>,
@@ -670,10 +791,29 @@ async fn handle_conn(
         fn drop(&mut self) {
             let state = self.state.clone();
             let last_activity = self.last_activity.clone();
-            tokio::spawn(async move {
-                let mut conns = state.active_conns.lock().await;
-                conns.retain(|c| !Arc::ptr_eq(&c.last_activity, &last_activity));
-            });
+            match tokio::runtime::Handle::try_current() {
+                Ok(handle) => {
+                    handle.spawn(async move {
+                        let mut conns = state.active_conns.lock().await;
+                        conns.retain(|c| !Arc::ptr_eq(&c.last_activity, &last_activity));
+                    });
+                }
+                Err(_) => {
+                    // No tokio runtime → we're being torn down. Try a
+                    // best-effort sync cleanup; if the mutex is held
+                    // we can't block forever during shutdown, so we
+                    // just log and let the slot orphan with the
+                    // dying runtime.
+                    if let Ok(mut conns) = state.active_conns.try_lock() {
+                        conns.retain(|c| !Arc::ptr_eq(&c.last_activity, &last_activity));
+                    } else {
+                        log::debug!(
+                            target: "remote_control",
+                            "SlotGuard::drop during shutdown — runtime gone and active_conns locked; slot orphaned",
+                        );
+                    }
+                }
+            }
         }
     }
     let _slot_guard = SlotGuard {

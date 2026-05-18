@@ -59,6 +59,15 @@ pub fn expected_response(secret_base64: &str, challenge: &[u8; 16]) -> Result<[u
 /// the wall-clock time of this function depends only on `clients.len()`
 /// (not on which client matches, or whether any does).
 ///
+/// Corrupt-secret rows (invalid base64 in the on-disk JSON) participate in
+/// the timing budget via a dummy HMAC computation against a fixed zero-
+/// secret + the live `ct_eq` step, so the work shape stays uniform across
+/// all rows. Without this, a row with a corrupt secret would short-circuit
+/// past `ct_eq` and produce a measurable timing skew — letting an
+/// attacker who can observe handshake latency infer how many rows are
+/// well-formed. The fixed dummy secret is constant-time-equivalent to any
+/// other 32-byte value (HMAC-SHA256 doesn't branch on input).
+///
 /// Returning `Option<&AuthorizedClient>` rather than the identifier is
 /// deliberate: callers want to log the name and use the secret for
 /// per-session derivation if we ever add one. Constant-time secrecy applies
@@ -68,15 +77,37 @@ pub fn identify_client<'a>(
     response: &[u8; 32],
     clients: &'a [AuthorizedClient],
 ) -> Option<&'a AuthorizedClient> {
+    // Per-row work-shape equalisation: when a row's secret is corrupt
+    // base64, we burn a FULL HMAC computation against a fixed dummy
+    // secret rather than short-circuiting on the decode error. The
+    // dummy secret is encoded outside the loop (one base64 encode +
+    // discard) but the HMAC is computed inside per row, so each
+    // iteration costs the same as a valid-secret row (1 base64
+    // decode + 1 HMAC-SHA256 + 1 ct_eq). Without this, an attacker
+    // who can observe handshake latency across many requests can
+    // distinguish "k rows have corrupt secrets" from "all rows are
+    // well-formed" by the per-iteration cost delta (~hundreds of ns
+    // for HMAC vs ~tens of ns for a base64 reject).
+    let dummy_secret = base64::engine::general_purpose::STANDARD.encode([0u8; 32]);
+
     let mut found: Option<&AuthorizedClient> = None;
     for client in clients {
-        // A decode error here means the on-disk JSON has a corrupt secret;
-        // skip the client rather than aborting auth entirely.
-        let Ok(expected) = expected_response(&client.secret_base64, challenge) else {
-            continue;
+        // `expected_response` returns Err iff the row's secret is
+        // unparseable base64. Track that as `valid` so a corrupt row
+        // can't accidentally authenticate as that row's name even if
+        // the attacker submitted the dummy response (the pairing is
+        // already broken on disk).
+        let (expected, valid) = match expected_response(&client.secret_base64, challenge) {
+            Ok(bytes) => (bytes, true),
+            Err(_) => {
+                // Burn equivalent HMAC work on the dummy secret so
+                // the iteration time matches a valid row's.
+                let burned = expected_response(&dummy_secret, challenge).unwrap_or([0u8; 32]);
+                (burned, false)
+            }
         };
         let matches: bool = expected.ct_eq(response).into();
-        if matches && found.is_none() {
+        if valid && matches && found.is_none() {
             found = Some(client);
             // Intentionally NOT `break;` — we want the work-shape to depend
             // only on `clients.len()`, not on which client matched.
