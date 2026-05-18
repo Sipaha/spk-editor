@@ -10,7 +10,7 @@
 //! intent to every alive connection).
 
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
@@ -20,7 +20,7 @@ use futures::{SinkExt as _, StreamExt as _};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::ServerConfig;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex as AsyncMutex, oneshot, watch};
+use tokio::sync::{Mutex as AsyncMutex, Semaphore, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::tungstenite::Message;
@@ -33,7 +33,7 @@ use crate::cert::ServerCert;
 use crate::dispatch::{
     ConnectionDispatcher, JsonRpcResponse, RemoteDispatcher, parse_request,
 };
-use crate::model::{AuthorizedClient, BAN_DURATION_SECS};
+use crate::model::AuthorizedClient;
 
 /// Max time (seconds) the client has to reply to the challenge frame
 /// before we drop the connection.
@@ -43,6 +43,44 @@ const HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 /// anything for this long is dropped; clients are expected to ping
 /// (`remote.editor.ping`) well below this bound to stay alive.
 const IDLE_READ_TIMEOUT_SECS: u64 = 60;
+
+/// Exponential backoff for repeat auth failures, in seconds. First fail
+/// from a subnet → 30 s cooldown; second within the grace window → 5 min;
+/// third → 1 h; fourth+ → 24 h. The schedule discourages persistent
+/// scanners (cost grows fast) while keeping accidental fat-finger
+/// fail-once cases cheap.
+const BAN_BACKOFF_SECS: &[u64] = &[30, 300, 3_600, 86_400];
+
+/// Window after a ban expires during which the failure-count is still
+/// remembered. If a new auth failure arrives within this window, the
+/// counter advances and the next ban is the next step in
+/// [`BAN_BACKOFF_SECS`]. After the window, the record decays back to
+/// "first offense".
+const BAN_MEMORY_SECS: u64 = 6 * 3_600;
+
+/// Hard cap on how many subnet records the ban map holds. Without this,
+/// a flooder with millions of IPs could OOM the server BY ITS BAN MAP
+/// alone. On overflow we evict the record with the oldest `last_seen`
+/// (LRU), preserving recent offenders for the backoff escalation.
+const BAN_LIST_MAX_ENTRIES: usize = 10_000;
+
+/// Tokens-per-second for the global accept-rate limiter. New accepts
+/// that arrive faster than this wait in a tokio sleep before being
+/// admitted into TLS — caps total TLS-handshake CPU regardless of how
+/// many source IPs are attacking. 5/s easily covers a human pairing
+/// + reconnect spike but kills a 10k-IP fan-in cold.
+const ACCEPT_RATE_PER_SEC: u32 = 5;
+
+/// Bucket depth for the rate limiter. Allows short bursts above
+/// [`ACCEPT_RATE_PER_SEC`] (legit client open + browser tab open at
+/// the same time) without queueing.
+const ACCEPT_BURST: u32 = 10;
+
+/// Max number of TLS handshakes happening at the same time. A new
+/// connection past this bound waits on the semaphore until an earlier
+/// handshake either completes or times out. Caps memory + CPU during
+/// a flood.
+const TLS_HANDSHAKE_CONCURRENCY: usize = 4;
 
 /// Configuration for a listener. Owned by the caller across the
 /// `start_listener` call boundary; consumed into the spawned task.
@@ -79,13 +117,115 @@ struct ConnectionSlot {
     kill: Option<oneshot::Sender<()>>,
 }
 
-#[derive(Default)]
+/// One row in the ban map. Keyed by [`subnet_key`] (a /24 for IPv4, /64
+/// for IPv6) so a casual attacker can't trivially sidestep by switching
+/// their last octet.
+struct BanRecord {
+    /// How many auth failures we've seen from this subnet within the
+    /// memory window. Indexes into [`BAN_BACKOFF_SECS`] for the next
+    /// ban duration (clamped to the last entry).
+    consecutive_failures: u32,
+    /// `Some(t)` while the subnet is currently banned (t is when the
+    /// ban lifts). `None` between bans, but the record sticks around
+    /// for [`BAN_MEMORY_SECS`] so a repeat offender escalates.
+    banned_until: Option<Instant>,
+    /// Last time anything touched this record. Used for the LRU
+    /// eviction when the map is at [`BAN_LIST_MAX_ENTRIES`] capacity.
+    last_seen: Instant,
+}
+
 struct ListenerState {
-    /// IP -> Instant when the ban expires. Inserted on auth failure,
-    /// pruned lazily on the next accept from any IP (so the map stays
-    /// roughly bounded by the rate of recent offenders).
-    banned_until: AsyncMutex<HashMap<IpAddr, Instant>>,
+    /// Subnet -> ban record. Entries pruned lazily on every accept (so
+    /// the map decays automatically when nobody's attacking) and capped
+    /// at [`BAN_LIST_MAX_ENTRIES`] entries via LRU eviction on insert.
+    bans: AsyncMutex<HashMap<IpAddr, BanRecord>>,
+    /// Live authenticated connections — what the connection-budget LRU
+    /// evicter looks at. Populated AFTER successful auth so a failed
+    /// handshake never costs a legit client their slot.
     active_conns: AsyncMutex<Vec<ConnectionSlot>>,
+    /// Bounds total TLS-handshake concurrency to avoid CPU + memory
+    /// thrashing under flood. New connections past the budget queue on
+    /// `acquire().await` until an earlier handshake finishes (or
+    /// times out at [`HANDSHAKE_TIMEOUT_SECS`]).
+    tls_handshake_slots: Semaphore,
+    /// Token bucket for the global accept rate. Reads/writes go through
+    /// a tokio mutex; the data inside is tiny (last refill time + token
+    /// count) so contention is negligible.
+    accept_bucket: AsyncMutex<TokenBucket>,
+}
+
+impl Default for ListenerState {
+    fn default() -> Self {
+        Self {
+            bans: AsyncMutex::new(HashMap::new()),
+            active_conns: AsyncMutex::new(Vec::new()),
+            tls_handshake_slots: Semaphore::new(TLS_HANDSHAKE_CONCURRENCY),
+            accept_bucket: AsyncMutex::new(TokenBucket::new(
+                ACCEPT_BURST,
+                ACCEPT_RATE_PER_SEC,
+            )),
+        }
+    }
+}
+
+/// Trivial in-memory token bucket. `capacity` is the burst budget;
+/// `refill_per_sec` is the steady-state rate. `take_one().await` blocks
+/// the caller until at least one token is available, refilling lazily
+/// from the wall clock since the last call.
+struct TokenBucket {
+    capacity: u32,
+    refill_per_sec: u32,
+    tokens: f64,
+    last_refill: Instant,
+}
+
+impl TokenBucket {
+    fn new(capacity: u32, refill_per_sec: u32) -> Self {
+        Self {
+            capacity,
+            refill_per_sec,
+            tokens: capacity as f64,
+            last_refill: Instant::now(),
+        }
+    }
+
+    /// Refill from elapsed wall time. Returns the wait duration the
+    /// caller should sleep for if no tokens are available, or `Duration::ZERO`
+    /// if a token was taken.
+    fn try_take(&mut self) -> Duration {
+        let now = Instant::now();
+        let elapsed = now.saturating_duration_since(self.last_refill);
+        self.last_refill = now;
+        let refill = elapsed.as_secs_f64() * self.refill_per_sec as f64;
+        self.tokens = (self.tokens + refill).min(self.capacity as f64);
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            Duration::ZERO
+        } else {
+            // Need (1.0 - self.tokens) more tokens at refill_per_sec rate.
+            let needed = 1.0 - self.tokens;
+            let wait_secs = needed / self.refill_per_sec as f64;
+            Duration::from_secs_f64(wait_secs)
+        }
+    }
+}
+
+/// Mask a peer IP down to the network portion we treat as "one
+/// offender". /24 for IPv4 (last octet zeroed); /64 for IPv6 (last
+/// 8 bytes zeroed). Same /24 over residential ISP usually = same
+/// human + same NAT; legit pairs always share their /24 with their
+/// own router.
+fn subnet_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            IpAddr::V4(Ipv4Addr::new(o[0], o[1], o[2], 0))
+        }
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            IpAddr::V6(Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+        }
+    }
 }
 
 fn now_millis() -> i64 {
@@ -188,62 +328,55 @@ async fn accept_loop(
             accept = listener.accept() => {
                 match accept {
                     Ok((stream, peer)) => {
-                        // Cheapest gate first: drop the TCP stream
-                        // immediately if the source IP is in the
-                        // ban list. TLS never starts; the attacker
-                        // pays only the SYN/ACK cost.
+                        // 1. Subnet ban — cheapest gate. Drop the TCP
+                        //    stream before TLS, even before the rate-
+                        //    limiter, so banned subnets pay only SYN/ACK.
                         if is_banned(&state, peer.ip()).await {
                             log::debug!(
                                 target: "remote_control",
-                                "dropping connection from banned {peer}",
+                                "dropping connection from banned subnet (peer={peer})",
                             );
                             drop(stream);
                             continue;
                         }
-                        // Second gate: connection-count budget. If
-                        // the live count is already at the cap, evict
-                        // the longest-idle slot before admitting the
-                        // new one — so the user's freshly-tapped
-                        // phone always gets in, even if a stale tab
-                        // is still chewing on a previous socket.
-                        let budget = *max_connections_rx.borrow();
-                        evict_if_over_budget(&state, budget).await;
+                        // 2. Global accept-rate limit. Sleep until a
+                        //    token is available so a burst of probes
+                        //    can't drag the editor's CPU into TLS-
+                        //    handshake exhaustion.
+                        let wait = {
+                            let mut bucket = state.accept_bucket.lock().await;
+                            bucket.try_take()
+                        };
+                        if !wait.is_zero() {
+                            log::debug!(
+                                target: "remote_control",
+                                "accept-rate limit: deferring {peer} by {wait:?}",
+                            );
+                            tokio::time::sleep(wait).await;
+                        }
 
                         let acceptor = acceptor.clone();
                         let clients_rx = clients_rx.clone();
+                        let max_connections_rx = max_connections_rx.clone();
                         let dispatcher = dispatcher.clone();
                         let state = state.clone();
-                        let last_activity = Arc::new(AtomicI64::new(now_millis()));
-                        let (kill_tx, kill_rx) = oneshot::channel::<()>();
-                        let slot = ConnectionSlot {
-                            peer,
-                            last_activity: last_activity.clone(),
-                            kill: Some(kill_tx),
-                        };
-                        state.active_conns.lock().await.push(slot);
                         tokio::spawn(async move {
-                            let result = handle_conn(
+                            if let Err(err) = handle_conn(
                                 stream,
                                 peer,
                                 acceptor,
                                 clients_rx,
+                                max_connections_rx,
                                 dispatcher,
-                                state.clone(),
-                                last_activity.clone(),
-                                kill_rx,
+                                state,
                             )
-                            .await;
-                            if let Err(err) = result {
+                            .await
+                            {
                                 log::debug!(
                                     target: "remote_control",
                                     "connection from {peer} ended with: {err:#}",
                                 );
                             }
-                            // Remove this slot on exit. Identity is by
-                            // the Arc pointer of `last_activity`, which
-                            // is unique per connection.
-                            let mut conns = state.active_conns.lock().await;
-                            conns.retain(|c| !Arc::ptr_eq(&c.last_activity, &last_activity));
                         });
                     }
                     Err(err) => {
@@ -259,23 +392,82 @@ async fn accept_loop(
     }
 }
 
-/// Lazily prune the ban list and check if `ip` is still banned.
+/// Check if the subnet `ip` belongs to is currently banned. Side
+/// effect: prunes records older than [`BAN_MEMORY_SECS`] (with no
+/// active ban) so the map decays during quiet periods.
 async fn is_banned(state: &ListenerState, ip: IpAddr) -> bool {
-    let mut bans = state.banned_until.lock().await;
+    let mut bans = state.bans.lock().await;
     let now = Instant::now();
-    bans.retain(|_, deadline| *deadline > now);
-    bans.get(&ip).is_some_and(|deadline| *deadline > now)
+    let memory_cutoff = now - Duration::from_secs(BAN_MEMORY_SECS);
+    // Drop records that have NEITHER an active ban nor a recent
+    // last_seen — they're decayed entries, no reason to keep them.
+    bans.retain(|_, rec| {
+        rec.banned_until.is_some_and(|t| t > now) || rec.last_seen > memory_cutoff
+    });
+    let key = subnet_key(ip);
+    bans.get(&key)
+        .and_then(|rec| rec.banned_until)
+        .is_some_and(|deadline| deadline > now)
 }
 
-/// Add `ip` to the ban list for [`BAN_DURATION_SECS`] starting now.
-async fn ban_ip(state: &ListenerState, ip: IpAddr) {
-    let mut bans = state.banned_until.lock().await;
-    let deadline = Instant::now() + Duration::from_secs(BAN_DURATION_SECS);
-    bans.insert(ip, deadline);
+/// Record a fresh auth failure from `ip`'s subnet. Advances the
+/// failure counter (subject to the [`BAN_MEMORY_SECS`] decay) and
+/// sets `banned_until` based on the matching entry in
+/// [`BAN_BACKOFF_SECS`]. On insert at capacity, evicts the
+/// least-recently-touched record.
+async fn record_auth_failure(state: &ListenerState, ip: IpAddr) {
+    let mut bans = state.bans.lock().await;
+    let now = Instant::now();
+    let key = subnet_key(ip);
+    let entry = bans.entry(key).or_insert_with(|| BanRecord {
+        consecutive_failures: 0,
+        banned_until: None,
+        last_seen: now,
+    });
+    // If the prior ban already ended AND it was long enough ago that
+    // the record decayed, the .or_insert above gave us a brand-new
+    // counter at 0 → step below makes it 1 (= first offense, 30 s).
+    entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
+    entry.last_seen = now;
+    let step = BAN_BACKOFF_SECS
+        .get((entry.consecutive_failures as usize).saturating_sub(1))
+        .copied()
+        .unwrap_or_else(|| *BAN_BACKOFF_SECS.last().unwrap_or(&86_400));
+    entry.banned_until = Some(now + Duration::from_secs(step));
     log::info!(
         target: "remote_control",
-        "ip {ip} banned for {BAN_DURATION_SECS}s after auth failure",
+        "subnet {key} banned for {step}s (failure #{count})",
+        count = entry.consecutive_failures,
     );
+    // Capacity bound: evict LRU record if we just blew past the cap.
+    // Worst-case overshoot is 1 (we just inserted) so a single pop is
+    // enough.
+    if bans.len() > BAN_LIST_MAX_ENTRIES {
+        if let Some(victim) = bans
+            .iter()
+            .min_by_key(|(_, rec)| rec.last_seen)
+            .map(|(k, _)| *k)
+        {
+            bans.remove(&victim);
+            log::debug!(
+                target: "remote_control",
+                "ban map at cap, evicted LRU subnet {victim}",
+            );
+        }
+    }
+}
+
+/// Successful auth from `ip` resets its subnet's failure counter. Lets
+/// a legit user who fat-fingered the QR scan reset to a clean slate
+/// once they get one good handshake through.
+async fn record_auth_success(state: &ListenerState, ip: IpAddr) {
+    let mut bans = state.bans.lock().await;
+    let key = subnet_key(ip);
+    if let Some(rec) = bans.get_mut(&key) {
+        rec.consecutive_failures = 0;
+        rec.banned_until = None;
+        rec.last_seen = Instant::now();
+    }
 }
 
 /// If the active connection count is `>= budget`, evict the slot with
@@ -317,13 +509,22 @@ async fn handle_conn(
     peer: SocketAddr,
     acceptor: TlsAcceptor,
     clients_rx: watch::Receiver<Vec<AuthorizedClient>>,
+    max_connections_rx: watch::Receiver<u32>,
     dispatcher: Arc<dyn RemoteDispatcher>,
     state: Arc<ListenerState>,
-    last_activity: Arc<AtomicI64>,
-    kill_rx: oneshot::Receiver<()>,
 ) -> Result<()> {
     // Disable Nagle: WS frames are small and latency-sensitive.
     let _ = stream.set_nodelay(true);
+
+    // Bound concurrent TLS handshakes — a flood gets queued on the
+    // semaphore instead of trampling CPU. Held until the handshake
+    // completes (the permit is released by drop at the end of this
+    // block via the `_permit` binding).
+    let _permit = state
+        .tls_handshake_slots
+        .acquire()
+        .await
+        .map_err(|err| anyhow!("tls semaphore closed: {err}"))?;
 
     let tls_stream = acceptor
         .accept(stream)
@@ -333,6 +534,10 @@ async fn handle_conn(
     let mut ws = tokio_tungstenite::accept_async(tls_stream)
         .await
         .context("WebSocket upgrade")?;
+    // After the WS handshake the TLS handshake is over; release the
+    // semaphore early so the next queued connection can begin its
+    // own TLS work in parallel with our HMAC handshake + request loop.
+    drop(_permit);
 
     // 1. Send challenge.
     let challenge = auth::make_challenge().context("make_challenge")?;
@@ -368,9 +573,9 @@ async fn handle_conn(
         Ok(bytes) => bytes,
         Err(err) => {
             // Malformed handshake response counts as an auth failure —
-            // ban the IP so a script-kiddie scanner that's spraying
-            // random bytes pays the 30s cooldown before its next try.
-            ban_ip(&state, peer.ip()).await;
+            // ban the subnet (escalating backoff) so a scanner that's
+            // spraying random bytes pays compounding cooldowns.
+            record_auth_failure(&state, peer.ip()).await;
             return Err(err).context("parsing handshake response");
         }
     };
@@ -381,9 +586,9 @@ async fn handle_conn(
     let Some(client) = identified else {
         log::info!(
             target: "remote_control",
-            "auth failed for peer {peer} — banning IP for {BAN_DURATION_SECS}s",
+            "auth failed for peer {peer} — banning subnet",
         );
-        ban_ip(&state, peer.ip()).await;
+        record_auth_failure(&state, peer.ip()).await;
         let close = CloseFrame {
             code: CloseCode::Policy,
             reason: "unauthorized".into(),
@@ -396,14 +601,53 @@ async fn handle_conn(
         target: "remote_control",
         "client {client_name:?} from {peer} authenticated",
     );
+    // Successful auth resets the subnet's failure counter so a legit
+    // user who fat-fingered their first attempt clears their record.
+    record_auth_success(&state, peer.ip()).await;
 
-    // 4. Welcome.
+    // 4. Register the slot AFTER auth (not before) — that way a failed
+    //    handshake never costs a legitimate client their connection,
+    //    and the connection budget only counts real connections.
+    let budget = *max_connections_rx.borrow();
+    evict_if_over_budget(&state, budget).await;
+    let last_activity = Arc::new(AtomicI64::new(now_millis()));
+    let (kill_tx, kill_rx) = oneshot::channel::<()>();
+    {
+        let mut conns = state.active_conns.lock().await;
+        conns.push(ConnectionSlot {
+            peer,
+            last_activity: last_activity.clone(),
+            kill: Some(kill_tx),
+        });
+    }
+    // Ensure the slot is removed when this function returns, no matter
+    // which exit path. Identity is by Arc::ptr_eq on `last_activity`.
+    struct SlotGuard {
+        state: Arc<ListenerState>,
+        last_activity: Arc<AtomicI64>,
+    }
+    impl Drop for SlotGuard {
+        fn drop(&mut self) {
+            let state = self.state.clone();
+            let last_activity = self.last_activity.clone();
+            tokio::spawn(async move {
+                let mut conns = state.active_conns.lock().await;
+                conns.retain(|c| !Arc::ptr_eq(&c.last_activity, &last_activity));
+            });
+        }
+    }
+    let _slot_guard = SlotGuard {
+        state: state.clone(),
+        last_activity: last_activity.clone(),
+    };
+
+    // 5. Welcome.
     let welcome = serde_json::json!({ "type": "welcome", "client": client_name });
     ws.send(Message::Text(welcome.to_string().into()))
         .await
         .context("sending welcome")?;
 
-    // 5. Request loop.
+    // 6. Request loop.
     run_request_loop(&mut ws, &client_name, dispatcher.as_ref(), last_activity, kill_rx).await?;
     Ok(())
 }

@@ -10,11 +10,6 @@ pub const DEFAULT_PORT: u16 = 21772;
 /// phones, etc.) can bump it from the Remote Control modal.
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 1;
 
-/// How long an IP stays banned after a failed handshake. The ban check
-/// runs at TCP accept, before TLS, so a hosed-up scanner doesn't even
-/// pay the certificate cost during this window.
-pub const BAN_DURATION_SECS: u64 = 30;
-
 /// Persisted shape of `~/.config/spk-editor/remote-control.json`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RemoteControlSettings {
