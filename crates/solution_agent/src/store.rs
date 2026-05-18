@@ -1111,13 +1111,27 @@ impl SolutionAgentStore {
         let already_open: std::collections::HashSet<SolutionSessionId> =
             self.sessions.keys().copied().collect();
         cx.spawn(async move |this, cx| {
+            // `list_open_session_ids` filters out rows whose `closed_at`
+            // is set — sessions the user explicitly closed via the
+            // desktop's close-tab affordance. Without this, every
+            // refresh after a close would re-hydrate the closed
+            // session back into self.sessions, undoing the close from
+            // the phone's perspective on the very next list_sessions.
+            let open_ids: std::collections::HashSet<SolutionSessionId> = db
+                .list_open_session_ids(solution_id.clone())
+                .await?
+                .into_iter()
+                .collect();
+            if open_ids.is_empty() {
+                return Ok(Vec::new());
+            }
             let metas = db.list_for_solution(solution_id.clone()).await?;
             if metas.is_empty() {
                 return Ok(Vec::new());
             }
             let to_hydrate: Vec<&SolutionSessionMetadata> = metas
                 .iter()
-                .filter(|m| !already_open.contains(&m.id))
+                .filter(|m| open_ids.contains(&m.id) && !already_open.contains(&m.id))
                 .collect();
             if to_hydrate.is_empty() {
                 return Ok(Vec::new());

@@ -246,6 +246,23 @@ impl SolutionAgentDb {
             select_open_tabs(&connection, &solution_id)
         })
     }
+
+    /// Returns ids of every session for `solution_id` whose
+    /// `closed_at IS NULL` (i.e. the user hasn't explicitly closed
+    /// the session via the desktop's close-tab affordance).
+    /// Driven by `hydrate_all_for_solution` so MCP-only consumers
+    /// see open-but-not-currently-tabbed sessions WITHOUT also
+    /// resurrecting ones the user explicitly archived.
+    pub fn list_open_session_ids(
+        &self,
+        solution_id: SolutionId,
+    ) -> Task<Result<Vec<SolutionSessionId>>> {
+        let connection = self.connection.clone();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            select_open_session_ids(&connection, &solution_id)
+        })
+    }
 }
 
 /// Apply `ALTER TABLE solution_sessions ADD COLUMN <column_def>` and
@@ -458,6 +475,30 @@ fn select_open_tabs(
     for id in rows {
         let parsed = SolutionSessionId::parse(&id)
             .map_err(|e| anyhow!("invalid SolutionSessionId in tab_order row: {e}"))?;
+        out.push(parsed);
+    }
+    Ok(out)
+}
+
+/// Sibling of [`select_open_tabs`] for the MCP-driven phone hydration
+/// path. Drops the `tab_order IS NOT NULL` requirement so closed-tab-
+/// but-not-explicitly-closed sessions surface, while still excluding
+/// rows whose `closed_at` is set (those were soft-deleted on close_session
+/// and re-hydrating them would resurrect the conversation the user
+/// just dismissed).
+fn select_open_session_ids(
+    connection: &Connection,
+    solution_id: &SolutionId,
+) -> Result<Vec<SolutionSessionId>> {
+    let mut select = connection.select_bound::<String, String>(indoc! {"
+        SELECT id FROM solution_sessions
+        WHERE solution_id = ? AND closed_at IS NULL
+    "})?;
+    let rows = select(solution_id.0.clone())?;
+    let mut out = Vec::with_capacity(rows.len());
+    for id in rows {
+        let parsed = SolutionSessionId::parse(&id)
+            .map_err(|e| anyhow!("invalid SolutionSessionId in open-session row: {e}"))?;
         out.push(parsed);
     }
     Ok(out)
