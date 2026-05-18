@@ -9,16 +9,18 @@
 //! `watch` channel where `borrow().clone()` cheaply propagates shutdown
 //! intent to every alive connection).
 
-use std::net::SocketAddr;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
 use futures::{SinkExt as _, StreamExt as _};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::ServerConfig;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{Mutex as AsyncMutex, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::tungstenite::Message;
@@ -31,7 +33,7 @@ use crate::cert::ServerCert;
 use crate::dispatch::{
     ConnectionDispatcher, JsonRpcResponse, RemoteDispatcher, parse_request,
 };
-use crate::model::AuthorizedClient;
+use crate::model::{AuthorizedClient, BAN_DURATION_SECS};
 
 /// Max time (seconds) the client has to reply to the challenge frame
 /// before we drop the connection.
@@ -53,7 +55,44 @@ pub struct ListenerConfig {
     /// Open connections from a revoked client are NOT kicked — that's a
     /// future improvement.
     pub clients_rx: watch::Receiver<Vec<AuthorizedClient>>,
+    /// Live cap on concurrent authorized client sockets. Updated via
+    /// `tx.send(n)` whenever the user changes the value in the modal —
+    /// the accept loop reads it on every accept so changes take effect
+    /// immediately for new connections (already-open ones aren't
+    /// retroactively kicked when the cap shrinks).
+    pub max_connections_rx: watch::Receiver<u32>,
     pub dispatcher: Arc<dyn RemoteDispatcher>,
+}
+
+/// Per-connection registration. The accept loop keeps a Vec of these to
+/// (a) enforce the connection budget by evicting the longest-idle entry
+/// and (b) report observability if we ever surface it.
+struct ConnectionSlot {
+    peer: SocketAddr,
+    /// Unix-millis timestamp of the last activity on this connection.
+    /// Updated by the per-conn task on every inbound frame; read by the
+    /// accept loop when picking an LRU victim. Atomic so the read side
+    /// doesn't need a lock.
+    last_activity: Arc<AtomicI64>,
+    /// Drop-on-eviction signal. The connection task selects against
+    /// `kill_rx`; firing it sends a clean close frame and exits.
+    kill: Option<oneshot::Sender<()>>,
+}
+
+#[derive(Default)]
+struct ListenerState {
+    /// IP -> Instant when the ban expires. Inserted on auth failure,
+    /// pruned lazily on the next accept from any IP (so the map stays
+    /// roughly bounded by the rate of recent offenders).
+    banned_until: AsyncMutex<HashMap<IpAddr, Instant>>,
+    active_conns: AsyncMutex<Vec<ConnectionSlot>>,
+}
+
+fn now_millis() -> i64 {
+    let dur = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    dur.as_millis().min(i64::MAX as u128) as i64
 }
 
 /// Handle returned by `start_listener`. Dropping it triggers shutdown.
@@ -99,11 +138,15 @@ pub async fn start_listener(cfg: ListenerConfig) -> Result<ListenerHandle> {
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
+    let state = Arc::new(ListenerState::default());
+
     let task = tokio::spawn(accept_loop(
         listener,
         acceptor,
         cfg.clients_rx,
+        cfg.max_connections_rx,
         cfg.dispatcher,
+        state,
         shutdown_rx,
     ));
 
@@ -130,7 +173,9 @@ async fn accept_loop(
     listener: TcpListener,
     acceptor: TlsAcceptor,
     clients_rx: watch::Receiver<Vec<AuthorizedClient>>,
+    max_connections_rx: watch::Receiver<u32>,
     dispatcher: Arc<dyn RemoteDispatcher>,
+    state: Arc<ListenerState>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
     loop {
@@ -143,18 +188,62 @@ async fn accept_loop(
             accept = listener.accept() => {
                 match accept {
                     Ok((stream, peer)) => {
+                        // Cheapest gate first: drop the TCP stream
+                        // immediately if the source IP is in the
+                        // ban list. TLS never starts; the attacker
+                        // pays only the SYN/ACK cost.
+                        if is_banned(&state, peer.ip()).await {
+                            log::debug!(
+                                target: "remote_control",
+                                "dropping connection from banned {peer}",
+                            );
+                            drop(stream);
+                            continue;
+                        }
+                        // Second gate: connection-count budget. If
+                        // the live count is already at the cap, evict
+                        // the longest-idle slot before admitting the
+                        // new one — so the user's freshly-tapped
+                        // phone always gets in, even if a stale tab
+                        // is still chewing on a previous socket.
+                        let budget = *max_connections_rx.borrow();
+                        evict_if_over_budget(&state, budget).await;
+
                         let acceptor = acceptor.clone();
                         let clients_rx = clients_rx.clone();
                         let dispatcher = dispatcher.clone();
+                        let state = state.clone();
+                        let last_activity = Arc::new(AtomicI64::new(now_millis()));
+                        let (kill_tx, kill_rx) = oneshot::channel::<()>();
+                        let slot = ConnectionSlot {
+                            peer,
+                            last_activity: last_activity.clone(),
+                            kill: Some(kill_tx),
+                        };
+                        state.active_conns.lock().await.push(slot);
                         tokio::spawn(async move {
-                            if let Err(err) =
-                                handle_conn(stream, peer, acceptor, clients_rx, dispatcher).await
-                            {
+                            let result = handle_conn(
+                                stream,
+                                peer,
+                                acceptor,
+                                clients_rx,
+                                dispatcher,
+                                state.clone(),
+                                last_activity.clone(),
+                                kill_rx,
+                            )
+                            .await;
+                            if let Err(err) = result {
                                 log::debug!(
                                     target: "remote_control",
                                     "connection from {peer} ended with: {err:#}",
                                 );
                             }
+                            // Remove this slot on exit. Identity is by
+                            // the Arc pointer of `last_activity`, which
+                            // is unique per connection.
+                            let mut conns = state.active_conns.lock().await;
+                            conns.retain(|c| !Arc::ptr_eq(&c.last_activity, &last_activity));
                         });
                     }
                     Err(err) => {
@@ -170,12 +259,68 @@ async fn accept_loop(
     }
 }
 
+/// Lazily prune the ban list and check if `ip` is still banned.
+async fn is_banned(state: &ListenerState, ip: IpAddr) -> bool {
+    let mut bans = state.banned_until.lock().await;
+    let now = Instant::now();
+    bans.retain(|_, deadline| *deadline > now);
+    bans.get(&ip).is_some_and(|deadline| *deadline > now)
+}
+
+/// Add `ip` to the ban list for [`BAN_DURATION_SECS`] starting now.
+async fn ban_ip(state: &ListenerState, ip: IpAddr) {
+    let mut bans = state.banned_until.lock().await;
+    let deadline = Instant::now() + Duration::from_secs(BAN_DURATION_SECS);
+    bans.insert(ip, deadline);
+    log::info!(
+        target: "remote_control",
+        "ip {ip} banned for {BAN_DURATION_SECS}s after auth failure",
+    );
+}
+
+/// If the active connection count is `>= budget`, evict the slot with
+/// the OLDEST `last_activity` timestamp (LRU). Triggered before admitting
+/// each new connection.
+///
+/// `budget == 0` is treated as "no limit" — useful escape hatch if the
+/// user sets the setting to 0 (although the UI clamps to >= 1).
+async fn evict_if_over_budget(state: &ListenerState, budget: u32) {
+    if budget == 0 {
+        return;
+    }
+    let mut conns = state.active_conns.lock().await;
+    while conns.len() >= budget as usize {
+        // argmin by last_activity; ties → first match (stable).
+        let Some((idx, _)) = conns
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, c)| c.last_activity.load(Ordering::Relaxed))
+        else {
+            break;
+        };
+        let mut victim = conns.swap_remove(idx);
+        let victim_peer = victim.peer;
+        if let Some(kill) = victim.kill.take() {
+            // Receiver may have already exited (race with natural
+            // close); ignoring the error is correct.
+            let _ = kill.send(());
+        }
+        log::info!(
+            target: "remote_control",
+            "evicting longest-idle connection {victim_peer} to make room (budget={budget})",
+        );
+    }
+}
+
 async fn handle_conn(
     stream: TcpStream,
     peer: SocketAddr,
     acceptor: TlsAcceptor,
     clients_rx: watch::Receiver<Vec<AuthorizedClient>>,
     dispatcher: Arc<dyn RemoteDispatcher>,
+    state: Arc<ListenerState>,
+    last_activity: Arc<AtomicI64>,
+    kill_rx: oneshot::Receiver<()>,
 ) -> Result<()> {
     // Disable Nagle: WS frames are small and latency-sensitive.
     let _ = stream.set_nodelay(true);
@@ -219,8 +364,16 @@ async fn handle_conn(
         }
     };
 
-    let response_bytes = parse_handshake_response(response_text.as_ref())
-        .context("parsing handshake response")?;
+    let response_bytes = match parse_handshake_response(response_text.as_ref()) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            // Malformed handshake response counts as an auth failure —
+            // ban the IP so a script-kiddie scanner that's spraying
+            // random bytes pays the 30s cooldown before its next try.
+            ban_ip(&state, peer.ip()).await;
+            return Err(err).context("parsing handshake response");
+        }
+    };
 
     // 3. Snapshot the client list at handshake time.
     let clients = clients_rx.borrow().clone();
@@ -228,8 +381,9 @@ async fn handle_conn(
     let Some(client) = identified else {
         log::info!(
             target: "remote_control",
-            "auth failed for peer {peer}",
+            "auth failed for peer {peer} — banning IP for {BAN_DURATION_SECS}s",
         );
+        ban_ip(&state, peer.ip()).await;
         let close = CloseFrame {
             code: CloseCode::Policy,
             reason: "unauthorized".into(),
@@ -250,7 +404,7 @@ async fn handle_conn(
         .context("sending welcome")?;
 
     // 5. Request loop.
-    run_request_loop(&mut ws, &client_name, dispatcher.as_ref()).await?;
+    run_request_loop(&mut ws, &client_name, dispatcher.as_ref(), last_activity, kill_rx).await?;
     Ok(())
 }
 
@@ -286,6 +440,8 @@ async fn run_request_loop<S>(
     ws: &mut tokio_tungstenite::WebSocketStream<S>,
     client_name: &str,
     dispatcher: &dyn RemoteDispatcher,
+    last_activity: Arc<AtomicI64>,
+    mut kill_rx: oneshot::Receiver<()>,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -301,12 +457,13 @@ where
 
     loop {
         // Tokio `select!` here arbitrates between WS-read, notification
-        // pump, and idle timeout. Without `biased;` the runtime picks a
-        // random-ready arm — biased keeps WS reads ordering-stable
-        // relative to notifications interleaved at the same wake.
+        // pump, idle timeout, and the eviction-kill signal. The kill
+        // arm fires when the accept loop picked this slot as LRU
+        // victim to make room for a new connection.
         let select_outcome = if let Some(rx) = notifications_rx.as_mut() {
             tokio::select! {
                 biased;
+                _ = &mut kill_rx => SelectOutcome::Evicted,
                 next = ws.next() => SelectOutcome::Frame(next),
                 notification = rx.recv() => SelectOutcome::Notification(notification),
                 _ = tokio::time::sleep(Duration::from_secs(IDLE_READ_TIMEOUT_SECS)) => {
@@ -316,6 +473,7 @@ where
         } else {
             tokio::select! {
                 biased;
+                _ = &mut kill_rx => SelectOutcome::Evicted,
                 next = ws.next() => SelectOutcome::Frame(next),
                 _ = tokio::time::sleep(Duration::from_secs(IDLE_READ_TIMEOUT_SECS)) => {
                     SelectOutcome::Idle
@@ -335,6 +493,10 @@ where
                 return Err(anyhow!("ws read error: {err}"));
             }
             SelectOutcome::Frame(Some(Ok(frame))) => {
+                // Any inbound frame counts as activity for LRU
+                // eviction purposes — a client mid-conversation
+                // shouldn't lose its slot to a fresh connection.
+                last_activity.store(now_millis(), Ordering::Relaxed);
                 match frame {
                     Message::Text(text) => {
                         let response = match parse_request(text.as_ref()) {
@@ -446,6 +608,18 @@ where
                 let _ = ws.send(Message::Close(Some(close))).await;
                 return Ok(());
             }
+            SelectOutcome::Evicted => {
+                log::info!(
+                    target: "remote_control",
+                    "client {client_name:?} evicted by accept loop to free a slot",
+                );
+                let close = CloseFrame {
+                    code: CloseCode::Away,
+                    reason: "evicted by new connection".into(),
+                };
+                let _ = ws.send(Message::Close(Some(close))).await;
+                return Ok(());
+            }
         }
     }
 }
@@ -461,6 +635,7 @@ enum SelectOutcome {
     ),
     Notification(Option<serde_json::Value>),
     Idle,
+    Evicted,
 }
 
 async fn write_response<S>(
