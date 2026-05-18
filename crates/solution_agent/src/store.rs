@@ -1197,15 +1197,23 @@ impl SolutionAgentStore {
                         s.parent_session_id = meta.parent_session_id;
                         s
                     });
+                    // Insert into `self.sessions` so the phone's
+                    // list_sessions (via all_sessions()) and get_session
+                    // (via self.sessions.get()) can find it. INTENTIONALLY
+                    // skip `by_solution` and the SessionCreated event —
+                    // those are the desktop navigator's input. The
+                    // navigator's reconcile_open_sessions_with_store
+                    // reads sessions_for() (= by_solution lookup), so
+                    // leaving by_solution alone keeps the navigator
+                    // ignorant of cold-hydrated sessions, which is what
+                    // we want: hydration is read-only metadata exposure
+                    // for the phone, not a 'reopen all closed tabs'
+                    // command. If/when the user genuinely reopens one
+                    // of these via the tab strip, restore_open_tabs's
+                    // contains_key check will skip the re-insert but
+                    // the navigator's own open_session path will add
+                    // it to by_solution at that point.
                     this.sessions.insert(meta.id, entity);
-                    this.by_solution
-                        .entry(solution_id.clone())
-                        .or_default()
-                        .push(meta.id);
-                    cx.emit(SolutionAgentStoreEvent::SessionCreated {
-                        id: meta.id,
-                        parent_session_id: meta.parent_session_id,
-                    });
                     hydrated.push(meta.id);
                 }
                 if !hydrated.is_empty() {
