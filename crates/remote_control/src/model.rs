@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Default port the (future) Remote Control listener binds to.
-pub const DEFAULT_PORT: u16 = 7777;
+pub const DEFAULT_PORT: u16 = 21772;
 
 /// Persisted shape of `~/.config/spk-editor/remote-control.json`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

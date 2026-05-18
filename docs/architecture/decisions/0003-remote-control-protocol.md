@@ -27,7 +27,7 @@ Existing inputs that constrain the decision:
 
 - `RemoteControlSettings::clients[]` already has `name` + `secret_base64`
   (32-byte symmetric secret, base64). R-1.5 surfaces this via QR code as
-  `spk-remote://<addr>:<port>?secret=<b64>&client=<name>`. So **the
+  `spk-editor-remote://<addr>:<port>?secret=<b64>&client=<name>`. So **the
   pre-shared symmetric secret is already provisioned end-to-end**; any
   protocol choice must consume it directly (no PKI, no separate cert
   enrollment dance).
@@ -55,13 +55,13 @@ Existing inputs that constrain the decision:
   Server boots, generates a self-signed TLS cert via `rcgen`, persists it
   alongside `remote-control.json` so cert identity is stable across
   restarts. The cert's SHA-256 fingerprint is included in the QR alongside
-  the secret: `spk-remote://<addr>:<port>?secret=<b64>&client=<name>&server_fp=<b64>`.
+  the secret: `spk-editor-remote://<addr>:<port>?secret=<b64>&client=<name>&server_fp=<b64>`.
 - **Server auth:** Android client pins by fingerprint (rejects any cert
   whose SHA-256 differs from the one in the QR). No CA, no Let's Encrypt,
   no DNS dependency.
 - **Client auth:** post-TLS, server sends a 16-byte random `challenge`
   frame as the first WebSocket message. Client replies with
-  `HMAC-SHA256(secret, "spk-remote-v1\0" || challenge)`. Server verifies
+  `HMAC-SHA256(secret, "spk-editor-remote-v1\0" || challenge)`. Server verifies
   against every authorized client's secret (constant-time compare); the
   first match identifies which `AuthorizedClient` this is. Mismatch closes
   the connection with policy code 1008.
@@ -288,7 +288,7 @@ When R-2 lands, expect these new files in `crates/remote_control/`:
   absent; reuse otherwise.
 - `crates/remote_control/src/auth.rs` — HMAC-SHA256 challenge logic.
   Server sends 16 random bytes as the first WS frame after TLS. Client
-  has 10 s to reply with `hex(HMAC-SHA256(secret, b"spk-remote-v1\0" || challenge))`.
+  has 10 s to reply with `hex(HMAC-SHA256(secret, b"spk-editor-remote-v1\0" || challenge))`.
   Server tries each `AuthorizedClient.secret_base64` in constant time;
   identifies the client on match or closes the connection (WS code 1008)
   on mismatch / timeout.
@@ -300,7 +300,7 @@ When R-2 lands, expect these new files in `crates/remote_control/`:
 ### QR payload extension (R-3 / R-1.5 follow-up)
 
 ```
-spk-remote://<addr>:<port>?secret=<b64-32>&client=<name>&server_fp=<b64-sha256-32>
+spk-editor-remote://<addr>:<port>?secret=<b64-32>&client=<name>&server_fp=<b64-sha256-32>
 ```
 
 `server_fp` is the **SHA-256 of the cert's DER bytes**, base64-encoded

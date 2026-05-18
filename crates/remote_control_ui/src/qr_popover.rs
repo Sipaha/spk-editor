@@ -125,8 +125,8 @@ fn build_url_and_code(
     }
 }
 
-/// Construct the `spk-remote://…` URL the Android client decodes. The
-/// secret IS base64 (StandardChars include `/` and `+`) — those break
+/// Construct the `spk-editor-remote://…` URL the Android client decodes.
+/// The secret IS base64 (StandardChars include `/` and `+`) — those break
 /// URL parsing, so we re-encode URL-SAFE for the `secret` query
 /// parameter. The client name is percent-encoded. `server_fingerprint`,
 /// when present, is the SHA-256 of the live cert DER from
@@ -153,7 +153,7 @@ fn build_url(
     let url_safe_secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&raw_secret);
     let encoded_name = urlencoding::encode(client_name);
     let mut url = format!(
-        "spk-remote://{address}:{port}?secret={url_safe_secret}&client={encoded_name}"
+        "spk-editor-remote://{address}:{port}?secret={url_safe_secret}&client={encoded_name}"
     );
     if let Some(fp) = server_fingerprint {
         let fp_url_safe = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(fp);
@@ -344,7 +344,7 @@ mod tests {
             Some(fixture_fingerprint()),
         )
         .expect("build_url");
-        assert!(url.starts_with("spk-remote://203.0.113.1:7777"), "got {url}");
+        assert!(url.starts_with("spk-editor-remote://203.0.113.1:7777"), "got {url}");
         assert!(url.contains("client=Phone"), "got {url}");
         // The URL-safe alphabet must not contain `+` or `/` (those are
         // reserved in standard base64 and would break URL parsing on
