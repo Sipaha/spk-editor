@@ -40,6 +40,8 @@ d83ab47 R-5a fixup (:core api configuration after SDK install)
 
 End-state: `:core` 72 tests green, debug APK 12.0 MB, release APK 2.12 MB.
 Build commands and pairing instructions live in the sibling repo's README.
+
+**Sibling repo remote** (added 2026-05-18): `git@github.com:Sipaha/spk-editor-mobile.git`. Push uses the same `github.com-sipaha` SSH host-alias as the spk-editor remote (config in `~/.ssh/config`). Note local directory name (`spk-editor-android-client`) differs from the GitHub repo name (`spk-editor-mobile`) — both refer to the same project.
 No CI yet.
 
 ## Additional 2026-05-17 phases (after the 1st handoff cut)
