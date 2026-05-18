@@ -1056,6 +1056,19 @@ pub struct CreateSessionParams {
     /// (`unknown_parent_session` or `parent_session_in_different_solution`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
+    /// Optional user-supplied title. When absent the desktop assigns a
+    /// title automatically from the first user turn — clients that
+    /// want a stable, human-supplied name (e.g. the phone) can set
+    /// this. Renamable later via `solution_agent.rename_session`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Optional working directory for the agent subprocess. Must be one
+    /// of the solution's visible worktree roots — values outside the
+    /// solution are rejected. When absent, the first worktree of the
+    /// active project for `solution_id` is used (matches the previous
+    /// behaviour).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for CreateSessionParams {
@@ -1067,6 +1080,8 @@ impl<'de> Deserialize<'de> for CreateSessionParams {
             agent_id: String,
             initial_message: Option<String>,
             parent_session_id: Option<String>,
+            title: Option<String>,
+            cwd: Option<String>,
         }
         let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
         Ok(Self {
@@ -1074,6 +1089,8 @@ impl<'de> Deserialize<'de> for CreateSessionParams {
             agent_id: inner.agent_id,
             initial_message: inner.initial_message,
             parent_session_id: inner.parent_session_id,
+            title: inner.title,
+            cwd: inner.cwd,
         })
     }
 }
@@ -1148,6 +1165,8 @@ impl McpServerTool for CreateSessionTool {
                 )
             })?;
 
+        let cwd: Option<std::path::PathBuf> = input.cwd.as_ref().map(std::path::PathBuf::from);
+
         let create_task = cx.update(|cx| {
             let store = SolutionAgentStore::global(cx);
             store.update(cx, |store, cx| {
@@ -1155,13 +1174,29 @@ impl McpServerTool for CreateSessionTool {
                     solution_id,
                     agent_id,
                     project,
-                    None,
+                    cwd,
                     parent_session_id,
                     cx,
                 )
             })
         });
         let session_id = create_task.await?;
+
+        // Apply the user-supplied title (if any). Done as a separate
+        // rename so the create path stays single-purpose and the title
+        // change emits the SessionTitleChanged event that subscribers
+        // (including the WS notification forwarder) already listen for.
+        if let Some(raw_title) = input.title.as_deref() {
+            let trimmed = raw_title.trim();
+            if !trimmed.is_empty() {
+                let title = SharedString::from(trimmed.to_string());
+                cx.update(|cx| -> Result<()> {
+                    let store = SolutionAgentStore::global(cx);
+                    store.update(cx, |store, cx| store.rename_session(session_id, title, cx))?;
+                    Ok(())
+                })?;
+            }
+        }
 
         if let Some(content) = input.initial_message {
             cx.update(|cx| {
@@ -2836,6 +2871,8 @@ mod tests {
                     agent_id: "mock-agent".into(),
                     initial_message: None,
                     parent_session_id: Some(unknown_parent.to_string()),
+                    title: None,
+                    cwd: None,
                 },
                 &mut cx.to_async(),
             )
@@ -2869,6 +2906,8 @@ mod tests {
                     agent_id: "mock-agent".into(),
                     initial_message: None,
                     parent_session_id: Some(parent_id.to_string()),
+                    title: None,
+                    cwd: None,
                 },
                 &mut cx.to_async(),
             )

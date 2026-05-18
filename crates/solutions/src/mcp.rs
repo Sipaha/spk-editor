@@ -667,10 +667,20 @@ impl McpServerTool for OpenSolutionTool {
             let app_state = workspace::AppState::global(cx);
             let mut options = workspace::OpenOptions::default();
             options.focus = input.focus;
-            // Solutions always open in a new window so the autonomous
-            // agent driving via MCP doesn't accidentally swap worktrees
-            // into a window the user is actively working in.
-            options.open_mode = workspace::OpenMode::NewWindow;
+            // Phone-driven `solutions.open` should reuse an existing
+            // editor window whenever possible: if the solution is
+            // already open, `Activate` mode causes `open_paths`'s
+            // find_existing_workspace path to pick that window and
+            // surface it. If the solution isn't open yet, Activate
+            // falls back to the currently-active MultiWorkspace
+            // window — i.e. the user's main window. Only when no
+            // MultiWorkspace exists does it spawn a fresh one. This
+            // replaces the previous always-`NewWindow` behaviour,
+            // which left the user with a new window per phone-driven
+            // navigation. Autonomous agents that genuinely need a
+            // fresh window can be added back behind an explicit
+            // input.open_mode parameter when the need arises.
+            options.open_mode = workspace::OpenMode::Activate;
             // Capture the launcher (if any) so we can retire it once the
             // solution window is up — matches the UI flow's behaviour
             // when clicking a row in the launcher.
