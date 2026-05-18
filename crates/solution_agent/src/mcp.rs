@@ -592,57 +592,64 @@ impl McpServerTool for GetSessionTool {
                 .read_with(cx, |store, _| store.session(session_id))
                 .with_context(|| format!("session_not_found: {}", session_id))?;
             let session = entity.read(cx);
-            let (entries, total_count) = session
+            // Live sessions have an attached `acp_thread`; cold (sleeping)
+            // sessions don't — but they still have `cold_entries`
+            // reconstructed from the persisted blob on disk. Without this
+            // fallback the mobile client sees an empty chat for any
+            // session whose subprocess hasn't been respawned yet (a
+            // common state for any session you scroll past without
+            // tapping into).
+            let live_entries: Option<Vec<&acp_thread::AgentThreadEntry>> = session
                 .acp_thread()
-                .map(|thread| {
-                    let thread_ref = thread.read(cx);
-                    let entries_ref = thread_ref.entries();
-                    let total = entries_ref.len();
-                    // R-6e: index-anchored slice. `after_index` /
-                    // `before_index` are exclusive bounds and `count`
-                    // takes the LAST n entries within the bound (so the
-                    // common "show me the newest 50" query is just
-                    // `count=50` with no bounds).
-                    //
-                    // We walk every entry (not just the kept ones) so
-                    // `image_cursor` stays in lock-step with what a
-                    // non-paginated call would have produced — that
-                    // keeps `EntryImage.index` stable across paginated
-                    // calls, which is the contract that lets the client
-                    // rely on `spk-image://N` URLs in markdown.
-                    let after = input.after_index;
-                    let before = input.before_index;
-                    let mut image_cursor = 0usize;
-                    let mut kept: Vec<EntrySummary> = Vec::new();
-                    for (index, entry) in entries_ref.iter().enumerate() {
-                        let in_range = after.map_or(true, |a| index > a)
-                            && before.map_or(true, |b| index < b);
-                        if in_range {
-                            kept.push(summarize_entry(
-                                entry,
-                                index,
-                                input.include_full_content,
-                                input.include_images,
-                                &mut image_cursor,
-                                cx,
-                            ));
-                        } else {
-                            image_cursor += count_images_in_entry(entry);
-                        }
+                .map(|thread| thread.read(cx).entries().iter().collect());
+            let entries_ref: Vec<&acp_thread::AgentThreadEntry> = live_entries
+                .unwrap_or_else(|| session.cold_entries.iter().collect());
+            let (entries, total_count) = {
+                let total = entries_ref.len();
+                // R-6e: index-anchored slice. `after_index` /
+                // `before_index` are exclusive bounds and `count`
+                // takes the LAST n entries within the bound (so the
+                // common "show me the newest 50" query is just
+                // `count=50` with no bounds).
+                //
+                // We walk every entry (not just the kept ones) so
+                // `image_cursor` stays in lock-step with what a
+                // non-paginated call would have produced — that
+                // keeps `EntryImage.index` stable across paginated
+                // calls, which is the contract that lets the client
+                // rely on `spk-image://N` URLs in markdown.
+                let after = input.after_index;
+                let before = input.before_index;
+                let mut image_cursor = 0usize;
+                let mut kept: Vec<EntrySummary> = Vec::new();
+                for (index, entry) in entries_ref.iter().enumerate() {
+                    let in_range = after.map_or(true, |a| index > a)
+                        && before.map_or(true, |b| index < b);
+                    if in_range {
+                        kept.push(summarize_entry(
+                            entry,
+                            index,
+                            input.include_full_content,
+                            input.include_images,
+                            &mut image_cursor,
+                            cx,
+                        ));
+                    } else {
+                        image_cursor += count_images_in_entry(entry);
                     }
-                    if let Some(n) = input.count {
-                        if kept.len() > n {
-                            // Take the last n. `EntrySummary.index`
-                            // preserves the absolute position so the
-                            // client can still tell where it sits in
-                            // the session timeline.
-                            let drop_count = kept.len() - n;
-                            kept.drain(..drop_count);
-                        }
+                }
+                if let Some(n) = input.count {
+                    if kept.len() > n {
+                        // Take the last n. `EntrySummary.index`
+                        // preserves the absolute position so the
+                        // client can still tell where it sits in
+                        // the session timeline.
+                        let drop_count = kept.len() - n;
+                        kept.drain(..drop_count);
                     }
-                    (kept, total)
-                })
-                .unwrap_or((Vec::new(), 0));
+                }
+                (kept, total)
+            };
             let summary = session_summary(session, cx);
             Ok(GetSessionResult {
                 id: summary.id,
