@@ -766,7 +766,7 @@ fn truncate_history_label(text: &str, max_chars: usize) -> String {
 /// minutes only past the hour mark; seconds drop off there because
 /// minute-precision is enough at that scale and the extra digits just
 /// added jitter without information.
-fn format_elapsed(secs: u64) -> String {
+pub(crate) fn format_elapsed(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s")
     } else if secs < 3600 {

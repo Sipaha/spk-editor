@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use acp_thread::{AgentThreadEntry, ToolCallContent, UserMessageId};
+use acp_thread::{AgentThreadEntry, ToolCallContent, ToolCallStatus, UserMessageId};
 use agent_client_protocol::schema as acp;
 use base64::Engine;
 use gpui::{
@@ -9,7 +9,7 @@ use gpui::{
     EntityId, EventEmitter, ExternalPaths, FocusHandle, Focusable, FollowMode,
     InteractiveElement as _, IntoElement, ListAlignment, ListSizingBehavior, ListState,
     MouseButton, MouseDownEvent, ParentElement, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Subscription, WeakEntity, Window, div, list, px,
+    StatefulInteractiveElement as _, Styled, Subscription, Task, WeakEntity, Window, div, list, px,
 };
 use markdown::{Markdown, MarkdownFont, MarkdownStyle};
 use ui::prelude::*;
@@ -271,6 +271,13 @@ pub struct SolutionSessionView {
     /// `sessions_for(&solution_id)` pass) and a false-positive notify
     /// just paints the same frame again.
     _store_subscription: Option<Subscription>,
+    /// Background tick that wakes the view once a second while any
+    /// visible tool call sits in `InProgress`, so the per-tool elapsed
+    /// "Xs" badge in `render_tool_call` advances even when the agent
+    /// emits no AcpThread events. Mirrors `status_row::ensure_thinking_tick`.
+    /// Self-cleared when no InProgress tool remains so the next
+    /// transition can start a fresh tick.
+    tool_tick: Option<Task<()>>,
 }
 
 impl SolutionSessionView {
@@ -465,6 +472,7 @@ impl SolutionSessionView {
             resuming_markdown: None,
             resuming_markdown_source: SharedString::default(),
             expanded_queue_markers: HashSet::new(),
+            tool_tick: None,
         };
         // Detect any thread that is already attached at construction
         // (e.g. after `resume_session`) and wire its lifecycle hooks.
@@ -564,6 +572,62 @@ impl SolutionSessionView {
         }
         self.last_thread_entity_id = new_id;
         self.recompute_rewind_table(cx);
+    }
+
+    /// Returns `true` if the currently-attached `AcpThread` has at least
+    /// one entry whose status is `InProgress`. Used to drive
+    /// `ensure_tool_tick` — when this flips back to false the tick task
+    /// breaks its loop and self-clears.
+    fn has_in_progress_tool_call(&self, cx: &App) -> bool {
+        let Some(thread) = self.session.read(cx).acp_thread() else {
+            return false;
+        };
+        thread.read(cx).entries().iter().any(|entry| {
+            matches!(
+                entry,
+                AgentThreadEntry::ToolCall(call)
+                    if matches!(call.status, ToolCallStatus::InProgress)
+            )
+        })
+    }
+
+    /// Spawn a background tick that wakes the view once a second for as
+    /// long as any visible tool call is `InProgress`. Drives the
+    /// per-tool "Xs" elapsed badge in `render_tool_call` without
+    /// depending on `AcpThreadEvent` firing during quiet pauses (the
+    /// agent often blocks on a single long-running tool with zero
+    /// streaming events in flight). Idempotent — a second call while
+    /// `tool_tick` is already `Some` is a no-op.
+    fn ensure_tool_tick(&mut self, cx: &mut Context<Self>) {
+        if self.tool_tick.is_some() {
+            return;
+        }
+        self.tool_tick = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                let still_running = this
+                    .update(cx, |this, cx| {
+                        let running = this.has_in_progress_tool_call(cx);
+                        if running {
+                            cx.notify();
+                        }
+                        running
+                    })
+                    .ok()
+                    .unwrap_or(false);
+                if !still_running {
+                    break;
+                }
+            }
+            // Self-cleanup so the next InProgress flip starts a fresh
+            // tick instead of relying on the next render to reset the
+            // slot.
+            let _ = this.update(cx, |this, _| {
+                this.tool_tick = None;
+            });
+        }));
     }
 
     /// Fine-grained reaction to thread mutations. Replaces the previous
@@ -1897,6 +1961,13 @@ impl Render for SolutionSessionView {
         // newly-arrived tool-call terminal starts streaming into our view
         // on its very first chunk (vs the next unrelated render).
         self.sync_terminal_observers(cx);
+        // If any visible tool call is currently in `InProgress`, make
+        // sure the per-second tick is running so the "Xs" elapsed badge
+        // beside its status advances even when the agent emits no
+        // events. The tick self-stops once nothing is `InProgress`.
+        if self.has_in_progress_tool_call(cx) {
+            self.ensure_tool_tick(cx);
+        }
         let texts_per_entry = self.collect_entry_texts(cx);
         let (find_matches_owned, find_selected_for_md) = self
             .find

@@ -764,6 +764,21 @@ pub(crate) fn render_tool_call(
         _ => Color::Muted,
     };
 
+    // Elapsed-time badge: shown only while the tool is actively running
+    // so the user can tell a 30-second hang apart from a freshly-started
+    // call. Terminal statuses skip the badge — we keep the timestamp on
+    // the entity (see acp_thread::ToolCall::status_started_at) but
+    // rendering "ran for Xs" on done/failed/canceled calls is a
+    // deliberate follow-up, not part of the live-counter surface.
+    let elapsed_label = if matches!(call.status, ToolCallStatus::InProgress) {
+        call.status_started_at.map(|started| {
+            let elapsed_secs = (chrono::Utc::now() - started).num_seconds().max(0) as u64;
+            crate::status_row::format_elapsed(elapsed_secs)
+        })
+    } else {
+        None
+    };
+
     let mut container = v_flex()
         .gap_0p5()
         .my_1()
@@ -789,7 +804,14 @@ pub(crate) fn render_tool_call(
                     Label::new(status_text)
                         .size(LabelSize::XSmall)
                         .color(status_color),
-                ),
+                )
+                .when_some(elapsed_label, |this, label| {
+                    this.child(
+                        Label::new(SharedString::from(label))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                }),
         );
 
     let mut span_idx = 1;
