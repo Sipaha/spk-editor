@@ -256,6 +256,11 @@ pub fn from_persisted(persisted: PersistedEntryV2, cx: &mut App) -> AgentThreadE
                 raw_output: p.raw_output,
                 tool_name: p.tool_name.map(SharedString::from),
                 subagent_session_info: None,
+                // Cold blobs only persist terminal statuses (see
+                // `TerminalToolCallStatus`), so the rehydrated call is
+                // never InProgress and therefore never needs a
+                // start-of-InProgress timestamp.
+                status_started_at: None,
             })
         }
         PersistedEntryV2::Plan(entries) => {

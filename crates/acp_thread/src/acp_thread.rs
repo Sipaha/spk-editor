@@ -5,6 +5,7 @@ mod terminal;
 use action_log::{ActionLog, ActionLogTelemetry};
 use agent_client_protocol::schema as acp;
 use anyhow::{Context as _, Result, anyhow};
+use chrono::{DateTime, Utc};
 use collections::HashSet;
 pub use connection::*;
 pub use diff::*;
@@ -257,6 +258,13 @@ pub struct ToolCall {
     pub raw_output: Option<serde_json::Value>,
     pub tool_name: Option<SharedString>,
     pub subagent_session_info: Option<SubagentSessionInfo>,
+    /// Wall-clock timestamp captured the first time `status` becomes
+    /// `InProgress`. Kept across the transition to terminal statuses so
+    /// renderers can show "ran for Xs" without a second source of
+    /// truth. `None` for tool calls that were constructed in a terminal
+    /// state (e.g. cold-persistence hydration) and never re-entered
+    /// `InProgress`.
+    pub status_started_at: Option<DateTime<Utc>>,
 }
 
 impl ToolCall {
@@ -299,6 +307,8 @@ impl ToolCall {
 
         let subagent_session_info = subagent_session_info_from_meta(&tool_call.meta);
 
+        let status_started_at = matches!(status, ToolCallStatus::InProgress).then(Utc::now);
+
         let result = Self {
             id: tool_call.tool_call_id,
             label: cx
@@ -313,6 +323,7 @@ impl ToolCall {
             raw_output: tool_call.raw_output,
             tool_name,
             subagent_session_info,
+            status_started_at,
         };
         Ok(result)
     }
@@ -342,7 +353,21 @@ impl ToolCall {
         }
 
         if let Some(status) = status {
-            self.status = status.into();
+            let new_status: ToolCallStatus = status.into();
+            // Stamp `status_started_at` on a *transition* into InProgress
+            // (Pending → InProgress, WaitingForConfirmation → InProgress,
+            // …). A redundant InProgress → InProgress update keeps the
+            // existing stamp so the elapsed counter is monotonic across
+            // streaming progress events. Transitions out of InProgress to
+            // a terminal status (Completed/Failed/Rejected/Canceled)
+            // intentionally leave the timestamp populated — downstream
+            // renderers may want to show "ran for Xs" on a finished call.
+            if matches!(new_status, ToolCallStatus::InProgress)
+                && !matches!(self.status, ToolCallStatus::InProgress)
+            {
+                self.status_started_at = Some(Utc::now());
+            }
+            self.status = new_status;
         }
 
         if let Some(subagent_session_info) = subagent_session_info_from_meta(&meta) {
@@ -1836,6 +1861,9 @@ impl AcpThread {
                     raw_output: None,
                     tool_name: None,
                     subagent_session_info: None,
+                    // Synthetic Failed call — never observed an
+                    // InProgress transition, so no timestamp.
+                    status_started_at: None,
                 };
                 self.push_entry(AgentThreadEntry::ToolCall(failed_tool_call), cx);
                 return Ok(());
@@ -3141,6 +3169,98 @@ mod tests {
             content.contains("hello buffered"),
             "expected buffered output to render, got: {content}"
         );
+    }
+
+    #[gpui::test]
+    async fn test_status_started_at_set_when_tool_call_enters_in_progress(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let connection = Rc::new(FakeAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(
+                    project,
+                    PathList::new(&[std::path::Path::new(path!("/test"))]),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+
+        let before = Utc::now();
+        thread.update(cx, |thread, cx| {
+            // Upsert in Pending — no timestamp yet.
+            let pending = acp::ToolCall::new(
+                acp::ToolCallId::new("call-1".to_string()),
+                "Bash".to_string(),
+            )
+            .status(acp::ToolCallStatus::Pending);
+            thread.upsert_tool_call(pending, cx).expect("upsert pending");
+        });
+        thread.read_with(cx, |thread, _| {
+            let AgentThreadEntry::ToolCall(call) = &thread.entries()[0] else {
+                panic!("expected ToolCall entry");
+            };
+            assert!(
+                call.status_started_at.is_none(),
+                "Pending tool call should not yet have a started_at timestamp",
+            );
+        });
+
+        // Flip to InProgress and confirm the stamp lands.
+        thread.update(cx, |thread, cx| {
+            let in_progress = acp::ToolCall::new(
+                acp::ToolCallId::new("call-1".to_string()),
+                "Bash".to_string(),
+            )
+            .status(acp::ToolCallStatus::InProgress);
+            thread
+                .upsert_tool_call(in_progress, cx)
+                .expect("upsert in_progress");
+        });
+        let after = Utc::now();
+        thread.read_with(cx, |thread, _| {
+            let AgentThreadEntry::ToolCall(call) = &thread.entries()[0] else {
+                panic!("expected ToolCall entry");
+            };
+            let stamp = call
+                .status_started_at
+                .expect("InProgress transition must stamp status_started_at");
+            assert!(
+                stamp >= before && stamp <= after,
+                "status_started_at {stamp:?} should fall between {before:?} and {after:?}",
+            );
+        });
+
+        // Flip to Completed — stamp must survive so renderers can show
+        // "ran for Xs" on finished calls.
+        thread.update(cx, |thread, cx| {
+            let completed = acp::ToolCall::new(
+                acp::ToolCallId::new("call-1".to_string()),
+                "Bash".to_string(),
+            )
+            .status(acp::ToolCallStatus::Completed);
+            thread
+                .upsert_tool_call(completed, cx)
+                .expect("upsert completed");
+        });
+        thread.read_with(cx, |thread, _| {
+            let AgentThreadEntry::ToolCall(call) = &thread.entries()[0] else {
+                panic!("expected ToolCall entry");
+            };
+            assert!(
+                matches!(call.status, ToolCallStatus::Completed),
+                "expected status to be Completed",
+            );
+            assert!(
+                call.status_started_at.is_some(),
+                "status_started_at must be preserved across transition to a terminal status",
+            );
+        });
     }
 
     #[gpui::test]
