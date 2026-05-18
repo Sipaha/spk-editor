@@ -164,6 +164,21 @@ impl McpServerTool for ListSessionsTool {
             ),
             None => None,
         };
+        // Hydrate any DB-only sessions for the requested solution. The
+        // desktop's tab strip only hydrates rows with `tab_order IS
+        // NOT NULL`, so closed-tab sessions were invisible to MCP-only
+        // consumers like the phone — even though their full transcripts
+        // sit on disk. `hydrate_all_for_solution` is a no-op for already-
+        // hydrated sessions, so the second list_sessions call costs just
+        // one cheap DB metadata query.
+        if let Some(s) = input.solution_id.as_ref() {
+            let sol_id = SolutionId(s.clone());
+            let task = cx.update(|cx| {
+                let store = SolutionAgentStore::global(cx);
+                store.update(cx, |s, cx| s.hydrate_all_for_solution(sol_id, cx))
+            });
+            task.await?;
+        }
         let (sessions, total_count) = cx.update(|cx| {
             let store = SolutionAgentStore::global(cx);
             store.read_with(cx, |store, cx| {

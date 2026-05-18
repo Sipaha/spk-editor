@@ -1087,6 +1087,136 @@ impl SolutionAgentStore {
         })
     }
 
+    /// Like [`restore_open_tabs`], but loads **every** session row for the
+    /// solution — including ones with `tab_order IS NULL` (closed tabs).
+    /// Sessions already in `self.sessions` are skipped. Each freshly-
+    /// hydrated session gets a `cold_entries` reconstruction from its
+    /// persisted blob, so subsequent `get_session` / `list_sessions`
+    /// calls see the full conversation history without needing the
+    /// subprocess respawned.
+    ///
+    /// Driven by `solution_agent.list_sessions` so an MCP-only consumer
+    /// (the phone) can see closed-tab sessions — the desktop's tab strip
+    /// path was the only thing populating the in-memory store before,
+    /// which left closed sessions invisible to MCP regardless of how
+    /// much data was on disk.
+    pub fn hydrate_all_for_solution(
+        &self,
+        solution_id: SolutionId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Vec<SolutionSessionId>>> {
+        let Some(db) = self.persistence.clone() else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let already_open: std::collections::HashSet<SolutionSessionId> =
+            self.sessions.keys().copied().collect();
+        cx.spawn(async move |this, cx| {
+            let metas = db.list_for_solution(solution_id.clone()).await?;
+            if metas.is_empty() {
+                return Ok(Vec::new());
+            }
+            let to_hydrate: Vec<&SolutionSessionMetadata> = metas
+                .iter()
+                .filter(|m| !already_open.contains(&m.id))
+                .collect();
+            if to_hydrate.is_empty() {
+                return Ok(Vec::new());
+            }
+            // Load every blob first off the foreground thread. Missing
+            // blobs (NULL acp_thread_blob) just mean the session has
+            // never had any conversation content — those still get
+            // hydrated, just with an empty cold_entries vec.
+            let mut blobs: std::collections::HashMap<SolutionSessionId, Vec<u8>> =
+                std::collections::HashMap::new();
+            for meta in &to_hydrate {
+                if let Some(bytes) = db.load_blob(meta.id).await? {
+                    blobs.insert(meta.id, bytes);
+                }
+            }
+            let result_ids: Vec<SolutionSessionId> = this.update(cx, |this, cx| {
+                let mut hydrated: Vec<SolutionSessionId> = Vec::with_capacity(to_hydrate.len());
+                for meta in &to_hydrate {
+                    if this.sessions.contains_key(&meta.id) {
+                        continue;
+                    }
+                    let cold_entries: Vec<acp_thread::AgentThreadEntry> = blobs
+                        .remove(&meta.id)
+                        .and_then(|bytes| serde_json::from_slice::<PersistedSession>(&bytes).ok())
+                        .map(|persisted| {
+                            if !persisted.entries_v2.is_empty() {
+                                persisted
+                                    .entries_v2
+                                    .into_iter()
+                                    .map(|p| crate::cold_persistence::from_persisted(p, cx))
+                                    .collect()
+                            } else {
+                                let legacy_sources: Vec<String> =
+                                    if !persisted.entry_summaries.is_empty() {
+                                        persisted.entry_summaries
+                                    } else {
+                                        persisted
+                                            .entries
+                                            .into_iter()
+                                            .map(|e| e.markdown)
+                                            .collect()
+                                    };
+                                legacy_sources
+                                    .into_iter()
+                                    .map(|md| {
+                                        crate::cold_persistence::from_persisted(
+                                            crate::cold_persistence::PersistedEntryV2::Assistant(
+                                                crate::cold_persistence::PersistedAssistantMessage {
+                                                    chunks: vec![
+                                                        crate::cold_persistence::PersistedAssistantChunk::Message(
+                                                            md,
+                                                        ),
+                                                    ],
+                                                },
+                                            ),
+                                            cx,
+                                        )
+                                    })
+                                    .collect()
+                            }
+                        })
+                        .unwrap_or_default();
+                    let entity = cx.new(|_| {
+                        let mut s = SolutionSession::new_idle(
+                            meta.id,
+                            meta.solution_id.clone(),
+                            meta.agent_id.clone(),
+                            meta.acp_session_id.clone(),
+                        );
+                        s.title = meta.title.clone();
+                        s.created_at = meta.created_at;
+                        s.last_activity_at = meta.last_activity_at;
+                        s.context_count = meta.context_count;
+                        s.cwd = meta.cwd.clone();
+                        s.cold_entries = cold_entries;
+                        s.cached_total_tokens = meta.total_tokens;
+                        s.parent_session_id = meta.parent_session_id;
+                        s
+                    });
+                    this.sessions.insert(meta.id, entity);
+                    this.by_solution
+                        .entry(solution_id.clone())
+                        .or_default()
+                        .push(meta.id);
+                    cx.emit(SolutionAgentStoreEvent::SessionCreated {
+                        id: meta.id,
+                        parent_session_id: meta.parent_session_id,
+                    });
+                    hydrated.push(meta.id);
+                }
+                if !hydrated.is_empty() {
+                    cx.notify();
+                }
+                hydrated
+            })?;
+            Ok(result_ids)
+        })
+    }
+
     pub fn close_session(&mut self, id: SolutionSessionId, cx: &mut Context<Self>) -> Result<()> {
         let removed = self
             .sessions
