@@ -21,6 +21,7 @@ use ui::{IconButtonShape, Tooltip, prelude::*};
 use workspace::{ModalView, MultiWorkspace, Workspace};
 
 use crate::delete_confirm_modal::{DeleteConfirmItem, open_delete_confirm};
+use crate::modals::NewSolutionModal;
 use crate::open::{OpenIntent, open_solution};
 use crate::window_helpers::is_solution_open_anywhere;
 
@@ -185,9 +186,24 @@ impl SolutionPickerDropdown {
         }
     }
 
-    fn open_create(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn open_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // cx.dispatch_action(&NewSolution) used to be the implementation,
+        // but the dropdown is rendered as a popover and isn't in the
+        // workspace's focus tree — so the workspace's register_action
+        // handler never fires and the click silently does nothing.
+        // Open the modal directly via the workspace handle we already
+        // hold (same approach used by the welcome-window delete flow
+        // fix in 8c7d87c931).
         cx.emit(DismissEvent);
-        cx.dispatch_action(&crate::actions::NewSolution);
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let weak = workspace.downgrade();
+        workspace.update(cx, |workspace, cx| {
+            workspace.toggle_modal(window, cx, |window, cx| {
+                NewSolutionModal::new(weak, window, cx)
+            });
+        });
     }
 
     fn open_row(&mut self, id: SolutionId, window: &mut Window, cx: &mut Context<Self>) {

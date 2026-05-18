@@ -101,7 +101,7 @@ pub struct NewSolutionModal {
 }
 
 impl NewSolutionModal {
-    fn new(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let name_editor = cx.new(|cx| Editor::single_line(window, cx));
         name_editor.update(cx, |editor, cx| {
             editor.set_placeholder_text("Solution name", window, cx);
