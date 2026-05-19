@@ -25,17 +25,22 @@ pub fn translate(method: &str) -> Option<&'static str> {
         "remote.solutions.list" => Some("solutions.list"),
         "remote.solutions.get" => Some("solutions.get"),
         "remote.solutions.open" => Some("solutions.open"),
+        "remote.solutions.create" => Some("solutions.create"),
+        "remote.solutions.delete" => Some("solutions.delete"),
         "remote.solution_agent.list_agents" => Some("solution_agent.list_agents"),
         "remote.solution_agent.list_sessions" => Some("solution_agent.list_sessions"),
         "remote.solution_agent.get_session" => Some("solution_agent.get_session"),
         "remote.solution_agent.get_session_entry" => Some("solution_agent.get_session_entry"),
         "remote.solution_agent.create_session" => Some("solution_agent.create_session"),
+        "remote.solution_agent.close_session" => Some("solution_agent.close_session"),
         "remote.solution_agent.send_message" => Some("solution_agent.send_message"),
         "remote.solution_agent.cancel_turn" => Some("solution_agent.cancel_turn"),
         "remote.solution_agent.get_session_children" => {
             Some("solution_agent.get_session_children")
         }
         "remote.solution_agent.rename_session" => Some("solution_agent.rename_session"),
+        "remote.solution_agent.restart_agent" => Some("solution_agent.restart_agent"),
+        "remote.solution_agent.start_compact" => Some("solution_agent.start_compact"),
         _ => None,
     }
 }
@@ -75,6 +80,8 @@ mod tests {
             ("remote.solutions.list", "solutions.list"),
             ("remote.solutions.get", "solutions.get"),
             ("remote.solutions.open", "solutions.open"),
+            ("remote.solutions.create", "solutions.create"),
+            ("remote.solutions.delete", "solutions.delete"),
             (
                 "remote.solution_agent.list_agents",
                 "solution_agent.list_agents",
@@ -96,6 +103,10 @@ mod tests {
                 "solution_agent.create_session",
             ),
             (
+                "remote.solution_agent.close_session",
+                "solution_agent.close_session",
+            ),
+            (
                 "remote.solution_agent.send_message",
                 "solution_agent.send_message",
             ),
@@ -110,6 +121,14 @@ mod tests {
             (
                 "remote.solution_agent.rename_session",
                 "solution_agent.rename_session",
+            ),
+            (
+                "remote.solution_agent.restart_agent",
+                "solution_agent.restart_agent",
+            ),
+            (
+                "remote.solution_agent.start_compact",
+                "solution_agent.start_compact",
             ),
         ];
         for (wire, bare) in cases {
@@ -129,7 +148,6 @@ mod tests {
             "remote.windows.send_keystroke",
             "remote.editor.handle_cli_args",
             "editor.capabilities", // bare name without `remote.` prefix
-            "remote.solutions.delete",
             "remote.catalog.add_project",
         ];
         for method in banned {
