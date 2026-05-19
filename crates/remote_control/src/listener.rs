@@ -466,11 +466,28 @@ async fn record_auth_failure(state: &ListenerState, ip: IpAddr) {
     // counter at 0 → step below makes it 1 (= first offense, 30 s).
     entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
     entry.last_seen = now;
-    // Clamp index into the const backoff table — past the end of the
-    // schedule we stay at the longest step (currently 24 h). The
-    // const-assert at module load (via `unwrap()` here) catches the
-    // accidental-empty-slice regression at first call.
-    let idx = ((entry.consecutive_failures as usize).saturating_sub(1))
+    // 1-failure grace period: the first auth-fail in a window only
+    // increments the counter and logs at WARN — no ban yet. The ban
+    // ladder kicks in on the SECOND consecutive failure. Why:
+    // legitimate mobile clients periodically hit one-off malformed
+    // handshakes (a half-open WS after Doze, a stale frame from a
+    // pre-restart connection, a partial read that races a tungstenite
+    // re-key) and the original "ban on failure #1" was tripping users
+    // into the 30s → 5min ladder for purely transient causes — a real
+    // 2026-05-19 incident where the maintainer's home IP got locked
+    // into the 5-minute escalation tier. A scanner spraying random
+    // bytes will rack up failures quickly enough to still get banned;
+    // a real user with one bad packet eats a single warn.
+    if entry.consecutive_failures == 1 {
+        log::warn!(
+            target: "remote_control",
+            "subnet {key} auth failure #1 — no ban yet (grace period); ladder fires on the next consecutive failure",
+        );
+        return;
+    }
+    // `consecutive_failures` is now ≥ 2. Index 0 → 30 s, 1 → 5 min, …
+    // The offset of 2 here is what the grace skip earns the table.
+    let idx = ((entry.consecutive_failures as usize) - 2)
         .min(BAN_BACKOFF_SECS.len() - 1);
     let step = BAN_BACKOFF_SECS[idx];
     entry.banned_until = Some(now + Duration::from_secs(step));
@@ -637,8 +654,18 @@ async fn handle_conn(
     // slow-loris peer can trickle TLS bytes forever and hold its
     // permit (and its TCP/TLS state) indefinitely; with the semaphore
     // capped at 4 slots, 4 such peers would lock out all legit
-    // pairings. Failures here also count as auth failures so the
-    // subnet ban-escalation ladder catches deliberate flooders.
+    // pairings.
+    //
+    // NOTE: We do NOT count pre-handshake transport errors (TLS / WS
+    // upgrade failures or timeouts) as auth failures. Mobile clients
+    // on flaky LTE lose TCP mid-TLS regularly, and a foreground-driven
+    // reconnect storm can produce a burst of these. Counting them as
+    // attacks pushed legitimate users into the 30s → 5min → 1h → 24h
+    // ban ladder for purely network-induced disconnects. The TLS
+    // concurrency semaphore + accept-rate limit already gate abuse
+    // here; the ban ladder only fires on `record_auth_failure` calls
+    // below, which require the peer to send an actual handshake
+    // response.
     let tls_stream = match tokio::time::timeout(
         Duration::from_secs(HANDSHAKE_TIMEOUT_SECS),
         acceptor.accept(stream),
@@ -647,11 +674,9 @@ async fn handle_conn(
     {
         Ok(Ok(s)) => s,
         Ok(Err(err)) => {
-            record_auth_failure(&state, peer.ip()).await;
             return Err(err).context("TLS handshake");
         }
         Err(_) => {
-            record_auth_failure(&state, peer.ip()).await;
             return Err(anyhow!(
                 "TLS handshake timeout after {HANDSHAKE_TIMEOUT_SECS}s"
             ));
@@ -687,12 +712,16 @@ async fn handle_conn(
     .await
     {
         Ok(Ok(s)) => s,
+        // See the TLS branch above: pre-handshake transport errors are
+        // network-side glitches (or, at worst, a scanner that hasn't
+        // yet sent anything we can identify as malicious), not auth
+        // failures. The HMAC challenge response is the earliest point
+        // where a peer commits to a verifiable identity claim — only
+        // then can a failure be attributed to "wrong actor".
         Ok(Err(err)) => {
-            record_auth_failure(&state, peer.ip()).await;
             return Err(err).context("WebSocket upgrade");
         }
         Err(_) => {
-            record_auth_failure(&state, peer.ip()).await;
             return Err(anyhow!(
                 "WebSocket upgrade timeout after {HANDSHAKE_TIMEOUT_SECS}s"
             ));
@@ -738,7 +767,22 @@ async fn handle_conn(
         Err(err) => {
             // Malformed handshake response counts as an auth failure —
             // ban the subnet (escalating backoff) so a scanner that's
-            // spraying random bytes pays compounding cooldowns.
+            // spraying random bytes pays compounding cooldowns. The
+            // grace period in `record_auth_failure` ensures a single
+            // glitch-induced malformed payload only warns; the ladder
+            // fires from #2 onward.
+            //
+            // Log the offending payload (truncated to keep huge garbage
+            // from filling the log) and the parse error so the next
+            // incident is diagnosable without an strace. Truncation is
+            // by chars, not bytes — non-ASCII payloads stay UTF-8 valid.
+            let preview: String = response_text.chars().take(200).collect();
+            let elided = response_text.chars().count() > 200;
+            log::warn!(
+                target: "remote_control",
+                "malformed handshake response from {peer}: {err:#}; payload preview={preview:?}{}",
+                if elided { " (truncated)" } else { "" },
+            );
             record_auth_failure(&state, peer.ip()).await;
             return Err(err).context("parsing handshake response");
         }
@@ -993,6 +1037,22 @@ where
                             );
                             continue;
                         }
+                        // Diagnostic — info-level breadcrumb so a live
+                        // log tail can confirm chunks ARE reaching the
+                        // server. The header parse below is duplicated
+                        // by the handler; that's fine, this is a debug
+                        // aid not a hot path.
+                        let upload_id_log = u64::from_be_bytes(
+                            bytes[0..8].try_into().unwrap_or([0; 8]),
+                        );
+                        let offset_log = u64::from_be_bytes(
+                            bytes[8..16].try_into().unwrap_or([0; 8]),
+                        );
+                        log::info!(
+                            target: "remote_control::upload",
+                            "binary frame from {client_name:?}: upload_id={upload_id_log} offset={offset_log} payload_bytes={}",
+                            bytes.len() - 16,
+                        );
                         // Delegate parsing + dispatch to the upper-layer
                         // handler registered via
                         // `remote_control::set_binary_frame_handler`.
@@ -1005,15 +1065,20 @@ where
                             Some(handler) => {
                                 if let Err(err) = handler(&bytes) {
                                     log::warn!(
-                                        target: "remote_control",
-                                        "binary frame handler rejected frame (client={client_name:?}): {err}",
+                                        target: "remote_control::upload",
+                                        "binary frame handler rejected upload_id={upload_id_log} offset={offset_log} (client={client_name:?}): {err}",
+                                    );
+                                } else {
+                                    log::info!(
+                                        target: "remote_control::upload",
+                                        "binary frame written: upload_id={upload_id_log} offset={offset_log}",
                                     );
                                 }
                             }
                             None => {
                                 log::warn!(
-                                    target: "remote_control",
-                                    "no binary frame handler installed; dropping {n}-byte frame (client={client_name:?})",
+                                    target: "remote_control::upload",
+                                    "NO binary frame handler installed; dropping {n}-byte frame (client={client_name:?})",
                                     n = bytes.len(),
                                 );
                             }
@@ -1042,7 +1107,19 @@ where
                     .pointer("/params/kind")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
+                if kind.starts_with("upload_") {
+                    log::info!(
+                        target: "remote_control::upload",
+                        "forwarding {kind} notification to {client_name:?}",
+                    );
+                }
                 if !allow_list::should_forward_event(kind) {
+                    if kind.starts_with("upload_") {
+                        log::warn!(
+                            target: "remote_control::upload",
+                            "DROPPING {kind} notification — allow_list rejected (BUG?)",
+                        );
+                    }
                     continue;
                 }
                 let envelope = serde_json::json!({
