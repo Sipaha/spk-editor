@@ -17,7 +17,7 @@ mod tools;
 mod window_ids;
 
 pub use handoff::{HandoffOutcome, try_handoff_to_existing_instance};
-pub use lifecycle::{set_runtime_dir_for_test, socket_path, start_server};
+pub use lifecycle::{runtime_dir, set_runtime_dir_for_test, socket_path, start_server};
 pub use notifications::emit as emit_notification;
 pub use registry::{
     init, register_tool, register_tool_with_tier, register_typed_tool_with_protection,

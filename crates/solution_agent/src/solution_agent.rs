@@ -26,6 +26,7 @@ pub(crate) mod slash_commands;
 pub mod status_item;
 pub(crate) mod status_row;
 pub mod store;
+pub mod upload;
 
 #[cfg(any(feature = "test-support", test))]
 pub mod test_support;
@@ -35,7 +36,8 @@ pub use model::{
 };
 
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use agent_servers::CustomAgentServer;
 use gpui::{App, AppContext, AsyncApp, SharedString};
@@ -85,6 +87,24 @@ pub fn init(cx: &mut App) {
 
     mcp::register(cx);
     event_sources::install(cx);
+
+    // Chunked-upload manager: shared between the listener (pure tokio
+    // binary-frame handler) and the `solution_agent.upload_*` MCP tools
+    // (GPUI context). Bytes land under `<editor_mcp::runtime_dir>/uploads/`
+    // so they share the lifetime of the editor's runtime root — tests can
+    // pin this via `editor_mcp::set_runtime_dir_for_test`.
+    let tmp_root = editor_mcp::runtime_dir().join("uploads");
+    match upload::UploadManager::new(tmp_root) {
+        Ok(manager) => {
+            let handle = Arc::new(Mutex::new(manager));
+            upload::install(handle);
+            spawn_upload_ack_drainer(cx);
+            spawn_upload_gc(cx);
+        }
+        Err(err) => {
+            log::error!("solution_agent: failed to init upload manager: {err}");
+        }
+    }
 
     // Workspace hook for navigator + status item registration. The navigator
     // derives its active Solution from the workspace's project worktrees on
@@ -142,6 +162,63 @@ pub fn init(cx: &mut App) {
         workspace.status_bar().update(cx, |bar, cx| {
             bar.add_right_item(status_item, window, cx);
         });
+    })
+    .detach();
+}
+
+/// Drain queued chunk-ack events from the `UploadManager` and broadcast each
+/// one as an `upload_chunk_acked` MCP notification. The listener (pure tokio)
+/// can't call `editor_mcp::emit_notification` directly because the underlying
+/// `McpServer` uses `RefCell` and must be touched from the GPUI thread, so the
+/// ack queue inside `UploadManager` is the cross-thread hand-off.
+///
+/// 100ms tick is fast enough that mobile progress bars feel live but slow
+/// enough that an idle editor isn't waking up for nothing. The drainer only
+/// emits when the queue has acks — empty drains are a single Vec::take + early
+/// continue.
+fn spawn_upload_ack_drainer(cx: &mut App) {
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(100))
+                .await;
+            // `AsyncApp::update` panics if the App was dropped — the task
+            // is detached, so the panic is contained to this task (matches
+            // every other detached `cx.spawn` site in the crate).
+            cx.update(|cx| {
+                let acks = upload::with_manager(|m| m.drain_acks()).unwrap_or_default();
+                for ack in acks {
+                    let payload = serde_json::json!({
+                        "upload_id": ack.upload_id,
+                        "received_bytes": ack.received_bytes,
+                    });
+                    editor_mcp::emit_notification(cx, "upload_chunk_acked", payload);
+                }
+            });
+        }
+    })
+    .detach();
+}
+
+/// Reap stale uploads every 5 minutes. An attacker who could exhaust disk by
+/// init-ing thousands of uploads + never finishing is bounded by the
+/// per-session cap inside `UploadManager`, but the periodic GC catches the
+/// "legitimate client uploaded and crashed" case too.
+fn spawn_upload_gc(cx: &mut App) {
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        loop {
+            cx.background_executor()
+                .timer(Duration::from_secs(5 * 60))
+                .await;
+            cx.update(|_cx| {
+                upload::with_manager(|m| {
+                    let n = m.gc(std::time::Instant::now(), upload::UPLOAD_TTL);
+                    if n > 0 {
+                        log::info!("upload::gc: reaped {n} expired entries");
+                    }
+                });
+            });
+        }
     })
     .detach();
 }

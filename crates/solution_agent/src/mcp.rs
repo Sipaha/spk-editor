@@ -61,6 +61,18 @@ pub fn register(cx: &mut App) {
     editor_mcp::register_tool(cx, |server| {
         server.add_tool(GetSessionChildrenTool);
     });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(UploadInitTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(UploadStatusTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(UploadFinishTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(UploadAbortTool);
+    });
 }
 
 // =====================================================================
@@ -2308,6 +2320,292 @@ impl McpServerTool for ReadSessionHistoryTool {
     }
 }
 
+// =====================================================================
+// solution_agent.upload_{init,status,finish,abort}
+// =====================================================================
+//
+// Chunked-upload control surface for the WebSocket binary-frame attachment
+// path. See `solution_agent::upload` for the storage manager and
+// `remote_control::listener` for the binary-frame dispatch. Mobile clients
+// drive the lifecycle:
+//   1. `upload_init` → server allocates an id + tmp file, returns u64 id.
+//   2. WS binary frames (16-byte header `u64 id BE | u64 offset BE` +
+//      payload) push the bytes; the listener calls `UploadManager::write_chunk`.
+//   3. (optional) `upload_status` polls per-id progress.
+//   4. `upload_finish` validates total size + optional sha256, returns
+//      `{handle: "spk-upload://<id>"}`.
+//   5. The handle is embedded as a `ResourceLink` in `send_message_blocks`,
+//      which swaps it for inline `Image`/`Text` content and aborts the entry.
+//   6. `upload_abort` cancels an upload (e.g. user cancelled the picker).
+
+/// Allocate a chunked-upload slot for `session_id`. Returns an `upload_id`
+/// that subsequent WebSocket binary frames (16-byte header + payload) write
+/// chunks against. The session must already exist; the per-session
+/// concurrency cap blocks runaway disk usage.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct UploadInitParams {
+    pub session_id: String,
+    pub mime: String,
+    pub display_name: String,
+    pub total_size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for UploadInitParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            session_id: String,
+            mime: String,
+            display_name: String,
+            total_size: u64,
+            sha256: Option<String>,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            session_id: inner.session_id,
+            mime: inner.mime,
+            display_name: inner.display_name,
+            total_size: inner.total_size,
+            sha256: inner.sha256,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct UploadInitResult {
+    pub upload_id: u64,
+}
+
+#[derive(Clone)]
+pub struct UploadInitTool;
+
+impl McpServerTool for UploadInitTool {
+    type Input = UploadInitParams;
+    type Output = UploadInitResult;
+    const NAME: &'static str = "solution_agent.upload_init";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.session_id.is_empty(),
+            "invalid_params: session_id is required"
+        );
+        anyhow::ensure!(!input.mime.is_empty(), "invalid_params: mime is required");
+        anyhow::ensure!(
+            !input.display_name.is_empty(),
+            "invalid_params: display_name is required"
+        );
+        anyhow::ensure!(
+            input.total_size > 0,
+            "invalid_params: total_size must be > 0"
+        );
+
+        // Validate the session is known to the store BEFORE allocating a
+        // tmp file. A typo'd session_id should fail fast, not after the
+        // client has streamed megabytes of payload.
+        let session_id = SolutionSessionId::parse(&input.session_id)
+            .map_err(|e| anyhow!("bad session id: {e}"))?;
+        let exists = cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.read(cx).session(session_id).is_some()
+        });
+        if !exists {
+            anyhow::bail!("unknown_session: {}", input.session_id);
+        }
+
+        let upload_id = crate::upload::with_manager(|m| {
+            m.init(
+                input.session_id,
+                input.mime,
+                input.display_name,
+                input.total_size,
+                input.sha256,
+            )
+        })
+        .ok_or_else(|| anyhow!("upload manager not initialised"))??;
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("upload_id={upload_id}"),
+            }],
+            structured_content: UploadInitResult { upload_id },
+        })
+    }
+}
+
+/// Inspect the per-upload `received_bytes` / `total_size` progress without
+/// consuming the entry. Mobile clients can poll this between chunks for a
+/// progress bar.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct UploadStatusParams {
+    pub upload_id: u64,
+}
+
+impl<'de> Deserialize<'de> for UploadStatusParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            upload_id: u64,
+        }
+        Ok(Self {
+            upload_id: Option::<Inner>::deserialize(de)?
+                .unwrap_or_default()
+                .upload_id,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct UploadStatusResult {
+    pub received_bytes: u64,
+    pub total_size: u64,
+}
+
+#[derive(Clone)]
+pub struct UploadStatusTool;
+
+impl McpServerTool for UploadStatusTool {
+    type Input = UploadStatusParams;
+    type Output = UploadStatusResult;
+    const NAME: &'static str = "solution_agent.upload_status";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        _cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        let (received_bytes, total_size) = crate::upload::with_manager(|m| m.status(input.upload_id))
+            .ok_or_else(|| anyhow!("upload manager not initialised"))?
+            .ok_or_else(|| anyhow!("unknown_upload_id: {}", input.upload_id))?;
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("{received_bytes}/{total_size}"),
+            }],
+            structured_content: UploadStatusResult {
+                received_bytes,
+                total_size,
+            },
+        })
+    }
+}
+
+/// Finalize an upload — validates `received_bytes == total_size`, optionally
+/// verifies a sha256, and returns the `spk-upload://<id>` handle string
+/// that `send_message_blocks` resolves to inline content.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct UploadFinishParams {
+    pub upload_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for UploadFinishParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            upload_id: u64,
+            sha256: Option<String>,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            upload_id: inner.upload_id,
+            sha256: inner.sha256,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct UploadFinishResult {
+    pub handle: String,
+}
+
+#[derive(Clone)]
+pub struct UploadFinishTool;
+
+impl McpServerTool for UploadFinishTool {
+    type Input = UploadFinishParams;
+    type Output = UploadFinishResult;
+    const NAME: &'static str = "solution_agent.upload_finish";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        _cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        let handle = crate::upload::with_manager(|m| {
+            m.finish(input.upload_id, input.sha256.as_deref())
+        })
+        .ok_or_else(|| anyhow!("upload manager not initialised"))??;
+        let handle_uri = format!("{}{}", crate::upload::HANDLE_SCHEME, handle.id);
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: handle_uri.clone(),
+            }],
+            structured_content: UploadFinishResult { handle: handle_uri },
+        })
+    }
+}
+
+/// Cancel an in-flight or finished-but-unconsumed upload, deleting the tmp
+/// file. Idempotent in spirit — calling abort on an unknown id returns an
+/// error rather than silently succeeding so the client knows the entry was
+/// already gone (e.g. GC reaped it).
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct UploadAbortParams {
+    pub upload_id: u64,
+}
+
+impl<'de> Deserialize<'de> for UploadAbortParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            upload_id: u64,
+        }
+        Ok(Self {
+            upload_id: Option::<Inner>::deserialize(de)?
+                .unwrap_or_default()
+                .upload_id,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct UploadAbortResult {}
+
+#[derive(Clone)]
+pub struct UploadAbortTool;
+
+impl McpServerTool for UploadAbortTool {
+    type Input = UploadAbortParams;
+    type Output = UploadAbortResult;
+    const NAME: &'static str = "solution_agent.upload_abort";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        _cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        crate::upload::with_manager(|m| m.abort(input.upload_id))
+            .ok_or_else(|| anyhow!("upload manager not initialised"))??;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: "aborted".to_string(),
+            }],
+            structured_content: UploadAbortResult {},
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! R-5e enrichment coverage. These tests build a real `AcpThread`
@@ -3555,5 +3853,149 @@ mod tests {
             "no decline reason on success; got {:?}",
             result.structured_content.message
         );
+    }
+
+    // -----------------------------------------------------------------
+    // upload_{init,status,finish,abort} + send_message_blocks resolution
+    // -----------------------------------------------------------------
+
+    /// `crate::upload::install` is a `OnceLock` — only the first caller wins
+    /// process-wide. We can't keep handing out fresh `UploadManager`s per
+    /// test; if we did, the second caller's `TempDir` would also drop on
+    /// scope exit, leaving the first-installed manager pointing at a
+    /// vanished directory. Instead, keep one persistent tempdir + manager
+    /// alive for the lifetime of the test binary, and have each test allocate
+    /// a fresh session+upload inside it.
+    fn ensure_test_upload_manager() {
+        use std::sync::OnceLock;
+        static GUARD: OnceLock<tempfile::TempDir> = OnceLock::new();
+        GUARD.get_or_init(|| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let manager =
+                crate::upload::UploadManager::new(dir.path().to_path_buf()).expect("new mgr");
+            crate::upload::install(std::sync::Arc::new(std::sync::Mutex::new(manager)));
+            dir
+        });
+    }
+
+    #[gpui::test]
+    async fn upload_init_returns_id_and_status_round_trips(cx: &mut gpui::TestAppContext) {
+        let (session_id, _img, _tmp_session) = seed_session_with_image(cx).await;
+        // OnceLock semantics: install only takes on first call per process,
+        // so a prior test's manager may already be in place. That's fine —
+        // each upload gets a fresh id from `next_id` and lands in some
+        // valid tmp_root.
+        ensure_test_upload_manager();
+
+        let init = UploadInitTool
+            .run(
+                UploadInitParams {
+                    session_id: session_id.to_string(),
+                    mime: "image/png".to_string(),
+                    display_name: "pic.png".to_string(),
+                    total_size: 4,
+                    sha256: None,
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("upload_init");
+        let upload_id = init.structured_content.upload_id;
+        assert!(upload_id > 0);
+
+        let status = UploadStatusTool
+            .run(
+                UploadStatusParams { upload_id },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("upload_status");
+        assert_eq!(status.structured_content.received_bytes, 0);
+        assert_eq!(status.structured_content.total_size, 4);
+    }
+
+    #[gpui::test]
+    async fn upload_init_rejects_unknown_session(cx: &mut gpui::TestAppContext) {
+        let (_session_id, _img, _tmp_session) = seed_session_with_image(cx).await;
+        ensure_test_upload_manager();
+        let err = UploadInitTool
+            .run(
+                UploadInitParams {
+                    session_id: "nonexistent-session-id".to_string(),
+                    mime: "image/png".to_string(),
+                    display_name: "a.png".to_string(),
+                    total_size: 1,
+                    sha256: None,
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .map(|_| "ok")
+            .unwrap_or_else(|e| Box::leak(format!("ERR: {e}").into_boxed_str()));
+        assert!(
+            err.starts_with("ERR"),
+            "expected error for unknown session, got {err}"
+        );
+    }
+
+    #[gpui::test]
+    async fn upload_finish_after_chunk_returns_handle_and_abort_cleans(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (session_id, _img, _tmp_session) = seed_session_with_image(cx).await;
+        ensure_test_upload_manager();
+
+        let init = UploadInitTool
+            .run(
+                UploadInitParams {
+                    session_id: session_id.to_string(),
+                    mime: "image/png".to_string(),
+                    display_name: "tiny.png".to_string(),
+                    total_size: 4,
+                    sha256: None,
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("upload_init");
+        let upload_id = init.structured_content.upload_id;
+
+        // Drive a chunk write through the manager directly — the binary
+        // frame path is tested in `remote_control`; here we just need a
+        // populated tmp file for `finish` to verify.
+        crate::upload::with_manager(|m| m.write_chunk(upload_id, 0, &[1, 2, 3, 4]))
+            .expect("manager installed")
+            .expect("write_chunk");
+
+        let finish = UploadFinishTool
+            .run(
+                UploadFinishParams {
+                    upload_id,
+                    sha256: None,
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("upload_finish");
+        assert!(
+            finish
+                .structured_content
+                .handle
+                .starts_with(crate::upload::HANDLE_SCHEME),
+            "expected spk-upload:// handle, got {}",
+            finish.structured_content.handle
+        );
+
+        UploadAbortTool
+            .run(
+                UploadAbortParams { upload_id },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("upload_abort");
+
+        let after = crate::upload::with_manager(|m| m.resolve(upload_id).is_some())
+            .expect("manager installed");
+        assert!(!after, "abort should drop the entry");
     }
 }

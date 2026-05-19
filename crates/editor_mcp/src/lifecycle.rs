@@ -28,7 +28,7 @@ pub fn set_runtime_dir_for_test(dir: PathBuf) {
     let _ = RUNTIME_DIR_OVERRIDE.set(dir);
 }
 
-fn runtime_dir() -> PathBuf {
+pub fn runtime_dir() -> PathBuf {
     RUNTIME_DIR_OVERRIDE
         .get()
         .cloned()
