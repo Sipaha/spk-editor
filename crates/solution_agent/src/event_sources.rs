@@ -124,7 +124,7 @@ pub(crate) fn build_message_appended_payload(
     entry_index: usize,
     cx: &App,
 ) -> serde_json::Value {
-    let role_and_preview = SolutionAgentStore::try_global(cx).and_then(|store| {
+    let role_preview_csid = SolutionAgentStore::try_global(cx).and_then(|store| {
         store.read_with(cx, |store, cx| {
             let session = store.session(session_id)?;
             let session_ref = session.read(cx);
@@ -138,11 +138,29 @@ pub(crate) fn build_message_appended_payload(
                 acp_thread::AgentThreadEntry::CompletedPlan(_) => "plan",
             };
             let preview = truncate_preview(&entry.to_markdown(cx), 200);
-            Some((role.to_string(), preview))
+            // Only user messages can carry an originating-client send id
+            // (stamped on the content-block `_meta` by the client). Other
+            // roles return None unconditionally. Clients use the id to
+            // pop their in-flight optimistic bubble the moment this
+            // notification arrives — no content-equality match needed.
+            let client_send_id =
+                if let acp_thread::AgentThreadEntry::UserMessage(message) = entry {
+                    acp_thread::client_send_id_from_user_message(message)
+                } else {
+                    None
+                };
+            Some((role.to_string(), preview, client_send_id))
         })
     });
-    match role_and_preview {
-        Some((role, preview)) => json!({
+    match role_preview_csid {
+        Some((role, preview, Some(csid))) => json!({
+            "session_id": session_id.to_string(),
+            "entry_index": entry_index,
+            "role": role,
+            "preview": preview,
+            "client_send_id": csid,
+        }),
+        Some((role, preview, None)) => json!({
             "session_id": session_id.to_string(),
             "entry_index": entry_index,
             "role": role,

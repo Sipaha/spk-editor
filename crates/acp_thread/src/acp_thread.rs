@@ -88,6 +88,47 @@ pub fn subagent_session_info_from_meta(meta: &Option<acp::Meta>) -> Option<Subag
         .and_then(|v| serde_json::from_value(v.clone()).ok())
 }
 
+/// Key under which a client (the phone today, possibly other UIs later)
+/// can stamp a locally-generated send id onto a user message's content
+/// blocks via the ACP `_meta` mechanism. The server treats the value
+/// opaquely — it's plumbed through to MCP consumers verbatim so the
+/// originating client can round-trip-match its optimistic bubble to the
+/// server-echoed entry without relying on fragile content-equality
+/// (server-side previews are truncated to ~200 chars, which breaks
+/// exact-string match on long messages — the bug that motivated this).
+///
+/// `i64` rather than UUID: the only requirement is "distinct between
+/// messages the same client is keeping live optimistic bubbles for".
+/// A millisecond timestamp from the phone's clock satisfies that and
+/// is half the wire bytes of a UUID string.
+pub const SPK_CLIENT_SEND_ID_META_KEY: &str = "spk_client_send_id";
+
+/// Scan a UserMessage's chunks for an `spk_client_send_id` meta stamp
+/// (set by the originating client; phone today). Returns the first
+/// non-null `i64` found across all content-block variants' `_meta`
+/// fields. Returns `None` when no chunk carries the key — the common
+/// case for desktop-originated user messages, which don't stamp.
+pub fn client_send_id_from_user_message(message: &UserMessage) -> Option<i64> {
+    for chunk in &message.chunks {
+        let meta = match chunk {
+            acp::ContentBlock::Text(t) => &t.meta,
+            acp::ContentBlock::Image(i) => &i.meta,
+            acp::ContentBlock::Audio(a) => &a.meta,
+            acp::ContentBlock::ResourceLink(r) => &r.meta,
+            acp::ContentBlock::Resource(r) => &r.meta,
+            _ => continue,
+        };
+        if let Some(id) = meta
+            .as_ref()
+            .and_then(|m| m.get(SPK_CLIENT_SEND_ID_META_KEY))
+            .and_then(|v| v.as_i64())
+        {
+            return Some(id);
+        }
+    }
+    None
+}
+
 #[derive(Debug)]
 pub struct UserMessage {
     pub id: Option<UserMessageId>,

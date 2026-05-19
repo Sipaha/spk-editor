@@ -562,6 +562,16 @@ pub struct EntrySummary {
     /// Present only for `role == "plan"` entries.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<PlanSummary>,
+    /// Originating client's locally-generated send id, plumbed verbatim
+    /// from the user message's content-block `_meta.spk_client_send_id`
+    /// (see `acp_thread::SPK_CLIENT_SEND_ID_META_KEY`). Present only for
+    /// `role == "user"` entries that came from a client that stamped one
+    /// (the mobile client today; desktop-originated sends leave it
+    /// `None`). Lets the originating client dedupe its in-flight
+    /// optimistic bubble against the server-echoed entry by an exact
+    /// id-match instead of fragile content-equality on truncated previews.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_send_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -836,6 +846,12 @@ fn summarize_entry(
     } else {
         None
     };
+    let client_send_id =
+        if let acp_thread::AgentThreadEntry::UserMessage(message) = entry {
+            acp_thread::client_send_id_from_user_message(message)
+        } else {
+            None
+        };
 
     EntrySummary {
         role: role.to_string(),
@@ -845,6 +861,7 @@ fn summarize_entry(
         images,
         tool_call,
         plan,
+        client_send_id,
     }
 }
 
