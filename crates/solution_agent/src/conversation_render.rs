@@ -504,36 +504,37 @@ pub(crate) fn render_user_message(
 ///      submission re-narrated by a system bracket. Same helper as
 ///      `pending_blocks_preview` so the queued ghost bubble and the
 ///      sent message render identically.
-///   2. Strips the literal "`Image`" placeholder that
-///      `acp_thread::ContentBlock::append` emits when merging image
-///      chunks (we render images via clickable text spans, not as
-///      inline thumbnails, so the placeholder is pure noise).
-///   3. Rewrites the user-typed `[image #N]` placeholders into
-///      markdown links of the form `[image #N](spk-image://<N-1>)`.
-///      The Markdown widget paints them as clickable spans; our
-///      `on_url_click` handler intercepts the `spk-image://` scheme
-///      and opens an image-preview window for the matching chunk.
-///   4. Collapses leftover double-blank lines so the bubble doesn't
-///      grow an empty paragraph where `Image` used to live.
+///   2. Rewrites EVERY image placeholder in the text into a clickable
+///      markdown link of the form `[image #N](spk-image://<idx>)`.
+///      Two flavours of placeholder hit this path:
+///       - `[image #N]` — injected by the desktop compose-paste handler
+///         (label is the session-monotonic
+///         `SolutionSessionView::image_count_so_far`), so the user-
+///         facing `N` is preserved verbatim.
+///       - "`Image`" — emitted by `acp_thread::ContentBlock::append`
+///         when an Image chunk follows other content in the same
+///         message (the common shape for a mobile-originated user
+///         message that bundled text + attachments). These get a
+///         synthesised 1-based label off the local ordinal so the
+///         desktop bubble surfaces them as `[image #1]`, `[image #2]`
+///         identically to a desktop-pasted message.
+///      The on-click handler intercepts `spk-image://<idx>` and opens
+///      an image-preview window for the matching chunk by ORDINAL
+///      position — never `N - 1` — because the `N` from the desktop
+///      label is a session counter, not a per-message index.
+///   3. Collapses leftover double-blank lines so the bubble doesn't
+///      grow an empty paragraph where the placeholder used to live.
 pub(crate) fn clean_user_message_text(text: &str) -> String {
     let unmarked = strip_queue_marker(text);
-    let stripped = unmarked.replace("`Image`", "");
-    // The `[image #N]` label is session-monotonic (counter on
-    // `SolutionSessionView::image_count_so_far`), so `N` is NOT the
-    // image's position inside this message — message #2's only image
-    // can perfectly well be labelled "image #5". The on-click handler
-    // looks up `message.chunks` filtered to images by *ordinal*, so the
-    // URL idx must be the placeholder's ordinal position within the
-    // current message text, not `N - 1`. Earlier code used `N - 1` and
-    // sent everything past the first message's image-zero into
-    // `cx.open_url`, which dropped users into the OS "Open With…" dialog
-    // for the unhandled `spk-image://` scheme.
     let mut ordinal: usize = 0;
-    let with_links = IMAGE_PLACEHOLDER_RE.replace_all(&stripped, |caps: &regex::Captures| {
-        let n: usize = caps[1].parse().unwrap_or(1);
+    let with_links = USER_IMAGE_PLACEHOLDER_RE.replace_all(&unmarked, |caps: &regex::Captures| {
+        let label_n = caps
+            .get(1)
+            .and_then(|m| m.as_str().parse::<usize>().ok())
+            .unwrap_or(ordinal + 1);
         let idx = ordinal;
         ordinal += 1;
-        format!("[image #{n}](spk-image://{idx})")
+        format!("[image #{label_n}](spk-image://{idx})")
     });
     // Reconstruct with explicit markdown line-break semantics:
     //   * single `\n` between non-empty lines → `  \n` (CommonMark
@@ -571,10 +572,27 @@ pub(crate) fn clean_user_message_text(text: &str) -> String {
 }
 
 /// `[image #N]` placeholder pattern injected by the compose paste
-/// handler. The capture group is the 1-based image index.
+/// handler. The capture group is the 1-based image index. Used by
+/// the recall path (`session_view::recall`) where we want ONLY the
+/// desktop-typed placeholders, not the `\`Image\`` literals emitted
+/// by acp_thread's image-chunk merge — those don't carry a recall
+/// label and would just confuse the recall surface.
 pub(crate) static IMAGE_PLACEHOLDER_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| {
         regex::Regex::new(r"\[image #(\d+)\]").expect("static regex compiles")
+    });
+
+/// Combined regex for [clean_user_message_text]: matches either the
+/// desktop-paste `[image #N]` placeholder OR the literal `\`Image\``
+/// inline-code marker that `acp_thread::ContentBlock::append` emits
+/// when merging an image chunk into a multi-block user message
+/// (e.g. mobile-originated text + attachment bundle). The capture
+/// group is the digits inside `[image #N]` when that variant matched;
+/// `None` when the `\`Image\`` branch matched, in which case the
+/// caller synthesises a 1-based ordinal from the match position.
+pub(crate) static USER_IMAGE_PLACEHOLDER_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\[image #(\d+)\]|`Image`").expect("static regex compiles")
     });
 
 /// Mirrors `acp_thread::ContentBlock::decode_image` (private upstream)
