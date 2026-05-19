@@ -35,6 +35,9 @@ pub fn register(cx: &mut App) {
         server.add_tool(SendMessageTool);
     });
     editor_mcp::register_tool(cx, |server| {
+        server.add_tool(SendMessageBlocksTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
         server.add_tool(CloseSessionTool);
     });
     editor_mcp::register_tool(cx, |server| {
@@ -1391,6 +1394,91 @@ impl McpServerTool for SendMessageTool {
                 text: "queued".to_string(),
             }],
             structured_content: SendMessageResult {},
+        })
+    }
+}
+
+// =====================================================================
+// solution_agent.send_message_blocks
+// =====================================================================
+
+/// Send a structured user message composed of one or more ACP
+/// `ContentBlock`s (text + images + resource links, etc). Mirrors
+/// `SendMessageTool` but lets MCP consumers pass multi-modal payloads
+/// — primarily the mobile client, which encodes picked images and
+/// text-like files into `Image` / `Text` blocks. The bare
+/// `send_message` text-only tool stays for callers that only have a
+/// plain prompt.
+///
+/// Fire-and-forget — the returned `Task` from
+/// `SolutionAgentStore::send_message_blocks` is detached so the tool
+/// response returns immediately once the prompt is enqueued.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct SendMessageBlocksParams {
+    pub session_id: String,
+    /// Each entry is serialised per the ACP `ContentBlock` schema
+    /// (`{"type": "text", "text": "..."}` /
+    /// `{"type": "image", "data": "<base64>", "mimeType": "image/png"}` /
+    /// `{"type": "resource_link", "uri": "...", ...}` / etc).
+    pub blocks: Vec<acp::ContentBlock>,
+}
+
+impl<'de> Deserialize<'de> for SendMessageBlocksParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            session_id: String,
+            blocks: Vec<acp::ContentBlock>,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            session_id: inner.session_id,
+            blocks: inner.blocks,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct SendMessageBlocksResult {}
+
+#[derive(Clone)]
+pub struct SendMessageBlocksTool;
+
+impl McpServerTool for SendMessageBlocksTool {
+    type Input = SendMessageBlocksParams;
+    type Output = SendMessageBlocksResult;
+    const NAME: &'static str = "solution_agent.send_message_blocks";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.session_id.is_empty(),
+            "invalid_params: session_id is required"
+        );
+        anyhow::ensure!(
+            !input.blocks.is_empty(),
+            "invalid_params: blocks must contain at least one item"
+        );
+        let session_id = SolutionSessionId::parse(&input.session_id)
+            .map_err(|e| anyhow!("bad session id: {e}"))?;
+        let blocks = input.blocks;
+
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| {
+                store.send_message_blocks(session_id, blocks, cx).detach();
+            });
+        });
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: "queued".to_string(),
+            }],
+            structured_content: SendMessageBlocksResult {},
         })
     }
 }

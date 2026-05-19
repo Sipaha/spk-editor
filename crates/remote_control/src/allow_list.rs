@@ -34,6 +34,9 @@ pub fn translate(method: &str) -> Option<&'static str> {
         "remote.solution_agent.create_session" => Some("solution_agent.create_session"),
         "remote.solution_agent.close_session" => Some("solution_agent.close_session"),
         "remote.solution_agent.send_message" => Some("solution_agent.send_message"),
+        "remote.solution_agent.send_message_blocks" => {
+            Some("solution_agent.send_message_blocks")
+        }
         "remote.solution_agent.cancel_turn" => Some("solution_agent.cancel_turn"),
         "remote.solution_agent.get_session_children" => {
             Some("solution_agent.get_session_children")
@@ -109,6 +112,10 @@ mod tests {
             (
                 "remote.solution_agent.send_message",
                 "solution_agent.send_message",
+            ),
+            (
+                "remote.solution_agent.send_message_blocks",
+                "solution_agent.send_message_blocks",
             ),
             (
                 "remote.solution_agent.cancel_turn",
