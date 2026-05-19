@@ -138,6 +138,15 @@ pub struct SessionSummary {
     /// unknown model).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
+    /// Wall-clock ms when the session's current `state` last flipped to
+    /// `Running`. Computed at serialisation time from the monotonic
+    /// `SessionState::Running { started_at: Instant }` via
+    /// `Utc::now() - started_at.elapsed()`. `None` when state isn't
+    /// Running. Lets clients render a live "Running for Xs" badge
+    /// without the server having to push elapsed-tick updates — the
+    /// client ticks locally from this anchor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_started_at_ms: Option<i64>,
     /// F: parent session reference for sub-agent indication. `None` for
     /// top-level sessions. Set at creation time via
     /// `solution_agent.create_session({parent_session_id})`.
@@ -262,6 +271,18 @@ fn session_summary(session: &SolutionSession, cx: &App) -> SessionSummary {
         .map(|usage| usage.max_tokens)
         .filter(|m| *m > 0)
         .or(session.cached_max_tokens);
+    // Wall-clock anchor for the live Running counter. SessionState's
+    // started_at is a monotonic Instant (not serialisable); convert by
+    // subtracting its elapsed from Utc::now(). Sub-ms clock skew is
+    // negligible at the human-visible tick rate (1 Hz).
+    let state_started_at_ms = match &session.state {
+        crate::model::SessionState::Running { started_at, .. } => {
+            let wall = chrono::Utc::now() - chrono::Duration::from_std(started_at.elapsed())
+                .unwrap_or_default();
+            Some(wall.timestamp_millis())
+        }
+        _ => None,
+    };
     SessionSummary {
         id: session.id.to_string(),
         solution_id: session.solution_id.0.clone(),
@@ -272,6 +293,7 @@ fn session_summary(session: &SolutionSession, cx: &App) -> SessionSummary {
         last_activity_at: session.last_activity_at.timestamp_millis(),
         total_tokens,
         max_tokens,
+        state_started_at_ms,
         parent_session_id: session.parent_session_id.map(|id| id.to_string()),
     }
 }
