@@ -44,6 +44,10 @@ pub fn translate(method: &str) -> Option<&'static str> {
         "remote.solution_agent.rename_session" => Some("solution_agent.rename_session"),
         "remote.solution_agent.restart_agent" => Some("solution_agent.restart_agent"),
         "remote.solution_agent.start_compact" => Some("solution_agent.start_compact"),
+        "remote.solution_agent.upload_init" => Some("solution_agent.upload_init"),
+        "remote.solution_agent.upload_status" => Some("solution_agent.upload_status"),
+        "remote.solution_agent.upload_finish" => Some("solution_agent.upload_finish"),
+        "remote.solution_agent.upload_abort" => Some("solution_agent.upload_abort"),
         _ => None,
     }
 }
@@ -60,7 +64,10 @@ pub fn translate(method: &str) -> Option<&'static str> {
 /// agent-session events are exactly what an Android pager-like client
 /// needs to stream a turn live.
 pub fn should_forward_event(kind: &str) -> bool {
-    kind.starts_with("agent_session_")
+    // `agent_session_*` covers per-turn streaming; `upload_*` covers
+    // chunked-upload progress / errors emitted by the binary-frame path
+    // in `listener.rs`. Mobile clients subscribe to both.
+    kind.starts_with("agent_session_") || kind.starts_with("upload_")
 }
 
 #[cfg(test)]
@@ -137,6 +144,22 @@ mod tests {
                 "remote.solution_agent.start_compact",
                 "solution_agent.start_compact",
             ),
+            (
+                "remote.solution_agent.upload_init",
+                "solution_agent.upload_init",
+            ),
+            (
+                "remote.solution_agent.upload_status",
+                "solution_agent.upload_status",
+            ),
+            (
+                "remote.solution_agent.upload_finish",
+                "solution_agent.upload_finish",
+            ),
+            (
+                "remote.solution_agent.upload_abort",
+                "solution_agent.upload_abort",
+            ),
         ];
         for (wire, bare) in cases {
             assert_eq!(translate(wire), Some(*bare), "for {wire}");
@@ -177,6 +200,18 @@ mod tests {
         assert!(should_forward_event("agent_session_title_changed"));
         assert!(should_forward_event("agent_session_message_appended"));
         assert!(should_forward_event("agent_session_notification_sent"));
+    }
+
+    #[test]
+    fn upload_kinds_forward() {
+        // Chunked-upload progress / error events flow back to the mobile
+        // client over the same notification pipe — see
+        // `docs/plans/2026-05-19-chunked-upload-binary-frames.md`.
+        assert!(should_forward_event("upload_chunk_acked"));
+        assert!(should_forward_event("upload_chunk_error"));
+        // Bare `upload` (no underscore) does NOT match — the prefix
+        // gate is exact, same as agent_session_.
+        assert!(!should_forward_event("uploadqueued"));
     }
 
     #[test]

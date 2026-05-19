@@ -755,6 +755,16 @@ fn main() {
         run_config::init(cx);
         run_config_ui::init(cx);
         remote_control::init(cx);
+        // Wire solution_agent's binary-frame dispatch into remote_control's
+        // listener — this is the third-party site where both crates'
+        // public surfaces meet so neither has to dep on the other. The
+        // listener fires this callback on every authenticated WS binary
+        // frame; the closure parses the 16-byte upload header + writes
+        // to UploadManager. See remote_control::BinaryFrameHandler and
+        // docs/plans/2026-05-19-chunked-upload-binary-frames.md.
+        remote_control::set_binary_frame_handler(std::sync::Arc::new(
+            |bytes: &[u8]| solution_agent::upload::dispatch_binary_frame(bytes),
+        ));
         remote_control_ui::init(cx);
         git_conflict_ui::init(cx);
         let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
