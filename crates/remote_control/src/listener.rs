@@ -658,13 +658,26 @@ async fn handle_conn(
         }
     };
 
-    // Cap the pre-auth message size: tungstenite's defaults are 64 MiB
-    // frame / 64 MiB message, which is a free memory amplifier for an
-    // unauth'd peer. The challenge response is ≤ 200 bytes; 64 KiB is
-    // generous headroom for any framing overhead.
+    // Cap the WS message size. tokio-tungstenite locks WebSocketConfig
+    // at handshake — there's no way to swap to a looser config after
+    // auth completes, so the same cap covers BOTH the pre-auth
+    // challenge round-trip AND every authenticated message thereafter.
+    //
+    // Pre-auth concern: tungstenite's default (64 MiB) is a free memory
+    // amplifier for an unauth'd peer. Per-IP accept-rate-limit + auth-
+    // fail ban + HANDSHAKE_TIMEOUT_SECS already gate the abuse window,
+    // so we don't need a tight pre-auth-only cap to be safe.
+    //
+    // Post-auth concern: multi-modal user prompts (mobile attachments,
+    // task #11) ship base64-encoded image bytes inline. Mobile picker
+    // caps each picked image at 5 MB raw; base64 inflates that to
+    // ~6.7 MB. Multi-pick is up to 4 images per send, so a worst-case
+    // payload is ~27 MB plus JSON-RPC envelope. 32 MiB covers it with
+    // headroom; tighter caps land the user a confusing "Broken pipe"
+    // when tungstenite kicks the connection mid-write.
     let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
-        .max_frame_size(Some(64 * 1024))
-        .max_message_size(Some(64 * 1024));
+        .max_frame_size(Some(32 * 1024 * 1024))
+        .max_message_size(Some(32 * 1024 * 1024));
     let mut ws = match tokio::time::timeout(
         Duration::from_secs(HANDSHAKE_TIMEOUT_SECS),
         tokio_tungstenite::accept_async_with_config(tls_stream, Some(ws_config)),
