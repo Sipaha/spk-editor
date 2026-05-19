@@ -1,6 +1,6 @@
 # Chunked upload via WebSocket binary frames + start-on-pick + resume
 
-**Status:** ready to dispatch
+**Status:** complete
 **Estimated:** server ~90 min (HEAVY), mobile ~120 min (HEAVY). Two sequential sub-agent dispatches.
 **Goal:** Replace the inline base64 image flow with a proper chunked upload protocol. Upload starts the moment the user picks a file (not on Send). Chunks travel as WebSocket **binary** frames — no base64, no JSON encoding overhead. Survives WS disconnects + force-kills via `upload_status` resume. On Send, the message references uploaded blobs via `spk-upload://<id>` ResourceLinks; the server resolves these into `acp::ContentBlock::Image` (or Resource) just before forwarding to ACP, so the agent sees the same Image block as today.
 
@@ -316,5 +316,22 @@ Manual smoke (deferred to maintainer):
 - [ ] Mobile `:app` Send gate waits for all attachments `Done`; send uses ResourceLink not inline bytes.
 - [ ] Mobile `encodeAttachment` deleted; text attachments also route through upload + server-side fenced-code resolution.
 
+## Implementation notes worth carrying forward
+
+- **Dep direction inverted from the original sketch.** Plan said listener.rs would call `solution_agent::upload::with_manager` directly, requiring `solution_agent.workspace = true` in remote_control's Cargo.toml. That feature-unifies a second rustls CryptoProvider into remote_control's dep set via the transitive `agent_servers` / `claude-acp` graph, breaking the post-auth TLS handshake (caught by `set_enabled_starts_and_stops_listener` test panic: "Could not automatically determine the process-level CryptoProvider from Rustls crate features"). Fix: `remote_control::set_binary_frame_handler(Arc<dyn Fn(&[u8]) -> Result<(), String>>)` indirection; the third-party `crates/zed/src/main.rs` wires `solution_agent::upload::dispatch_binary_frame` into it during init. Neither crate deps the other.
+- **Header byte-order sign-extension trap.** Kotlin's `Long ushr ... and 0xFF` SHIFT-then-MASK is required; a naive `Long ushr ... .toByte()` chain sign-extends negative-looking ids to 0xFF for every byte. Test `negative-looking uploadId masks correctly without sign extension` catches it. Verified the binary header decoded with `u64::from_be_bytes` on the Rust side matches the bytes Kotlin emits.
+- **UploadManager internal constructor pattern.** Class itself + nested `State` are `public` (MainViewModel exposes them on `startAttachmentUpload` return type), but the constructor is `internal` so only the coordinator can instantiate. Cleaner than `internal class` (which would leak `internal` types through public surface).
+- **Queue-replay with stale upload.** No special handling needed: a replayed `send_message_blocks` whose ResourceLink references a GC'd upload bubbles up as a normal tool error → existing snackbar path. Documented in commit `8e5f10d`.
+- **Single notification observer in SessionListStore** owns the existing subscribe loop; added `upload_chunk_acked` to its subscribe list + `uploadNotificationRouter` callback fired BEFORE the agent_session branches. Wired from `MainViewModel.init` via `sessionList.uploadNotificationRouter = uploadManager::onChunkAcked`.
+
 ## Final commit SHAs
-_appended at finalize_
+
+Server:
+- `76bbd57912` solution_agent: headless make_headless_project_for_solution helper (companion for #14 but shared infra)
+- `65fd88d508` solution_agent: UploadManager + upload_{init,status,finish,abort} MCP tools
+- `30fe8eed6a` remote_control: binary-frame chunk dispatch via BinaryFrameHandler trait + WS cap dial-back + allow-list
+
+Mobile:
+- `c270abb` core: chunked-upload protocol + binary-frame seam on RemoteClient
+- `47b719e` app: UploadManager + InFlightUploadsRepository + notification wiring
+- `8e5f10d` app+core: route attachments through chunked upload, drop encodeAttachment
