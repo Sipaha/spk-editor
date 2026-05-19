@@ -354,6 +354,37 @@ pub fn with_manager<R, F: FnOnce(&mut UploadManager) -> R>(f: F) -> Option<R> {
     }
 }
 
+/// Decode a WS binary frame and dispatch to the upload manager. Wire
+/// format: 16-byte header (u64 upload_id BE + u64 offset BE) + raw
+/// payload — see `docs/plans/2026-05-19-chunked-upload-binary-frames.md`.
+/// `Err(reason)` makes the listener log + drop the frame; `Ok(())`
+/// is the happy path. Wired into `remote_control` via
+/// `remote_control::set_binary_frame_handler` in the main binary's
+/// init so this crate doesn't need a direct dep on `remote_control`
+/// (and vice versa — keeps the rustls `CryptoProvider` graph clean).
+pub fn dispatch_binary_frame(bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() < 16 {
+        return Err(format!("frame too short ({} < 16)", bytes.len()));
+    }
+    let mut id_buf = [0u8; 8];
+    id_buf.copy_from_slice(&bytes[0..8]);
+    let mut off_buf = [0u8; 8];
+    off_buf.copy_from_slice(&bytes[8..16]);
+    let upload_id = u64::from_be_bytes(id_buf);
+    let offset = u64::from_be_bytes(off_buf);
+    let payload = &bytes[16..];
+    let result = with_manager(|m| m.write_chunk(upload_id, offset, payload));
+    match result {
+        Some(Ok(_new_received)) => Ok(()),
+        Some(Err(err)) => Err(format!(
+            "upload_id={upload_id} offset={offset}: {err:#}"
+        )),
+        None => Err(format!(
+            "upload manager not installed; dropping (upload_id={upload_id})"
+        )),
+    }
+}
+
 /// Reserved scheme for upload handle URIs. Mobile clients embed strings
 /// like `spk-upload://42` as `ResourceLink.uri`; the
 /// `send_message_blocks` resolver swaps them for inline content.

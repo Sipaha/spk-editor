@@ -668,16 +668,18 @@ async fn handle_conn(
     // fail ban + HANDSHAKE_TIMEOUT_SECS already gate the abuse window,
     // so we don't need a tight pre-auth-only cap to be safe.
     //
-    // Post-auth concern: multi-modal user prompts (mobile attachments,
-    // task #11) ship base64-encoded image bytes inline. Mobile picker
-    // caps each picked image at 5 MB raw; base64 inflates that to
-    // ~6.7 MB. Multi-pick is up to 4 images per send, so a worst-case
-    // payload is ~27 MB plus JSON-RPC envelope. 32 MiB covers it with
-    // headroom; tighter caps land the user a confusing "Broken pipe"
-    // when tungstenite kicks the connection mid-write.
+    // Post-auth concern: chunked uploads ship payload bytes as raw WS
+    // binary frames (16-byte header + body) per
+    // `docs/plans/2026-05-19-chunked-upload-binary-frames.md`. Chunks are
+    // sized at ~1 MiB on the client so a single frame round-trip
+    // dominates over framing overhead; the cap is 1 MiB so an authed
+    // peer can't amplify per-frame memory beyond what we've sized the
+    // server for. Big attachments now arrive as a stream of small frames
+    // instead of one giant base64-stuffed JSON message, so the 32 MiB
+    // headroom the inline-base64 path needed is gone.
     let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
-        .max_frame_size(Some(32 * 1024 * 1024))
-        .max_message_size(Some(32 * 1024 * 1024));
+        .max_frame_size(Some(1024 * 1024))
+        .max_message_size(Some(1024 * 1024));
     let mut ws = match tokio::time::timeout(
         Duration::from_secs(HANDSHAKE_TIMEOUT_SECS),
         tokio_tungstenite::accept_async_with_config(tls_stream, Some(ws_config)),
@@ -975,13 +977,47 @@ where
                             .context("sending pong")?;
                     }
                     Message::Pong(_) => {}
-                    Message::Binary(_) => {
-                        let err = JsonRpcResponse::error(
-                            serde_json::Value::Null,
-                            -32600,
-                            "binary frames not supported on this protocol version",
-                        );
-                        write_response(ws, &err).await?;
+                    Message::Binary(bytes) => {
+                        // Chunked-upload frame: 16-byte header
+                        // (u64 upload_id BE | u64 offset BE) + raw payload.
+                        // See `docs/plans/2026-05-19-chunked-upload-binary-frames.md`.
+                        // Anything < 16 bytes is malformed — log and
+                        // drop rather than erroring on the WS, since a
+                        // legit client never sends shorter frames and
+                        // an attacker shouldn't get useful feedback.
+                        if bytes.len() < 16 {
+                            log::warn!(
+                                target: "remote_control",
+                                "client {client_name:?} sent {n}-byte binary frame (< 16); dropping",
+                                n = bytes.len(),
+                            );
+                            continue;
+                        }
+                        // Delegate parsing + dispatch to the upper-layer
+                        // handler registered via
+                        // `remote_control::set_binary_frame_handler`.
+                        // Keeps `remote_control` free of the
+                        // `solution_agent` dep (which would pull a
+                        // second rustls CryptoProvider via its
+                        // transitive `agent_servers` / `claude-acp`
+                        // graph and break the post-auth handshake).
+                        match crate::binary_frame_handler() {
+                            Some(handler) => {
+                                if let Err(err) = handler(&bytes) {
+                                    log::warn!(
+                                        target: "remote_control",
+                                        "binary frame handler rejected frame (client={client_name:?}): {err}",
+                                    );
+                                }
+                            }
+                            None => {
+                                log::warn!(
+                                    target: "remote_control",
+                                    "no binary frame handler installed; dropping {n}-byte frame (client={client_name:?})",
+                                    n = bytes.len(),
+                                );
+                            }
+                        }
                     }
                     Message::Close(frame) => {
                         log::debug!(
