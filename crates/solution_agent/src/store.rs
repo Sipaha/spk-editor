@@ -1998,6 +1998,44 @@ impl SolutionAgentStore {
         }
     }
 
+    /// Construct a headless `project::Project` bound to nothing in
+    /// particular — no worktree, no env, no window/workspace. Used by
+    /// the MCP-driven auto-wake path (`queue::send_message_blocks_with_wake`):
+    /// when a client (the mobile app) sends to a Cold session and the
+    /// desktop has no window open for the solution, we still need a
+    /// project handle to feed into `resume_session`.
+    ///
+    /// The `_solution` arg is taken for symmetry with the call site
+    /// (and to make the intent obvious at call sites) but isn't used —
+    /// `resume_session` keys claude-acp's jsonl lookup off the
+    /// metadata's `cwd`, not the project's worktree. Empty worktree is
+    /// fine.
+    ///
+    /// Pulls dependencies from `workspace::AppState::global` — the
+    /// editor's `main.rs` sets this before any MCP server can hit us,
+    /// so absence is a programmer error in init order (returns Err so
+    /// the caller surfaces it instead of panicking).
+    pub(crate) fn make_headless_project_for_solution(
+        _solution: &solutions::Solution,
+        cx: &mut App,
+    ) -> Result<Entity<project::Project>> {
+        let app_state = workspace::AppState::try_global(cx)
+            .ok_or_else(|| anyhow!("workspace::AppState global is not initialised"))?;
+        Ok(project::Project::local(
+            app_state.client.clone(),
+            app_state.node_runtime.clone(),
+            app_state.user_store.clone(),
+            app_state.languages.clone(),
+            app_state.fs.clone(),
+            None,
+            project::LocalProjectFlags {
+                init_worktree_trust: false,
+                ..Default::default()
+            },
+            cx,
+        ))
+    }
+
     fn gc_orphan_solutions(&mut self, cx: &mut Context<Self>) {
         let Some(store) = SolutionStore::try_global(cx) else {
             return;
