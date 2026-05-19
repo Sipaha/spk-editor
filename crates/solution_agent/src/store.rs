@@ -2065,7 +2065,7 @@ impl SolutionAgentStore {
                 let max_stale_breached = existing_first_dirty_at
                     .map(|t| {
                         now.saturating_duration_since(t)
-                            >= std::time::Duration::from_millis(1000)
+                            >= std::time::Duration::from_millis(2000)
                     })
                     .unwrap_or(false);
                 if max_stale_breached {
@@ -2078,7 +2078,7 @@ impl SolutionAgentStore {
                     let entry_index = *idx;
                     let task = cx.spawn(async move |this, cx: &mut AsyncApp| {
                         cx.background_executor()
-                            .timer(std::time::Duration::from_millis(200))
+                            .timer(std::time::Duration::from_millis(500))
                             .await;
                         this.update(cx, |this, cx| {
                             if this.entry_update_throttles.remove(&key).is_some() {
