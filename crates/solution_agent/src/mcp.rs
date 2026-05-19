@@ -584,6 +584,16 @@ pub struct EntrySummary {
     /// id-match instead of fragile content-equality on truncated previews.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_send_id: Option<i64>,
+    /// Every distinct `spk_client_send_id` carried by this user
+    /// entry, in source order. The single-id `client_send_id` field
+    /// above is kept for back-compat (old mobile builds only look
+    /// there); modern clients should prefer this list, since the
+    /// server-side queue-merge path (`store::queue::send_message_blocks`'s
+    /// `pending_messages` flush) rolls N originating bundles into one
+    /// ACP message with N distinct stamps. Empty for non-user entries
+    /// or for user entries from clients that don't stamp ids.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub client_send_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -858,12 +868,13 @@ fn summarize_entry(
     } else {
         None
     };
-    let client_send_id =
+    let client_send_ids: Vec<i64> =
         if let acp_thread::AgentThreadEntry::UserMessage(message) = entry {
-            acp_thread::client_send_id_from_user_message(message)
+            acp_thread::client_send_ids_from_user_message(message)
         } else {
-            None
+            Vec::new()
         };
+    let client_send_id = client_send_ids.first().copied();
 
     EntrySummary {
         role: role.to_string(),
@@ -874,6 +885,7 @@ fn summarize_entry(
         tool_call,
         plan,
         client_send_id,
+        client_send_ids,
     }
 }
 
@@ -1594,9 +1606,18 @@ impl McpServerTool for CloseSessionTool {
 /// Cancel the in-flight turn on `session_id`. Forwards to
 /// `AgentConnection::cancel`; the session will eventually transition to
 /// `Idle` (or `Errored`) via the regular `AcpThreadEvent` plumbing.
+///
+/// When `flush_pending` is true the call additionally sets the
+/// session's `flush_after_cancel` flag so that the `pending_messages`
+/// queue (filled while the agent was Running) gets flushed as one
+/// merged follow-up turn the moment the cancel settles, instead of
+/// being dropped. This is the wire path the mobile Force-flush
+/// button uses to "stop and send my queued messages now".
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct CancelTurnParams {
     pub session_id: String,
+    #[serde(default)]
+    pub flush_pending: bool,
 }
 
 impl<'de> Deserialize<'de> for CancelTurnParams {
@@ -1605,11 +1626,13 @@ impl<'de> Deserialize<'de> for CancelTurnParams {
         #[serde(default, deny_unknown_fields)]
         struct Inner {
             session_id: String,
+            #[serde(default)]
+            flush_pending: bool,
         }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
         Ok(Self {
-            session_id: Option::<Inner>::deserialize(de)?
-                .unwrap_or_default()
-                .session_id,
+            session_id: inner.session_id,
+            flush_pending: inner.flush_pending,
         })
     }
 }
@@ -1637,9 +1660,24 @@ impl McpServerTool for CancelTurnTool {
         let session_id = SolutionSessionId::parse(&input.session_id)
             .map_err(|e| anyhow!("bad session id: {e}"))?;
 
+        let flush_pending = input.flush_pending;
         cx.update(|cx| -> Result<()> {
             let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, cx| store.cancel_turn(session_id, cx))?;
+            store.update(cx, |store, cx| {
+                if flush_pending {
+                    // Best-effort: when there is nothing to flush
+                    // `interrupt_and_flush_pending` errors with
+                    // "no queued messages". Treat that as success
+                    // here — the caller asked for "cancel + maybe
+                    // flush", and the cancel half still makes sense.
+                    match store.interrupt_and_flush_pending(session_id, cx) {
+                        Ok(()) => Ok(()),
+                        Err(_) => store.cancel_turn(session_id, cx),
+                    }
+                } else {
+                    store.cancel_turn(session_id, cx)
+                }
+            })?;
             Ok(())
         })?;
 

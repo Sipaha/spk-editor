@@ -138,29 +138,36 @@ pub(crate) fn build_message_appended_payload(
                 acp_thread::AgentThreadEntry::CompletedPlan(_) => "plan",
             };
             let preview = truncate_preview(&entry.to_markdown(cx), 200);
-            // Only user messages can carry an originating-client send id
-            // (stamped on the content-block `_meta` by the client). Other
-            // roles return None unconditionally. Clients use the id to
-            // pop their in-flight optimistic bubble the moment this
-            // notification arrives — no content-equality match needed.
-            let client_send_id =
+            // Only user messages can carry originating-client send ids
+            // (stamped on each content block's `_meta` by the client).
+            // For other roles return an empty Vec; for users return
+            // every distinct id we find — a single id for the common
+            // one-shot send, multiple when the server-side queue merge
+            // rolled N originating bundles into one ACP message (see
+            // `client_send_ids_from_user_message`). Clients use the
+            // list to pop every contributing optimistic bubble.
+            let client_send_ids: Vec<i64> =
                 if let acp_thread::AgentThreadEntry::UserMessage(message) = entry {
-                    acp_thread::client_send_id_from_user_message(message)
+                    acp_thread::client_send_ids_from_user_message(message)
                 } else {
-                    None
+                    Vec::new()
                 };
-            Some((role.to_string(), preview, client_send_id))
+            Some((role.to_string(), preview, client_send_ids))
         })
     });
     match role_preview_csid {
-        Some((role, preview, Some(csid))) => json!({
+        Some((role, preview, csids)) if !csids.is_empty() => json!({
             "session_id": session_id.to_string(),
             "entry_index": entry_index,
             "role": role,
             "preview": preview,
-            "client_send_id": csid,
+            // Back-compat alias for pre-R6h mobile builds that only
+            // know the singular field. Always the FIRST csid so the
+            // legacy "pop one" path keeps working.
+            "client_send_id": csids[0],
+            "client_send_ids": csids,
         }),
-        Some((role, preview, None)) => json!({
+        Some((role, preview, _)) => json!({
             "session_id": session_id.to_string(),
             "entry_index": entry_index,
             "role": role,

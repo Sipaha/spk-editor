@@ -109,6 +109,22 @@ pub const SPK_CLIENT_SEND_ID_META_KEY: &str = "spk_client_send_id";
 /// fields. Returns `None` when no chunk carries the key — the common
 /// case for desktop-originated user messages, which don't stamp.
 pub fn client_send_id_from_user_message(message: &UserMessage) -> Option<i64> {
+    client_send_ids_from_user_message(message).into_iter().next()
+}
+
+/// Like [client_send_id_from_user_message] but returns EVERY csid
+/// found across the message's chunks, in source order, deduplicated.
+///
+/// Used by the merge path on server-side queue flushes: when
+/// `pending_messages` rolls up N originating sends into one ACP user
+/// message, each of the N bundles' first ContentBlock still carries
+/// its own client send id, so the merged entry has multiple stamps.
+/// External MCP consumers (the Android client) need the full list to
+/// pop every optimistic bubble that contributed to the merge — pre-
+/// fix the consumer only saw the first id and the other N-1 bubbles
+/// stayed orphaned.
+pub fn client_send_ids_from_user_message(message: &UserMessage) -> Vec<i64> {
+    let mut out: Vec<i64> = Vec::new();
     for chunk in &message.chunks {
         let meta = match chunk {
             acp::ContentBlock::Text(t) => &t.meta,
@@ -123,10 +139,12 @@ pub fn client_send_id_from_user_message(message: &UserMessage) -> Option<i64> {
             .and_then(|m| m.get(SPK_CLIENT_SEND_ID_META_KEY))
             .and_then(|v| v.as_i64())
         {
-            return Some(id);
+            if !out.contains(&id) {
+                out.push(id);
+            }
         }
     }
-    None
+    out
 }
 
 #[derive(Debug)]
