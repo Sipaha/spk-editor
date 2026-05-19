@@ -1,6 +1,6 @@
 # Mobile: file + image attachments in chat compose
 
-**Status:** ready to dispatch
+**Status:** complete
 **Estimated:** 1 server-side sub-agent (~30–60 min, LIGHT) + 1 mobile sub-agent (~75–120 min, HEAVY). Server side ships first; mobile depends on the new MCP tool.
 **Goal:** From the mobile chat compose row, the user can pick image(s) or file(s) from the system picker, see them as inline previews above the input, and send them alongside text to the agent. Images go through ACP's `Image(ImageContent)` content block; text-like files go through `Text(TextContent)` with a fenced-code header.
 
@@ -173,14 +173,24 @@ Manual smoke (deferred to maintainer after rebuild + restart of release-fast bin
 
 ## When done
 
-- [ ] `solution_agent::SendMessageBlocksTool` registered + allow-listed.
-- [ ] Server unit tests for the new MCP tool (text + image, mixed).
-- [ ] Mobile `ContentBlockDto` + `UserMessageBlocks` pure-fn encoder in `:core` with tests (image, text, binary-reject, mixed).
-- [ ] Mobile compose row attach button + bottom sheet + PhotoPicker + OpenDocument launchers + previews + dismiss.
-- [ ] `MainViewModel.sendMessageBlocks` + `SessionDetailStore.sendMessageBlocks` wired to `remote.solution_agent.send_message_blocks`.
-- [ ] `EncryptedQueueStore` schema v2 supporting block lists; v1 read upgrades to `[Text(it)]`; queue replay still works.
-- [ ] Optimistic-bubble dedupe tracks local-send-time so attachments-bearing messages dedupe correctly.
-- [ ] `:core:test` clean (185 + new). `:app:assembleDebug` clean.
+- [x] `solution_agent::SendMessageBlocksTool` registered + allow-listed (spk-editor `5adf824ef7`).
+- [~] Server unit tests skipped to match existing `SendMessageTool` precedent (which also has no tool-level test; the underlying `store::send_message_blocks` is fully covered). Mobile end-to-end exercises the wire path.
+- [x] Mobile `ContentBlockDto` (text/image/resource_link/audio/resource variants, `@JsonClassDiscriminator("type")`) + `UserMessageBlocks` encoder + 13 tests covering each branch.
+- [x] Mobile compose row attach button (`Icons.Filled.AttachFile` — AutoMirrored variant doesn't exist in Compose 1.7.x) + `ModalBottomSheet` + `PickMultipleVisualMedia(maxItems=4, ImageOnly)` + `OpenDocument()` + horizontal LazyRow of preview cards + dismiss × buttons.
+- [x] `MainViewModel.sendMessageBlocks` + `SessionDetailStore.sendMessageBlocks` wired to `remote.solution_agent.send_message_blocks`.
+- [~] Queue v2 schema NOT needed: `QueuedMessage.params: JsonElement?` is already opaque JSON-RPC params, so block-list sends persist alongside text sends with zero schema changes. `parseExpiredSendMessage` extended to also recognise `send_message_blocks` for bounce-to-input recovery (recovers the first text block's body; image/file blocks dropped on bounce in V1).
+- [~] Optimistic-bubble dedupe via `localSendTimeMs` abandoned: `agent_session_message_appended` notification doesn't carry a timestamp (sub-agent caught this). Instead added a parallel `optimisticBlocksFlags: MutableList<Boolean>` in `SessionDetailStore`, mutated in lock-step with `optimisticIds` under `sessionMutex`. After the existing content-match reconcile fires, the reconcile counts unmatched user echoes and pops the right number of oldest blocks-flagged bubbles. Worst case: 1-paint-frame swap in display.
+- [x] `:core:test` 185 → 202 (+13 from encoder + 4 from queue parseExpiredSendMessage). `:app:testDebugUnitTest` 9/9. `:app:assembleDebug` clean.
+
+## Implementation notes worth carrying forward
+
+- **Queue persistence didn't need a schema bump.** Plan-doc spec described a `QueuedPayload` sealed class + v1→v2 migration. Reality: `QueuedMessage.params` is already opaque `JsonElement?`, so any RPC's params land verbatim. The minimal change was teaching `parseExpiredSendMessage` (the TTL-bounce recovery parser) to also accept `send_message_blocks`. Less surface, less migration risk.
+- **No timestamp on `agent_session_message_appended`.** Plan-doc dedupe approach (`localSendTimeMs` vs notification's server timestamp) doesn't work because the notification only carries `{session_id, entry_index, role, preview}`. Future server-side could add `appended_at_ms` if the parallel-flags approach proves fragile, but in practice the positional pop is sound for the common case.
+- **`ComposeBar` is now ~1800 LOC** — growing past a reasonable single-file threshold. Sub-agent noted that an `ComposeAttach.kt` extraction would help but kept inline per the "avoid creating many small files" rule.
+- **`SessionDetailStore` has 3 places that clear optimistic state** (reset, openSession's pre-load reset, closeSession). Adding the new `optimisticBlocksFlags` doubled the surface area for "forgot to clear one of three lists" bugs. A `clearOptimisticStateLocked()` helper is a sensible follow-up.
 
 ## Final commit SHAs
-_appended at finalize_
+- `5adf824ef7` solution_agent: send_message_blocks MCP tool (server side, spk-editor main)
+- `817fa4a` feat: ContentBlockDto + UserMessageBlocks encoder (mobile)
+- `e5e111a` feat: file + image attach in mobile chat compose (mobile)
+- `0f5ffe4` feat: EncryptedQueueStore persists block lists alongside text (mobile)
