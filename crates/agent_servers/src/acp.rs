@@ -796,7 +796,17 @@ impl AcpConnection {
                     && n > 0
                 {
                     let trimmed = line.trim_end_matches(['\n', '\r']);
-                    log::warn!("agent stderr: {trimmed}");
+                    // Downgrade known-benign claude-acp internal-lifecycle
+                    // noise to debug. These lines fire on every tool call
+                    // (or every session init for some) and flood the
+                    // editor log with WARN-level entries that look like
+                    // real problems. Add new patterns here as upstream
+                    // surfaces more chatty internals.
+                    if is_benign_agent_stderr(trimmed) {
+                        log::debug!("agent stderr: {trimmed}");
+                    } else {
+                        log::warn!("agent stderr: {trimmed}");
+                    }
                     debug_log.record_line(AcpDebugMessageDirection::Stderr, trimmed);
                     line.clear();
                 }
@@ -1788,6 +1798,46 @@ impl AgentConnection for AcpConnection {
 
     fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
         self
+    }
+}
+
+/// Pattern-match noisy lines that claude-acp emits during normal
+/// operation but which look like WARN-worthy events when surfaced
+/// verbatim in the editor log. Downgraded to debug to keep the
+/// editor's real-warning signal-to-noise ratio sane.
+///
+/// Each pattern is a substring (not full-string) match so claude-acp
+/// versioning prefixes (timestamps, levels, etc.) don't break the
+/// filter. Add new patterns as upstream surfaces more chatty internals.
+fn is_benign_agent_stderr(line: &str) -> bool {
+    // Fires on every tool-call when no post-hook is configured —
+    // i.e. every tool call in the common case.
+    line.contains("No onPostToolUseHook found for tool use ID")
+}
+
+#[cfg(test)]
+mod stderr_filter_tests {
+    use super::is_benign_agent_stderr;
+
+    #[test]
+    fn filters_the_post_tool_use_hook_noise() {
+        assert!(is_benign_agent_stderr(
+            "No onPostToolUseHook found for tool use ID: toolu_01Frjxu6a1XM4fe5rXRRfK9W"
+        ));
+        // Substring match (not full-line) so any leading prefix from a
+        // future claude-acp wrapper still gets caught.
+        assert!(is_benign_agent_stderr(
+            "[2026-05-19T12:33:34] No onPostToolUseHook found for tool use ID: toolu_xyz"
+        ));
+    }
+
+    #[test]
+    fn preserves_real_warnings() {
+        assert!(!is_benign_agent_stderr(
+            "ERROR: failed to connect to MCP server"
+        ));
+        assert!(!is_benign_agent_stderr("panic: something went wrong"));
+        assert!(!is_benign_agent_stderr(""));
     }
 }
 
