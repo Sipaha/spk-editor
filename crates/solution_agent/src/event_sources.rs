@@ -89,6 +89,14 @@ pub fn install(cx: &mut App) {
                         payload,
                     );
                 }
+                SolutionAgentStoreEvent::SessionQueueChanged(id) => {
+                    let payload = build_queue_changed_payload(*id, cx);
+                    editor_mcp::emit_notification(
+                        cx,
+                        "agent_session_queue_changed",
+                        payload,
+                    );
+                }
                 SolutionAgentStoreEvent::SessionNotified(id, kind) => {
                     let kind_str = match kind {
                         NotifyKind::Completed => "completed",
@@ -178,6 +186,87 @@ pub(crate) fn build_message_appended_payload(
             "entry_index": entry_index,
         }),
     }
+}
+
+/// Build the JSON payload for an `agent_session_queue_changed`
+/// notification. Walks the session's `pending_messages` queue and
+/// emits one descriptor per bundle:
+///
+///   - `csids`: every `spk_client_send_id` stamp across the bundle's
+///     content blocks, in source order, deduplicated. Mobile pops
+///     local optimistic bubbles whose csid lands in this set, then
+///     renders the bundle as ONE Queued bubble — matching the
+///     desktop's "single ghost bubble that grows" semantics for
+///     bundles that absorbed multiple originating sends.
+///   - `preview`: the markdown rendering the desktop would show
+///     (queue marker stripped, image placeholders inline).
+///   - `image_count`: how many image blocks the bundle carries, so
+///     the mobile can render `[image #N]`-style affordances on the
+///     queued bubble without decoding the blocks themselves
+///     (chunks aren't shipped on this wire path).
+///
+/// `bundles: []` is the canonical "queue is empty" payload — the
+/// mobile uses that to clear any synthetic Queued bubbles it was
+/// rendering off a previous broadcast. Stable session-id + always-
+/// present `bundles` array (never omitted) keeps the consumer's
+/// decode path simple.
+pub(crate) fn build_queue_changed_payload(
+    session_id: crate::model::SolutionSessionId,
+    cx: &App,
+) -> serde_json::Value {
+    let bundles: Vec<serde_json::Value> = SolutionAgentStore::try_global(cx)
+        .and_then(|store| {
+            store.read_with(cx, |store, cx| {
+                let session = store.session(session_id)?;
+                let session_ref = session.read(cx);
+                let out: Vec<serde_json::Value> = session_ref
+                    .pending_messages
+                    .iter()
+                    .map(|bundle| {
+                        let csids: Vec<i64> = {
+                            let mut out: Vec<i64> = Vec::new();
+                            for block in bundle {
+                                let meta = match block {
+                                    agent_client_protocol::schema::ContentBlock::Text(t) => &t.meta,
+                                    agent_client_protocol::schema::ContentBlock::Image(i) => &i.meta,
+                                    agent_client_protocol::schema::ContentBlock::Audio(a) => &a.meta,
+                                    agent_client_protocol::schema::ContentBlock::ResourceLink(r) => &r.meta,
+                                    agent_client_protocol::schema::ContentBlock::Resource(r) => &r.meta,
+                                    _ => continue,
+                                };
+                                if let Some(id) = meta
+                                    .as_ref()
+                                    .and_then(|m| m.get(acp_thread::SPK_CLIENT_SEND_ID_META_KEY))
+                                    .and_then(|v| v.as_i64())
+                                    && !out.contains(&id)
+                                {
+                                    out.push(id);
+                                }
+                            }
+                            out
+                        };
+                        let preview = crate::conversation_render::pending_blocks_preview(bundle, cx);
+                        let image_count: usize = bundle
+                            .iter()
+                            .filter(|b| {
+                                matches!(b, agent_client_protocol::schema::ContentBlock::Image(_))
+                            })
+                            .count();
+                        json!({
+                            "csids": csids,
+                            "preview": preview,
+                            "image_count": image_count,
+                        })
+                    })
+                    .collect();
+                Some(out)
+            })
+        })
+        .unwrap_or_default();
+    json!({
+        "session_id": session_id.to_string(),
+        "bundles": bundles,
+    })
 }
 
 #[cfg(test)]

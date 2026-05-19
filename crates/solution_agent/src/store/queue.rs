@@ -246,6 +246,12 @@ impl SolutionAgentStore {
                 "session={session_id} enqueued (merged={merged}, queue_len={queue_len}) preview={blocks_text_summary}",
             );
             cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+            // External MCP consumers (the mobile client) render queued
+            // bundles as Queued bubbles in real time off this event —
+            // without it a desktop-typed follow-up to a busy session
+            // would stay invisible on a paired mobile until the
+            // eventual flush.
+            cx.emit(SolutionAgentStoreEvent::SessionQueueChanged(session_id));
             cx.notify();
             return Task::ready(Ok(()));
         }

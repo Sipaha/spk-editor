@@ -676,6 +676,35 @@ pub struct GetSessionResult {
     /// pagination filters applied to `entries`. Lets the client render a
     /// "Load older" affordance and detect resume-time gaps.
     pub total_count: usize,
+    /// Server-side `pending_messages` queue, one descriptor per bundle.
+    /// Empty when the agent isn't holding any follow-up sends from
+    /// during a Running window. Mobile renders each bundle as a
+    /// Queued bubble — paired with the live `agent_session_queue_changed`
+    /// notification this is the cold-start seed for the unified
+    /// cross-client queue display.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_bundles: Vec<QueuedBundleSummary>,
+}
+
+/// One descriptor from `SolutionSession::pending_messages` exposed to
+/// MCP consumers. Mirrors the wire shape that
+/// `event_sources::build_queue_changed_payload` emits on the
+/// `agent_session_queue_changed` notification.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct QueuedBundleSummary {
+    /// Every distinct `spk_client_send_id` carried by the bundle's
+    /// content blocks, in source order. Empty for desktop-typed
+    /// bundles (no csid stamp) — clients should still render them as
+    /// Queued bubbles, they just can't dedupe against local
+    /// optimistic state in that case.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub csids: Vec<i64>,
+    /// Markdown preview of the bundle, queue-marker stripped, image
+    /// placeholders rendered inline as `[image #N]`.
+    pub preview: String,
+    /// Number of image blocks in the bundle. Lets the client surface
+    /// an `[image #N]` affordance without holding the image bytes.
+    pub image_count: u32,
 }
 
 #[derive(Clone)]
@@ -763,6 +792,7 @@ impl McpServerTool for GetSessionTool {
                 (kept, total)
             };
             let summary = session_summary(session, cx);
+            let pending_bundles = build_pending_bundle_summaries(session, cx);
             Ok(GetSessionResult {
                 id: summary.id,
                 solution_id: summary.solution_id,
@@ -776,6 +806,7 @@ impl McpServerTool for GetSessionTool {
                 parent_session_id: summary.parent_session_id,
                 entries,
                 total_count,
+                pending_bundles,
             })
         })?;
 
@@ -785,6 +816,55 @@ impl McpServerTool for GetSessionTool {
             structured_content: result,
         })
     }
+}
+
+/// Build the [QueuedBundleSummary] list off a session's
+/// `pending_messages` queue. Pulled out so `get_session` and any
+/// future cold-load surface can reuse the same shape that
+/// `event_sources::build_queue_changed_payload` emits on the live
+/// notification path. Empty queue → empty Vec.
+fn build_pending_bundle_summaries(
+    session: &crate::model::SolutionSession,
+    _cx: &App,
+) -> Vec<QueuedBundleSummary> {
+    session
+        .pending_messages
+        .iter()
+        .map(|bundle| {
+            let csids: Vec<i64> = {
+                let mut out: Vec<i64> = Vec::new();
+                for block in bundle {
+                    let meta = match block {
+                        acp::ContentBlock::Text(t) => &t.meta,
+                        acp::ContentBlock::Image(i) => &i.meta,
+                        acp::ContentBlock::Audio(a) => &a.meta,
+                        acp::ContentBlock::ResourceLink(r) => &r.meta,
+                        acp::ContentBlock::Resource(r) => &r.meta,
+                        _ => continue,
+                    };
+                    if let Some(id) = meta
+                        .as_ref()
+                        .and_then(|m| m.get(acp_thread::SPK_CLIENT_SEND_ID_META_KEY))
+                        .and_then(|v| v.as_i64())
+                        && !out.contains(&id)
+                    {
+                        out.push(id);
+                    }
+                }
+                out
+            };
+            let preview = crate::conversation_render::pending_blocks_preview(bundle, _cx);
+            let image_count: u32 = bundle
+                .iter()
+                .filter(|b| matches!(b, acp::ContentBlock::Image(_)))
+                .count() as u32;
+            QueuedBundleSummary {
+                csids,
+                preview,
+                image_count,
+            }
+        })
+        .collect()
 }
 
 fn entry_role(entry: &acp_thread::AgentThreadEntry) -> &'static str {

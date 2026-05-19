@@ -1250,6 +1250,12 @@ impl SolutionSessionView {
             cx.emit(crate::store::SolutionAgentStoreEvent::SessionStateChanged(
                 session_id,
             ));
+            // The bundle just landed back in pending_messages —
+            // broadcast so paired clients (mobile) re-render the
+            // restored Queued bubble.
+            cx.emit(crate::store::SolutionAgentStoreEvent::SessionQueueChanged(
+                session_id,
+            ));
         });
         cx.notify();
         true

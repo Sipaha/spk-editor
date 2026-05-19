@@ -94,6 +94,13 @@ pub enum SolutionAgentStoreEvent {
     /// treat the index as a hint and re-fetch the full session if the
     /// numbers don't line up.
     SessionMessageAppended(SolutionSessionId, usize),
+    /// `pending_messages` on the session changed (push, drain, clear,
+    /// or merge into back-of-queue). External MCP consumers use this
+    /// to render server-side queued bundles as Queued bubbles in real
+    /// time on every paired client — without it a desktop-typed
+    /// follow-up while the agent is mid-turn stays invisible on the
+    /// mobile until the eventual flush, and vice-versa.
+    SessionQueueChanged(SolutionSessionId),
     SessionNotified(SolutionSessionId, notifier::NotifyKind),
 }
 
@@ -874,8 +881,9 @@ impl SolutionAgentStore {
                     // never dispatches the message the user typed
                     // while the tab was cold (Send button gets stuck
                     // because `resuming` stays `true`).
-                    existing.update(cx, |session, cx| {
-                        if !session.pending_messages.is_empty() {
+                    let had_pending = existing.update(cx, |session, cx| {
+                        let had_pending = !session.pending_messages.is_empty();
+                        if had_pending {
                             // Cold→live transition with queued messages
                             // shouldn't normally happen (cold sessions
                             // can't queue), but log if it ever does so
@@ -906,7 +914,11 @@ impl SolutionAgentStore {
                         // observers see a fully-populated session when
                         // they wake up to re-attach.
                         session.set_acp_thread(Some(acp_thread.clone()), cx);
+                        had_pending
                     });
+                    if had_pending {
+                        cx.emit(SolutionAgentStoreEvent::SessionQueueChanged(session_id));
+                    }
                 } else {
                     let entity = cx.new(|cx| {
                         let mut s = SolutionSession::new_idle(
@@ -1635,8 +1647,9 @@ impl SolutionAgentStore {
 
             this.update(cx, |store, cx| {
                 let new_acp_session_id = new_thread.read(cx).session_id().clone();
-                session_entity.update(cx, |s, cx| {
-                    if !s.pending_messages.is_empty() {
+                let had_pending = session_entity.update(cx, |s, cx| {
+                    let had_pending = !s.pending_messages.is_empty();
+                    if had_pending {
                         // `/clear` wipes the session's conversation —
                         // queued follow-ups are tied to the OLD context
                         // and don't apply to a freshly-empty thread, so
@@ -1674,11 +1687,15 @@ impl SolutionAgentStore {
                     // last so SessionView re-attaches against a fully
                     // wiped session struct.
                     s.set_acp_thread(Some(new_thread.clone()), cx);
+                    had_pending
                 });
                 let new_sub = store.subscribe_to_session(session_id, new_thread, cx);
                 session_entity.update(cx, |s, _| s._acp_subscription = Some(new_sub));
                 store.persist_session_row(session_id, cx);
                 cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+                if had_pending {
+                    cx.emit(SolutionAgentStoreEvent::SessionQueueChanged(session_id));
+                }
                 cx.notify();
             })?;
 
@@ -1857,7 +1874,7 @@ impl SolutionAgentStore {
                         // user-typed content vanishing without a
                         // trace, which is exactly the failure mode we
                         // want to be able to grep for.
-                        if let Some(s) = self.sessions.get(&session_id).cloned() {
+                        let had_pending = if let Some(s) = self.sessions.get(&session_id).cloned() {
                             s.update(cx, |s, _| {
                                 let dropped = s.pending_messages.len();
                                 if dropped > 0 {
@@ -1876,7 +1893,13 @@ impl SolutionAgentStore {
                                     );
                                 }
                                 s.pending_messages.clear();
-                            });
+                                dropped > 0
+                            })
+                        } else {
+                            false
+                        };
+                        if had_pending {
+                            cx.emit(SolutionAgentStoreEvent::SessionQueueChanged(session_id));
                         }
                     } else {
                         let drained: Vec<_> = self
@@ -1889,6 +1912,10 @@ impl SolutionAgentStore {
                                 })
                             })
                             .unwrap_or_default();
+                        let had_pending = !drained.is_empty();
+                        if had_pending {
+                            cx.emit(SolutionAgentStoreEvent::SessionQueueChanged(session_id));
+                        }
                         if !drained.is_empty() {
                             let bundle_count = drained.len();
                             // Flatten N queued messages into one Vec.

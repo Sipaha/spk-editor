@@ -128,6 +128,11 @@ impl SolutionSessionView {
             cx.emit(crate::store::SolutionAgentStoreEvent::SessionStateChanged(
                 session_id,
             ));
+            // The bundle just left `pending_messages` — broadcast so
+            // paired clients (mobile) drop the matching Queued bubble.
+            cx.emit(crate::store::SolutionAgentStoreEvent::SessionQueueChanged(
+                session_id,
+            ));
         });
         cx.stop_propagation();
         cx.notify();
