@@ -272,6 +272,19 @@ impl SolutionAgentDb {
 /// at `warn` so a busted migration leaves a breadcrumb instead of
 /// silently leaving the schema half-applied.
 fn apply_idempotent_add_column(connection: &Connection, column_def: &str) {
+    // Pre-check via `PRAGMA table_info`. The sqlez wrapper surfaces
+    // duplicate-column errors as opaque "Prepare call failed for
+    // query: …" without the underlying SQLite text, so the old
+    // substring filter no longer matched on a re-run — every restart
+    // logged one WARN per already-applied migration. Inspecting the
+    // catalog up front avoids both the noise AND the prepare attempt.
+    let column_name = column_def
+        .split_whitespace()
+        .next()
+        .unwrap_or(column_def);
+    if column_exists(connection, "solution_sessions", column_name) {
+        return;
+    }
     let ddl = format!("ALTER TABLE solution_sessions ADD COLUMN {column_def}");
     let mut run = match connection.exec(&ddl) {
         Ok(run) => run,
@@ -299,6 +312,30 @@ fn apply_idempotent_add_column(connection: &Connection, column_def: &str) {
             );
         }
     }
+}
+
+/// True if [table] already has a column named [column] (case-
+/// insensitive per SQLite catalog rules). Used by
+/// [apply_idempotent_add_column] to skip migrations whose DDL would
+/// have triggered a duplicate-column SQLite error. Errors from the
+/// PRAGMA itself fall back to "assume missing" — the ALTER will then
+/// either succeed or hit the substring-filtered duplicate-name path,
+/// so the worst case is one harmless log line.
+fn column_exists(connection: &Connection, table: &str, column: &str) -> bool {
+    let ddl = format!("PRAGMA table_info({table})");
+    // `PRAGMA table_info` yields columns:
+    //   cid, name, type, notnull, dflt_value, pk
+    // We only need column 1 (`name`).
+    let prepared = connection.select::<String>(&ddl);
+    let mut selector = match prepared {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let rows = match selector() {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    rows.iter().any(|name| name.eq_ignore_ascii_case(column))
 }
 
 fn insert_or_update_metadata(

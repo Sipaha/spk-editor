@@ -1494,7 +1494,13 @@ impl McpServerTool for SendMessageBlocksTool {
         );
         let session_id = SolutionSessionId::parse(&input.session_id)
             .map_err(|e| anyhow!("bad session id: {e}"))?;
-        let blocks = input.blocks;
+        // Swap any `spk-upload://<id>` ResourceLink for the inline
+        // Image/Text the chunked-upload tmp file contains, BEFORE the
+        // bundle reaches the store. Without this step the handle URI
+        // would travel verbatim to claude-acp, which has no idea what
+        // `spk-upload://` means — the attached image silently vanishes
+        // and the agent sees only the accompanying text.
+        let blocks = crate::upload::resolve_upload_handles(input.blocks)?;
 
         cx.update(|cx| {
             let store = SolutionAgentStore::global(cx);
@@ -2419,6 +2425,9 @@ impl McpServerTool for UploadInitTool {
             anyhow::bail!("unknown_session: {}", input.session_id);
         }
 
+        // Capture log fields before moving `input` into the manager call.
+        let mime_for_log = input.mime.clone();
+        let total_size_for_log = input.total_size;
         let upload_id = crate::upload::with_manager(|m| {
             m.init(
                 input.session_id,
@@ -2430,6 +2439,10 @@ impl McpServerTool for UploadInitTool {
         })
         .ok_or_else(|| anyhow!("upload manager not initialised"))??;
 
+        log::info!(
+            target: "solution_agent::upload",
+            "upload_init OK: upload_id={upload_id} mime={mime_for_log} total_size={total_size_for_log}",
+        );
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text {
                 text: format!("upload_id={upload_id}"),
@@ -2541,11 +2554,16 @@ impl McpServerTool for UploadFinishTool {
         input: Self::Input,
         _cx: &mut AsyncApp,
     ) -> Result<ToolResponse<Self::Output>> {
+        let upload_id_for_log = input.upload_id;
         let handle = crate::upload::with_manager(|m| {
             m.finish(input.upload_id, input.sha256.as_deref())
         })
         .ok_or_else(|| anyhow!("upload manager not initialised"))??;
         let handle_uri = format!("{}{}", crate::upload::HANDLE_SCHEME, handle.id);
+        log::info!(
+            target: "solution_agent::upload",
+            "upload_finish OK: upload_id={upload_id_for_log} handle={handle_uri}",
+        );
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text {
                 text: handle_uri.clone(),

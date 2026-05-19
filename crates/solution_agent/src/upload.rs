@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use agent_client_protocol::schema as acp;
 use anyhow::{Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 
@@ -411,6 +412,150 @@ pub fn is_text_like(mime: &str) -> bool {
     )
 }
 
+/// Walk `blocks` and replace every `ResourceLink` whose URI starts with
+/// [`HANDLE_SCHEME`] with an inline `Image` (for `image/*` mimes) or
+/// `Text` (for `is_text_like` mimes) `ContentBlock` carrying the bytes
+/// stored in the upload manager's tmp file. Non-handle blocks pass
+/// through untouched.
+///
+/// Called from `SendMessageBlocksTool::run` after argument validation
+/// and BEFORE the blocks reach `store::send_message_blocks` — so by the
+/// time the bundle reaches `AcpThread::send`, the only `ResourceLink`
+/// blocks left are ones the client meant literally (e.g. `file://`
+/// pointers from a future desktop attach flow).
+///
+/// On any error mid-bundle (unknown id, unsupported mime, I/O failure),
+/// the function returns `Err` WITHOUT consuming any upload — the user
+/// can retry the send and the bytes are still on disk. The successful
+/// case aborts each resolved entry to free its tmp file (the server
+/// has already inlined the bytes into the outgoing prompt; the tmp
+/// file is no longer needed).
+///
+/// Synchronous file reads are OK here because uploads are capped at
+/// 5 MB on the mobile side and `with_manager` already holds the sync
+/// mutex — the caller (`SendMessageBlocksTool::run`) is on the
+/// AsyncApp executor's task queue, not blocking a hot loop.
+pub fn resolve_upload_handles(
+    blocks: Vec<acp::ContentBlock>,
+) -> Result<Vec<acp::ContentBlock>> {
+    let arc = get().ok_or_else(|| anyhow!("upload manager not initialised"))?;
+    let mut guard = arc
+        .lock()
+        .map_err(|err| anyhow!("upload manager mutex poisoned: {err}"))?;
+    resolve_upload_handles_with(&mut guard, blocks)
+}
+
+/// Pure-fn body of [`resolve_upload_handles`] — kept separate so unit
+/// tests can drive a local `UploadManager` without going through the
+/// process-global `OnceLock`. Production callers MUST go through the
+/// wrapper above; it holds the mutex for the whole resolution pass so
+/// a concurrent `upload_abort` racing against resolution can't pull
+/// the tmp file out from under us. `pub(crate)` because cross-crate
+/// callers should never reach in directly — the wrapper is the only
+/// API surface.
+pub(crate) fn resolve_upload_handles_with(
+    manager: &mut UploadManager,
+    blocks: Vec<acp::ContentBlock>,
+) -> Result<Vec<acp::ContentBlock>> {
+    use base64::Engine as _;
+
+    let mut out = Vec::with_capacity(blocks.len());
+    let mut consumed: Vec<UploadId> = Vec::new();
+    for block in blocks {
+        match block {
+            acp::ContentBlock::ResourceLink(link)
+                if link.uri.starts_with(HANDLE_SCHEME) =>
+            {
+                let id_str = link
+                    .uri
+                    .strip_prefix(HANDLE_SCHEME)
+                    .expect("starts_with guard above");
+                let id: UploadId = id_str
+                    .parse()
+                    .map_err(|err| anyhow!("invalid upload handle {:?}: {err}", link.uri))?;
+                let snapshot = manager
+                    .resolve(id)
+                    .map(|s| {
+                        (
+                            s.tmp_path.clone(),
+                            s.mime.clone(),
+                            s.display_name.clone(),
+                            s.received_bytes,
+                            s.expected_size,
+                        )
+                    })
+                    .ok_or_else(|| anyhow!("unknown_upload_id: id={id}"))?;
+                let (tmp_path, mime, display_name, received_bytes, expected_size) = snapshot;
+                // `upload_finish` is the only legitimate path to a
+                // handle URI — it gates on the same equality. But a
+                // buggy / malicious client could call
+                // `send_message_blocks` with a synthesised
+                // `spk-upload://N` directly, bypassing finish. Re-check
+                // here so partial bytes can't be silently fed to the
+                // LLM.
+                if received_bytes != expected_size {
+                    bail!(
+                        "upload_not_finished: id={id} received {received_bytes}/{expected_size}",
+                    );
+                }
+                let bytes = std::fs::read(&tmp_path)
+                    .map_err(|err| anyhow!("reading upload {id} tmp file {tmp_path:?}: {err}"))?;
+                let resolved = if mime.starts_with("image/") {
+                    let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                    acp::ContentBlock::Image(acp::ImageContent::new(data, mime))
+                } else if is_text_like(&mime) {
+                    let text = String::from_utf8(bytes).map_err(|err| {
+                        anyhow!("upload {id} marked text but not valid UTF-8: {err}")
+                    })?;
+                    let fence_hint = extension_from_mime(&mime);
+                    let fence = backtick_fence_for(&text);
+                    let body = format!(
+                        "Attached file `{display_name}`:\n\n{fence}{fence_hint}\n{text}\n{fence}",
+                    );
+                    acp::ContentBlock::Text(acp::TextContent::new(body))
+                } else {
+                    bail!("unsupported_mime: {mime} (upload_id={id})");
+                };
+                consumed.push(id);
+                out.push(resolved);
+            }
+            other => out.push(other),
+        }
+    }
+    for id in consumed {
+        if let Err(err) = manager.abort(id) {
+            log::debug!("resolve_upload_handles: abort({id}) failed: {err:#}");
+        }
+    }
+    Ok(out)
+}
+
+/// Pick a backtick run long enough to wrap [text] without colliding with
+/// any backtick run inside it. CommonMark's rule: an outer fence must be
+/// strictly longer than the longest backtick run on any line of the
+/// payload. Anything shorter lets a crafted (or accidental) row of N
+/// backticks in the uploaded file terminate the fence early, leaking
+/// content after the false close into the LLM's prompt as plain text.
+///
+/// Minimum is four backticks (matches the historical default for
+/// inline-attached code on the mobile side); we scale up to
+/// `max_run + 1` for pathological inputs.
+fn backtick_fence_for(text: &str) -> String {
+    let mut max_run = 0usize;
+    let mut cur = 0usize;
+    for ch in text.chars() {
+        if ch == '`' {
+            cur += 1;
+            if cur > max_run {
+                max_run = cur;
+            }
+        } else {
+            cur = 0;
+        }
+    }
+    "`".repeat(std::cmp::max(4, max_run + 1))
+}
+
 /// Best-effort markdown fence hint for a text-like upload. Falls back to
 /// the empty string when we don't have a better suggestion — markdown
 /// renderers handle empty fences fine.
@@ -610,5 +755,216 @@ mod tests {
         assert!(is_text_like("application/x-yaml"));
         assert!(!is_text_like("image/png"));
         assert!(!is_text_like("application/octet-stream"));
+    }
+
+    // ----- resolve_upload_handles -----
+
+    fn seed_upload(m: &mut UploadManager, mime: &str, bytes: &[u8]) -> UploadId {
+        let id = m
+            .init(
+                "session-x".into(),
+                mime.into(),
+                "pic".into(),
+                bytes.len() as u64,
+                None,
+            )
+            .expect("init");
+        m.write_chunk(id, 0, bytes).expect("write");
+        id
+    }
+
+    fn handle_link(id: UploadId, name: &str) -> acp::ContentBlock {
+        acp::ContentBlock::ResourceLink(acp::ResourceLink::new(
+            name.to_string(),
+            format!("{HANDLE_SCHEME}{id}"),
+        ))
+    }
+
+    #[test]
+    fn resolve_image_handle_inlines_base64() {
+        use base64::Engine as _;
+        let (mut m, _dir) = mgr();
+        let bytes = b"\x89PNG\r\n\x1a\n_fakebytes";
+        let id = seed_upload(&mut m, "image/png", bytes);
+        let tmp = m.resolve(id).map(|s| s.tmp_path.clone()).expect("resolve");
+
+        let blocks = vec![
+            acp::ContentBlock::Text(acp::TextContent::new("hi".to_string())),
+            handle_link(id, "pic.png"),
+        ];
+        let out = resolve_upload_handles_with(&mut m, blocks).expect("resolve_blocks");
+
+        assert_eq!(out.len(), 2);
+        match &out[0] {
+            acp::ContentBlock::Text(t) => assert_eq!(t.text, "hi"),
+            other => panic!("expected text, got {other:?}"),
+        }
+        match &out[1] {
+            acp::ContentBlock::Image(img) => {
+                assert_eq!(img.mime_type, "image/png");
+                let want = base64::engine::general_purpose::STANDARD.encode(bytes);
+                assert_eq!(img.data, want);
+            }
+            other => panic!("expected image, got {other:?}"),
+        }
+        assert!(
+            m.resolve(id).is_none(),
+            "successful resolution must abort the entry",
+        );
+        assert!(!tmp.exists(), "tmp file should be deleted after abort");
+    }
+
+    #[test]
+    fn resolve_text_like_handle_wraps_in_fenced_code() {
+        let (mut m, _dir) = mgr();
+        let payload = "{\"k\": 1}";
+        let id = m
+            .init(
+                "session-y".into(),
+                "application/json".into(),
+                "config.json".into(),
+                payload.len() as u64,
+                None,
+            )
+            .expect("init");
+        m.write_chunk(id, 0, payload.as_bytes()).expect("write");
+
+        let out = resolve_upload_handles_with(&mut m, vec![handle_link(id, "config.json")])
+            .expect("resolve");
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            acp::ContentBlock::Text(t) => {
+                assert!(t.text.contains("config.json"));
+                assert!(t.text.contains("````json"));
+                assert!(t.text.contains(payload));
+            }
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_unknown_id_errors_and_leaves_other_blocks_untouched() {
+        let (mut m, _dir) = mgr();
+        let id = seed_upload(&mut m, "image/png", b"abcd");
+
+        let blocks = vec![
+            handle_link(id, "real.png"),
+            handle_link(999_999, "ghost.png"),
+        ];
+        let err = resolve_upload_handles_with(&mut m, blocks).unwrap_err().to_string();
+        assert!(err.contains("unknown_upload_id"), "got: {err}");
+        // The first (good) upload's tmp file must NOT have been freed —
+        // a mid-stream error leaves the bundle re-runnable.
+        assert!(
+            m.resolve(id).is_some(),
+            "good upload should still be live after mid-stream error",
+        );
+    }
+
+    #[test]
+    fn resolve_unsupported_mime_errors() {
+        let (mut m, _dir) = mgr();
+        let id = seed_upload(&mut m, "application/octet-stream", b"\x00\xff");
+        let err = resolve_upload_handles_with(&mut m, vec![handle_link(id, "blob.bin")])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unsupported_mime"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_passes_through_non_handle_resource_links() {
+        let (mut m, _dir) = mgr();
+        let link = acp::ContentBlock::ResourceLink(acp::ResourceLink::new(
+            "hosts".to_string(),
+            "file:///etc/hosts".to_string(),
+        ));
+        let out = resolve_upload_handles_with(&mut m, vec![link]).expect("resolve");
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            acp::ContentBlock::ResourceLink(r) => assert_eq!(r.uri, "file:///etc/hosts"),
+            other => panic!("expected resource_link pass-through, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_rejects_unfinished_upload() {
+        let (mut m, _dir) = mgr();
+        // Init for 10 bytes, only write 3 → received_bytes < expected_size.
+        let id = m
+            .init(
+                "session-z".into(),
+                "image/png".into(),
+                "half.png".into(),
+                10,
+                None,
+            )
+            .expect("init");
+        m.write_chunk(id, 0, &[1, 2, 3]).expect("partial write");
+
+        let err = resolve_upload_handles_with(&mut m, vec![handle_link(id, "half.png")])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("upload_not_finished"),
+            "want upload_not_finished guard, got: {err}",
+        );
+        // Entry must still be alive (no cleanup on resolve error so the
+        // client can recover by finishing the upload + retrying).
+        assert!(m.resolve(id).is_some(), "partial upload should survive resolve failure");
+    }
+
+    #[test]
+    fn backtick_fence_escapes_payload_with_inner_fences() {
+        let (mut m, _dir) = mgr();
+        // Payload contains a 5-backtick line that would break a fixed
+        // 4-backtick fence. The resolver must pick at least 6 backticks
+        // so the closing fence isn't triggered early.
+        let payload = "line1\n`````\nline3";
+        let id = m
+            .init(
+                "session-fence".into(),
+                "text/plain".into(),
+                "tricky.txt".into(),
+                payload.len() as u64,
+                None,
+            )
+            .expect("init");
+        m.write_chunk(id, 0, payload.as_bytes()).expect("write");
+
+        let out = resolve_upload_handles_with(&mut m, vec![handle_link(id, "tricky.txt")])
+            .expect("resolve");
+        let body = match &out[0] {
+            acp::ContentBlock::Text(t) => t.text.clone(),
+            other => panic!("expected text block, got {other:?}"),
+        };
+        // The outer fence must be 6+ backticks because the payload's
+        // longest backtick run is 5. The body must START with that
+        // fence (after the prefix) AND END with the same length.
+        let opening_run = body
+            .lines()
+            .find(|l| l.starts_with("``"))
+            .expect("body has opening fence line");
+        let opening_len = opening_run.chars().take_while(|&c| c == '`').count();
+        assert!(
+            opening_len >= 6,
+            "opening fence too short ({opening_len}); inner 5-backtick line would break out",
+        );
+        // The closing fence is the LAST non-empty line and must match.
+        let closing = body.lines().filter(|l| !l.is_empty()).last().unwrap();
+        let closing_len = closing.chars().take_while(|&c| c == '`').count();
+        assert_eq!(opening_len, closing_len, "open/close fences must match");
+    }
+
+    #[test]
+    fn resolve_invalid_handle_uri_errors() {
+        let (mut m, _dir) = mgr();
+        let link = acp::ContentBlock::ResourceLink(acp::ResourceLink::new(
+            "bad".to_string(),
+            "spk-upload://not-a-number".to_string(),
+        ));
+        let err = resolve_upload_handles_with(&mut m, vec![link])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid upload handle"), "got: {err}");
     }
 }

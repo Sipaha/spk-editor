@@ -188,6 +188,12 @@ fn spawn_upload_ack_drainer(cx: &mut App) {
             cx.update(|cx| {
                 let acks = upload::with_manager(|m| m.drain_acks()).unwrap_or_default();
                 for ack in acks {
+                    log::info!(
+                        target: "solution_agent::upload",
+                        "drainer emit upload_chunk_acked: upload_id={} received={}",
+                        ack.upload_id,
+                        ack.received_bytes,
+                    );
                     let payload = serde_json::json!({
                         "upload_id": ack.upload_id,
                         "received_bytes": ack.received_bytes,

@@ -678,6 +678,13 @@ impl SolutionAgentStore {
             );
             let mut last_err: Option<anyhow::Error> = None;
             let mut attached: Option<(Entity<acp_thread::AcpThread>, PathBuf)> = None;
+            // `true` only while EVERY cwd candidate so far has failed
+            // with `Resource not found`. A single non-RNF error
+            // (transport, auth, allow-list, …) flips this to `false`
+            // and disables the new-session fallback below — the
+            // failure isn't a "claude-acp forgot the session" case
+            // and re-creating wouldn't help.
+            let mut all_resource_gone = true;
             for attempt_cwd in attempts {
                 let work_dirs = util::path_list::PathList::new(&[attempt_cwd
                     .to_string_lossy()
@@ -720,6 +727,7 @@ impl SolutionAgentStore {
                             // Non-recoverable (auth, transport, …). Fall
                             // through with this error — fallback would
                             // just hit the same wall.
+                            all_resource_gone = false;
                             last_err = Some(err);
                             break;
                         }
@@ -734,6 +742,75 @@ impl SolutionAgentStore {
                     }
                 }
             }
+            // If every cwd candidate returned "Resource not found" the
+            // ACP session is genuinely gone (claude-acp lost its jsonl,
+            // was restarted, or the agent rotated state under us) and
+            // no further resume attempt against the SAME acp_session_id
+            // can recover. Mint a fresh ACP session on the same
+            // connection so the caller's pending prompt still lands —
+            // the alternative is bouncing the user's message with an
+            // unactionable "Resource not found" snackbar.
+            //
+            // The new ACP session has NO conversation history from
+            // claude-acp's perspective. We log the transition loudly so
+            // the user-visible side ("agent forgot the previous turns,
+            // but my message went through") is at least traceable. The
+            // SolutionSession entity below picks up the new session id
+            // via `acp_thread.read(cx).session_id()`, so persistence and
+            // the navigator stay aligned with claude-acp on the next
+            // round-trip.
+            let new_session_fallback: Option<Entity<acp_thread::AcpThread>> =
+                if attached.is_none() && all_resource_gone {
+                    let acp_meta = this.update(cx, |store, _| {
+                        store.build_session_meta(&pair.1, &solution)
+                    })?;
+                    let fallback_cwd = if primary_cwd != solution.root {
+                        primary_cwd.clone()
+                    } else {
+                        solution.root.clone()
+                    };
+                    let work_dirs = util::path_list::PathList::new(&[fallback_cwd
+                        .to_string_lossy()
+                        .into_owned()]);
+                    log::warn!(
+                        target: "solution_agent::resume",
+                        "session={} every cwd candidate returned Resource not found — \
+                         claude-acp lost session {}; minting a NEW ACP session on the \
+                         same connection (conversation history will appear empty to the \
+                         agent on the next turn)",
+                        meta.id,
+                        acp_session_id.0,
+                    );
+                    let new_session_task: Task<Result<Entity<acp_thread::AcpThread>>> =
+                        cx.update(|cx| {
+                            connection.clone().new_session_with_meta(
+                                project.clone(),
+                                work_dirs,
+                                acp_meta,
+                                cx,
+                            )
+                        });
+                    match new_session_task.await {
+                        Ok(thread) => {
+                            attached = Some((thread.clone(), fallback_cwd));
+                            Some(thread)
+                        }
+                        Err(err) => {
+                            log::error!(
+                                target: "solution_agent::resume",
+                                "session={} new_session fallback failed after exhausting \
+                                 resume candidates: {err:#}",
+                                meta.id,
+                            );
+                            last_err = Some(err);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+            let _ = new_session_fallback; // silence unused warning — used via `attached`
+
             let (acp_thread, applied_cwd) = match attached {
                 Some(pair) => pair,
                 None => {
