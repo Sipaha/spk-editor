@@ -1,6 +1,6 @@
 # Mobile: per-session chat-history disk cache with diff-only fetch on open
 
-**Status:** ready to dispatch
+**Status:** complete
 **Estimated:** 1 sub-agent session, ~75–120 min (HEAVY)
 **Goal:** Opening a chat dialog on mobile no longer re-fetches the full transcript every time. The phone keeps a per-session encrypted-on-disk cache of `EntrySummary` entries up to `lastSeenIndex`; on open it pulls cached entries instantly + asks the server only for the diff via `after_index=cache.lastIndex`.
 
@@ -157,13 +157,23 @@ Manual smoke:
 
 ## When done
 
-- [ ] `SessionHistoryRepository` class + `CachedSessionHistory` DTO in `:app`.
-- [ ] `SessionHistoryMerge` pure-fn in `:core` with unit tests.
-- [ ] `SessionDetailStore.openSession` intercepts the cache + uses `after_index` for the diff fetch.
-- [ ] Live notification handler appends new entries into the cache.
-- [ ] Eviction hooks wired on `closeSession(id)` / `restart_agent` / `start_compact` / GC sweep / forget-server.
-- [ ] Base64-blob strip on write (don't bloat the cache with inline images).
-- [ ] `:core:test` green for new merge tests. `:app:compileDebugKotlin` clean. `:app:assembleDebug` green.
+- [x] `SessionHistoryRepository` class + `CachedSessionHistory` DTO in `:app`.
+- [x] `SessionHistoryMerge` pure-fn in `:core` with unit tests (6 new tests).
+- [x] `SessionDetailStore.openSession` intercepts the cache + uses `after_index` for the diff fetch.
+- [x] Live notification handler persists new entries via `fetchAndReplaceEntry` (re-saves whole snapshot rather than appendEntries — notifications can be replacements not appends; 500ms repo debounce coalesces back-to-back writes).
+- [x] Eviction hooks: closeSession (via SessionListStore after RPC success) / restart_agent (after RPC returns new id) / start_compact (two-phase: pendingCompactSourceIds set + onChildSessionCreated router consumes) / GC sweep on refreshSessions / removeServer evictAll.
+- [x] Base64-blob strip on write — chunks > 4KB stripped via `stripImages` companion fn; mobile already lazy-fetches via get_session_entry(include_images=true).
+- [x] `:core:test` 179 → 185 (+6 merge tests). `:app:compileDebugKotlin` clean. `:app:assembleDebug` SUCCESSFUL.
+
+## Implementation notes worth carrying forward
+
+- **Per-server prefixed keys, not per-server file**. Plan said `history-cache-v1-${serverId}.xml`, but the audit-shaped codebase uses one prefs file with per-server prefixed keys (`spk_history_cache` + `history-v1:<serverId>:<sessionId>`). Mirroring the actual `EncryptedQueueStore`/`LastSeenRepository`/`DraftRepository`/`ListCacheRepository` precedent was the right call.
+- **`switchToServer` doesn't wipe.** Plan's claim that ConnectionManager wipes per-server blobs on `switchToServer` was wrong — those blobs survive switches BECAUSE they're per-server-keyed. History cache follows the same: survives switches, dies only on `removeServer` / explicit forget.
+- **Int not Long for index types.** EntrySummary.index is Int (sentinel -1), GetSessionResult.totalCount is Int (sentinel -1). Used Int/Int? throughout for type-consistency with wire DTOs.
+- **`appendEntries` is a no-op when no prior cache exists.** Live-update splices to an uncached session don't seed a half-cache; partial transcript without the head defeats gap-detection on the next open. First full fetch populates the cache properly.
+- **`:app` test seam absent**. `:app` test target is pure JVM (no Robolectric), so SessionHistoryRepository (needs Android Context + EncryptedSharedPreferences) is uncovered. The pure logic lives in `:core/SessionHistoryMerge` and is fully covered by the 6 merge tests.
+- **`onChildSessionCreated` is the right hook for compact's two-phase eviction.** Existing router decodes SessionCreatedPayload.parentSessionId; just consult the pending set in addition to the openSid check.
 
 ## Final commit SHAs
-_appended at finalize_
+- `969b804` feat: SessionHistoryRepository + mergeSessionHistory scaffolding
+- `f7dbefe` feat: wire SessionHistoryRepository into chat-open + eviction sites
