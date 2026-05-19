@@ -47,7 +47,29 @@ pub struct SolutionAgentStore {
     /// `Self`, which makes the trait object generic and unstorable. `&App`
     /// is the strict supertype the resolver actually needs.
     pub focus_resolver: Option<Arc<dyn Fn(SolutionSessionId, &gpui::App) -> bool + Send + Sync>>,
+    /// In-flight debounce slots for `AcpThreadEvent::EntryUpdated` events.
+    /// Tool-call arg deltas, assistant-text chunks, and status flips on an
+    /// existing entry all funnel through `EntryUpdated`; without this map
+    /// they would either spam MCP notifications (one per token) or — as the
+    /// pre-fix behaviour did — get dropped on the floor entirely because
+    /// the catch-all match arm ignored them.
+    ///
+    /// Each key is a `(session_id, entry_index)` pair; the value is the
+    /// pending trailing-edge `SessionMessageAppended` emit task. Updates
+    /// while a task is in flight replace the entry (dropping the old `Task`
+    /// cancels its `timer().await`), restarting the debounce window. The
+    /// `first_dirty_at` field captures when the FIRST update for this
+    /// debounce window arrived so we can force-emit on a max-stale
+    /// breach — a continuously-streaming entry mustn't be able to starve
+    /// the trailing-edge emit indefinitely.
+    entry_update_throttles: HashMap<(SolutionSessionId, usize), EntryUpdateThrottle>,
     _solution_subscription: Option<Subscription>,
+}
+
+struct EntryUpdateThrottle {
+    first_dirty_at: std::time::Instant,
+    #[allow(dead_code)]
+    task: Task<()>,
 }
 
 #[derive(Debug)]
@@ -292,6 +314,7 @@ impl SolutionAgentStore {
             adapters,
             server_registry: HashMap::new(),
             focus_resolver: None,
+            entry_update_throttles: HashMap::new(),
             _solution_subscription: solution_subscription,
         }
     }
@@ -1986,6 +2009,67 @@ impl SolutionAgentStore {
                         s.last_turn_duration = None;
                     });
                     self.persist_session_row(session_id, cx);
+                }
+            }
+            acp_thread::AcpThreadEvent::EntryUpdated(idx) => {
+                // Tool-call arg deltas, assistant-text chunks, and tool-
+                // status transitions on an existing entry all surface
+                // here. The pre-fix behaviour fell through to the
+                // `_ => {}` catch-all, so external MCP consumers (the
+                // Android client) never learned the entry changed and
+                // displayed only the initial empty `args_preview = "{}"`
+                // for a tool call or the first preview snapshot of a
+                // streaming assistant reply.
+                //
+                // Coalesced via a trailing-edge debounce: a 200 ms quiet
+                // window collapses a token-by-token streaming burst
+                // into roughly 5 emits/sec, and a 1 s max-stale guard
+                // forces an emit when an entry is continuously dirty so
+                // the consumer doesn't starve. Replacing an entry in
+                // `entry_update_throttles` drops the previous `Task`,
+                // which cancels its inflight timer → only the latest
+                // debounce window's task survives to fire.
+                let key = (session_id, *idx);
+                let now = std::time::Instant::now();
+                let existing_first_dirty_at = self
+                    .entry_update_throttles
+                    .get(&key)
+                    .map(|t| t.first_dirty_at);
+                let max_stale_breached = existing_first_dirty_at
+                    .map(|t| {
+                        now.saturating_duration_since(t)
+                            >= std::time::Duration::from_millis(1000)
+                    })
+                    .unwrap_or(false);
+                if max_stale_breached {
+                    self.entry_update_throttles.remove(&key);
+                    cx.emit(SolutionAgentStoreEvent::SessionMessageAppended(
+                        session_id, *idx,
+                    ));
+                } else {
+                    let first_dirty_at = existing_first_dirty_at.unwrap_or(now);
+                    let entry_index = *idx;
+                    let task = cx.spawn(async move |this, cx: &mut AsyncApp| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(200))
+                            .await;
+                        this.update(cx, |this, cx| {
+                            if this.entry_update_throttles.remove(&key).is_some() {
+                                cx.emit(SolutionAgentStoreEvent::SessionMessageAppended(
+                                    session_id,
+                                    entry_index,
+                                ));
+                            }
+                        })
+                        .ok();
+                    });
+                    self.entry_update_throttles.insert(
+                        key,
+                        EntryUpdateThrottle {
+                            first_dirty_at,
+                            task,
+                        },
+                    );
                 }
             }
             _ => {}
