@@ -22,7 +22,7 @@ use chrono::Utc;
 use gpui::{AsyncApp, Context, SharedString, Task};
 
 use super::{SolutionAgentStore, SolutionAgentStoreEvent};
-use crate::model::{SessionState, SolutionSessionId};
+use crate::model::{SessionState, SolutionSessionId, SolutionSessionMetadata};
 
 /// Opening of every queue-marker text block. Shared with
 /// [`crate::conversation_render::strip_queue_marker`] so a future tweak to
@@ -266,7 +266,13 @@ impl SolutionAgentStore {
         cx.notify();
 
         let Some(acp_thread) = session_entity.read(cx).acp_thread().cloned() else {
-            return Task::ready(Err(anyhow!("session {session_id} has no ACP thread yet")));
+            // Cold session — no live ACP thread. Wake the agent
+            // synchronously via `resume_session` (mirrors what the
+            // desktop's `SolutionSessionView::start_resume` does, minus
+            // the Window — MCP-driven sends don't have one). Re-enters
+            // `send_message_blocks` once the thread is attached so the
+            // normal hot-path code below runs unchanged.
+            return self.send_message_blocks_with_wake(session_id, blocks, cx);
         };
 
         // Route through `AcpThread::send` (not `connection.prompt` directly)
@@ -334,6 +340,105 @@ impl SolutionAgentStore {
                 }
             }
             result.map(|_| ()).map_err(|err| anyhow!(err))
+        })
+    }
+
+    /// Wake a cold session (no ACP thread attached) and queue the
+    /// supplied blocks for delivery once the wake handshake completes.
+    /// Driven by `send_message_blocks` when it discovers an empty
+    /// `acp_thread()` — the user (typically the mobile client over
+    /// MCP) sent to a sleeping session and the previous behaviour was
+    /// to return a hard "session has no ACP thread yet" error.
+    ///
+    /// Snapshots the session metadata, resolves the owning solution
+    /// from `SolutionStore`, builds a headless project (no worktree —
+    /// `resume_session` keys claude-acp's jsonl lookup off
+    /// `meta.cwd`, not the project's worktree), then awaits
+    /// `resume_session` + re-enters `send_message_blocks`. The
+    /// second entry sees the now-attached thread and forwards
+    /// normally — if the session became hot during the wake (some
+    /// other path attached a thread first), that's benign.
+    ///
+    /// Reuses `session.project` if it's still cached (sessions
+    /// created in this process keep the original handle) instead of
+    /// constructing a headless one — keeps the existing worktree set
+    /// intact for the resume call.
+    fn send_message_blocks_with_wake(
+        &mut self,
+        session_id: SolutionSessionId,
+        blocks: Vec<agent_client_protocol::schema::ContentBlock>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let Some(session_entity) = self.session(session_id) else {
+            return Task::ready(Err(anyhow!("unknown session {session_id}")));
+        };
+        let (meta, cached_project) = session_entity.read_with(cx, |s, _| {
+            let meta = SolutionSessionMetadata {
+                id: s.id,
+                solution_id: s.solution_id.clone(),
+                agent_id: s.agent_id.clone(),
+                acp_session_id: s.acp_session_id.clone(),
+                title: s.title.clone(),
+                created_at: s.created_at,
+                last_activity_at: s.last_activity_at,
+                preview: None,
+                total_tokens: None,
+                context_count: s.context_count,
+                cwd: s.cwd.clone(),
+                parent_session_id: s.parent_session_id,
+            };
+            (meta, s.project.clone())
+        });
+
+        let solution_id = meta.solution_id.clone();
+        let solution = solutions::SolutionStore::try_global(cx)
+            .and_then(|store| {
+                store
+                    .read(cx)
+                    .solutions()
+                    .iter()
+                    .find(|s| s.id == solution_id)
+                    .cloned()
+            });
+        let Some(solution) = solution else {
+            return Task::ready(Err(anyhow!(
+                "unknown_solution: cannot wake session {session_id} — solution {solution_id:?} \
+                 not found in SolutionStore"
+            )));
+        };
+
+        let project = match cached_project {
+            Some(project) => project,
+            None => match SolutionAgentStore::make_headless_project_for_solution(&solution, cx) {
+                Ok(project) => project,
+                Err(err) => {
+                    return Task::ready(Err(anyhow!(
+                        "wake_for_send: headless project construction failed for {session_id}: \
+                         {err:#}"
+                    )));
+                }
+            },
+        };
+
+        log::info!(
+            target: "solution_agent::queue",
+            "session={session_id} cold-send wake: invoking resume_session before forwarding \
+             {} block(s)",
+            blocks.len()
+        );
+
+        let resume_task = self.resume_session(meta, project, cx);
+        cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let _resumed_id = resume_task.await?;
+            // The thread is now attached on the same session entity;
+            // re-enter the send path so the hot branch fires. If a
+            // racing path attached the thread first, this still
+            // resolves correctly — `send_message_blocks` always
+            // re-reads `acp_thread()` after the cold check.
+            let task = this.update(cx, |store, cx| {
+                store.send_message_blocks(session_id, blocks, cx)
+            })?;
+            task.await
         })
     }
 }

@@ -1299,3 +1299,106 @@ fn build_session_meta_emits_correct_json_shape(cx: &mut TestAppContext) {
         });
     });
 }
+
+// =====================================================================
+// Auto-wake for MCP `send_message_blocks` on cold sessions
+// =====================================================================
+
+/// Sending to a cold session whose owning Solution is gone from
+/// `SolutionStore` returns the structured `unknown_solution` error —
+/// not the legacy "session has no ACP thread yet" — so MCP clients can
+/// distinguish "the agent isn't running yet (we'll wake it)" from
+/// "this session is orphaned (give up)".
+#[gpui::test]
+async fn cold_send_unknown_solution_returns_structured_error(cx: &mut TestAppContext) {
+    // Use a SolutionId that won't be in SolutionStore. We still need
+    // SolutionStore initialised because `SolutionAgentStore::init_global`
+    // subscribes to it.
+    let dir = tempfile::tempdir().expect("tempdir");
+    cx.update(|cx| {
+        let settings_store = settings::SettingsStore::test(cx);
+        cx.set_global(settings_store);
+        let solutions_store =
+            solutions::SolutionStore::for_test(dir.path().join("solutions.json"), cx);
+        solutions::install_global_for_test(solutions_store, cx);
+        let registry = Arc::new(AdapterRegistry::new());
+        SolutionAgentStore::init_global(cx, registry);
+    });
+
+    let orphan_solution_id = SolutionId("orphan-sol".into());
+    let session_id = SolutionSessionId::new();
+    let agent_id = SharedString::from("mock-agent");
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            insert_cold_session(
+                session_id,
+                orphan_solution_id.clone(),
+                agent_id.clone(),
+                None,
+                None,
+                store,
+                cx,
+            );
+        });
+    });
+
+    let task = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let blocks = vec![agent_client_protocol::schema::ContentBlock::Text(
+                agent_client_protocol::schema::TextContent::new("hello".to_string()),
+            )];
+            store.send_message_blocks(session_id, blocks, cx)
+        })
+    });
+
+    let err = task.await.expect_err("orphan solution must fail");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("unknown_solution"),
+        "expected structured 'unknown_solution' error, got {msg:?}"
+    );
+    assert!(
+        !msg.contains("has no ACP thread yet"),
+        "auto-wake should replace the legacy 'no ACP thread' error, got {msg:?}"
+    );
+}
+
+/// Hot-path passthrough: when a session has a live `acp_thread`,
+/// `send_message_blocks` flips the state to Running synchronously
+/// without entering the wake path — the wake helper must not interfere
+/// with already-attached sessions.
+#[gpui::test]
+async fn hot_send_does_not_enter_wake_path(cx: &mut TestAppContext) {
+    let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let blocks = vec![agent_client_protocol::schema::ContentBlock::Text(
+                agent_client_protocol::schema::TextContent::new("hot path".to_string()),
+            )];
+            // Detach — we only care that the synchronous state flip
+            // happened. The actual prompt path uses the MockConnection
+            // which returns Err without a gate (see test_support); that
+            // would arrive as `Errored` after the spawn resolves.
+            store
+                .send_message_blocks(session_id, blocks, cx)
+                .detach_and_log_err(cx);
+        });
+    });
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let session = store.session(session_id).expect("session exists");
+            let state = session.read(cx).state.clone();
+            assert!(
+                matches!(state, SessionState::Running { .. }),
+                "hot path should flip to Running synchronously, got {state:?}"
+            );
+        });
+    });
+}
