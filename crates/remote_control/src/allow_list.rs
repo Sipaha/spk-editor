@@ -31,6 +31,7 @@ pub fn translate(method: &str) -> Option<&'static str> {
         "remote.solutions.add_empty_member" => Some("solutions.add_empty_member"),
         "remote.solutions.remove_member" => Some("solutions.remove_member"),
         "remote.catalog.list" => Some("catalog.list"),
+        "remote.catalog.remove_project" => Some("catalog.remove_project"),
         "remote.solution_agent.list_agents" => Some("solution_agent.list_agents"),
         "remote.solution_agent.list_sessions" => Some("solution_agent.list_sessions"),
         "remote.solution_agent.get_session" => Some("solution_agent.get_session"),
@@ -110,6 +111,7 @@ mod tests {
             ),
             ("remote.solutions.remove_member", "solutions.remove_member"),
             ("remote.catalog.list", "catalog.list"),
+            ("remote.catalog.remove_project", "catalog.remove_project"),
             (
                 "remote.solution_agent.list_agents",
                 "solution_agent.list_agents",
