@@ -13,6 +13,30 @@ use util::ResultExt as _;
 
 pub type AddProgressCallback = Box<dyn FnMut(&str, Option<u8>, &mut App) + 'static>;
 
+/// `git init` a freshly-created empty member directory with no remote.
+///
+/// Run synchronously (blocking) via `std::process::Command`: the call site
+/// [`SolutionStore::add_empty_member`] is sync and a local `git init` is a
+/// sub-100ms one-shot, so spinning up the async clone machinery would be
+/// overkill. Best-effort by design — the caller `.log_err()`s the result so
+/// a missing/old `git` binary degrades to "plain folder, no VCS" rather
+/// than failing project creation outright.
+fn init_empty_git_repo(local_path: &std::path::Path) -> Result<()> {
+    let status = std::process::Command::new("git")
+        .arg("init")
+        .arg(local_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .with_context(|| format!("spawning git init for {}", local_path.display()))?;
+    anyhow::ensure!(
+        status.success(),
+        "git init for {} exited with {status}",
+        local_path.display()
+    );
+    Ok(())
+}
+
 /// Internal record for an in-flight `add_member` call. The UI reads a
 /// snapshot via [`SolutionStore::pending_adds_for`] and reacts to
 /// [`SolutionStoreEvent::MemberAddProgress`] / `MemberAddCompleted`.
@@ -302,8 +326,13 @@ impl SolutionStore {
     /// slug derived from `project_name` and uniquified against the
     /// solution's existing member catalog ids; nothing is inserted into
     /// `catalog_projects`. The directory `solution.root/<slug>` is created
-    /// (incl. parents). Display name in selectors comes from the path's
-    /// last segment via the orphan-rendering rule.
+    /// (incl. parents) and `git init`-ed with no remote, so the new project
+    /// tracks history from the start and can be pushed somewhere later via
+    /// the normal git UI. It never enters the catalog (which requires a
+    /// `remote_url`), so a remote-less local project is not offered in the
+    /// project picker when creating or editing other solutions. Display
+    /// name in selectors comes from the path's last segment via the
+    /// orphan-rendering rule.
     pub fn add_empty_member(
         &mut self,
         solution_id: &SolutionId,
@@ -321,6 +350,7 @@ impl SolutionStore {
         let local_path = sol.root.join(&slug);
         std::fs::create_dir_all(&local_path)
             .with_context(|| format!("creating {}", local_path.display()))?;
+        init_empty_git_repo(&local_path).log_err();
         sol.members.push(SolutionMember {
             catalog_id: cat_id.clone(),
             local_path,
@@ -602,6 +632,10 @@ mod tests {
             member_path.file_name().and_then(|n| n.to_str()),
             Some("frontend"),
             "slug from name"
+        );
+        assert!(
+            member_path.join(".git").exists(),
+            "empty member must be git-initialised (no remote)"
         );
     }
 

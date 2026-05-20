@@ -1538,10 +1538,13 @@ impl McpServerTool for AddMemberTool {
 // solutions.add_empty_member
 // =====================================================================
 
-/// Create a new empty (non-git) project as a member of a Solution. Creates
-/// the directory `solution.root/<slug>` (slug derived from `name` and
-/// uniquified against existing members) and registers it — no clone, no git
-/// init. Returns the new member's `catalog_id` synchronously.
+/// Create a new empty project as a member of a Solution. Creates the
+/// directory `solution.root/<slug>` (slug derived from `name` and
+/// uniquified against existing members), `git init`s it with no remote so
+/// history can be pushed somewhere later, and registers it — no clone. The
+/// member never enters the catalog, so a remote-less local project is not
+/// offered in the picker for other solutions. Returns the new member's
+/// `catalog_id` synchronously.
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct AddEmptyMemberParams {
     pub solution_id: String,

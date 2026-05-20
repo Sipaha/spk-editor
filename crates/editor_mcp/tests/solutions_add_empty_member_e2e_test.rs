@@ -1,6 +1,7 @@
 //! End-to-end test for `solutions.add_empty_member` over the MCP socket —
-//! the synchronous "create a new empty (non-git) project in a Solution"
-//! path the mobile project-registry feature drives.
+//! the synchronous "create a new empty project in a Solution" path the
+//! mobile project-registry feature drives. The new project is git-init'ed
+//! with no remote so its history can be pushed somewhere later.
 //!
 //! Lives in its own test binary (one `start_server` per process — the
 //! `editor_mcp` server singleton can't be re-bound within a process, so
@@ -19,7 +20,7 @@ use smol::net::unix::UnixStream;
 use std::time::Duration;
 
 #[gpui::test]
-async fn add_empty_member_creates_non_git_member(cx: &mut gpui::TestAppContext) {
+async fn add_empty_member_creates_git_member(cx: &mut gpui::TestAppContext) {
     cx.executor().allow_parking();
 
     let runtime_dir = tempfile::tempdir().expect("runtime tempdir");
@@ -97,7 +98,7 @@ async fn add_empty_member_creates_non_git_member(cx: &mut gpui::TestAppContext) 
         .to_string();
     assert!(!catalog_id.is_empty(), "catalog_id should be a non-empty slug");
 
-    // --- 3. solutions.get reports the member, on disk, with no .git ---
+    // --- 3. solutions.get reports the member, on disk, git-init'ed ---
     let resp = call_tool(
         &mut stream,
         3,
@@ -128,8 +129,8 @@ async fn add_empty_member_creates_non_git_member(cx: &mut gpui::TestAppContext) 
     let local = std::path::Path::new(local_path);
     assert!(local.exists(), "local_path {local_path} does not exist");
     assert!(
-        !local.join(".git").exists(),
-        "empty member must NOT be a git repo: {local_path}",
+        local.join(".git").exists(),
+        "empty member must be git-initialised (no remote): {local_path}",
     );
 
     // --- 4. A second empty member with the same name gets a distinct slug ---
