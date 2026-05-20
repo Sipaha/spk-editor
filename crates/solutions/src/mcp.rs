@@ -530,9 +530,10 @@ impl McpServerTool for RenameSolutionTool {
 // solutions.delete
 // =====================================================================
 
-/// Delete a Solution from config. Does NOT touch on-disk directories
-/// (Solutions are config-only entities; v1 deliberately leaves orphan
-/// directories for the user to clean up).
+/// Delete a Solution and its on-disk worktrees: removes the config entry
+/// and then deletes the solution's `root` directory (mirroring the desktop
+/// `delete_solution_with_cleanup`). The catalog cache is untouched, so
+/// catalog-backed projects can be re-cloned later.
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct DeleteSolutionParams {
     pub solution_id: String,
@@ -575,12 +576,41 @@ impl McpServerTool for DeleteSolutionTool {
             !input.solution_id.is_empty(),
             "invalid_params: solution_id is required"
         );
-        cx.update(|cx| -> Result<()> {
+        let root = cx.update(|cx| -> Result<Option<std::path::PathBuf>> {
             let store = SolutionStore::global(cx);
-            let id = crate::SolutionId(input.solution_id);
+            let id = crate::SolutionId(input.solution_id.clone());
+            // Capture the root before removal so we can delete its on-disk
+            // worktrees afterwards.
+            let root = store.read_with(cx, |s, _| {
+                s.solutions()
+                    .iter()
+                    .find(|sol| sol.id == id)
+                    .map(|sol| sol.root.clone())
+            });
             store.update(cx, |s, cx| s.delete_solution(&id, cx))?;
-            Ok(())
+            Ok(root)
         })?;
+        // Match the desktop delete (`delete_solution_with_cleanup`): a
+        // deleted solution takes its on-disk project files with it. Done in
+        // the background — a slow / partial `remove_dir_all` shouldn't block
+        // the tool response, and `NotFound` (already gone) is not an error.
+        if let Some(root) = root {
+            let root_display = root.display().to_string();
+            cx.background_executor()
+                .spawn(async move {
+                    // Direct `remove_dir_all` on a background-executor thread
+                    // (no `smol::unblock`): unblock spawns its own OS thread,
+                    // which the deterministic gpui test scheduler rejects.
+                    if let Err(err) = std::fs::remove_dir_all(&root)
+                        && err.kind() != std::io::ErrorKind::NotFound
+                    {
+                        log::warn!(
+                            "solutions.delete: removing {root_display} failed: {err} (orphaned files left in place)"
+                        );
+                    }
+                })
+                .detach();
+        }
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text {
                 text: "deleted".to_string(),
