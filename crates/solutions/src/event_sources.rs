@@ -128,6 +128,10 @@ pub fn install(cx: &mut App) {
                             }),
                         );
                     }
+                    // Window reconciliation only — `Changed` (emitted
+                    // alongside) already drives the `solution_changed`
+                    // notification that refreshes remote clients' lists.
+                    SolutionStoreEvent::Deleted { .. } => {}
                 }),
             );
         }

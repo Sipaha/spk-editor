@@ -71,6 +71,16 @@ pub enum SolutionStoreEvent {
         panel: crate::db::PanelKind,
         catalog: CatalogId,
     },
+    /// Emitted when a Solution is removed from the store. Carries the
+    /// solution's `root` path captured *before* removal, because the
+    /// in-store mapping is gone by the time subscribers run — window
+    /// reconciliation (closing the deleted solution's workspace and
+    /// activating a sibling) must match worktrees by path, not by a
+    /// store lookup that would now return nothing.
+    Deleted {
+        id: SolutionId,
+        root: std::path::PathBuf,
+    },
 }
 
 impl EventEmitter<SolutionStoreEvent> for SolutionStore {}
@@ -538,6 +548,15 @@ impl SolutionStore {
     }
 
     pub fn delete_solution(&mut self, id: &SolutionId, cx: &mut gpui::Context<Self>) -> Result<()> {
+        // Capture the root before removal so the `Deleted` event can carry
+        // it — subscribers can no longer look the solution up by id once
+        // it's gone from the store.
+        let root = self
+            .config
+            .solutions
+            .iter()
+            .find(|s| s.id == *id)
+            .map(|s| s.root.clone());
         let before = self.config.solutions.len();
         self.config.solutions.retain(|s| s.id != *id);
         if self.config.solutions.len() == before {
@@ -550,6 +569,12 @@ impl SolutionStore {
         self.panel_member_selections
             .retain(|(sid, _), _| sid != id);
         cx.emit(SolutionStoreEvent::Changed);
+        if let Some(root) = root {
+            cx.emit(SolutionStoreEvent::Deleted {
+                id: id.clone(),
+                root,
+            });
+        }
         cx.notify();
         Ok(())
     }

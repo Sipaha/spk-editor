@@ -44,6 +44,7 @@ pub fn init(cx: &mut App) {
     cx.observe_new(modals::register).detach();
     cx.observe_new(register_tab_actions).detach();
     cx.observe_new(register_member_sync_observer).detach();
+    cx.observe_new(register_solution_delete_observer).detach();
     welcome::init(cx);
     switch::register_mcp(cx);
 }
@@ -136,6 +137,96 @@ fn register_member_sync_observer(
         workspace
             .swap_worktrees_to(paths, window, cx)
             .detach_and_log_err(cx);
+    })
+    .detach();
+}
+
+/// When a Solution is deleted from the store (from any source — the
+/// desktop tab strip, the mobile remote, an MCP call), close the
+/// workspace that was hosting it and let `MultiWorkspace` activate a
+/// neighbouring solution tab in its place. Without this the deleting
+/// caller (notably the mobile `solutions.delete` MCP path, which never
+/// touches the desktop window) leaves the window showing an orphaned
+/// project with no active solution tab.
+///
+/// Matches the hosting workspace by the deleted solution's `root` path
+/// rather than a store lookup: by the time this fires the solution is
+/// already gone from the store, so `solution_for_path` /
+/// `workspace_has_solution` would report "not hosted" for the very
+/// workspace we need to close.
+fn register_solution_delete_observer(
+    _workspace: &mut Workspace,
+    window: Option<&mut Window>,
+    cx: &mut gpui::Context<Workspace>,
+) {
+    use util::ResultExt as _;
+    let Some(window) = window else { return };
+    let Some(store) = SolutionStore::try_global(cx) else {
+        return;
+    };
+    cx.subscribe_in(&store, window, |workspace, _store, event, window, cx| {
+        let SolutionStoreEvent::Deleted { root, .. } = event else {
+            return;
+        };
+        let Some(mw_weak) = workspace.multi_workspace().cloned() else {
+            return;
+        };
+        let root = root.clone();
+        // Defer: iterating / reading sibling workspaces must not run while
+        // this Workspace entity is mid-update (mirrors `close_solution`).
+        cx.spawn_in(window, async move |_, cx| {
+            if let Some(mw) = cx.update(|_, _| mw_weak.upgrade()).ok().flatten() {
+                mw.update_in(cx, |mw, window, cx| {
+                    close_workspaces_under_root_in(mw, &root, window, cx);
+                })
+                .log_err();
+            }
+        })
+        .detach();
+    })
+    .detach();
+}
+
+/// Close every workspace in `mw` whose project has a worktree under
+/// `root` (i.e. it was hosting the just-deleted solution), then open the
+/// launcher if the window is left empty. `remove_project_group` activates
+/// a neighbouring group, so the user lands on another open solution
+/// rather than a blank window. Idempotent: if several of the window's
+/// workspaces fire this for the same delete, the first call removes the
+/// group and the rest find nothing to close.
+fn close_workspaces_under_root_in(
+    mw: &mut workspace::MultiWorkspace,
+    root: &std::path::Path,
+    window: &mut Window,
+    cx: &mut gpui::Context<workspace::MultiWorkspace>,
+) {
+    use util::ResultExt as _;
+    let to_close: Vec<_> = mw
+        .workspaces()
+        .filter(|ws| {
+            ws.read(cx)
+                .project()
+                .read(cx)
+                .worktrees(cx)
+                .any(|tree| tree.read(cx).abs_path().starts_with(root))
+        })
+        .map(|ws| (ws.read(cx).project_group_key(cx), ws.clone()))
+        .collect();
+    if to_close.is_empty() {
+        return;
+    }
+    let close_tasks: Vec<_> = to_close
+        .into_iter()
+        .map(|(group_key, _)| mw.remove_project_group(&group_key, window, cx))
+        .collect();
+    cx.spawn_in(window, async move |this, cx| {
+        for task in close_tasks {
+            task.await.log_err();
+        }
+        this.update_in(cx, |mw, window, cx| {
+            crate::welcome_trigger::open_welcome_if_window_empty(mw, window, cx);
+        })
+        .log_err();
     })
     .detach();
 }
