@@ -50,6 +50,9 @@ pub fn register(cx: &mut App) {
         server.add_tool(RestartAgentTool);
     });
     editor_mcp::register_tool(cx, |server| {
+        server.add_tool(ResetContextTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
         server.add_tool(CompactSessionTool);
     });
     editor_mcp::register_tool(cx, |server| {
@@ -1902,6 +1905,78 @@ impl McpServerTool for RestartAgentTool {
             }],
             structured_content: RestartAgentResult {
                 session_id: new_session_id.to_string(),
+            },
+        })
+    }
+}
+
+// =====================================================================
+// solution_agent.reset_context
+// =====================================================================
+
+/// Wipe the conversation history of `session_id` while keeping the tab,
+/// title, and `SolutionSessionId` stable. Wired to the desktop's
+/// `/clear` slash command via `store::reset_context`. Different from
+/// `restart_agent`, which mints a fresh session id (and therefore drops
+/// the user-set title) — use this when the intent is "clear this chat"
+/// and not "this session is broken, give me a new one".
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct ResetContextParams {
+    pub session_id: String,
+}
+
+impl<'de> Deserialize<'de> for ResetContextParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            session_id: String,
+        }
+        Ok(Self {
+            session_id: Option::<Inner>::deserialize(de)?
+                .unwrap_or_default()
+                .session_id,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct ResetContextResult {
+    pub session_id: String,
+}
+
+#[derive(Clone)]
+pub struct ResetContextTool;
+
+impl McpServerTool for ResetContextTool {
+    type Input = ResetContextParams;
+    type Output = ResetContextResult;
+    const NAME: &'static str = "solution_agent.reset_context";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.session_id.is_empty(),
+            "invalid_params: session_id is required"
+        );
+        let session_id = SolutionSessionId::parse(&input.session_id)
+            .map_err(|e| anyhow!("bad session id: {e}"))?;
+
+        let reset_task = cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| store.reset_context(session_id, cx))
+        });
+        let same_session_id = reset_task.await?;
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: same_session_id.to_string(),
+            }],
+            structured_content: ResetContextResult {
+                session_id: same_session_id.to_string(),
             },
         })
     }

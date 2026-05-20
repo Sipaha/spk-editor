@@ -28,6 +28,32 @@ pub struct Capabilities {
     pub editor_mcp_version: String,
     pub supported_event_kinds: Vec<String>,
     pub experiments: Vec<String>,
+    /// Absolute path of the running editor binary (`std::env::current_exe`).
+    pub binary_path: String,
+    /// Local-time mtime of that binary file, i.e. when this build was
+    /// written to disk. Lets a client confirm the *running* process is the
+    /// freshly-built binary rather than a stale one, without trusting the
+    /// operator's memory of whether they restarted. `<unknown>` if the
+    /// path / metadata can't be read.
+    pub binary_built_at: String,
+}
+
+/// Resolve `(path, mtime-as-local-time-string)` for the running binary.
+/// Returns `<unknown>` placeholders rather than failing — the probe is a
+/// best-effort diagnostic, not a critical path.
+fn running_binary_build_info() -> (String, String) {
+    let unknown = || ("<unknown>".to_string(), "<unknown>".to_string());
+    let Ok(path) = std::env::current_exe() else {
+        return unknown();
+    };
+    let built_at = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .map(|mtime| {
+            let dt: chrono::DateTime<chrono::Local> = mtime.into();
+            dt.format("%Y-%m-%d %H:%M:%S %:z").to_string()
+        })
+        .unwrap_or_else(|_| "<unknown>".to_string());
+    (path.display().to_string(), built_at)
 }
 
 #[derive(Clone)]
@@ -43,6 +69,7 @@ impl McpServerTool for CapabilitiesTool {
         _input: Self::Input,
         _cx: &mut AsyncApp,
     ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        let (binary_path, binary_built_at) = running_binary_build_info();
         let caps = Capabilities {
             protocol_version: "2024-11-05".to_string(),
             editor_mcp_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -51,10 +78,15 @@ impl McpServerTool for CapabilitiesTool {
                 .map(|s| (*s).to_string())
                 .collect(),
             experiments: vec![],
+            binary_path,
+            binary_built_at,
         };
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text {
-                text: format!("editor_mcp v{}", caps.editor_mcp_version),
+                text: format!(
+                    "editor_mcp v{} · binary built {}",
+                    caps.editor_mcp_version, caps.binary_built_at
+                ),
             }],
             structured_content: caps,
         })

@@ -1600,18 +1600,16 @@ impl SolutionAgentStore {
         let Some(session_entity) = self.sessions.get(&session_id).cloned() else {
             return Task::ready(Err(anyhow!("unknown session {session_id}")));
         };
-        let (solution_id, agent_id, project) = {
+        // `project` is None for a COLD session (loaded from the DB, never
+        // promoted to live this run) — the common case for `/clear` on a
+        // session whose conversation was generated in a previous editor
+        // run. Rather than bail, we resolve a headless project from the
+        // solution below (same fallback the cold→live auto-wake path uses
+        // in `queue::send_message_blocks_with_wake`), so reset works on
+        // cold sessions too.
+        let (solution_id, agent_id, cached_project) = {
             let s = session_entity.read(cx);
-            let project = match s.project.clone() {
-                Some(project) => project,
-                None => {
-                    return Task::ready(Err(anyhow!(
-                        "session {session_id} has no cached project — reset_context not supported \
-                         for prebuilt test sessions"
-                    )));
-                }
-            };
-            (s.solution_id.clone(), s.agent_id.clone(), project)
+            (s.solution_id.clone(), s.agent_id.clone(), s.project.clone())
         };
         let pair = (solution_id.clone(), agent_id);
 
@@ -1629,6 +1627,15 @@ impl SolutionAgentStore {
                             .ok_or_else(|| anyhow!("solution {:?} not found", solution_id))
                     })
             })?;
+            let project = match cached_project {
+                Some(project) => project,
+                None => {
+                    let solution = solution.clone();
+                    cx.update(move |cx| {
+                        SolutionAgentStore::make_headless_project_for_solution(&solution, cx)
+                    })?
+                }
+            };
             let (connection_task, acp_meta) = this.update(cx, |store, cx| {
                 let task =
                     store.get_or_spawn_connection(pair.clone(), &solution, project.clone(), cx);
@@ -1683,6 +1690,10 @@ impl SolutionAgentStore {
                     s.cached_total_tokens = None;
                     s.last_turn_duration = None;
                     s.cold_entries.clear();
+                    // Cache the (possibly freshly-built headless) project so
+                    // a subsequent reset/restart on this now-live session
+                    // doesn't have to rebuild it.
+                    s.project = Some(project.clone());
                     // `set_acp_thread` emits ThreadReplaced + notify;
                     // last so SessionView re-attaches against a fully
                     // wiped session struct.

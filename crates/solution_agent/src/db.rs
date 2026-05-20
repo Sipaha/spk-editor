@@ -322,10 +322,18 @@ fn apply_idempotent_add_column(connection: &Connection, column_def: &str) {
 /// either succeed or hit the substring-filtered duplicate-name path,
 /// so the worst case is one harmless log line.
 fn column_exists(connection: &Connection, table: &str, column: &str) -> bool {
-    let ddl = format!("PRAGMA table_info({table})");
-    // `PRAGMA table_info` yields columns:
-    //   cid, name, type, notnull, dflt_value, pk
-    // We only need column 1 (`name`).
+    // Use the table-valued `pragma_table_info(...)` function (SQLite ≥
+    // 3.16) and project `name` explicitly so the single-column
+    // `select::<String>` reads the column NAME. The bare
+    // `PRAGMA table_info(...)` form yields six columns
+    // (cid, name, type, notnull, dflt_value, pk) and `select::<String>`
+    // reads column 0 — the integer `cid`, NOT `name` — so the existence
+    // check compared cid strings ("0", "1", …) against the column name,
+    // never matched, and let every already-applied migration re-run its
+    // ALTER and log a spurious "prepare failed" WARN on each restart.
+    // `table` is an internal constant, so inlining it as a quoted
+    // literal carries no injection risk.
+    let ddl = format!("SELECT name FROM pragma_table_info('{table}')");
     let prepared = connection.select::<String>(&ddl);
     let mut selector = match prepared {
         Ok(s) => s,

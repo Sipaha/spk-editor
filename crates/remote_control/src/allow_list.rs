@@ -43,6 +43,7 @@ pub fn translate(method: &str) -> Option<&'static str> {
         }
         "remote.solution_agent.rename_session" => Some("solution_agent.rename_session"),
         "remote.solution_agent.restart_agent" => Some("solution_agent.restart_agent"),
+        "remote.solution_agent.reset_context" => Some("solution_agent.reset_context"),
         "remote.solution_agent.start_compact" => Some("solution_agent.start_compact"),
         "remote.solution_agent.upload_init" => Some("solution_agent.upload_init"),
         "remote.solution_agent.upload_status" => Some("solution_agent.upload_status"),
@@ -139,6 +140,10 @@ mod tests {
             (
                 "remote.solution_agent.restart_agent",
                 "solution_agent.restart_agent",
+            ),
+            (
+                "remote.solution_agent.reset_context",
+                "solution_agent.reset_context",
             ),
             (
                 "remote.solution_agent.start_compact",

@@ -500,7 +500,7 @@ pub(crate) fn resolve_upload_handles_with(
                 }
                 let bytes = std::fs::read(&tmp_path)
                     .map_err(|err| anyhow!("reading upload {id} tmp file {tmp_path:?}: {err}"))?;
-                let resolved = if mime.starts_with("image/") {
+                let mut resolved = if mime.starts_with("image/") {
                     let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
                     acp::ContentBlock::Image(acp::ImageContent::new(data, mime))
                 } else if is_text_like(&mime) {
@@ -516,6 +516,19 @@ pub(crate) fn resolve_upload_handles_with(
                 } else {
                     bail!("unsupported_mime: {mime} (upload_id={id})");
                 };
+                // Carry the originating ResourceLink's `_meta` onto the
+                // resolved block. For an image-only send the upload
+                // ResourceLink is the FIRST (often only) block, so it
+                // holds the client's `spk_client_send_id` stamp; building
+                // a fresh Image/Text block without copying it dropped the
+                // csid, which left the queue bundle (and the flushed user
+                // entry) un-correlated to the mobile's optimistic bubble —
+                // the dedup couldn't fire and the user saw a duplicate.
+                match &mut resolved {
+                    acp::ContentBlock::Image(c) => c.meta = link.meta.clone(),
+                    acp::ContentBlock::Text(c) => c.meta = link.meta.clone(),
+                    _ => {}
+                }
                 consumed.push(id);
                 out.push(resolved);
             }
