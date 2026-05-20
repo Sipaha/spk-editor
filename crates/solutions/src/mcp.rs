@@ -58,6 +58,9 @@ pub fn register(cx: &mut App) {
         server.add_tool(AddMemberTool);
     });
     editor_mcp::register_tool(cx, |server| {
+        server.add_tool(AddEmptyMemberTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
         server.add_tool(RemoveMemberTool);
     });
     editor_mcp::register_tool(cx, |server| {
@@ -1527,6 +1530,80 @@ impl McpServerTool for AddMemberTool {
                 ),
             }],
             structured_content: AddMemberResult { operation_id },
+        })
+    }
+}
+
+// =====================================================================
+// solutions.add_empty_member
+// =====================================================================
+
+/// Create a new empty (non-git) project as a member of a Solution. Creates
+/// the directory `solution.root/<slug>` (slug derived from `name` and
+/// uniquified against existing members) and registers it — no clone, no git
+/// init. Returns the new member's `catalog_id` synchronously.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct AddEmptyMemberParams {
+    pub solution_id: String,
+    pub name: String,
+}
+
+impl<'de> Deserialize<'de> for AddEmptyMemberParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            solution_id: String,
+            name: String,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            solution_id: inner.solution_id,
+            name: inner.name,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct AddEmptyMemberResult {
+    pub catalog_id: String,
+}
+
+#[derive(Clone)]
+pub struct AddEmptyMemberTool;
+
+impl McpServerTool for AddEmptyMemberTool {
+    type Input = AddEmptyMemberParams;
+    type Output = AddEmptyMemberResult;
+    const NAME: &'static str = "solutions.add_empty_member";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.solution_id.is_empty(),
+            "invalid_params: solution_id is required"
+        );
+        anyhow::ensure!(
+            !input.name.trim().is_empty(),
+            "invalid_params: name is required"
+        );
+
+        let sol_id = crate::SolutionId(input.solution_id.clone());
+        let cat_id = cx.update(|cx| -> Result<crate::CatalogId> {
+            let store = SolutionStore::global(cx);
+            store.update(cx, |s, cx| s.add_empty_member(&sol_id, &input.name, cx))
+        })?;
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: cat_id.0.clone(),
+            }],
+            structured_content: AddEmptyMemberResult {
+                catalog_id: cat_id.0,
+            },
         })
     }
 }
