@@ -27,6 +27,10 @@ pub fn translate(method: &str) -> Option<&'static str> {
         "remote.solutions.open" => Some("solutions.open"),
         "remote.solutions.create" => Some("solutions.create"),
         "remote.solutions.delete" => Some("solutions.delete"),
+        "remote.solutions.add_member" => Some("solutions.add_member"),
+        "remote.solutions.add_empty_member" => Some("solutions.add_empty_member"),
+        "remote.solutions.remove_member" => Some("solutions.remove_member"),
+        "remote.catalog.list" => Some("catalog.list"),
         "remote.solution_agent.list_agents" => Some("solution_agent.list_agents"),
         "remote.solution_agent.list_sessions" => Some("solution_agent.list_sessions"),
         "remote.solution_agent.get_session" => Some("solution_agent.get_session"),
@@ -59,16 +63,22 @@ pub fn translate(method: &str) -> Option<&'static str> {
 /// `crates/editor_mcp/tests/notifications_e2e_test.rs` for the on-wire
 /// shape.
 ///
-/// Block-list rationale: local-state events (`buffer_opened`,
-/// `lsp_started`, `solution_changed`, etc.) leak filesystem and project
-/// state we don't want the Android client poking at this phase. The
-/// agent-session events are exactly what an Android pager-like client
-/// needs to stream a turn live.
+/// Block-list rationale: buffer/LSP/diagnostic local-state events leak
+/// filesystem and project detail we don't want the Android client poking
+/// at. The agent-session events are exactly what an Android pager-like
+/// client needs to stream a turn live; the solution member-add + change
+/// events drive the mobile project-registry UI (ghost rows + list refresh).
 pub fn should_forward_event(kind: &str) -> bool {
     // `agent_session_*` covers per-turn streaming; `upload_*` covers
     // chunked-upload progress / errors emitted by the binary-frame path
-    // in `listener.rs`. Mobile clients subscribe to both.
-    kind.starts_with("agent_session_") || kind.starts_with("upload_")
+    // in `listener.rs`. The `solution_member_add_*` + `solution_changed`
+    // kinds let the mobile client render clone progress and refresh the
+    // member list after an add. Mobile subscribes to all of these.
+    kind.starts_with("agent_session_")
+        || kind.starts_with("upload_")
+        || kind == "solution_member_add_progress"
+        || kind == "solution_member_add_completed"
+        || kind == "solution_changed"
 }
 
 #[cfg(test)]
@@ -93,6 +103,13 @@ mod tests {
             ("remote.solutions.open", "solutions.open"),
             ("remote.solutions.create", "solutions.create"),
             ("remote.solutions.delete", "solutions.delete"),
+            ("remote.solutions.add_member", "solutions.add_member"),
+            (
+                "remote.solutions.add_empty_member",
+                "solutions.add_empty_member",
+            ),
+            ("remote.solutions.remove_member", "solutions.remove_member"),
+            ("remote.catalog.list", "catalog.list"),
             (
                 "remote.solution_agent.list_agents",
                 "solution_agent.list_agents",
@@ -220,8 +237,17 @@ mod tests {
     }
 
     #[test]
+    fn solution_member_and_change_kinds_forward() {
+        // The mobile project-registry UI needs these: progress drives the
+        // ghost member rows, completed clears them, and `solution_changed`
+        // triggers a `solutions.get` refresh after an add.
+        assert!(should_forward_event("solution_member_add_progress"));
+        assert!(should_forward_event("solution_member_add_completed"));
+        assert!(should_forward_event("solution_changed"));
+    }
+
+    #[test]
     fn local_state_kinds_are_blocked() {
-        assert!(!should_forward_event("solution_changed"));
         assert!(!should_forward_event("solution_active_changed"));
         assert!(!should_forward_event("buffer_opened"));
         assert!(!should_forward_event("buffer_saved"));
