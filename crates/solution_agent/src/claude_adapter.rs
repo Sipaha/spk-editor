@@ -51,6 +51,20 @@ impl SolutionAgentAdapter for ClaudeAcpAdapter {
             "Build / test / git commands must be run from within a member subdirectory \
              (the solution root has no .git, no Cargo.toml, etc.).\n",
         );
+        buf.push_str(&format!(
+            "\nThis solution's id is `{id}`. You can manage its member projects with \
+             these MCP tools (provided by the `spk-editor` server):\n\
+             - `catalog.list` — list every available registry (catalog) project.\n\
+             - `solutions.add_member {{\"solution_id\": \"{id}\", \"catalog_id\": \
+             \"<id from catalog.list>\"}}` — clone an existing registry project into \
+             THIS solution (runs asynchronously).\n\
+             - `solutions.add_empty_member {{\"solution_id\": \"{id}\", \"name\": \
+             \"<project name>\"}}` — create a new empty, git-initialised (no remote) \
+             project in THIS solution.\n\
+             Use these whenever the user asks to add an existing project or create a \
+             new one in this solution.\n",
+            id = solution.id.as_str(),
+        ));
         buf.push_str(
             "Stay inside the solution. All file edits, git operations, and shell \
              commands that mutate source code must be confined to the solution \
@@ -101,6 +115,13 @@ mod tests {
         assert!(prompt.contains("CLAUDE.md"));
         assert!(prompt.contains("Stay inside the solution"));
         assert!(prompt.contains("per-action go-ahead"));
+        // Catalog / project-management awareness: the agent must know the
+        // solution id and the tools to list + add projects to it.
+        assert!(prompt.contains("solution's id is `sol-x`"));
+        assert!(prompt.contains("catalog.list"));
+        assert!(prompt.contains("solutions.add_member"));
+        assert!(prompt.contains("solutions.add_empty_member"));
+        assert!(prompt.contains("\"solution_id\": \"sol-x\""));
     }
 
     #[test]
