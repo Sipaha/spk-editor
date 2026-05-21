@@ -6,6 +6,7 @@ mod auto_trust;
 pub mod branch_protection;
 mod cache;
 pub mod db;
+mod dock_snapshot;
 mod event_sources;
 pub mod git;
 pub mod mcp;
@@ -28,6 +29,7 @@ pub use store::{
     SolutionStore, SolutionStoreEvent, install_global_for_test,
     refresh_active_solution_for_branch_protection,
 };
+pub use dock_snapshot::{DockSideSnapshot, DockSnapshots, SolutionDockSnapshot};
 pub use tabs_snapshot::{SolutionTabsSnapshot, TabSnapshots};
 
 use ::settings::Settings;

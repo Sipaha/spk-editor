@@ -4,6 +4,7 @@ use crate::git;
 use crate::model::{CatalogId, CatalogProject, Solution, SolutionId, SolutionMember};
 use crate::persistence::{CURRENT_VERSION, SolutionsConfig};
 use crate::slug::unique_slug;
+use crate::dock_snapshot::{DockSnapshots, SolutionDockSnapshot};
 use crate::tabs_snapshot::{SolutionTabsSnapshot, TabSnapshots};
 use anyhow::{Context as _, Result, bail};
 use chrono::Utc;
@@ -28,6 +29,16 @@ pub struct SolutionStore {
     /// tabs themselves), and persistence would mean keeping
     /// `solutions.json` in sync with potentially-stale path lists.
     pub(crate) tab_snapshots: TabSnapshots,
+    /// Per-Solution dock (panel) layout snapshots, populated by the
+    /// in-place switch orchestrator on switch-out and replayed on
+    /// switch-in. Runtime-only; not persisted to disk — same rationale
+    /// as `tab_snapshots`: losing the snapshot after an editor restart
+    /// is acceptable (panel size already persists globally via the
+    /// KVP-backed `persist_panel_size_state`, and open/closed state
+    /// reverts to upstream defaults), and persistence would mean keeping
+    /// `solutions.json` in sync with transient layout that the user can
+    /// trivially re-establish.
+    pub(crate) dock_snapshots: DockSnapshots,
     /// Per-(solution, panel) catalog member selection. Hydrated from
     /// the `panel_member_selections` DB table at init time and
     /// updated through `set_panel_member_selection`. Lives only in the
@@ -137,6 +148,7 @@ impl SolutionStore {
             fs_lock: Arc::new(smol::lock::Mutex::new(())),
             in_flight_adds: HashMap::default(),
             tab_snapshots: TabSnapshots::default(),
+            dock_snapshots: DockSnapshots::default(),
             panel_member_selections,
         });
         cx.set_global(GlobalSolutionStore(store));
@@ -209,6 +221,7 @@ impl SolutionStore {
             fs_lock: Arc::new(smol::lock::Mutex::new(())),
             in_flight_adds: HashMap::default(),
             tab_snapshots: TabSnapshots::default(),
+            dock_snapshots: DockSnapshots::default(),
             panel_member_selections: HashMap::default(),
         })
     }
@@ -239,6 +252,32 @@ impl SolutionStore {
         } else {
             self.tab_snapshots.insert(id, snapshot);
         }
+        cx.emit(SolutionStoreEvent::Changed);
+        cx.notify();
+    }
+
+    /// Read the dock-layout snapshot (if any) for a given Solution.
+    /// Missing entries return `None` — meaning "this Solution has never
+    /// been switched away from in this session", which the orchestrator
+    /// treats as "leave the current docks as-is on switch-in".
+    pub fn dock_snapshot(&self, id: &SolutionId) -> Option<&SolutionDockSnapshot> {
+        self.dock_snapshots.get(id)
+    }
+
+    /// Write the dock-layout snapshot for a given Solution. Unlike the
+    /// tab snapshot, the default (all-closed) value is NOT evicted: an
+    /// all-closed layout is a meaningful per-Solution preference (the
+    /// user closed every panel) and must round-trip so switching back
+    /// restores the closed docks rather than inheriting the previous
+    /// Solution's open ones. Emits `Changed` (the active id itself
+    /// didn't move, only the saved shape).
+    pub fn set_dock_snapshot(
+        &mut self,
+        id: SolutionId,
+        snapshot: SolutionDockSnapshot,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.dock_snapshots.insert(id, snapshot);
         cx.emit(SolutionStoreEvent::Changed);
         cx.notify();
     }
@@ -1169,6 +1208,71 @@ mod tests {
             still.is_none(),
             "default (empty) snapshot must evict the entry; got {still:?}"
         );
+    }
+
+    #[gpui::test]
+    async fn dock_snapshot_round_trips_and_absent_returns_none(cx: &mut TestAppContext) {
+        use crate::dock_snapshot::{DockSideSnapshot, SolutionDockSnapshot};
+        use workspace::dock::PanelSizeState;
+
+        let dir = tempdir().expect("tempdir");
+        let store = cx.update(|cx| SolutionStore::for_test(dir.path().join("s.json"), cx));
+        let sol_a = store
+            .update(cx, |s, cx| {
+                s.create_solution("A", dir.path().to_path_buf(), cx)
+            })
+            .expect("create solution A");
+        let sol_b = store
+            .update(cx, |s, cx| {
+                s.create_solution("B", dir.path().to_path_buf(), cx)
+            })
+            .expect("create solution B");
+
+        let snapshot = SolutionDockSnapshot {
+            left: DockSideSnapshot {
+                is_open: true,
+                active_panel_index: Some(1),
+                size: Some(PanelSizeState {
+                    size: Some(gpui::px(240.0)),
+                    flex: None,
+                }),
+            },
+            right: DockSideSnapshot {
+                is_open: false,
+                active_panel_index: None,
+                size: None,
+            },
+            bottom: DockSideSnapshot::default(),
+        };
+        store.update(cx, |s, cx| {
+            s.set_dock_snapshot(sol_a.clone(), snapshot.clone(), cx);
+        });
+
+        let recovered = store.read_with(cx, |s, _| s.dock_snapshot(&sol_a).cloned());
+        assert_eq!(recovered, Some(snapshot));
+        // Solution B never had a snapshot recorded.
+        let absent = store.read_with(cx, |s, _| s.dock_snapshot(&sol_b).cloned());
+        assert_eq!(absent, None);
+    }
+
+    #[gpui::test]
+    async fn dock_snapshot_all_closed_round_trips_not_evicted(cx: &mut TestAppContext) {
+        use crate::dock_snapshot::SolutionDockSnapshot;
+
+        let dir = tempdir().expect("tempdir");
+        let store = cx.update(|cx| SolutionStore::for_test(dir.path().join("s.json"), cx));
+        let sol = store
+            .update(cx, |s, cx| {
+                s.create_solution("S", dir.path().to_path_buf(), cx)
+            })
+            .expect("create solution");
+        // An all-closed layout (the default) must be stored, not evicted,
+        // so switching back restores closed docks.
+        store.update(cx, |s, cx| {
+            s.set_dock_snapshot(sol.clone(), SolutionDockSnapshot::default(), cx);
+        });
+        let recovered = store.read_with(cx, |s, _| s.dock_snapshot(&sol).cloned());
+        assert_eq!(recovered, Some(SolutionDockSnapshot::default()));
     }
 
     #[gpui::test]

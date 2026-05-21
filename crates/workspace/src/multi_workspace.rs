@@ -27,7 +27,7 @@ const SIDEBAR_RESIZE_HANDLE_SIZE: Pixels = px(6.0);
 
 use crate::open_remote_project_with_existing_connection;
 use crate::{
-    CloseIntent, CloseWindow, Dock, DockPosition, Event as WorkspaceEvent, Item, ModalView,
+    CloseIntent, CloseWindow, DockPosition, Event as WorkspaceEvent, Item, ModalView,
     OpenMode, Panel, Workspace, WorkspaceId, client_side_decorations,
     persistence::model::MultiWorkspaceState,
 };
@@ -1429,34 +1429,13 @@ impl MultiWorkspace {
         let old_active_was_retained = self.active_workspace_is_retained();
         let workspace_was_retained = self.is_workspace_retained(&workspace);
 
-        // Snapshot dock open/closed state and active panel index from
-        // the workspace we're leaving so we can carry it across to the
-        // one we're activating. Each `Workspace` keeps its own per-side
-        // `Dock` entities, so without this propagation switching solution
-        // tabs would expose each tab's defaults — the user closes the
-        // left panel on AlphaSol, switches to GammaEmpty, and the panel
-        // pops back open because GammaEmpty's dock has its own
-        // (default-open) state.
-        //
-        // We sync `is_open` and `active_panel_index`. Panel order is
-        // deterministic across workspaces (`zed.rs::initialize_panels`
-        // adds them in the same order on each workspace) so the
-        // numeric index lines up with the same panel type. Panel size
-        // already persists globally via KVP-backed
-        // `persist_panel_size_state`, so we don't replicate that here.
-        let leaving_dock_state = {
-            let ws = old_active_workspace.read(cx);
-            let snapshot = |dock: &Entity<Dock>| {
-                let dock_read = dock.read(cx);
-                (dock_read.is_open(), dock_read.active_panel_index())
-            };
-            (
-                snapshot(ws.left_dock()),
-                snapshot(ws.right_dock()),
-                snapshot(ws.bottom_dock()),
-            )
-        };
-
+        // NOTE: dock layout is intentionally NOT propagated from the
+        // leaving workspace to the arriving one. Each retained
+        // `Workspace` is its OWN Solution with its OWN per-side `Dock`
+        // entities, so per-Solution dock state means letting each
+        // workspace keep its own docks across an activate. The per-
+        // Solution capture/replay lives in the in-place switch
+        // orchestrator (`solutions_ui::switch`), keyed by Solution id.
         if !workspace_was_retained {
             self.register_workspace(&workspace, window, cx);
 
@@ -1473,15 +1452,8 @@ impl MultiWorkspace {
             group.last_active_workspace = Some(self.active_workspace.downgrade());
         }
 
-        // Apply the snapshot to the now-active workspace. `set_open` is
-        // a no-op if the side is already in the target state, so this
-        // doesn't churn when the docks already match.
-        let (left_state, right_state, bottom_state) = leaving_dock_state;
         let active = self.active_workspace.clone();
         active.update(cx, |ws, cx| {
-            apply_dock_state(ws.left_dock(), left_state, window, cx);
-            apply_dock_state(ws.right_dock(), right_state, window, cx);
-            apply_dock_state(ws.bottom_dock(), bottom_state, window, cx);
             // Force a window-title re-set for the entering workspace.
             // Each `Workspace` caches its `last_window_title` to avoid
             // X event spam, but the OS window has a single title that
@@ -2045,26 +2017,6 @@ impl MultiWorkspace {
             })
         }
     }
-}
-
-/// Apply a previously snapshotted (`is_open`, `active_panel_index`)
-/// pair to a target dock. Used by `MultiWorkspace::activate` to carry
-/// dock layout across solution-tab switches.
-fn apply_dock_state(
-    dock: &Entity<Dock>,
-    state: (bool, Option<usize>),
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
-) {
-    let (open, active_index) = state;
-    dock.update(cx, |dock, cx| {
-        if let Some(index) = active_index
-            && index < dock.panels_len()
-        {
-            dock.activate_panel(index, window, cx);
-        }
-        dock.set_open(open, window, cx);
-    });
 }
 
 impl Render for MultiWorkspace {

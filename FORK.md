@@ -211,6 +211,27 @@ list is recoverable). Snapshots are runtime-only — losing them across
 an editor restart is acceptable, persistence would mean keeping the
 map in sync with potentially-stale paths.
 
+Dock (panel) layout is *also* per-Solution and rides the same
+capture/replay points (step 1 / a final step in the orchestrator),
+keyed by Solution id into `SolutionStore::dock_snapshots`
+(`SolutionDockSnapshot` per side: `is_open`, `active_panel_index`,
+active-panel `PanelSizeState`). Because the in-place switch keeps ONE
+`Workspace` (and its three `Dock` entities) alive across switches, the
+docks would otherwise be SHARED across Solutions — so we explicitly
+capture on switch-out and restore on switch-in. First-time-no-snapshot
+restores nothing (the Solution inherits the current docks and remembers
+its own changes thereafter); an all-closed layout *is* stored (not
+evicted) so "I closed every panel here" round-trips. The full
+`PanelSizeState` (not a bare `Pixels`) is captured so horizontal docks
+sized by `flex` survive. The corresponding cross-solution propagation
+in `MultiWorkspace::activate` (the old `apply_dock_state` helper that
+copied the leaving workspace's dock state onto the arriving one) was
+**removed** — on the activate path each `Workspace` is its own Solution
+with its own docks, so per-Solution behaviour just means *not* copying.
+The restore toggling in the orchestrator is the INTENDED per-Solution
+restore, not a splash-robustness band-aid: it's keyed by Solution and
+only fires when a snapshot exists.
+
 ### 15. mold mandatory for x86_64-linux builds
 
 Why: system `ld` is the wall-clock bottleneck of `release-fast` incremental rebuilds (multi-GB peak RAM, several seconds per re-link on Zed's link graph). mold is ~5-10× faster and uses a fraction of the RAM. The existing aarch64 entry pins `lld` out of *necessity* (libwebrtc.a fails to link otherwise); the x86_64 entry pins `mold` for *perf* but elevated to required because silent fallback to `ld` is a worse failure mode than a one-line apt install. Mirrors the same "you must install a fast linker before first build" contract.
