@@ -12,7 +12,8 @@ use agent_client_protocol::schema as acp;
 use base64::Engine;
 use chrono::TimeZone as _;
 use gpui::{
-    AnyElement, App, Context, Empty, Entity, InteractiveElement as _, IntoElement, ParentElement,
+    AnyElement, App, Context, ElementId, Empty, Entity, InteractiveElement as _, IntoElement,
+    ParentElement,
     Render, SharedString, StatefulInteractiveElement as _, Styled, WeakEntity, Window, div, px,
     relative,
 };
@@ -1039,11 +1040,17 @@ pub(crate) fn render_tool_call(
                 };
                 let thread = thread.clone();
                 let tool_call_id = tool_call_id.clone();
+                // Composite id: a named-integer per entry, with the
+                // button index nested as a child. Collision-proof
+                // regardless of how many buttons a tool exposes (the old
+                // `entry_idx * 1000 + button_idx` collided at ≥1000
+                // buttons).
+                let button_id = ElementId::NamedChild(
+                    std::sync::Arc::new(ElementId::named_usize("tool-auth", entry_idx)),
+                    button_idx.to_string().into(),
+                );
                 row = row.child(
-                    Button::new(
-                        ("tool-auth", entry_idx * 1000 + button_idx),
-                        button.label.clone(),
-                    )
+                    Button::new(button_id, button.label.clone())
                     .style(style)
                     .label_size(LabelSize::Small)
                     .color(label_color)

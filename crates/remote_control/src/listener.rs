@@ -44,11 +44,13 @@ const HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 /// (`remote.editor.ping`) well below this bound to stay alive.
 const IDLE_READ_TIMEOUT_SECS: u64 = 60;
 
-/// Exponential backoff for repeat auth failures, in seconds. First fail
-/// from a subnet → 30 s cooldown; second within the grace window → 5 min;
-/// third → 1 h; fourth+ → 24 h. The schedule discourages persistent
-/// scanners (cost grows fast) while keeping accidental fat-finger
-/// fail-once cases cheap.
+/// Exponential backoff for repeat auth failures, in seconds. There is a
+/// 1-failure grace period: the FIRST failure from a subnet earns no ban
+/// at all (it only increments the counter). The ladder then maps the
+/// failure count to a tier as: failure #2 → 30 s, #3 → 5 min, #4 → 1 h,
+/// #5 and beyond → 24 h (clamped to the last entry). The schedule
+/// discourages persistent scanners (cost grows fast) while keeping
+/// accidental fat-finger fail-once cases entirely free.
 const BAN_BACKOFF_SECS: &[u64] = &[30, 300, 3_600, 86_400];
 
 /// Window after a ban expires during which the failure-count is still
@@ -1203,4 +1205,184 @@ where
         .await
         .context("sending response")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    /// Returns the remaining ban duration (in whole seconds) for `ip`'s
+    /// subnet, or `None` if the record carries no active ban. Reads the
+    /// ban map directly so the assertions don't depend on wall-clock
+    /// elapsed time within the test (the deadline is always
+    /// `now + tier`, set at the moment `record_auth_failure` ran).
+    async fn ban_tier_secs(state: &ListenerState, ip: IpAddr) -> Option<u64> {
+        let bans = state.bans.lock().await;
+        let rec = bans.get(&subnet_key(ip))?;
+        let until = rec.banned_until?;
+        // Round up: the deadline is `set_instant + tier`, and a few
+        // microseconds of test execution have elapsed since, so the raw
+        // remaining duration is just under the tier. Adding the saturating
+        // sub-second remainder back recovers the exact tier value.
+        let remaining = until.saturating_duration_since(Instant::now());
+        Some(remaining.as_secs() + 1)
+    }
+
+    fn ip(last_octet: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(203, 0, 113, last_octet))
+    }
+
+    #[tokio::test]
+    async fn auth_failure_ban_ladder_climbs_tiers() {
+        let state = ListenerState::default();
+        let peer = ip(7);
+
+        // Failure #1: grace period — no ban.
+        record_auth_failure(&state, peer).await;
+        assert_eq!(
+            ban_tier_secs(&state, peer).await,
+            None,
+            "first failure must be a free grace; if this asserts a ban, the grace period regressed"
+        );
+
+        // Failure #2: first backoff tier = 30 s. This is the assertion
+        // that pins the `- 2` index math: changing it to `- 1` would
+        // index BAN_BACKOFF_SECS[0+... ] one step ahead and yield 300,
+        // not 30, breaking this check.
+        record_auth_failure(&state, peer).await;
+        assert_eq!(ban_tier_secs(&state, peer).await, Some(30));
+
+        // Failure #3: 5 min.
+        record_auth_failure(&state, peer).await;
+        assert_eq!(ban_tier_secs(&state, peer).await, Some(300));
+
+        // Failure #4: 1 h.
+        record_auth_failure(&state, peer).await;
+        assert_eq!(ban_tier_secs(&state, peer).await, Some(3_600));
+
+        // Failure #5: 24 h (last tier).
+        record_auth_failure(&state, peer).await;
+        assert_eq!(ban_tier_secs(&state, peer).await, Some(86_400));
+
+        // Failures #6, #7: stay clamped at the last tier — the index
+        // saturates instead of running past the array end (which would
+        // panic).
+        record_auth_failure(&state, peer).await;
+        assert_eq!(ban_tier_secs(&state, peer).await, Some(86_400));
+        record_auth_failure(&state, peer).await;
+        assert_eq!(ban_tier_secs(&state, peer).await, Some(86_400));
+    }
+
+    #[tokio::test]
+    async fn ban_ladder_matches_backoff_array_with_grace_offset() {
+        // Independent of the hard-coded tier values above: drive the
+        // ladder and assert each ban equals BAN_BACKOFF_SECS[count - 2],
+        // which is the exact mapping the grace offset is supposed to
+        // produce. This catches an off-by-one in either direction.
+        let state = ListenerState::default();
+        let peer = ip(9);
+
+        record_auth_failure(&state, peer).await; // #1, grace
+        assert_eq!(ban_tier_secs(&state, peer).await, None);
+
+        for count in 2..=(BAN_BACKOFF_SECS.len() + 2) {
+            record_auth_failure(&state, peer).await;
+            let expected_idx = (count - 2).min(BAN_BACKOFF_SECS.len() - 1);
+            assert_eq!(
+                ban_tier_secs(&state, peer).await,
+                Some(BAN_BACKOFF_SECS[expected_idx]),
+                "failure #{count} should map to BAN_BACKOFF_SECS[{expected_idx}]"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn distinct_subnets_have_independent_counters() {
+        let state = ListenerState::default();
+        let a = ip(1);
+        // Different /24 (so a distinct subnet_key).
+        let b = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1));
+
+        // Two failures on `a` → tier 30 s. `b` is untouched.
+        record_auth_failure(&state, a).await;
+        record_auth_failure(&state, a).await;
+        assert_eq!(ban_tier_secs(&state, a).await, Some(30));
+        assert_eq!(ban_tier_secs(&state, b).await, None);
+
+        // First failure on `b` → still in its own grace window.
+        record_auth_failure(&state, b).await;
+        assert_eq!(ban_tier_secs(&state, b).await, None);
+        // `a` is unaffected.
+        assert_eq!(ban_tier_secs(&state, a).await, Some(30));
+    }
+
+    #[tokio::test]
+    async fn failure_count_decays_after_memory_window() {
+        // The decay is time-driven via `is_banned`'s `retain`, which
+        // prunes records whose ban has lifted AND whose `last_seen` is
+        // older than BAN_MEMORY_SECS. Since the record stores a
+        // `std::time::Instant` (not a tokio clock we can pause), we
+        // simulate elapsed time by back-dating the record's fields
+        // directly, then verify the prune fires and the counter resets.
+        let state = ListenerState::default();
+        let peer = ip(42);
+
+        // Get the counter to #2 (a real ban tier).
+        record_auth_failure(&state, peer).await;
+        record_auth_failure(&state, peer).await;
+        assert_eq!(ban_tier_secs(&state, peer).await, Some(30));
+
+        // Simulate: the ban has long since lifted and the memory window
+        // has fully elapsed. Back-date `last_seen` past the cutoff and
+        // clear `banned_until` so the record looks decayed.
+        {
+            let mut bans = state.bans.lock().await;
+            let rec = bans
+                .get_mut(&subnet_key(peer))
+                .expect("record present after failures");
+            rec.banned_until = None;
+            rec.last_seen = Instant::now()
+                - Duration::from_secs(BAN_MEMORY_SECS + 60);
+        }
+
+        // `is_banned` prunes decayed records as a side effect; the
+        // subnet should no longer be banned and the record should be gone.
+        assert!(!is_banned(&state, peer).await);
+        {
+            let bans = state.bans.lock().await;
+            assert!(
+                !bans.contains_key(&subnet_key(peer)),
+                "decayed record should have been pruned by is_banned"
+            );
+        }
+
+        // A fresh failure now starts the ladder over from the grace
+        // period (#1 → no ban), proving the counter reset.
+        record_auth_failure(&state, peer).await;
+        assert_eq!(ban_tier_secs(&state, peer).await, None);
+        record_auth_failure(&state, peer).await;
+        assert_eq!(ban_tier_secs(&state, peer).await, Some(30));
+    }
+
+    #[tokio::test]
+    async fn successful_auth_lifts_ban_but_keeps_counter() {
+        let state = ListenerState::default();
+        let peer = ip(13);
+
+        // Climb to #3 (5 min tier).
+        record_auth_failure(&state, peer).await;
+        record_auth_failure(&state, peer).await;
+        record_auth_failure(&state, peer).await;
+        assert_eq!(ban_tier_secs(&state, peer).await, Some(300));
+
+        // A successful auth lifts the active ban window...
+        record_auth_success(&state, peer).await;
+        assert_eq!(ban_tier_secs(&state, peer).await, None);
+
+        // ...but preserves the counter, so the NEXT failure resumes the
+        // ladder at #4 (1 h) rather than restarting at the grace tier.
+        record_auth_failure(&state, peer).await;
+        assert_eq!(ban_tier_secs(&state, peer).await, Some(3_600));
+    }
 }

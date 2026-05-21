@@ -2081,7 +2081,7 @@ async fn entry_updated_burst_coalesces_then_force_emits(cx: &mut TestAppContext)
                 EntryUpdateThrottle {
                     first_dirty_at: std::time::Instant::now()
                         - std::time::Duration::from_millis(2_500),
-                    task: gpui::Task::ready(()),
+                    _task: gpui::Task::ready(()),
                 },
             );
         });

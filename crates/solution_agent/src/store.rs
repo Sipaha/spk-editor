@@ -68,8 +68,10 @@ pub struct SolutionAgentStore {
 
 struct EntryUpdateThrottle {
     first_dirty_at: std::time::Instant,
-    #[allow(dead_code)]
-    task: Task<()>,
+    /// Stored only to keep the debounce timer alive: dropping this
+    /// `Task` cancels its `timer().await` (the trailing-edge emit).
+    /// Read implicitly via `Drop`, never by name.
+    _task: Task<()>,
 }
 
 #[derive(Debug)]
@@ -2165,7 +2167,7 @@ impl SolutionAgentStore {
                         key,
                         EntryUpdateThrottle {
                             first_dirty_at,
-                            task,
+                            _task: task,
                         },
                     );
                 }
