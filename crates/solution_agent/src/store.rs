@@ -1818,6 +1818,16 @@ impl SolutionAgentStore {
                     .acp_thread()
                     .map(|thread| thread.read(cx).entries().len().saturating_sub(1))
                     .unwrap_or(0);
+                // Stamp creation time the first time an absolute index appears. The
+                // vector length is the high-water mark: a streamed in-place
+                // EntryUpdated reuses an existing index and must not grow or
+                // rewrite the vector.
+                let now_ms = Utc::now().timestamp_millis();
+                session_entity.update(cx, |s, _| {
+                    while s.entry_created_ms.len() <= entry_index {
+                        s.entry_created_ms.push(now_ms);
+                    }
+                });
                 cx.emit(SolutionAgentStoreEvent::SessionMessageAppended(
                     session_id,
                     entry_index,

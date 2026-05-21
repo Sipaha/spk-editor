@@ -1402,3 +1402,70 @@ async fn hot_send_does_not_enter_wake_path(cx: &mut TestAppContext) {
         });
     });
 }
+
+#[gpui::test]
+async fn append_stamps_entry_created_ms_once_per_index(cx: &mut TestAppContext) {
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+
+    // Append a user entry. `push_user_content_block` creates a new
+    // UserMessage entry (no existing user message last), so `push_entry`
+    // fires, which emits `AcpThreadEvent::NewEntry`.
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.push_user_content_block(
+                Some(acp_thread::UserMessageId::new()),
+                agent_client_protocol::schema::ContentBlock::Text(
+                    agent_client_protocol::schema::TextContent::new("hello".to_string()),
+                ),
+                cx,
+            );
+        });
+    });
+    cx.executor().run_until_parked();
+
+    // Append an assistant entry. The thread's last entry is now UserMessage,
+    // so `push_assistant_content_block` also calls `push_entry` → `NewEntry`.
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.push_assistant_content_block(
+                agent_client_protocol::schema::ContentBlock::Text(
+                    agent_client_protocol::schema::TextContent::new("world".to_string()),
+                ),
+                false,
+                cx,
+            );
+        });
+    });
+    cx.executor().run_until_parked();
+
+    let stamps = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.read(cx).session(session_id).expect("session exists").read(cx).entry_created_ms.clone()
+    });
+    assert_eq!(stamps.len(), 2, "two appends → two timestamps");
+    assert!(stamps[1] >= stamps[0], "timestamps are non-decreasing");
+
+    // Now drive an in-place EntryUpdated on the last entry (streaming more
+    // text into the existing assistant message). `push_assistant_content_block`
+    // with an existing assistant entry as the last entry emits `EntryUpdated`,
+    // NOT `NewEntry` — so the vector must NOT grow or change.
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.push_assistant_content_block(
+                agent_client_protocol::schema::ContentBlock::Text(
+                    agent_client_protocol::schema::TextContent::new(" more text".to_string()),
+                ),
+                false,
+                cx,
+            );
+        });
+    });
+    cx.executor().run_until_parked();
+
+    let after = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.read(cx).session(session_id).expect("session exists").read(cx).entry_created_ms.clone()
+    });
+    assert_eq!(after.len(), 2, "in-place update must not add a timestamp");
+    assert_eq!(after[1], stamps[1], "existing timestamp must be unchanged");
+}
