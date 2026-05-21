@@ -485,6 +485,38 @@ async fn send_while_waiting_for_confirmation_unblocks_the_turn(cx: &mut TestAppC
                 1,
                 "the user's message must be queued for delivery, not dropped"
             );
+            // Fix 2 wired: the resolve branch set the one-shot
+            // `flush_after_cancel` so the queue survives even if the agent
+            // treats the rejection as a Cancelled stop rather than EndTurn.
+            assert!(
+                session.read(cx).flush_after_cancel,
+                "flush_after_cancel must be set so a Cancelled-stop rejection still flushes the queue"
+            );
+        });
+    });
+
+    // Drive the now-unblocked turn to completion. On `Stopped(EndTurn)` the
+    // store's queue handler drains `pending_messages` and re-sends them as
+    // the next turn — end-to-end delivery, not just enqueue.
+    cx.update(|cx| {
+        acp_thread.update(cx, |_thread, cx| {
+            cx.emit(acp_thread::AcpThreadEvent::Stopped(
+                agent_client_protocol::schema::StopReason::EndTurn,
+            ));
+        });
+    });
+    cx.executor().run_until_parked();
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let session = store.session(session_id).expect("session exists");
+            // The queued message was actually delivered: the flush drained
+            // it (and re-sent it as the next turn), so the queue is empty.
+            assert!(
+                session.read(cx).pending_messages.is_empty(),
+                "the queued message must be delivered (queue drained) after the turn stops, not dropped"
+            );
         });
     });
 }

@@ -45,8 +45,10 @@ use crate::model::{SessionState, SolutionSessionId, SolutionSessionMetadata};
 /// non-allow (`!is_allow()`) button, preferring `RejectOnce` over
 /// `RejectAlways` (decline just this once, don't poison future prompts
 /// with a remembered "always reject"). If — unexpectedly — there is no
-/// reject-flavoured button at all, we fall back to the LAST button, which
-/// by ACP convention is the most-declining option offered.
+/// reject-flavoured button at all (a malformed server response offering
+/// only allow options), we return `None` and the caller skips the resolve:
+/// a stuck turn is the acceptable failure mode here, silently picking an
+/// allow button (which would AUTO-APPROVE the tool call) is NOT.
 ///
 /// NOTE on the "custom / free-text answer" branch: the agreed design also
 /// wanted, when a question offers a free-text answer, to submit the user's
@@ -74,8 +76,7 @@ pub(crate) fn pending_authorization_reject(
         let reject = buttons
             .iter()
             .find(|button| button.kind == acp::PermissionOptionKind::RejectOnce)
-            .or_else(|| buttons.iter().find(|button| !button.is_allow()))
-            .or_else(|| buttons.last());
+            .or_else(|| buttons.iter().find(|button| !button.is_allow()));
         if let Some(button) = reject {
             return Some((call.id.clone(), button.outcome()));
         }
@@ -284,6 +285,12 @@ impl SolutionAgentStore {
                  authorization — declining (reject) to unblock the turn, then delivering \
                  the user's message as the next turn",
             );
+            // Guarantee the just-queued message is delivered even if the
+            // agent treats the rejection as a turn *cancel* rather than an
+            // EndTurn: the Cancelled-stop handler clears `pending_messages`
+            // WITHOUT sending unless `flush_after_cancel` is set. One-shot
+            // flag — no-op on EndTurn, consumed/reset by the Stopped handler.
+            session_entity.update(cx, |s, _| s.flush_after_cancel = true);
             thread.update(cx, |thread, cx| {
                 thread.authorize_tool_call(tool_call_id, reject_outcome, cx);
             });
