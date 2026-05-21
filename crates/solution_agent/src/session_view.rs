@@ -682,6 +682,28 @@ impl SolutionSessionView {
                     self.recompute_matches(cx);
                 }
             }
+            ToolAuthorizationRequested(tool_call_id) | ToolAuthorizationReceived(tool_call_id) => {
+                // The tool call transitioned into/out of
+                // `WaitingForConfirmation`, which adds/removes the
+                // authorization buttons inside its bubble and so changes
+                // the row height. `upsert_tool_call_inner` already emitted
+                // a `NewEntry`/`EntryUpdated` before this event, but that
+                // fired before the status flipped to
+                // `WaitingForConfirmation`; remeasure the affected row by
+                // id so the buttons are laid out at the correct height
+                // promptly.
+                if let Some(idx) = thread
+                    .read(cx)
+                    .entries()
+                    .iter()
+                    .position(|entry| matches!(
+                        entry,
+                        AgentThreadEntry::ToolCall(call) if &call.id == tool_call_id
+                    ))
+                {
+                    self.list_state.remeasure_items(idx..idx + 1);
+                }
+            }
             _ => {}
         }
         cx.notify();

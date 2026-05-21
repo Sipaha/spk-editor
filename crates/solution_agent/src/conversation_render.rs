@@ -4,8 +4,9 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use acp_thread::{
-    AcpThread, AgentThreadEntry, AssistantMessage, AssistantMessageChunk, ContentBlock, PlanEntry,
-    ToolCall, ToolCallContent, ToolCallStatus, UserMessage, UserMessageId,
+    AcpThread, AgentThreadEntry, AssistantMessage, AssistantMessageChunk, ContentBlock,
+    PermissionOptions, PlanEntry, SelectedPermissionOutcome, SelectedPermissionParams, ToolCall,
+    ToolCallContent, ToolCallStatus, UserMessage, UserMessageId,
 };
 use agent_client_protocol::schema as acp;
 use base64::Engine;
@@ -18,6 +19,7 @@ use gpui::{
 use markdown::{Markdown, MarkdownElement, MarkdownStyle};
 use ui::prelude::*;
 use ui::{ContextMenu, CopyButton, IconName, Label};
+use util::ResultExt as _;
 
 #[derive(Clone, Debug)]
 pub(crate) struct FindMatch {
@@ -146,6 +148,82 @@ pub(crate) fn tool_call_status_text(status: &ToolCallStatus) -> &'static str {
     }
 }
 
+/// A single clickable authorization choice flattened out of the
+/// `PermissionOptions` the agent attached to a `WaitingForConfirmation`
+/// tool call. Carries everything the render layer needs to draw a button
+/// and everything the click handler needs to rebuild a
+/// `SelectedPermissionOutcome` at click time (the outcome itself isn't
+/// `Clone`, so we keep the raw pieces instead).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PermissionButton {
+    pub(crate) option_id: acp::PermissionOptionId,
+    pub(crate) label: SharedString,
+    pub(crate) kind: acp::PermissionOptionKind,
+    /// Sub-patterns to attach as `SelectedPermissionParams::Terminal` when
+    /// answering — only ever non-empty for `Dropdown*` choices that carry
+    /// terminal command patterns.
+    pub(crate) patterns: Vec<String>,
+}
+
+impl PermissionButton {
+    /// True for allow-flavoured kinds — used by the renderer to pick a
+    /// filled/accent button vs a subtle one.
+    pub(crate) fn is_allow(&self) -> bool {
+        matches!(
+            self.kind,
+            acp::PermissionOptionKind::AllowOnce | acp::PermissionOptionKind::AllowAlways
+        )
+    }
+
+    /// Rebuild the answer to hand to `AcpThread::authorize_tool_call`.
+    pub(crate) fn outcome(&self) -> SelectedPermissionOutcome {
+        let params = if self.patterns.is_empty() {
+            None
+        } else {
+            Some(SelectedPermissionParams::Terminal {
+                patterns: self.patterns.clone(),
+            })
+        };
+        SelectedPermissionOutcome::new(self.option_id.clone(), self.kind).params(params)
+    }
+}
+
+/// Flatten a `PermissionOptions` into the list of buttons to render, in
+/// display order. Pure (no `cx`) so it can be unit-tested and reused by
+/// the future wire layer.
+///
+/// v1 simplification: the `Dropdown`/`DropdownWithPatterns` variants are
+/// rendered as a flat pair of buttons per choice (its allow + deny
+/// `PermissionOption`), reusing the choice's `sub_patterns` so a terminal
+/// "always allow these commands" choice still answers correctly. The
+/// pattern-picker UI (per-pattern checkboxes from `DropdownWithPatterns`)
+/// is intentionally NOT rendered here — answering a dropdown choice
+/// applies all of its `sub_patterns`.
+pub(crate) fn permission_buttons(options: &PermissionOptions) -> Vec<PermissionButton> {
+    let from_option = |option: &acp::PermissionOption, patterns: Vec<String>| PermissionButton {
+        option_id: option.option_id.clone(),
+        label: SharedString::from(option.name.clone()),
+        kind: option.kind,
+        patterns,
+    };
+    match options {
+        PermissionOptions::Flat(options) => options
+            .iter()
+            .map(|option| from_option(option, Vec::new()))
+            .collect(),
+        PermissionOptions::Dropdown(choices)
+        | PermissionOptions::DropdownWithPatterns { choices, .. } => choices
+            .iter()
+            .flat_map(|choice| {
+                [
+                    from_option(&choice.allow, choice.sub_patterns.clone()),
+                    from_option(&choice.deny, choice.sub_patterns.clone()),
+                ]
+            })
+            .collect(),
+    }
+}
+
 /// Filters `matches` down to the ones that fall in span `(entry_idx,
 /// span_idx)`, preserving order, and translates the global `selected`
 /// index into a span-local index (None if the active match isn't in
@@ -228,7 +306,7 @@ pub(crate) fn render_entry(
             cx,
         ),
         AgentThreadEntry::ToolCall(call) => {
-            render_tool_call(entry_idx, call, markdown_for, style, cx)
+            render_tool_call(entry_idx, call, markdown_for, style, thread.clone(), cx)
         }
         AgentThreadEntry::CompletedPlan(entries) => {
             render_plan(entry_idx, entries, markdown_for, style, cx)
@@ -846,6 +924,7 @@ pub(crate) fn render_tool_call(
     call: &ToolCall,
     markdown_for: &HashMap<(usize, usize), Entity<Markdown>>,
     style: &MarkdownStyle,
+    thread: gpui::WeakEntity<AcpThread>,
     cx: &App,
 ) -> AnyElement {
     let label_text = call.label.read(cx).source().to_string();
@@ -918,6 +997,53 @@ pub(crate) fn render_tool_call(
                 style,
             )));
             span_idx += 1;
+        }
+    }
+
+    // Authorization affordance: when the agent is blocked waiting for the
+    // user to allow/deny this tool call, render its options as buttons.
+    // Clicking one calls `AcpThread::authorize_tool_call`, which fulfills
+    // the `respond_tx` oneshot the connection is awaiting and unblocks the
+    // turn. The buttons disappear on the next render once the status moves
+    // off `WaitingForConfirmation`.
+    if let ToolCallStatus::WaitingForConfirmation { options, .. } = &call.status {
+        let buttons = permission_buttons(options);
+        if !buttons.is_empty() {
+            let tool_call_id = call.id.clone();
+            let mut row = h_flex().gap_1().mt_0p5().flex_wrap();
+            for (button_idx, button) in buttons.into_iter().enumerate() {
+                let style = if button.is_allow() {
+                    ButtonStyle::Filled
+                } else {
+                    ButtonStyle::Subtle
+                };
+                let label_color = if button.is_allow() {
+                    Color::Default
+                } else {
+                    Color::Muted
+                };
+                let thread = thread.clone();
+                let tool_call_id = tool_call_id.clone();
+                row = row.child(
+                    Button::new(
+                        ("tool-auth", entry_idx * 1000 + button_idx),
+                        button.label.clone(),
+                    )
+                    .style(style)
+                    .label_size(LabelSize::Small)
+                    .color(label_color)
+                    .on_click(move |_, _, cx| {
+                        let outcome = button.outcome();
+                        let tool_call_id = tool_call_id.clone();
+                        thread
+                            .update(cx, move |thread, cx| {
+                                thread.authorize_tool_call(tool_call_id, outcome, cx);
+                            })
+                            .log_err();
+                    }),
+                );
+            }
+            container = container.child(row);
         }
     }
 
@@ -1335,6 +1461,57 @@ mod tests {
         // "aa" in "aaaa" highlights two non-overlapping pairs at 0..2 and
         // 2..4 rather than three at 0..2, 1..3, 2..4.
         assert_eq!(collect("aaaa", "aa"), vec![0..2, 2..4]);
+    }
+
+    fn opt(
+        id: &'static str,
+        name: &str,
+        kind: acp::PermissionOptionKind,
+    ) -> acp::PermissionOption {
+        acp::PermissionOption::new(id, name.to_string(), kind)
+    }
+
+    #[test]
+    fn permission_buttons_flat_preserves_order_and_kind() {
+        let options = PermissionOptions::Flat(vec![
+            opt("allow", "Allow", acp::PermissionOptionKind::AllowOnce),
+            opt("reject", "Reject", acp::PermissionOptionKind::RejectOnce),
+        ]);
+        let buttons = permission_buttons(&options);
+        assert_eq!(buttons.len(), 2);
+        assert_eq!(buttons[0].label, SharedString::from("Allow"));
+        assert!(buttons[0].is_allow());
+        assert!(buttons[0].patterns.is_empty());
+        assert_eq!(buttons[1].label, SharedString::from("Reject"));
+        assert!(!buttons[1].is_allow());
+        // The rebuilt outcome carries the option id + kind verbatim.
+        let outcome = buttons[1].outcome();
+        assert_eq!(outcome.option_id, buttons[1].option_id);
+        assert_eq!(outcome.option_kind, acp::PermissionOptionKind::RejectOnce);
+        assert!(outcome.params.is_none());
+    }
+
+    #[test]
+    fn permission_buttons_dropdown_emits_allow_and_deny_per_choice_with_patterns() {
+        let choice = acp_thread::PermissionOptionChoice {
+            allow: opt("a", "Always allow", acp::PermissionOptionKind::AllowAlways),
+            deny: opt("d", "Always deny", acp::PermissionOptionKind::RejectAlways),
+            sub_patterns: vec!["^cargo build".to_string()],
+        };
+        let buttons = permission_buttons(&PermissionOptions::Dropdown(vec![choice]));
+        assert_eq!(buttons.len(), 2);
+        assert!(buttons[0].is_allow());
+        assert!(!buttons[1].is_allow());
+        // Patterns ride along on both the allow and deny buttons so the
+        // answer applies them.
+        assert_eq!(buttons[0].patterns, vec!["^cargo build".to_string()]);
+        let outcome = buttons[0].outcome();
+        match outcome.params {
+            Some(SelectedPermissionParams::Terminal { patterns }) => {
+                assert_eq!(patterns, vec!["^cargo build".to_string()]);
+            }
+            other => panic!("expected terminal params, got {other:?}"),
+        }
     }
 
     #[test]
