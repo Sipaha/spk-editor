@@ -29,7 +29,10 @@ mod tests {
     #[test]
     fn parse_empty_returns_default() {
         assert_eq!(parse("").expect("parse"), RemoteControlSettings::default());
-        assert_eq!(parse("   \n").expect("parse"), RemoteControlSettings::default());
+        assert_eq!(
+            parse("   \n").expect("parse"),
+            RemoteControlSettings::default()
+        );
     }
 
     #[test]

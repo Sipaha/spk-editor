@@ -177,7 +177,12 @@ pub(crate) fn render_compact_prompt_inner(
                     .map(|sol| sol.root.clone())
             })
         })
-        .ok_or_else(|| anyhow!("Compact failed: solution {:?} not registered", solution_id.0))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "Compact failed: solution {:?} not registered",
+                solution_id.0
+            )
+        })?;
 
     // `<root>/.agents/<sid>/c<count>/` — `c01`, `c02`, … so a
     // single `<sid>` directory groups every rotation of one
@@ -376,8 +381,12 @@ mod tests {
         // the `VisualTestContext` so we can call `workspace_window.root`
         // without a re-entrant `update_window` (which would deadlock
         // because `vcx.update` already holds the window lock).
-        let workspace_weak = cx
-            .update(|cx| workspace_window.root(cx).expect("workspace window is alive").downgrade());
+        let workspace_weak = cx.update(|cx| {
+            workspace_window
+                .root(cx)
+                .expect("workspace window is alive")
+                .downgrade()
+        });
 
         let mut vcx = VisualTestContext::from_window(*workspace_window, cx);
 

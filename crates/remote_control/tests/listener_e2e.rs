@@ -114,7 +114,11 @@ fn make_authorized_client(name: &str) -> AuthorizedClient {
     // same test get distinct secrets. Deterministic for reproducibility.
     let mut secret = [0u8; 32];
     for (i, b) in secret.iter_mut().enumerate() {
-        let name_byte = name.as_bytes().get(i % name.len().max(1)).copied().unwrap_or(0);
+        let name_byte = name
+            .as_bytes()
+            .get(i % name.len().max(1))
+            .copied()
+            .unwrap_or(0);
         *b = (i as u8).wrapping_mul(7).wrapping_add(name_byte);
     }
     AuthorizedClient {
@@ -133,9 +137,7 @@ fn make_server_cert() -> ServerCert {
     let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
     params.subject_alt_names = vec![
         SanType::DnsName("localhost".try_into().expect("dns san")),
-        SanType::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
-            127, 0, 0, 1,
-        ))),
+        SanType::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))),
     ];
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, "spk-test");
@@ -177,8 +179,7 @@ async fn full_handshake_and_minimal_dispatcher_round_trip() -> Result<()> {
     let cert = make_server_cert();
     let fingerprint = cert.fingerprint_sha256;
     let (clients_tx, clients_rx) = tokio::sync::watch::channel(settings.clients.clone());
-    let dispatcher: Arc<dyn remote_control::dispatch::RemoteDispatcher> =
-        MinimalDispatcher::new();
+    let dispatcher: Arc<dyn remote_control::dispatch::RemoteDispatcher> = MinimalDispatcher::new();
 
     let cfg = ListenerConfig {
         bind_addr: ([127, 0, 0, 1], 0).into(),
@@ -328,8 +329,7 @@ async fn handshake_rejects_unauthorized_client() -> Result<()> {
     let cert = make_server_cert();
     let fingerprint = cert.fingerprint_sha256;
     let (_clients_tx, clients_rx) = tokio::sync::watch::channel(settings.clients.clone());
-    let dispatcher: Arc<dyn remote_control::dispatch::RemoteDispatcher> =
-        MinimalDispatcher::new();
+    let dispatcher: Arc<dyn remote_control::dispatch::RemoteDispatcher> = MinimalDispatcher::new();
 
     let cfg = ListenerConfig {
         bind_addr: ([127, 0, 0, 1], 0).into(),

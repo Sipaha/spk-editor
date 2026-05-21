@@ -13,9 +13,8 @@ use base64::Engine;
 use chrono::TimeZone as _;
 use gpui::{
     AnyElement, App, Context, ElementId, Empty, Entity, InteractiveElement as _, IntoElement,
-    ParentElement,
-    Render, SharedString, StatefulInteractiveElement as _, Styled, WeakEntity, Window, div, px,
-    relative,
+    ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled, WeakEntity,
+    Window, div, px, relative,
 };
 use markdown::{Markdown, MarkdownElement, MarkdownStyle};
 use ui::prelude::*;
@@ -384,15 +383,11 @@ pub(crate) fn render_entry(
         .w_full()
         .when_some(date_separator, |this, label| {
             this.child(
-                h_flex()
-                    .w_full()
-                    .my_1()
-                    .justify_center()
-                    .child(
-                        Label::new(label)
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    ),
+                h_flex().w_full().my_1().justify_center().child(
+                    Label::new(label)
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                ),
             )
         })
         .child(body)
@@ -1051,18 +1046,18 @@ pub(crate) fn render_tool_call(
                 );
                 row = row.child(
                     Button::new(button_id, button.label.clone())
-                    .style(style)
-                    .label_size(LabelSize::Small)
-                    .color(label_color)
-                    .on_click(move |_, _, cx| {
-                        let outcome = button.outcome();
-                        let tool_call_id = tool_call_id.clone();
-                        thread
-                            .update(cx, move |thread, cx| {
-                                thread.authorize_tool_call(tool_call_id, outcome, cx);
-                            })
-                            .log_err();
-                    }),
+                        .style(style)
+                        .label_size(LabelSize::Small)
+                        .color(label_color)
+                        .on_click(move |_, _, cx| {
+                            let outcome = button.outcome();
+                            let tool_call_id = tool_call_id.clone();
+                            thread
+                                .update(cx, move |thread, cx| {
+                                    thread.authorize_tool_call(tool_call_id, outcome, cx);
+                                })
+                                .log_err();
+                        }),
                 );
             }
             container = container.child(row);
@@ -1485,11 +1480,7 @@ mod tests {
         assert_eq!(collect("aaaa", "aa"), vec![0..2, 2..4]);
     }
 
-    fn opt(
-        id: &'static str,
-        name: &str,
-        kind: acp::PermissionOptionKind,
-    ) -> acp::PermissionOption {
+    fn opt(id: &'static str, name: &str, kind: acp::PermissionOptionKind) -> acp::PermissionOption {
         acp::PermissionOption::new(id, name.to_string(), kind)
     }
 
@@ -1542,7 +1533,11 @@ mod tests {
         // resolve to an auto-approve — `pick_reject_button` returns None so
         // the queue path leaves the turn stuck rather than approving the call.
         let options = PermissionOptions::Flat(vec![
-            opt("allow-once", "Allow once", acp::PermissionOptionKind::AllowOnce),
+            opt(
+                "allow-once",
+                "Allow once",
+                acp::PermissionOptionKind::AllowOnce,
+            ),
             opt(
                 "allow-always",
                 "Allow always",
@@ -1556,12 +1551,23 @@ mod tests {
     fn pick_reject_button_prefers_reject_once() {
         let options = PermissionOptions::Flat(vec![
             opt("allow", "Allow", acp::PermissionOptionKind::AllowOnce),
-            opt("reject-always", "Reject always", acp::PermissionOptionKind::RejectAlways),
-            opt("reject-once", "Reject once", acp::PermissionOptionKind::RejectOnce),
+            opt(
+                "reject-always",
+                "Reject always",
+                acp::PermissionOptionKind::RejectAlways,
+            ),
+            opt(
+                "reject-once",
+                "Reject once",
+                acp::PermissionOptionKind::RejectOnce,
+            ),
         ]);
         let button = pick_reject_button(&options).expect("a reject button must be picked");
         assert_eq!(button.kind, acp::PermissionOptionKind::RejectOnce);
-        assert_eq!(button.option_id, acp::PermissionOptionId::new("reject-once"));
+        assert_eq!(
+            button.option_id,
+            acp::PermissionOptionId::new("reject-once")
+        );
     }
 
     #[test]

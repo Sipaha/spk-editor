@@ -19,8 +19,7 @@ use gpui::{
 use solutions::{SolutionId, SolutionStore, SolutionStoreEvent};
 use ui::prelude::*;
 use ui::{
-    CommonAnimationExt, ContextMenu, Icon, IconButtonShape, IconName, Label, LabelSize,
-    PopoverMenu,
+    CommonAnimationExt, ContextMenu, Icon, IconButtonShape, IconName, Label, LabelSize, PopoverMenu,
 };
 use workspace::{
     Workspace,

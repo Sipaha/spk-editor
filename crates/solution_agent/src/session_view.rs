@@ -383,9 +383,8 @@ impl SolutionSessionView {
         // Push-channel from `SolutionSession::set_acp_thread` straight
         // into `sync_thread_subscription`. Set up before moving `session`
         // into the struct literal so the borrow ends before the move.
-        let session_event_subscription = cx.subscribe(
-            &session,
-            |this, _session, event, cx| match event {
+        let session_event_subscription =
+            cx.subscribe(&session, |this, _session, event, cx| match event {
                 SolutionSessionEvent::ThreadReplaced => {
                     // Direct re-attach. Does not rely on the
                     // `cx.observe(&session)` callback firing — that path
@@ -394,8 +393,7 @@ impl SolutionSessionView {
                     // runs inside an outer `store.update`.
                     this.sync_thread_subscription(cx);
                 }
-            },
-        );
+            });
         // Watch the store for events that move sub-agents bubbles
         // around: a new child being created / closed, a visible
         // row's status / title flipping, a streaming turn inflating
@@ -403,19 +401,16 @@ impl SolutionSessionView {
         // the callback only needs to `cx.notify()` — the actual
         // filtering happens in `compute_strip_rows`.
         let store_subscription = SolutionAgentStore::try_global(cx).map(|store| {
-            cx.subscribe(
-                &store,
-                |_this, _store, event, cx| match event {
-                    crate::store::SolutionAgentStoreEvent::SessionCreated { .. }
-                    | crate::store::SolutionAgentStoreEvent::SessionClosed(_)
-                    | crate::store::SolutionAgentStoreEvent::SessionStateChanged(_)
-                    | crate::store::SolutionAgentStoreEvent::SessionTitleChanged(_)
-                    | crate::store::SolutionAgentStoreEvent::SessionMessageAppended(_, _) => {
-                        cx.notify();
-                    }
-                    _ => {}
-                },
-            )
+            cx.subscribe(&store, |_this, _store, event, cx| match event {
+                crate::store::SolutionAgentStoreEvent::SessionCreated { .. }
+                | crate::store::SolutionAgentStoreEvent::SessionClosed(_)
+                | crate::store::SolutionAgentStoreEvent::SessionStateChanged(_)
+                | crate::store::SolutionAgentStoreEvent::SessionTitleChanged(_)
+                | crate::store::SolutionAgentStoreEvent::SessionMessageAppended(_, _) => {
+                    cx.notify();
+                }
+                _ => {}
+            })
         });
         let mut view = Self {
             session_id,
@@ -692,15 +687,12 @@ impl SolutionSessionView {
                 // `WaitingForConfirmation`; remeasure the affected row by
                 // id so the buttons are laid out at the correct height
                 // promptly.
-                if let Some(idx) = thread
-                    .read(cx)
-                    .entries()
-                    .iter()
-                    .position(|entry| matches!(
+                if let Some(idx) = thread.read(cx).entries().iter().position(|entry| {
+                    matches!(
                         entry,
                         AgentThreadEntry::ToolCall(call) if &call.id == tool_call_id
-                    ))
-                {
+                    )
+                }) {
                     self.list_state.remeasure_items(idx..idx + 1);
                 }
             }
@@ -2259,9 +2251,7 @@ impl Render for SolutionSessionView {
                                         Some(pms) => chrono::Utc
                                             .timestamp_millis_opt(pms)
                                             .single()
-                                            .map(|d| {
-                                                d.with_timezone(&chrono::Local).date_naive()
-                                            })
+                                            .map(|d| d.with_timezone(&chrono::Local).date_naive())
                                             // Unknown prev date (e.g. DST-fold ambiguity) → suppress the separator
                                             // rather than render a spurious one.
                                             .map_or(false, |pd| pd != this_d),

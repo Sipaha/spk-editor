@@ -203,8 +203,7 @@ impl McpServerTool for ListSessionsTool {
         // read-only closure has no clean error-propagation shape.
         let want_parent = match input.parent_session_id.as_deref() {
             Some(s) => Some(
-                SolutionSessionId::parse(s)
-                    .map_err(|e| anyhow!("bad parent_session_id: {e}"))?,
+                SolutionSessionId::parse(s).map_err(|e| anyhow!("bad parent_session_id: {e}"))?,
             ),
             None => None,
         };
@@ -298,8 +297,8 @@ fn session_summary(session: &SolutionSession, cx: &App) -> SessionSummary {
     // negligible at the human-visible tick rate (1 Hz).
     let state_started_at_ms = match &session.state {
         crate::model::SessionState::Running { started_at, .. } => {
-            let wall = chrono::Utc::now() - chrono::Duration::from_std(started_at.elapsed())
-                .unwrap_or_default();
+            let wall = chrono::Utc::now()
+                - chrono::Duration::from_std(started_at.elapsed()).unwrap_or_default();
             Some(wall.timestamp_millis())
         }
         _ => None,
@@ -778,8 +777,8 @@ impl McpServerTool for GetSessionTool {
             let live_entries: Option<Vec<&acp_thread::AgentThreadEntry>> = session
                 .acp_thread()
                 .map(|thread| thread.read(cx).entries().iter().collect());
-            let entries_ref: Vec<&acp_thread::AgentThreadEntry> = live_entries
-                .unwrap_or_else(|| session.cold_entries.iter().collect());
+            let entries_ref: Vec<&acp_thread::AgentThreadEntry> =
+                live_entries.unwrap_or_else(|| session.cold_entries.iter().collect());
             let (entries, total_count) = {
                 let total = entries_ref.len();
                 // R-6e: index-anchored slice. `after_index` /
@@ -799,11 +798,14 @@ impl McpServerTool for GetSessionTool {
                 let mut image_cursor = 0usize;
                 let mut kept: Vec<EntrySummary> = Vec::new();
                 for (index, entry) in entries_ref.iter().enumerate() {
-                    let in_range = after.map_or(true, |a| index > a)
-                        && before.map_or(true, |b| index < b);
+                    let in_range =
+                        after.map_or(true, |a| index > a) && before.map_or(true, |b| index < b);
                     if in_range {
-                        let created_ms =
-                            session.entry_created_ms.get(index).copied().filter(|&ms| ms > 0);
+                        let created_ms = session
+                            .entry_created_ms
+                            .get(index)
+                            .copied()
+                            .filter(|&ms| ms > 0);
                         kept.push(summarize_entry(
                             entry,
                             index,
@@ -1054,8 +1056,7 @@ fn extract_images_for_entry(
                     out.push(EntryImage {
                         index: *image_cursor,
                         mime_type: image.format.mime_type().to_string(),
-                        data_base64: base64::engine::general_purpose::STANDARD
-                            .encode(&image.bytes),
+                        data_base64: base64::engine::general_purpose::STANDARD.encode(&image.bytes),
                     });
                     *image_cursor += 1;
                 }
@@ -1070,8 +1071,7 @@ fn extract_images_for_entry(
                     out.push(EntryImage {
                         index: *image_cursor,
                         mime_type: image.format.mime_type().to_string(),
-                        data_base64: base64::engine::general_purpose::STANDARD
-                            .encode(&image.bytes),
+                        data_base64: base64::engine::general_purpose::STANDARD.encode(&image.bytes),
                     });
                     *image_cursor += 1;
                 }
@@ -1091,8 +1091,7 @@ fn tool_call_summary(call: &acp_thread::ToolCall, cx: &App) -> ToolCallSummary {
         .as_ref()
         .map(|s| s.to_string())
         .unwrap_or_else(|| call.label.read(cx).source().to_string());
-    let status =
-        crate::conversation_render::tool_call_status_text(&call.status).to_string();
+    let status = crate::conversation_render::tool_call_status_text(&call.status).to_string();
     let args_preview = call
         .raw_input
         .as_ref()
@@ -1149,7 +1148,9 @@ fn permission_kind_str(kind: acp::PermissionOptionKind) -> &'static str {
         acp::PermissionOptionKind::RejectOnce => "reject_once",
         acp::PermissionOptionKind::RejectAlways => "reject_always",
         other => {
-            log::warn!("unknown PermissionOptionKind {other:?}; presenting as reject_once on the wire");
+            log::warn!(
+                "unknown PermissionOptionKind {other:?}; presenting as reject_once on the wire"
+            );
             "reject_once"
         }
     }
@@ -1395,8 +1396,8 @@ impl McpServerTool for CreateSessionTool {
                             .map(|entity| entity.read(cx).solution_id.clone())
                     })
                 });
-                let parent_solution = parent_solution
-                    .ok_or_else(|| anyhow!("unknown_parent_session: {raw}"))?;
+                let parent_solution =
+                    parent_solution.ok_or_else(|| anyhow!("unknown_parent_session: {raw}"))?;
                 if parent_solution != solution_id {
                     anyhow::bail!(
                         "parent_session_in_different_solution: {} != {}",
@@ -2891,9 +2892,10 @@ impl McpServerTool for UploadStatusTool {
         input: Self::Input,
         _cx: &mut AsyncApp,
     ) -> Result<ToolResponse<Self::Output>> {
-        let (received_bytes, total_size) = crate::upload::with_manager(|m| m.status(input.upload_id))
-            .ok_or_else(|| anyhow!("upload manager not initialised"))?
-            .ok_or_else(|| anyhow!("unknown_upload_id: {}", input.upload_id))?;
+        let (received_bytes, total_size) =
+            crate::upload::with_manager(|m| m.status(input.upload_id))
+                .ok_or_else(|| anyhow!("upload manager not initialised"))?
+                .ok_or_else(|| anyhow!("unknown_upload_id: {}", input.upload_id))?;
 
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text {
@@ -2952,10 +2954,9 @@ impl McpServerTool for UploadFinishTool {
         _cx: &mut AsyncApp,
     ) -> Result<ToolResponse<Self::Output>> {
         let upload_id_for_log = input.upload_id;
-        let handle = crate::upload::with_manager(|m| {
-            m.finish(input.upload_id, input.sha256.as_deref())
-        })
-        .ok_or_else(|| anyhow!("upload manager not initialised"))??;
+        let handle =
+            crate::upload::with_manager(|m| m.finish(input.upload_id, input.sha256.as_deref()))
+                .ok_or_else(|| anyhow!("upload manager not initialised"))??;
         let handle_uri = format!("{}{}", crate::upload::HANDLE_SCHEME, handle.id);
         log::info!(
             target: "solution_agent::upload",
@@ -3062,11 +3063,7 @@ mod tests {
                     fake_image_chunk("image/png", &image_b64_clone),
                     cx,
                 );
-                thread.push_assistant_content_block(
-                    fake_user_text_chunk("world"),
-                    false,
-                    cx,
-                );
+                thread.push_assistant_content_block(fake_user_text_chunk("world"), false, cx);
             });
         });
         cx.executor().run_until_parked();
@@ -3074,9 +3071,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn list_agents_returns_empty_when_no_adapters_registered(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    async fn list_agents_returns_empty_when_no_adapters_registered(cx: &mut gpui::TestAppContext) {
         // create_session_with_thread builds an empty AdapterRegistry —
         // mock-agent gets registered via `register_agent_server`, not
         // via `AdapterRegistry::register`. So list_agents (which reads
@@ -3217,9 +3212,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn get_session_entry_happy_path_returns_full_markdown(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    async fn get_session_entry_happy_path_returns_full_markdown(cx: &mut gpui::TestAppContext) {
         let (session_id, _img, _tmp) = seed_session_with_image(cx).await;
 
         let result = GetSessionEntryTool
@@ -3461,17 +3454,9 @@ mod tests {
                 for i in 0..n {
                     let text = format!("entry-{i}");
                     if i % 2 == 0 {
-                        thread.push_user_content_block(
-                            None,
-                            fake_user_text_chunk(&text),
-                            cx,
-                        );
+                        thread.push_user_content_block(None, fake_user_text_chunk(&text), cx);
                     } else {
-                        thread.push_assistant_content_block(
-                            fake_user_text_chunk(&text),
-                            false,
-                            cx,
-                        );
+                        thread.push_assistant_content_block(fake_user_text_chunk(&text), false, cx);
                     }
                 }
             });
@@ -3585,9 +3570,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn get_session_before_and_after_index_select_slice(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    async fn get_session_before_and_after_index_select_slice(cx: &mut gpui::TestAppContext) {
         let (session_id, _tmp) = seed_session_with_n_entries(cx, 5).await;
 
         let result = GetSessionTool
@@ -3655,9 +3638,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn get_session_after_index_past_end_returns_empty(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    async fn get_session_after_index_past_end_returns_empty(cx: &mut gpui::TestAppContext) {
         let (session_id, _tmp) = seed_session_with_n_entries(cx, 5).await;
 
         let result = GetSessionTool
@@ -3683,9 +3664,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn list_sessions_pagination_orders_desc_and_caps_to_count(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    async fn list_sessions_pagination_orders_desc_and_caps_to_count(cx: &mut gpui::TestAppContext) {
         // Reuse the first session's setup (it primes globals + the mock
         // adapter), then create two more sessions in the same solution
         // with slightly later activity timestamps so the DESC ordering
@@ -3713,12 +3692,7 @@ mod tests {
             .update(|cx| {
                 let store = SolutionAgentStore::global(cx);
                 store.update(cx, |store, cx| {
-                    store.create_session(
-                        solution_id.clone(),
-                        agent_id.clone(),
-                        project.clone(),
-                        cx,
-                    )
+                    store.create_session(solution_id.clone(), agent_id.clone(), project.clone(), cx)
                 })
             })
             .await
@@ -3728,12 +3702,7 @@ mod tests {
             .update(|cx| {
                 let store = SolutionAgentStore::global(cx);
                 store.update(cx, |store, cx| {
-                    store.create_session(
-                        solution_id.clone(),
-                        agent_id.clone(),
-                        project.clone(),
-                        cx,
-                    )
+                    store.create_session(solution_id.clone(), agent_id.clone(), project.clone(), cx)
                 })
             })
             .await
@@ -3810,10 +3779,7 @@ mod tests {
             (
                 session_ref.solution_id.clone(),
                 session_ref.agent_id.clone(),
-                session_ref
-                    .project
-                    .clone()
-                    .expect("parent has project"),
+                session_ref.project.clone().expect("parent has project"),
             )
         });
         cx.update(|cx| {
@@ -3952,9 +3918,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn get_session_children_returns_child_with_summary_fields(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    async fn get_session_children_returns_child_with_summary_fields(cx: &mut gpui::TestAppContext) {
         let (parent_id, _thread, _tmp) = create_session_with_thread(cx).await;
         let child_id = create_child_session(cx, parent_id).await;
 
@@ -4006,9 +3970,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn list_sessions_filters_by_parent_session_id(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    async fn list_sessions_filters_by_parent_session_id(cx: &mut gpui::TestAppContext) {
         let (parent_id, _thread, _tmp) = create_session_with_thread(cx).await;
         let child_id = create_child_session(cx, parent_id).await;
         // Add a second sibling so the filter has more than one row to
@@ -4047,7 +4009,9 @@ mod tests {
             .collect();
         assert_eq!(
             ids,
-            [child_id.to_string(), sibling_id.to_string()].into_iter().collect(),
+            [child_id.to_string(), sibling_id.to_string()]
+                .into_iter()
+                .collect(),
             "exactly the two children are returned",
         );
         assert!(
@@ -4065,18 +4029,12 @@ mod tests {
         // exercised even without a live `TokenUsageUpdated` event.
         cx.update(|cx| {
             let store = SolutionAgentStore::global(cx);
-            let session = store
-                .read(cx)
-                .session(session_id)
-                .expect("session exists");
+            let session = store.read(cx).session(session_id).expect("session exists");
             session.update(cx, |s, _| s.cached_total_tokens = Some(42_000));
         });
 
         let result = ListSessionsTool
-            .run(
-                ListSessionsParams::default(),
-                &mut cx.to_async(),
-            )
+            .run(ListSessionsParams::default(), &mut cx.to_async())
             .await
             .expect("list_sessions");
         let summary = result
@@ -4154,10 +4112,7 @@ mod tests {
         let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
         cx.update(|cx| {
             let store = SolutionAgentStore::global(cx);
-            let session = store
-                .read(cx)
-                .session(session_id)
-                .expect("session exists");
+            let session = store.read(cx).session(session_id).expect("session exists");
             session.update(cx, |s, _| s.cached_max_tokens = Some(180_000));
         });
 
@@ -4319,10 +4274,7 @@ mod tests {
         assert!(upload_id > 0);
 
         let status = UploadStatusTool
-            .run(
-                UploadStatusParams { upload_id },
-                &mut cx.to_async(),
-            )
+            .run(UploadStatusParams { upload_id }, &mut cx.to_async())
             .await
             .expect("upload_status");
         assert_eq!(status.structured_content.received_bytes, 0);
@@ -4402,10 +4354,7 @@ mod tests {
         );
 
         UploadAbortTool
-            .run(
-                UploadAbortParams { upload_id },
-                &mut cx.to_async(),
-            )
+            .run(UploadAbortParams { upload_id }, &mut cx.to_async())
             .await
             .expect("upload_abort");
 
@@ -4439,10 +4388,7 @@ mod tests {
         let fake_ms: i64 = 1_700_000_000_000;
         cx.update(|cx| {
             let store = SolutionAgentStore::global(cx);
-            let session_entity = store
-                .read(cx)
-                .session(session_id)
-                .expect("session exists");
+            let session_entity = store.read(cx).session(session_id).expect("session exists");
             session_entity.update(cx, |s, _| {
                 s.entry_created_ms = vec![fake_ms, NO_TIMESTAMP_MS, fake_ms + 1];
             });
@@ -4493,10 +4439,7 @@ mod tests {
         let fake_ms: i64 = 1_700_000_000_000;
         cx.update(|cx| {
             let store = SolutionAgentStore::global(cx);
-            let session_entity = store
-                .read(cx)
-                .session(session_id)
-                .expect("session exists");
+            let session_entity = store.read(cx).session(session_id).expect("session exists");
             session_entity.update(cx, |s, _| {
                 s.entry_created_ms = vec![fake_ms, NO_TIMESTAMP_MS];
             });
@@ -4515,7 +4458,11 @@ mod tests {
             .expect("get_session_entry");
 
         assert!(
-            result.structured_content.entry.created_ms.is_some_and(|ms| ms > 0),
+            result
+                .structured_content
+                .entry
+                .created_ms
+                .is_some_and(|ms| ms > 0),
             "GetSessionEntryTool must carry created_ms for a stamped entry; got {:?}",
             result.structured_content.entry.created_ms,
         );
@@ -4533,7 +4480,11 @@ mod tests {
             .expect("get_session_entry sentinel");
 
         assert!(
-            result_sentinel.structured_content.entry.created_ms.is_none(),
+            result_sentinel
+                .structured_content
+                .entry
+                .created_ms
+                .is_none(),
             "GetSessionEntryTool must surface sentinel as None; got {:?}",
             result_sentinel.structured_content.entry.created_ms,
         );

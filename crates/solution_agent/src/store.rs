@@ -2026,10 +2026,7 @@ impl SolutionAgentStore {
                     // Treat that as None so MCP consumers can fall back
                     // to `DEFAULT_CONTEXT_WINDOW` instead of rendering
                     // "X / 0" on the meter.
-                    let max = usage
-                        .as_ref()
-                        .map(|u| u.max_tokens)
-                        .filter(|m| *m > 0);
+                    let max = usage.as_ref().map(|u| u.max_tokens).filter(|m| *m > 0);
                     s.update(cx, |s, _| {
                         s.cached_total_tokens = total;
                         s.cached_max_tokens = max;
@@ -2137,8 +2134,7 @@ impl SolutionAgentStore {
                     .map(|t| t.first_dirty_at);
                 let max_stale_breached = existing_first_dirty_at
                     .map(|t| {
-                        now.saturating_duration_since(t)
-                            >= std::time::Duration::from_millis(2000)
+                        now.saturating_duration_since(t) >= std::time::Duration::from_millis(2000)
                     })
                     .unwrap_or(false);
                 if max_stale_breached {

@@ -83,19 +83,11 @@ pub fn install(cx: &mut App) {
                 }
                 SolutionAgentStoreEvent::SessionMessageAppended(id, entry_index) => {
                     let payload = build_message_appended_payload(*id, *entry_index, cx);
-                    editor_mcp::emit_notification(
-                        cx,
-                        "agent_session_message_appended",
-                        payload,
-                    );
+                    editor_mcp::emit_notification(cx, "agent_session_message_appended", payload);
                 }
                 SolutionAgentStoreEvent::SessionQueueChanged(id) => {
                     let payload = build_queue_changed_payload(*id, cx);
-                    editor_mcp::emit_notification(
-                        cx,
-                        "agent_session_queue_changed",
-                        payload,
-                    );
+                    editor_mcp::emit_notification(cx, "agent_session_queue_changed", payload);
                 }
                 SolutionAgentStoreEvent::SessionNotified(id, kind) => {
                     let kind_str = match kind {
@@ -237,7 +229,8 @@ pub(crate) fn build_queue_changed_payload(
                     .iter()
                     .map(|bundle| {
                         let csids = acp_thread::csids_from_blocks(bundle);
-                        let preview = crate::conversation_render::pending_blocks_preview(bundle, cx);
+                        let preview =
+                            crate::conversation_render::pending_blocks_preview(bundle, cx);
                         let image_count: usize = bundle
                             .iter()
                             .filter(|b| {
@@ -307,9 +300,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn message_appended_payload_carries_index_role_and_preview(
-        cx: &mut TestAppContext,
-    ) {
+    async fn message_appended_payload_carries_index_role_and_preview(cx: &mut TestAppContext) {
         // Build a real session with one user entry, then call the pure
         // payload builder directly — emit is a no-op without a socket,
         // so this is the only way to observe the wire shape from a
@@ -319,9 +310,10 @@ mod tests {
         cx.update(|cx| {
             let thread = {
                 let store = SolutionAgentStore::global(cx);
-                store.read(cx).session(session_id).and_then(|s| {
-                    s.read(cx).acp_thread().cloned()
-                })
+                store
+                    .read(cx)
+                    .session(session_id)
+                    .and_then(|s| s.read(cx).acp_thread().cloned())
             }
             .expect("thread");
             thread.update(cx, |thread, cx| {
@@ -346,23 +338,21 @@ mod tests {
                 .get("preview")
                 .and_then(|v| v.as_str())
                 .expect("preview");
-            assert!(preview.contains("hi"), "preview should contain 'hi': {preview}");
+            assert!(
+                preview.contains("hi"),
+                "preview should contain 'hi': {preview}"
+            );
         });
     }
 
     #[gpui::test]
-    async fn message_appended_payload_falls_back_when_thread_missing(
-        cx: &mut TestAppContext,
-    ) {
+    async fn message_appended_payload_falls_back_when_thread_missing(cx: &mut TestAppContext) {
         let registry = Arc::new(AdapterRegistry::new());
         cx.update(|cx| SolutionAgentStore::init_global(cx, registry));
 
         cx.update(|cx| {
-            let payload = build_message_appended_payload(
-                crate::model::SolutionSessionId::new(),
-                7,
-                cx,
-            );
+            let payload =
+                build_message_appended_payload(crate::model::SolutionSessionId::new(), 7, cx);
             let obj = payload.as_object().expect("object");
             assert_eq!(obj.get("entry_index").and_then(|v| v.as_u64()), Some(7));
             assert!(obj.get("role").is_none());
@@ -419,7 +409,10 @@ mod tests {
                 obj.get("session_id").and_then(|v| v.as_str()),
                 Some(session_id.to_string().as_str())
             );
-            let bundles = obj.get("bundles").and_then(|v| v.as_array()).expect("bundles");
+            let bundles = obj
+                .get("bundles")
+                .and_then(|v| v.as_array())
+                .expect("bundles");
             assert_eq!(bundles.len(), 1, "one seeded bundle → one descriptor");
             let bundle = bundles[0].as_object().expect("bundle object");
 
@@ -432,7 +425,10 @@ mod tests {
                 .collect();
             assert_eq!(csids, vec![111, 222], "csids in first-seen order, deduped");
 
-            let preview = bundle.get("preview").and_then(|v| v.as_str()).expect("preview");
+            let preview = bundle
+                .get("preview")
+                .and_then(|v| v.as_str())
+                .expect("preview");
             assert!(
                 preview.contains("hello world") && preview.contains("more"),
                 "preview should carry both text blocks: {preview}"
@@ -455,8 +451,14 @@ mod tests {
         cx.update(|cx| {
             let payload = build_queue_changed_payload(session_id, cx);
             let obj = payload.as_object().expect("object");
-            let bundles = obj.get("bundles").and_then(|v| v.as_array()).expect("bundles");
-            assert!(bundles.is_empty(), "empty queue must emit an empty bundles array");
+            let bundles = obj
+                .get("bundles")
+                .and_then(|v| v.as_array())
+                .expect("bundles");
+            assert!(
+                bundles.is_empty(),
+                "empty queue must emit an empty bundles array"
+            );
         });
     }
 
@@ -470,9 +472,10 @@ mod tests {
         cx.update(|cx| {
             let thread = {
                 let store = SolutionAgentStore::global(cx);
-                store.read(cx).session(session_id).and_then(|s| {
-                    s.read(cx).acp_thread().cloned()
-                })
+                store
+                    .read(cx)
+                    .session(session_id)
+                    .and_then(|s| s.read(cx).acp_thread().cloned())
             }
             .expect("thread");
             thread.update(cx, |thread, cx| {

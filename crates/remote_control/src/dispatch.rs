@@ -192,8 +192,7 @@ impl ConnectionDispatcher for ProxyConnection {
                         let code = err_value
                             .get("code")
                             .and_then(|v| v.as_i64())
-                            .unwrap_or(-32603)
-                            as i32;
+                            .unwrap_or(-32603) as i32;
                         let message = err_value
                             .get("message")
                             .and_then(|v| v.as_str())
@@ -213,11 +212,9 @@ impl ConnectionDispatcher for ProxyConnection {
                         JsonRpcResponse::ok(ws_id, upstream)
                     }
                 }
-                Err(err) => JsonRpcResponse::error(
-                    ws_id,
-                    -32603,
-                    format!("local MCP call failed: {err}"),
-                ),
+                Err(err) => {
+                    JsonRpcResponse::error(ws_id, -32603, format!("local MCP call failed: {err}"))
+                }
             }
         })
     }
@@ -279,11 +276,9 @@ impl ConnectionDispatcher for MinimalConnection {
                         "now": chrono::Utc::now().to_rfc3339(),
                     }),
                 ),
-                other => JsonRpcResponse::error(
-                    request.id,
-                    -32601,
-                    format!("method not found: {other}"),
-                ),
+                other => {
+                    JsonRpcResponse::error(request.id, -32601, format!("method not found: {other}"))
+                }
             }
         })
     }
@@ -301,16 +296,15 @@ mod tests {
     #[test]
     fn parse_rejects_non_json() {
         let err = parse_request("not json").expect_err("should fail");
-        let parsed: Value =
-            serde_json::to_value(&*err).expect("re-serialize error response");
+        let parsed: Value = serde_json::to_value(&*err).expect("re-serialize error response");
         assert_eq!(parsed["error"]["code"].as_i64(), Some(-32700));
         assert_eq!(parsed["id"], Value::Null);
     }
 
     #[test]
     fn parse_rejects_wrong_jsonrpc_version() {
-        let err = parse_request(r#"{"jsonrpc":"1.0","id":1,"method":"x"}"#)
-            .expect_err("should fail");
+        let err =
+            parse_request(r#"{"jsonrpc":"1.0","id":1,"method":"x"}"#).expect_err("should fail");
         let parsed: Value = serde_json::to_value(&*err).expect("re-serialize");
         assert_eq!(parsed["error"]["code"].as_i64(), Some(-32600));
     }
@@ -335,10 +329,9 @@ mod tests {
     fn minimal_dispatcher_ping_round_trip() {
         let dispatcher = MinimalDispatcher::new();
         let mut conn = block_on(dispatcher.open_connection()).expect("open");
-        let request: JsonRpcRequest = serde_json::from_str(
-            r#"{"jsonrpc":"2.0","id":"42","method":"remote.editor.ping"}"#,
-        )
-        .expect("parse");
+        let request: JsonRpcRequest =
+            serde_json::from_str(r#"{"jsonrpc":"2.0","id":"42","method":"remote.editor.ping"}"#)
+                .expect("parse");
         let response = block_on(conn.dispatch("client", request));
         let parsed: Value = serde_json::to_value(&response).expect("re-serialize");
         assert_eq!(parsed["id"], "42");
@@ -351,17 +344,18 @@ mod tests {
     fn minimal_dispatcher_unknown_method_is_method_not_found() {
         let dispatcher = MinimalDispatcher::new();
         let mut conn = block_on(dispatcher.open_connection()).expect("open");
-        let request: JsonRpcRequest = serde_json::from_str(
-            r#"{"jsonrpc":"2.0","id":9,"method":"remote.unknown"}"#,
-        )
-        .expect("parse");
+        let request: JsonRpcRequest =
+            serde_json::from_str(r#"{"jsonrpc":"2.0","id":9,"method":"remote.unknown"}"#)
+                .expect("parse");
         let response = block_on(conn.dispatch("client", request));
         let parsed: Value = serde_json::to_value(&response).expect("re-serialize");
         assert_eq!(parsed["error"]["code"].as_i64(), Some(-32601));
-        assert!(parsed["error"]["message"]
-            .as_str()
-            .expect("message string")
-            .contains("method not found"));
+        assert!(
+            parsed["error"]["message"]
+                .as_str()
+                .expect("message string")
+                .contains("method not found")
+        );
     }
 
     #[test]

@@ -382,11 +382,7 @@ impl SolutionSession {
     /// dropped by the outer flush's deduplication), which strands
     /// `SessionView::_thread_subscription` on the dead thread and
     /// silently halts conversation-list rendering for that session.
-    pub fn set_acp_thread(
-        &mut self,
-        thread: Option<Entity<AcpThread>>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_acp_thread(&mut self, thread: Option<Entity<AcpThread>>, cx: &mut Context<Self>) {
         self.acp_thread = thread;
         cx.emit(SolutionSessionEvent::ThreadReplaced);
         cx.notify();
@@ -489,21 +485,16 @@ mod tests {
             let emit = emit_count.clone();
             cx.subscribe(
                 &session,
-                move |_session: Entity<SolutionSession>,
-                      event: &SolutionSessionEvent,
-                      _cx| {
+                move |_session: Entity<SolutionSession>, event: &SolutionSessionEvent, _cx| {
                     let SolutionSessionEvent::ThreadReplaced = event;
                     emit.fetch_add(1, Ordering::SeqCst);
                 },
             )
             .detach();
             let observe = observe_count.clone();
-            cx.observe(
-                &session,
-                move |_session: Entity<SolutionSession>, _cx| {
-                    observe.fetch_add(1, Ordering::SeqCst);
-                },
-            )
+            cx.observe(&session, move |_session: Entity<SolutionSession>, _cx| {
+                observe.fetch_add(1, Ordering::SeqCst);
+            })
             .detach();
         });
 

@@ -68,30 +68,22 @@ impl UnixMcpProxy {
     /// an error if the connect times out or the socket is missing.
     pub async fn connect() -> Result<Self> {
         let socket_path = editor_mcp::socket_path();
-        let stream = tokio::time::timeout(
-            CONNECT_TIMEOUT,
-            UnixStream::connect(&socket_path),
-        )
-        .await
-        .map_err(|_| {
-            anyhow!(
-                "connecting to local MCP socket {} timed out after {}s",
-                socket_path.display(),
-                CONNECT_TIMEOUT.as_secs(),
-            )
-        })?
-        .with_context(|| format!("connecting to {}", socket_path.display()))?;
+        let stream = tokio::time::timeout(CONNECT_TIMEOUT, UnixStream::connect(&socket_path))
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "connecting to local MCP socket {} timed out after {}s",
+                    socket_path.display(),
+                    CONNECT_TIMEOUT.as_secs(),
+                )
+            })?
+            .with_context(|| format!("connecting to {}", socket_path.display()))?;
 
         let (read_half, write_half) = stream.into_split();
         let pending: ResponseMap = Arc::new(Mutex::new(HashMap::new()));
-        let (notifications_tx, notifications_rx) =
-            mpsc::channel(NOTIFICATION_QUEUE_CAPACITY);
+        let (notifications_tx, notifications_rx) = mpsc::channel(NOTIFICATION_QUEUE_CAPACITY);
 
-        let reader_task = tokio::spawn(read_loop(
-            read_half,
-            pending.clone(),
-            notifications_tx,
-        ));
+        let reader_task = tokio::spawn(read_loop(read_half, pending.clone(), notifications_tx));
 
         Ok(Self {
             write_half: Mutex::new(write_half),
@@ -115,11 +107,7 @@ impl UnixMcpProxy {
     /// caller's WS-side `id` is NOT used on the wire — the proxy mints a
     /// fresh local i32, and the response is rewrapped with the WS id by
     /// `ProxyDispatcher::dispatch`. Times out after 30 s.
-    pub async fn call_tool(
-        &self,
-        tool_name: &str,
-        arguments: Option<Value>,
-    ) -> Result<Value> {
+    pub async fn call_tool(&self, tool_name: &str, arguments: Option<Value>) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (response_tx, response_rx) = oneshot::channel::<Value>();
 
@@ -367,8 +355,7 @@ mod tests {
         let stream = UnixStream::connect(&socket).await.expect("connect");
         let (read_half, write_half) = stream.into_split();
         let pending: ResponseMap = Arc::new(Mutex::new(HashMap::new()));
-        let (notifications_tx, mut notifications_rx) =
-            mpsc::channel(NOTIFICATION_QUEUE_CAPACITY);
+        let (notifications_tx, mut notifications_rx) = mpsc::channel(NOTIFICATION_QUEUE_CAPACITY);
         let reader_task = tokio::spawn(read_loop(read_half, pending.clone(), notifications_tx));
         let proxy = UnixMcpProxy {
             write_half: Mutex::new(write_half),
@@ -389,15 +376,15 @@ mod tests {
         );
 
         // Notification should be queued and observable.
-        let notification = tokio::time::timeout(
-            Duration::from_millis(500),
-            notifications_rx.recv(),
-        )
-        .await
-        .expect("notification within 500ms")
-        .expect("channel still open");
+        let notification =
+            tokio::time::timeout(Duration::from_millis(500), notifications_rx.recv())
+                .await
+                .expect("notification within 500ms")
+                .expect("channel still open");
         assert_eq!(
-            notification.pointer("/params/kind").and_then(|v| v.as_str()),
+            notification
+                .pointer("/params/kind")
+                .and_then(|v| v.as_str()),
             Some("agent_session_message_appended"),
         );
 
@@ -421,8 +408,7 @@ mod tests {
         let stream = UnixStream::connect(&socket).await.expect("connect");
         let (read_half, write_half) = stream.into_split();
         let pending: ResponseMap = Arc::new(Mutex::new(HashMap::new()));
-        let (notifications_tx, _notifications_rx) =
-            mpsc::channel(NOTIFICATION_QUEUE_CAPACITY);
+        let (notifications_tx, _notifications_rx) = mpsc::channel(NOTIFICATION_QUEUE_CAPACITY);
         let reader_task = tokio::spawn(read_loop(read_half, pending.clone(), notifications_tx));
 
         // Shorten the timeout for this test by patching: we can't change

@@ -29,8 +29,7 @@ use crate::claude_adapter::CLAUDE_ACP_AGENT_ID;
 use crate::model::{SessionState, SolutionSession};
 use crate::store::{SolutionAgentStore, SolutionAgentStoreEvent};
 
-const COMMIT_MESSAGE_PROMPT: &str =
-    "Generate a commit message for the following diff. Return only the message, \
+const COMMIT_MESSAGE_PROMPT: &str = "Generate a commit message for the following diff. Return only the message, \
      no preamble or explanation. Follow conventional commits style if the project \
      uses it (detect from recent history).";
 
@@ -211,10 +210,7 @@ async fn drive_turn(
     Ok(text)
 }
 
-fn pick_active_solution(
-    repo_work_dir: Option<&Path>,
-    cx: &gpui::App,
-) -> Result<Solution> {
+fn pick_active_solution(repo_work_dir: Option<&Path>, cx: &gpui::App) -> Result<Solution> {
     let store = SolutionStore::try_global(cx)
         .ok_or_else(|| anyhow!("SolutionStore global is not initialised"))?;
     let store = store.read(cx);
@@ -413,10 +409,8 @@ mod tests {
                 let store = SolutionAgentStore::global(cx);
                 let store_read = store.read(cx);
                 for s in store_read.sessions_for(solution_id) {
-                    if matches!(
-                        s.read(cx).state,
-                        crate::model::SessionState::Running { .. }
-                    ) && let Some(thread) = s.read(cx).acp_thread().cloned()
+                    if matches!(s.read(cx).state, crate::model::SessionState::Running { .. })
+                        && let Some(thread) = s.read(cx).acp_thread().cloned()
                     {
                         return Some(thread);
                     }

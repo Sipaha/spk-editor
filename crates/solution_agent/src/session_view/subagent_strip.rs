@@ -389,13 +389,15 @@ fn render_row(
                     .color(Color::Muted)
             };
             let tokens_label: Option<AnyElement> = total_tokens.filter(|t| *t > 0).map(|t| {
-                Label::new(SharedString::from(format!("· {} tokens", abbreviate_tokens(t))))
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted)
-                    .into_any_element()
+                Label::new(SharedString::from(format!(
+                    "· {} tokens",
+                    abbreviate_tokens(t)
+                )))
+                .size(LabelSize::XSmall)
+                .color(Color::Muted)
+                .into_any_element()
             });
-            let row_id =
-                SharedString::from(format!("subagent-strip-row-{}", session_id.as_str()));
+            let row_id = SharedString::from(format!("subagent-strip-row-{}", session_id.as_str()));
             let title_text = row.label.clone();
             let tooltip_text = SharedString::from(format!("Switch to {}", title_text));
             h_flex()
@@ -409,11 +411,7 @@ fn render_row(
                 .hover(|s| s.bg(cx.theme().colors().element_hover))
                 .tooltip(Tooltip::text(tooltip_text))
                 .child(dot)
-                .child(
-                    Label::new(title_text)
-                        .size(LabelSize::Small)
-                        .truncate(),
-                )
+                .child(Label::new(title_text).size(LabelSize::Small).truncate())
                 .child(
                     Label::new(SharedString::from(state_label))
                         .size(LabelSize::XSmall)
@@ -458,12 +456,7 @@ fn switch_to_session(
 mod tests {
     use super::*;
 
-    fn snap(
-        id: &str,
-        parent: Option<&str>,
-        title: &str,
-        created_secs: i64,
-    ) -> SessionSnapshot {
+    fn snap(id: &str, parent: Option<&str>, title: &str, created_secs: i64) -> SessionSnapshot {
         let id = SolutionSessionId::parse(&pad8(id)).expect("id");
         let parent = parent.map(|p| SolutionSessionId::parse(&pad8(p)).expect("parent id"));
         SessionSnapshot {
@@ -495,7 +488,10 @@ mod tests {
     fn top_level_with_no_children_returns_none() {
         let parent = snap("a", None, "alpha", 1);
         let rows = compute_strip_rows(parent.id, &SolutionId("sol-a".into()), &[parent]);
-        assert!(rows.is_none(), "strip should hide for a lone top-level session");
+        assert!(
+            rows.is_none(),
+            "strip should hide for a lone top-level session"
+        );
     }
 
     #[test]
@@ -511,7 +507,9 @@ mod tests {
         assert_eq!(rows[1].indent_level, 1);
         assert_eq!(rows[1].label.as_ref(), "beta");
         match &rows[0].kind {
-            StripRowKind::Session { is_current, .. } => assert!(!is_current, "parent is not current"),
+            StripRowKind::Session { is_current, .. } => {
+                assert!(!is_current, "parent is not current")
+            }
             _ => panic!("expected Session row"),
         }
         match &rows[1].kind {

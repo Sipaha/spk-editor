@@ -95,10 +95,7 @@ impl SolutionAgentDb {
         apply_idempotent_add_column(&connection, "preview TEXT");
         apply_idempotent_add_column(&connection, "total_tokens INTEGER");
         apply_idempotent_add_column(&connection, "closed_at INTEGER");
-        apply_idempotent_add_column(
-            &connection,
-            "context_count INTEGER NOT NULL DEFAULT 1",
-        );
+        apply_idempotent_add_column(&connection, "context_count INTEGER NOT NULL DEFAULT 1");
         // `cwd` is the working directory the session was created
         // against. NULL for rows written before this column
         // existed — the resume path falls back to `solution.root`
@@ -278,10 +275,7 @@ fn apply_idempotent_add_column(connection: &Connection, column_def: &str) {
     // substring filter no longer matched on a re-run — every restart
     // logged one WARN per already-applied migration. Inspecting the
     // catalog up front avoids both the noise AND the prepare attempt.
-    let column_name = column_def
-        .split_whitespace()
-        .next()
-        .unwrap_or(column_def);
+    let column_name = column_def.split_whitespace().next().unwrap_or(column_def);
     if column_exists(connection, "solution_sessions", column_name) {
         return;
     }

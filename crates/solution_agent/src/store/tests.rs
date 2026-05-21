@@ -1586,7 +1586,13 @@ async fn append_stamps_entry_created_ms_once_per_index(cx: &mut TestAppContext) 
 
     let stamps = cx.update(|cx| {
         let store = SolutionAgentStore::global(cx);
-        store.read(cx).session(session_id).expect("session exists").read(cx).entry_created_ms.clone()
+        store
+            .read(cx)
+            .session(session_id)
+            .expect("session exists")
+            .read(cx)
+            .entry_created_ms
+            .clone()
     });
     assert_eq!(stamps.len(), 2, "two appends → two timestamps");
     assert!(stamps[1] >= stamps[0], "timestamps are non-decreasing");
@@ -1610,7 +1616,13 @@ async fn append_stamps_entry_created_ms_once_per_index(cx: &mut TestAppContext) 
 
     let after = cx.update(|cx| {
         let store = SolutionAgentStore::global(cx);
-        store.read(cx).session(session_id).expect("session exists").read(cx).entry_created_ms.clone()
+        store
+            .read(cx)
+            .session(session_id)
+            .expect("session exists")
+            .read(cx)
+            .entry_created_ms
+            .clone()
     });
     assert_eq!(after.len(), 2, "in-place update must not add a timestamp");
     assert_eq!(after[1], stamps[1], "existing timestamp must be unchanged");
@@ -1686,7 +1698,11 @@ async fn append_after_resumed_unstamped_history_does_not_fabricate(cx: &mut Test
     });
 
     // The vector must stay 1:1 with the thread's 3 entries.
-    assert_eq!(stamps.len(), 3, "gap-fill must keep the vector index-aligned");
+    assert_eq!(
+        stamps.len(),
+        3,
+        "gap-fill must keep the vector index-aligned"
+    );
     // The two historical (gap-filled) indices must NOT be fabricated.
     assert_eq!(
         stamps[0], NO_TIMESTAMP_MS,
@@ -1844,8 +1860,7 @@ async fn reset_context_clears_entry_created_ms(cx: &mut TestAppContext) {
             .len()
     });
     assert_eq!(
-        len_after,
-        0,
+        len_after, 0,
         "reset_context clears the timestamp vector with the entries"
     );
 }
@@ -1896,7 +1911,11 @@ async fn entries_removed_truncates_entry_created_ms(cx: &mut TestAppContext) {
             .entry_created_ms
             .clone()
     });
-    assert_eq!(stamps.len(), 2, "two appends → two timestamps before removal");
+    assert_eq!(
+        stamps.len(),
+        2,
+        "two appends → two timestamps before removal"
+    );
 
     // Emit EntriesRemoved(1..2) — removes the last entry. The live thread
     // still has one surviving entry (the user message), so this is a
@@ -1981,8 +2000,7 @@ async fn rotate_context_clears_entry_created_ms(cx: &mut TestAppContext) {
             .len()
     });
     assert_eq!(
-        len_after,
-        0,
+        len_after, 0,
         "rotate_context clears the timestamp vector with the entries"
     );
 }

@@ -172,9 +172,7 @@ impl UploadManager {
                 entry.received_bytes
             );
         }
-        let new_total = entry
-            .received_bytes
-            .saturating_add(data.len() as u64);
+        let new_total = entry.received_bytes.saturating_add(data.len() as u64);
         if new_total > entry.expected_size {
             bail!(
                 "write_chunk: upload {id} overrun — total {new_total} > expected {expected}",
@@ -212,11 +210,7 @@ impl UploadManager {
     /// supplied sha256), then return a handle to the tmp file. The entry
     /// stays in the map so `resolve` callers (e.g. `send_message_blocks`)
     /// can find it.
-    pub fn finish(
-        &mut self,
-        id: UploadId,
-        expected_sha256: Option<&str>,
-    ) -> Result<UploadHandle> {
+    pub fn finish(&mut self, id: UploadId, expected_sha256: Option<&str>) -> Result<UploadHandle> {
         let entry = self
             .state
             .get(&id)
@@ -236,9 +230,7 @@ impl UploadManager {
         if let Some(want) = expected {
             let actual = sha256_of_path(&entry.tmp_path)?;
             if !want.eq_ignore_ascii_case(&actual) {
-                bail!(
-                    "finish: upload {id} sha256 mismatch — expected {want}, computed {actual}",
-                );
+                bail!("finish: upload {id} sha256 mismatch — expected {want}, computed {actual}",);
             }
         }
         Ok(UploadHandle {
@@ -304,11 +296,9 @@ impl UploadManager {
 }
 
 fn sha256_of_path(path: &std::path::Path) -> Result<String> {
-    let mut file = File::open(path)
-        .map_err(|err| anyhow!("opening {path:?} for sha256: {err}"))?;
+    let mut file = File::open(path).map_err(|err| anyhow!("opening {path:?} for sha256: {err}"))?;
     let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)
-        .map_err(|err| anyhow!("hashing {path:?}: {err}"))?;
+    std::io::copy(&mut file, &mut hasher).map_err(|err| anyhow!("hashing {path:?}: {err}"))?;
     let digest = hasher.finalize();
     Ok(hex_encode(&digest))
 }
@@ -377,9 +367,7 @@ pub fn dispatch_binary_frame(bytes: &[u8]) -> Result<(), String> {
     let result = with_manager(|m| m.write_chunk(upload_id, offset, payload));
     match result {
         Some(Ok(_new_received)) => Ok(()),
-        Some(Err(err)) => Err(format!(
-            "upload_id={upload_id} offset={offset}: {err:#}"
-        )),
+        Some(Err(err)) => Err(format!("upload_id={upload_id} offset={offset}: {err:#}")),
         None => Err(format!(
             "upload manager not installed; dropping (upload_id={upload_id})"
         )),
@@ -435,9 +423,7 @@ pub fn is_text_like(mime: &str) -> bool {
 /// 5 MB on the mobile side and `with_manager` already holds the sync
 /// mutex — the caller (`SendMessageBlocksTool::run`) is on the
 /// AsyncApp executor's task queue, not blocking a hot loop.
-pub fn resolve_upload_handles(
-    blocks: Vec<acp::ContentBlock>,
-) -> Result<Vec<acp::ContentBlock>> {
+pub fn resolve_upload_handles(blocks: Vec<acp::ContentBlock>) -> Result<Vec<acp::ContentBlock>> {
     let arc = get().ok_or_else(|| anyhow!("upload manager not initialised"))?;
     let mut guard = arc
         .lock()
@@ -463,9 +449,7 @@ pub(crate) fn resolve_upload_handles_with(
     let mut consumed: Vec<UploadId> = Vec::new();
     for block in blocks {
         match block {
-            acp::ContentBlock::ResourceLink(link)
-                if link.uri.starts_with(HANDLE_SCHEME) =>
-            {
+            acp::ContentBlock::ResourceLink(link) if link.uri.starts_with(HANDLE_SCHEME) => {
                 let id_str = link
                     .uri
                     .strip_prefix(HANDLE_SCHEME)
@@ -494,9 +478,7 @@ pub(crate) fn resolve_upload_handles_with(
                 // here so partial bytes can't be silently fed to the
                 // LLM.
                 if received_bytes != expected_size {
-                    bail!(
-                        "upload_not_finished: id={id} received {received_bytes}/{expected_size}",
-                    );
+                    bail!("upload_not_finished: id={id} received {received_bytes}/{expected_size}",);
                 }
                 let bytes = std::fs::read(&tmp_path)
                     .map_err(|err| anyhow!("reading upload {id} tmp file {tmp_path:?}: {err}"))?;
@@ -625,9 +607,7 @@ mod tests {
         let r1 = m.write_chunk(id, 0, &[1, 2, 3, 4]).expect("c1");
         assert_eq!(r1, 4);
         assert_eq!(m.status(id), Some((4, 10)));
-        let r2 = m
-            .write_chunk(id, 4, &[5, 6, 7, 8, 9, 10])
-            .expect("c2");
+        let r2 = m.write_chunk(id, 4, &[5, 6, 7, 8, 9, 10]).expect("c2");
         assert_eq!(r2, 10);
         let acks = m.drain_acks();
         assert_eq!(acks.len(), 2);
@@ -712,10 +692,7 @@ mod tests {
             .finish(id, Some("ff00ff00".repeat(8).as_str()))
             .unwrap_err()
             .to_string();
-        assert!(
-            err.contains("sha256 mismatch"),
-            "got: {err}"
-        );
+        assert!(err.contains("sha256 mismatch"), "got: {err}");
     }
 
     #[test]
@@ -864,7 +841,9 @@ mod tests {
             handle_link(id, "real.png"),
             handle_link(999_999, "ghost.png"),
         ];
-        let err = resolve_upload_handles_with(&mut m, blocks).unwrap_err().to_string();
+        let err = resolve_upload_handles_with(&mut m, blocks)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("unknown_upload_id"), "got: {err}");
         // The first (good) upload's tmp file must NOT have been freed —
         // a mid-stream error leaves the bundle re-runnable.
@@ -923,7 +902,10 @@ mod tests {
         );
         // Entry must still be alive (no cleanup on resolve error so the
         // client can recover by finishing the upload + retrying).
-        assert!(m.resolve(id).is_some(), "partial upload should survive resolve failure");
+        assert!(
+            m.resolve(id).is_some(),
+            "partial upload should survive resolve failure"
+        );
     }
 
     #[test]

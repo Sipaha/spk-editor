@@ -39,8 +39,7 @@ use std::sync::{Arc, OnceLock};
 /// `CryptoProvider` into the dep set via the transitive
 /// `agent_servers` / `claude-acp` graph and break the post-auth
 /// handshake on first use.
-pub type BinaryFrameHandler =
-    Arc<dyn Fn(&[u8]) -> Result<(), String> + Send + Sync + 'static>;
+pub type BinaryFrameHandler = Arc<dyn Fn(&[u8]) -> Result<(), String> + Send + Sync + 'static>;
 
 static BINARY_FRAME_HANDLER: OnceLock<BinaryFrameHandler> = OnceLock::new();
 

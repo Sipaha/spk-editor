@@ -580,12 +580,13 @@ impl SolutionSessionsNavigator {
                                 let weak_nav = weak_nav.clone();
                                 let weak_view = weak_view.clone();
                                 move |window, cx| {
-                                    let Some(nav) = weak_nav.upgrade() else { return };
+                                    let Some(nav) = weak_nav.upgrade() else {
+                                        return;
+                                    };
                                     nav.update(cx, |nav, cx| {
                                         if is_cold {
-                                            let Some(view) = weak_view
-                                                .as_ref()
-                                                .and_then(|w| w.upgrade())
+                                            let Some(view) =
+                                                weak_view.as_ref().and_then(|w| w.upgrade())
                                             else {
                                                 return;
                                             };
@@ -633,12 +634,14 @@ impl SolutionSessionsNavigator {
                                             cx.update(|_, cx| {
                                                 if let Some(nav) = weak_nav.upgrade() {
                                                     nav.update(cx, |_, cx| {
-                                                        SolutionAgentStore::global(cx)
-                                                            .update(cx, |store, cx| {
+                                                        SolutionAgentStore::global(cx).update(
+                                                            cx,
+                                                            |store, cx| {
                                                                 store
                                                                     .reset_context(session_id, cx)
                                                                     .detach_and_log_err(cx);
-                                                            });
+                                                            },
+                                                        );
                                                     });
                                                 }
                                             })
@@ -904,7 +907,9 @@ fn relative_time_short(
 /// `HH:MM` in the machine's local timezone, 24-hour, zero-padded. Input is a
 /// UTC instant (created_ms reconstructs to UTC via `Utc.timestamp_millis_opt`).
 pub(crate) fn format_hm(when: chrono::DateTime<chrono::Utc>) -> String {
-    when.with_timezone(&chrono::Local).format("%H:%M").to_string()
+    when.with_timezone(&chrono::Local)
+        .format("%H:%M")
+        .to_string()
 }
 
 /// Date-separator label for `when` relative to `now` (both compared on their
@@ -922,7 +927,12 @@ pub(crate) fn local_date_label<Tz: chrono::TimeZone>(
     match days {
         0 => "Today".to_string(),
         1 => "Yesterday".to_string(),
-        _ => format!("{:04}-{:02}-{:02}", when_d.year(), when_d.month(), when_d.day()),
+        _ => format!(
+            "{:04}-{:02}-{:02}",
+            when_d.year(),
+            when_d.month(),
+            when_d.day()
+        ),
     }
 }
 
@@ -940,7 +950,11 @@ fn format_activity_tooltip(
     // (e.g. 01:00 local = prior-day UTC would render "Yesterday 01:00").
     let when_local = when.with_timezone(&chrono::Local);
     let now_local = now.with_timezone(&chrono::Local);
-    format!("{} {}", local_date_label(when_local, now_local), format_hm(when))
+    format!(
+        "{} {}",
+        local_date_label(when_local, now_local),
+        format_hm(when)
+    )
 }
 
 #[cfg(test)]

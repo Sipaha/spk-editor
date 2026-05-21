@@ -72,9 +72,7 @@ impl RemoteControlStore {
             settings: RemoteControlSettings::default(),
             fs: None,
             _watcher: None,
-            self_write_echoes: Arc::new(std::sync::Mutex::new(
-                std::collections::HashSet::new(),
-            )),
+            self_write_echoes: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             listener: None,
             cert_fingerprint: None,
             clients_tx: None,
@@ -129,7 +127,8 @@ impl RemoteControlStore {
     }
 
     pub fn try_global(cx: &App) -> Option<Entity<RemoteControlStore>> {
-        cx.try_global::<GlobalRemoteControlStore>().map(|g| g.0.clone())
+        cx.try_global::<GlobalRemoteControlStore>()
+            .map(|g| g.0.clone())
     }
 
     pub fn settings(&self) -> &RemoteControlSettings {
@@ -138,11 +137,7 @@ impl RemoteControlStore {
 
     /// Replace the entire settings struct. Emits `Changed` and persists to
     /// disk (best-effort).
-    pub fn update_settings(
-        &mut self,
-        settings: RemoteControlSettings,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn update_settings(&mut self, settings: RemoteControlSettings, cx: &mut Context<Self>) {
         if settings == self.settings {
             return;
         }
@@ -307,16 +302,11 @@ impl RemoteControlStore {
         self.save_to_disk(cx).detach();
     }
 
-
     /// Add a new authorized client with the given name. Returns the freshly
     /// constructed client (so the UI can show its secret prefix immediately).
     /// Fails when a client with the same name already exists, or when the
     /// platform's OS RNG isn't available.
-    pub fn add_client(
-        &mut self,
-        name: String,
-        cx: &mut Context<Self>,
-    ) -> Result<AuthorizedClient> {
+    pub fn add_client(&mut self, name: String, cx: &mut Context<Self>) -> Result<AuthorizedClient> {
         let trimmed = name.trim().to_string();
         if trimmed.is_empty() {
             return Err(anyhow!("client name cannot be empty"));
@@ -495,8 +485,7 @@ async fn bootstrap_listener(
     // `server_address` field is for QR advertising only.
     let bind_addr: SocketAddr = SocketAddr::from(([0, 0, 0, 0], port));
 
-    let dispatcher: Arc<dyn crate::dispatch::RemoteDispatcher> =
-        ProxyDispatcher::new();
+    let dispatcher: Arc<dyn crate::dispatch::RemoteDispatcher> = ProxyDispatcher::new();
 
     let cfg = ListenerConfig {
         bind_addr,
@@ -602,9 +591,12 @@ mod tests {
         let store = new_store(cx);
         let _subscription = store.update(cx, |_, cx| {
             let events = events.clone();
-            cx.subscribe(&cx.entity(), move |_, _, event: &RemoteControlStoreEvent, _| {
-                events.lock().expect("lock").push(event.clone());
-            })
+            cx.subscribe(
+                &cx.entity(),
+                move |_, _, event: &RemoteControlStoreEvent, _| {
+                    events.lock().expect("lock").push(event.clone());
+                },
+            )
         });
 
         store.update(cx, |store, cx| {

@@ -30,9 +30,7 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use crate::allow_list;
 use crate::auth;
 use crate::cert::ServerCert;
-use crate::dispatch::{
-    ConnectionDispatcher, JsonRpcResponse, RemoteDispatcher, parse_request,
-};
+use crate::dispatch::{ConnectionDispatcher, JsonRpcResponse, RemoteDispatcher, parse_request};
 use crate::model::AuthorizedClient;
 
 /// Max time (seconds) the client has to reply to the challenge frame
@@ -165,10 +163,7 @@ impl Default for ListenerState {
             bans: AsyncMutex::new(HashMap::new()),
             active_conns: AsyncMutex::new(Vec::new()),
             tls_handshake_slots: Semaphore::new(TLS_HANDSHAKE_CONCURRENCY),
-            accept_bucket: AsyncMutex::new(TokenBucket::new(
-                ACCEPT_BURST,
-                ACCEPT_RATE_PER_SEC,
-            )),
+            accept_bucket: AsyncMutex::new(TokenBucket::new(ACCEPT_BURST, ACCEPT_RATE_PER_SEC)),
         }
     }
 }
@@ -292,12 +287,9 @@ pub async fn start_listener(cfg: ListenerConfig) -> Result<ListenerHandle> {
     let listener = TcpListener::bind(cfg.bind_addr)
         .await
         .with_context(|| format!("binding {:?}", cfg.bind_addr))?;
-    let bound_addr = listener
-        .local_addr()
-        .context("reading bound local_addr")?;
+    let bound_addr = listener.local_addr().context("reading bound local_addr")?;
 
-    let server_config = build_tls_server_config(&cfg.cert)
-        .context("building TLS ServerConfig")?;
+    let server_config = build_tls_server_config(&cfg.cert).context("building TLS ServerConfig")?;
     let acceptor = TlsAcceptor::from(Arc::new(server_config));
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -489,8 +481,7 @@ async fn record_auth_failure(state: &ListenerState, ip: IpAddr) {
     }
     // `consecutive_failures` is now ≥ 2. Index 0 → 30 s, 1 → 5 min, …
     // The offset of 2 here is what the grace skip earns the table.
-    let idx = ((entry.consecutive_failures as usize) - 2)
-        .min(BAN_BACKOFF_SECS.len() - 1);
+    let idx = ((entry.consecutive_failures as usize) - 2).min(BAN_BACKOFF_SECS.len() - 1);
     let step = BAN_BACKOFF_SECS[idx];
     entry.banned_until = Some(now + Duration::from_secs(step));
     log::info!(
@@ -581,11 +572,8 @@ async fn watch_revocations(
         if clients_rx.changed().await.is_err() {
             return;
         }
-        let allowed: std::collections::HashSet<String> = clients_rx
-            .borrow()
-            .iter()
-            .map(|c| c.name.clone())
-            .collect();
+        let allowed: std::collections::HashSet<String> =
+            clients_rx.borrow().iter().map(|c| c.name.clone()).collect();
         // Collect the kill senders + log info under the active_conns
         // lock, then release the lock BEFORE firing the oneshot
         // sends. Send itself is non-blocking, but releasing first
@@ -746,14 +734,12 @@ async fn handle_conn(
         .context("sending challenge")?;
 
     // 2. Read response within 10s.
-    let response_frame = tokio::time::timeout(
-        Duration::from_secs(HANDSHAKE_TIMEOUT_SECS),
-        ws.next(),
-    )
-    .await
-    .map_err(|_| anyhow!("auth timeout after {HANDSHAKE_TIMEOUT_SECS}s"))?
-    .ok_or_else(|| anyhow!("connection closed during handshake"))?
-    .context("reading handshake response")?;
+    let response_frame =
+        tokio::time::timeout(Duration::from_secs(HANDSHAKE_TIMEOUT_SECS), ws.next())
+            .await
+            .map_err(|_| anyhow!("auth timeout after {HANDSHAKE_TIMEOUT_SECS}s"))?
+            .ok_or_else(|| anyhow!("connection closed during handshake"))?
+            .context("reading handshake response")?;
 
     let response_text = match response_frame {
         Message::Text(text) => text,
@@ -889,7 +875,14 @@ async fn handle_conn(
         .context("sending welcome")?;
 
     // 6. Request loop.
-    run_request_loop(&mut ws, &client_name, dispatcher.as_ref(), last_activity, kill_rx).await?;
+    run_request_loop(
+        &mut ws,
+        &client_name,
+        dispatcher.as_ref(),
+        last_activity,
+        kill_rx,
+    )
+    .await?;
     Ok(())
 }
 
@@ -903,13 +896,10 @@ fn parse_handshake_response(text: &str) -> Result<[u8; 32]> {
     let frame: ResponseFrame =
         serde_json::from_str(text).context("decoding response frame as JSON")?;
     if frame.kind != "response" {
-        return Err(anyhow!(
-            "expected type=\"response\", got {:?}",
-            frame.kind
-        ));
+        return Err(anyhow!("expected type=\"response\", got {:?}", frame.kind));
     }
-    let raw = hex::decode(frame.response.trim())
-        .map_err(|err| anyhow!("response hex decode: {err}"))?;
+    let raw =
+        hex::decode(frame.response.trim()).map_err(|err| anyhow!("response hex decode: {err}"))?;
     if raw.len() != 32 {
         return Err(anyhow!(
             "response must be 32 bytes (64 hex chars), got {} bytes",
@@ -937,8 +927,7 @@ where
     // surface -32603 per-request and keep the WS alive — the client may
     // retry, and a flapping editor restart shouldn't kick paired phones.
     let mut conn: Option<Box<dyn ConnectionDispatcher>> = None;
-    let mut notifications_rx: Option<tokio::sync::mpsc::Receiver<serde_json::Value>> =
-        None;
+    let mut notifications_rx: Option<tokio::sync::mpsc::Receiver<serde_json::Value>> = None;
 
     loop {
         // Tokio `select!` here arbitrates between WS-read, notification
@@ -998,9 +987,7 @@ where
                                             let response = JsonRpcResponse::error(
                                                 req.id.clone(),
                                                 -32603,
-                                                format!(
-                                                    "opening local MCP proxy: {err}"
-                                                ),
+                                                format!("opening local MCP proxy: {err}"),
                                             );
                                             write_response(ws, &response).await?;
                                             continue;
@@ -1008,9 +995,9 @@ where
                                     }
                                 }
                                 // Safe: `conn` is Some here.
-                                let dispatcher_ref = conn.as_mut().ok_or_else(|| {
-                                    anyhow!("connection dispatcher disappeared")
-                                })?;
+                                let dispatcher_ref = conn
+                                    .as_mut()
+                                    .ok_or_else(|| anyhow!("connection dispatcher disappeared"))?;
                                 dispatcher_ref.dispatch(client_name, req).await
                             }
                             Err(parse_err_response) => *parse_err_response,
@@ -1046,12 +1033,10 @@ where
                         // header parse below is duplicated by the
                         // handler; that's fine, this is a debug aid not
                         // a hot path.
-                        let upload_id_log = u64::from_be_bytes(
-                            bytes[0..8].try_into().unwrap_or([0; 8]),
-                        );
-                        let offset_log = u64::from_be_bytes(
-                            bytes[8..16].try_into().unwrap_or([0; 8]),
-                        );
+                        let upload_id_log =
+                            u64::from_be_bytes(bytes[0..8].try_into().unwrap_or([0; 8]));
+                        let offset_log =
+                            u64::from_be_bytes(bytes[8..16].try_into().unwrap_or([0; 8]));
                         log::debug!(
                             target: "remote_control::upload",
                             "binary frame from {client_name:?}: upload_id={upload_id_log} offset={offset_log} payload_bytes={}",
@@ -1181,10 +1166,7 @@ where
 enum SelectOutcome {
     Frame(
         Option<
-            Result<
-                tokio_tungstenite::tungstenite::Message,
-                tokio_tungstenite::tungstenite::Error,
-            >,
+            Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>,
         >,
     ),
     Notification(Option<serde_json::Value>),
@@ -1199,8 +1181,8 @@ async fn write_response<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let payload = serde_json::to_string(response)
-        .map_err(|err| anyhow!("serialising response: {err}"))?;
+    let payload =
+        serde_json::to_string(response).map_err(|err| anyhow!("serialising response: {err}"))?;
     ws.send(Message::Text(payload.into()))
         .await
         .context("sending response")?;
@@ -1342,8 +1324,7 @@ mod tests {
                 .get_mut(&subnet_key(peer))
                 .expect("record present after failures");
             rec.banned_until = None;
-            rec.last_seen = Instant::now()
-                - Duration::from_secs(BAN_MEMORY_SECS + 60);
+            rec.last_seen = Instant::now() - Duration::from_secs(BAN_MEMORY_SECS + 60);
         }
 
         // `is_banned` prunes decayed records as a side effect; the

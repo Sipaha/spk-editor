@@ -109,7 +109,9 @@ pub const SPK_CLIENT_SEND_ID_META_KEY: &str = "spk_client_send_id";
 /// fields. Returns `None` when no chunk carries the key — the common
 /// case for desktop-originated user messages, which don't stamp.
 pub fn client_send_id_from_user_message(message: &UserMessage) -> Option<i64> {
-    client_send_ids_from_user_message(message).into_iter().next()
+    client_send_ids_from_user_message(message)
+        .into_iter()
+        .next()
 }
 
 /// Like [client_send_id_from_user_message] but returns EVERY csid
@@ -3266,7 +3268,9 @@ mod tests {
                 "Bash".to_string(),
             )
             .status(acp::ToolCallStatus::Pending);
-            thread.upsert_tool_call(pending, cx).expect("upsert pending");
+            thread
+                .upsert_tool_call(pending, cx)
+                .expect("upsert pending");
         });
         thread.read_with(cx, |thread, _| {
             let AgentThreadEntry::ToolCall(call) = &thread.entries()[0] else {

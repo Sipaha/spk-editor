@@ -146,8 +146,7 @@ mod tests {
         let secret = base64::engine::general_purpose::STANDARD
             .decode(secret_base64)
             .expect("decode");
-        let mut mac =
-            <Hmac<Sha256> as Mac>::new_from_slice(&secret).expect("hmac");
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&secret).expect("hmac");
         mac.update(HMAC_DOMAIN_TAG);
         mac.update(&challenge);
         let expected = mac.finalize().into_bytes();
@@ -157,29 +156,22 @@ mod tests {
     #[test]
     fn identify_client_picks_match() {
         let challenge = make_challenge().expect("challenge");
-        let client_a = fixed_client(
-            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-        );
-        let client_b = fixed_client(
-            "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA=",
-        );
+        let client_a = fixed_client("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+        let client_b = fixed_client("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA=");
         let response_for_b =
             expected_response(&client_b.secret_base64, &challenge).expect("compute");
         let secret_b = client_b.secret_base64.clone();
         let clients = [client_a, client_b];
-        let identified = identify_client(&challenge, &response_for_b, &clients)
-            .expect("must identify");
+        let identified =
+            identify_client(&challenge, &response_for_b, &clients).expect("must identify");
         assert_eq!(identified.secret_base64, secret_b);
     }
 
     #[test]
     fn near_match_and_far_match_both_return_none() {
         let challenge = make_challenge().expect("challenge");
-        let client = fixed_client(
-            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-        );
-        let mut response =
-            expected_response(&client.secret_base64, &challenge).expect("compute");
+        let client = fixed_client("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+        let mut response = expected_response(&client.secret_base64, &challenge).expect("compute");
 
         // Near-match: flip the last bit. Must NOT identify.
         response[31] ^= 0x01;
@@ -209,15 +201,12 @@ mod tests {
         // client must still authenticate.
         let challenge = make_challenge().expect("challenge");
         let bad = fixed_client("not-valid-base64-!!!");
-        let good = fixed_client(
-            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-        );
-        let response =
-            expected_response(&good.secret_base64, &challenge).expect("compute");
+        let good = fixed_client("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+        let response = expected_response(&good.secret_base64, &challenge).expect("compute");
         let good_secret = good.secret_base64.clone();
         let clients = [bad, good];
-        let identified = identify_client(&challenge, &response, &clients)
-            .expect("good must identify");
+        let identified =
+            identify_client(&challenge, &response, &clients).expect("good must identify");
         assert_eq!(identified.secret_base64, good_secret);
     }
 }

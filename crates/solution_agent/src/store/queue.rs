@@ -271,8 +271,7 @@ impl SolutionAgentStore {
         // intentionally absent: the current ACP protocol can't express a
         // free-text permission answer — see `pending_authorization_reject`.)
         if let Some(thread) = session_entity.read(cx).acp_thread().cloned()
-            && let Some((tool_call_id, reject_outcome)) =
-                pending_authorization_reject(&thread, cx)
+            && let Some((tool_call_id, reject_outcome)) = pending_authorization_reject(&thread, cx)
         {
             log::info!(
                 target: "solution_agent::queue",
@@ -492,15 +491,14 @@ impl SolutionAgentStore {
         });
 
         let solution_id = meta.solution_id.clone();
-        let solution = solutions::SolutionStore::try_global(cx)
-            .and_then(|store| {
-                store
-                    .read(cx)
-                    .solutions()
-                    .iter()
-                    .find(|s| s.id == solution_id)
-                    .cloned()
-            });
+        let solution = solutions::SolutionStore::try_global(cx).and_then(|store| {
+            store
+                .read(cx)
+                .solutions()
+                .iter()
+                .find(|s| s.id == solution_id)
+                .cloned()
+        });
         let Some(solution) = solution else {
             return Task::ready(Err(anyhow!(
                 "unknown_solution: cannot wake session {session_id} — solution {solution_id:?} \
