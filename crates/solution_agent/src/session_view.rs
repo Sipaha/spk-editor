@@ -4,6 +4,7 @@ use std::rc::Rc;
 use acp_thread::{AgentThreadEntry, ToolCallContent, ToolCallStatus, UserMessageId};
 use agent_client_protocol::schema as acp;
 use base64::Engine;
+use chrono::TimeZone as _;
 use gpui::{
     AnyElement, App, ClipboardEntry, ClipboardItem, Context, DragMoveEvent, Empty, Entity,
     EntityId, EventEmitter, ExternalPaths, FocusHandle, Focusable, FollowMode,
@@ -2203,9 +2204,60 @@ impl Render for SolutionSessionView {
                                 };
                                 let view_weak = cx.entity().downgrade();
                                 let queue_expanded = this.expanded_queue_markers.contains(&idx);
+
+                                // Per-entry timestamp + date-separator
+                                // computation. `entry_created_ms` is
+                                // index-aligned with the entries list;
+                                // only `ms > 0` is a real time.
+                                let entry_count = match session.acp_thread() {
+                                    Some(t) => t.read(cx).entries().len(),
+                                    None => session.cold_entries.len(),
+                                };
+                                let is_last = idx + 1 == entry_count;
+                                let created_ms = session
+                                    .entry_created_ms
+                                    .get(idx)
+                                    .copied()
+                                    .filter(|&ms| ms > 0);
+                                let prev_ms = idx
+                                    .checked_sub(1)
+                                    .and_then(|p| session.entry_created_ms.get(p).copied())
+                                    .filter(|&ms| ms > 0);
+                                let date_separator = created_ms.and_then(|ms| {
+                                    let this_local = chrono::Utc
+                                        .timestamp_millis_opt(ms)
+                                        .single()?
+                                        .with_timezone(&chrono::Local);
+                                    let this_d = this_local.date_naive();
+                                    let show = match prev_ms {
+                                        // Leading header only at the very
+                                        // top — a real entry following
+                                        // timeless history gets no header.
+                                        None => idx == 0,
+                                        Some(pms) => chrono::Utc
+                                            .timestamp_millis_opt(pms)
+                                            .single()
+                                            .map(|d| {
+                                                d.with_timezone(&chrono::Local).date_naive()
+                                            })
+                                            .map_or(true, |pd| pd != this_d),
+                                    };
+                                    if show {
+                                        Some(crate::status_row::local_date_label(
+                                            this_local,
+                                            chrono::Local::now(),
+                                        ))
+                                    } else {
+                                        None
+                                    }
+                                });
+
                                 render_entry(
                                     idx,
                                     entry,
+                                    created_ms,
+                                    is_last,
+                                    date_separator,
                                     &this.markdown_for_render,
                                     style,
                                     &this.assistant_label_for_render,

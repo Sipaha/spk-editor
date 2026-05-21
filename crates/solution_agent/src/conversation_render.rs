@@ -9,6 +9,7 @@ use acp_thread::{
 };
 use agent_client_protocol::schema as acp;
 use base64::Engine;
+use chrono::TimeZone as _;
 use gpui::{
     AnyElement, App, Context, Empty, Entity, InteractiveElement as _, IntoElement, ParentElement,
     Render, SharedString, StatefulInteractiveElement as _, Styled, WeakEntity, Window, div, px,
@@ -192,6 +193,9 @@ pub(crate) fn render_span(
 pub(crate) fn render_entry(
     entry_idx: usize,
     entry: &AgentThreadEntry,
+    created_ms: Option<i64>,
+    is_last: bool,
+    date_separator: Option<String>,
     markdown_for: &HashMap<(usize, usize), Entity<Markdown>>,
     style: &MarkdownStyle,
     assistant_label: &SharedString,
@@ -205,15 +209,24 @@ pub(crate) fn render_entry(
         AgentThreadEntry::UserMessage(message) => render_user_message(
             entry_idx,
             message,
+            created_ms,
+            is_last,
             markdown_for,
             style,
             view,
             queue_marker_expanded,
             cx,
         ),
-        AgentThreadEntry::AssistantMessage(message) => {
-            render_assistant_message(entry_idx, message, markdown_for, style, assistant_label, cx)
-        }
+        AgentThreadEntry::AssistantMessage(message) => render_assistant_message(
+            entry_idx,
+            message,
+            created_ms,
+            is_last,
+            markdown_for,
+            style,
+            assistant_label,
+            cx,
+        ),
         AgentThreadEntry::ToolCall(call) => {
             render_tool_call(entry_idx, call, markdown_for, style, cx)
         }
@@ -231,7 +244,7 @@ pub(crate) fn render_entry(
     // the only Copy affordance, but that wrapper breaks the list's
     // flex layout so we host the menu per-entry instead.
     let inner_cell = std::cell::RefCell::new(Some(inner));
-    ui::right_click_menu(("session-entry-menu", entry_idx))
+    let body = ui::right_click_menu(("session-entry-menu", entry_idx))
         .trigger(move |_, _, _| {
             inner_cell
                 .borrow_mut()
@@ -266,7 +279,25 @@ pub(crate) fn render_entry(
                     .action("Copy", Box::new(markdown::Copy))
                     .action("Copy as markdown", Box::new(markdown::CopyAsMarkdown))
             })
+        });
+
+    // The separator (when present) renders ABOVE the bubble as a child of
+    // the same list item, keeping the list's idx↔entry mapping 1:1.
+    v_flex()
+        .when_some(date_separator, |this, label| {
+            this.child(
+                h_flex()
+                    .w_full()
+                    .my_1()
+                    .justify_center()
+                    .child(
+                        Label::new(label)
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    ),
+            )
         })
+        .child(body)
         .into_any_element()
 }
 
@@ -357,6 +388,8 @@ pub(crate) fn queue_marker_timestamp(marker: &str) -> Option<&str> {
 pub(crate) fn render_user_message(
     entry_idx: usize,
     message: &UserMessage,
+    created_ms: Option<i64>,
+    is_last: bool,
     markdown_for: &HashMap<(usize, usize), Entity<Markdown>>,
     style: &MarkdownStyle,
     view: WeakEntity<crate::session_view::SolutionSessionView>,
@@ -487,8 +520,12 @@ pub(crate) fn render_user_message(
                     .child(render_floating_copy_button(
                         SharedString::from(format!("copy-user-{entry_idx}")),
                         text,
-                        group_name,
-                    )),
+                        group_name.clone(),
+                    ))
+                    .when_some(
+                        render_message_time(created_ms, is_last, group_name),
+                        |this, time| this.child(time),
+                    ),
             ),
         )
         .into_any_element()
@@ -674,6 +711,8 @@ impl Render for ImagePreviewWindowView {
 pub(crate) fn render_assistant_message(
     entry_idx: usize,
     message: &AssistantMessage,
+    created_ms: Option<i64>,
+    is_last: bool,
     markdown_for: &HashMap<(usize, usize), Entity<Markdown>>,
     style: &MarkdownStyle,
     _assistant_label: &SharedString,
@@ -739,8 +778,11 @@ pub(crate) fn render_assistant_message(
         container = container.child(render_floating_copy_button(
             SharedString::from(format!("copy-assistant-{entry_idx}")),
             visible_text,
-            group_name,
+            group_name.clone(),
         ));
+    }
+    if let Some(time) = render_message_time(created_ms, is_last, group_name) {
+        container = container.child(time);
     }
     container.into_any_element()
 }
@@ -764,6 +806,31 @@ pub(crate) fn render_floating_copy_button(
             .tooltip_label("Copy as markdown")
             .visible_on_hover(group_name),
     )
+}
+
+/// Top-right `HH:MM` affordance for a message bubble. Anchored absolutely
+/// so it overlays the bubble's upper-right corner, sitting clear of the
+/// bottom-right copy button. On the newest bubble (`is_last`) it stays
+/// visible; on every older bubble it only reveals on hover (same group
+/// the copy button uses). Returns `None` for entries without a real
+/// timestamp (`ms <= 0` is filtered upstream).
+fn render_message_time(
+    created_ms: Option<i64>,
+    is_last: bool,
+    group_name: SharedString,
+) -> Option<impl IntoElement> {
+    let ms = created_ms.filter(|&ms| ms > 0)?;
+    let dt = chrono::Utc.timestamp_millis_opt(ms).single()?;
+    let label = div().absolute().top_0p5().right_1p5().child(
+        Label::new(crate::status_row::format_hm(dt))
+            .size(LabelSize::XSmall)
+            .color(Color::Muted),
+    );
+    Some(if is_last {
+        label.into_any_element()
+    } else {
+        label.visible_on_hover(group_name).into_any_element()
+    })
 }
 
 pub(crate) fn render_tool_call(
