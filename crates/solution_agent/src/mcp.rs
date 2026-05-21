@@ -771,7 +771,6 @@ impl McpServerTool for GetSessionTool {
                 // rely on `spk-image://N` URLs in markdown.
                 let after = input.after_index;
                 let before = input.before_index;
-                let created_times: Vec<i64> = session.entry_created_ms.clone();
                 let mut image_cursor = 0usize;
                 let mut kept: Vec<EntrySummary> = Vec::new();
                 for (index, entry) in entries_ref.iter().enumerate() {
@@ -779,7 +778,7 @@ impl McpServerTool for GetSessionTool {
                         && before.map_or(true, |b| index < b);
                     if in_range {
                         let created_ms =
-                            created_times.get(index).copied().filter(|&ms| ms > 0);
+                            session.entry_created_ms.get(index).copied().filter(|&ms| ms > 0);
                         kept.push(summarize_entry(
                             entry,
                             index,
@@ -4333,6 +4332,24 @@ mod tests {
             result.structured_content.entry.created_ms.is_some_and(|ms| ms > 0),
             "GetSessionEntryTool must carry created_ms for a stamped entry; got {:?}",
             result.structured_content.entry.created_ms,
+        );
+
+        let result_sentinel = GetSessionEntryTool
+            .run(
+                GetSessionEntryParams {
+                    session_id: session_id.to_string(),
+                    index: 1,
+                    include_images: false,
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session_entry sentinel");
+
+        assert!(
+            result_sentinel.structured_content.entry.created_ms.is_none(),
+            "GetSessionEntryTool must surface sentinel as None; got {:?}",
+            result_sentinel.structured_content.entry.created_ms,
         );
     }
 }
