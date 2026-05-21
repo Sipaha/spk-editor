@@ -201,6 +201,14 @@ pub struct SolutionSessionsNavigator {
     /// session in `Running` state; dropped (and so cancelled) when the
     /// next render observes the session is no longer running.
     pub(crate) thinking_tick: Option<gpui::Task<()>>,
+    /// Coarse ~15s tick that re-renders the status row so the
+    /// "last activity" relative label (`Running · 8m ago`) stays
+    /// current even when no AcpThreadEvents fire. Runs for as long as a
+    /// session tab is open (any state) — granularity of "ago" doesn't
+    /// need anything tighter. Kicked off by `render_status_row`; self-
+    /// cancels once no session is selected. Distinct from `thinking_tick`
+    /// (1 Hz, Running-only) which the elapsed-seconds counter needs.
+    pub(crate) activity_tick: Option<gpui::Task<()>>,
     /// In-flight `restore_open_tabs` task for the current solution. Held
     /// so we can ignore reconcile-from-store while restoration is mid-
     /// flight (otherwise the cold-session inserts the restore task
@@ -264,6 +272,7 @@ impl SolutionSessionsNavigator {
             cached_models: HashMap::default(),
             pending_model_fetches: HashSet::default(),
             thinking_tick: None,
+            activity_tick: None,
             pending_restore: None,
             _store_subscription: store_subscription,
             _solutions_subscription: solutions_subscription,
@@ -1372,6 +1381,7 @@ impl SolutionSessionsNavigator {
             cached_models: HashMap::default(),
             pending_model_fetches: HashSet::default(),
             thinking_tick: None,
+            activity_tick: None,
             pending_restore: None,
             _store_subscription: store_subscription,
             _solutions_subscription: None,

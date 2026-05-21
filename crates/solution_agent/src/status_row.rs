@@ -1,5 +1,6 @@
 //! Status footer rendered below the session tab strip: token meter, model name, mode, state badge, history popover.
 
+use chrono::TimeZone as _;
 use gpui::{Animation, AnimationExt, ElementId, pulsating_between};
 use gpui::{
     AppContext as _, Context, Entity, IntoElement, MouseButton, ParentElement, SharedString,
@@ -272,6 +273,44 @@ impl SolutionSessionsNavigator {
         }));
     }
 
+    /// Spawn a coarse background tick (~15s) that wakes the navigator so
+    /// the status row's "last activity" relative label ("· 8m ago") stays
+    /// current without depending on AcpThreadEvents. Unlike
+    /// `ensure_thinking_tick` (1 Hz, Running-only) this runs for as long as
+    /// any session tab is open — "ago" granularity doesn't need anything
+    /// tighter. Idempotent; self-cancels once no session is selected.
+    fn ensure_activity_tick(&mut self, cx: &mut Context<Self>) {
+        if self.activity_tick.is_some() {
+            return;
+        }
+        self.activity_tick = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(15))
+                    .await;
+                let session_open = this
+                    .update(cx, |this, cx| {
+                        let open = this
+                            .selected_index
+                            .and_then(|idx| this.open_sessions.get(idx).copied())
+                            .is_some();
+                        if open {
+                            cx.notify();
+                        }
+                        open
+                    })
+                    .ok()
+                    .unwrap_or(false);
+                if !session_open {
+                    break;
+                }
+            }
+            let _ = this.update(cx, |this, _| {
+                this.activity_tick = None;
+            });
+        }));
+    }
+
     pub(crate) fn render_status_row(
         &mut self,
         active_view: Option<&Entity<SolutionSessionView>>,
@@ -396,6 +435,12 @@ impl SolutionSessionsNavigator {
                 .map(|m| SharedString::from(m.name))
                 .or_else(|| Some(SharedString::from(current.0.to_string())))
         });
+        // Newest entry's server-stamped time, if it has a real one. The
+        // newest entry is the last element of `entry_created_ms` (index-
+        // aligned with entries); `> 0` filters out the NO_TIMESTAMP_MS
+        // sentinel and 0/missing. An all-historical or empty session has
+        // no real newest time → we render no relative label at all.
+        let last_activity_ms = s.entry_created_ms.last().copied().filter(|&ms| ms > 0);
         let _ = s;
         // While the active session is in `Running`, drive a 1 Hz tick
         // so the elapsed counter ("Thinking… Ns") in `state_text`
@@ -408,6 +453,9 @@ impl SolutionSessionsNavigator {
         } else if self.thinking_tick.is_some() {
             self.thinking_tick = None;
         }
+        // Keep the "last activity" relative label fresh with a coarse
+        // ~15s tick for as long as this session tab is open.
+        self.ensure_activity_tick(cx);
         // Kick off a model lookup if we don't have one cached yet.
         // Stored in `cached_models` for synchronous reads on later
         // frames; the spawn de-dupes via `pending_model_fetches`.
@@ -676,6 +724,31 @@ impl SolutionSessionsNavigator {
             }
         };
 
+        // "Last activity" relative label, sitting right after the state
+        // badge so a stalled agent (Running but last entry long ago) is
+        // obvious at a glance: `Thinking… 8m05s · 8m ago`. Hover reveals
+        // the absolute date-time of the newest entry. Rendered only when
+        // the newest entry carries a real server timestamp — an all-
+        // historical or empty session shows nothing here, leaving the row
+        // visually identical to before.
+        let activity_badge: Option<gpui::AnyElement> = last_activity_ms
+            .and_then(|ms| chrono::Utc.timestamp_millis_opt(ms).single())
+            .map(|dt| {
+                let now = chrono::Utc::now();
+                let relative = relative_time_short(dt, now);
+                let absolute = format_activity_tooltip(dt, now);
+                div()
+                    .id("solution-status-last-activity")
+                    .flex_none()
+                    .tooltip(ui::Tooltip::text(absolute))
+                    .child(
+                        Label::new(relative)
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .into_any_element()
+            });
+
         // `border_t_1()` (top border): the row now sits between the
         // conversation list and the compose box, so the separator we
         // want is at the TOP — without it the row blends into the
@@ -693,6 +766,10 @@ impl SolutionSessionsNavigator {
                 .border_t_1()
                 .border_color(cx.theme().colors().border_variant)
                 .child(div().flex_none().child(state_badge))
+                .when_some(activity_badge, |this, badge| {
+                    this.child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
+                        .child(badge)
+                })
                 .child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
                 .child(
                     div().flex_none().child(
@@ -849,6 +926,17 @@ pub(crate) fn local_date_label<Tz: chrono::TimeZone>(
     }
 }
 
+/// Absolute date-time label for the status-row "last activity" tooltip:
+/// `"<date-label> <HH:MM>"` ("Today 14:05" / "2026-05-19 09:12"). Reuses the
+/// shared date / time formatters so the tooltip stays consistent with the
+/// History popover and bubble hover times.
+fn format_activity_tooltip(
+    when: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    format!("{} {}", local_date_label(when, now), format_hm(when))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -860,6 +948,20 @@ mod tests {
         let s = format_hm(dt);
         assert_eq!(s.len(), 5); // "HH:MM"
         assert_eq!(s.as_bytes()[2], b':');
+    }
+
+    #[test]
+    fn format_activity_tooltip_combines_date_and_time() {
+        let now = chrono::Utc::now();
+        // Same instant → "Today HH:MM".
+        let tip = format_activity_tooltip(now, now);
+        assert!(tip.starts_with("Today "));
+        assert_eq!(tip.len(), "Today ".len() + 5); // "Today " + "HH:MM"
+        // A 10-day-old instant → "YYYY-MM-DD HH:MM".
+        let older = now - chrono::Duration::days(10);
+        let tip = format_activity_tooltip(older, now);
+        assert_eq!(tip.len(), 10 + 1 + 5); // date + space + time
+        assert_eq!(tip.as_bytes()[10], b' ');
     }
 
     #[test]

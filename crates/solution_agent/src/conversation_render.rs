@@ -814,27 +814,31 @@ pub(crate) fn render_floating_copy_button(
 
 /// Top-right `HH:MM` affordance for a message bubble. Anchored absolutely
 /// so it overlays the bubble's upper-right corner, sitting clear of the
-/// bottom-right copy button. On the newest bubble (`is_last`) it stays
-/// visible; on every older bubble it only reveals on hover (same group
-/// the copy button uses). Returns `None` for entries without a real
-/// timestamp (`ms <= 0` is filtered upstream).
+/// bottom-right copy button. Always hover-only (same group the copy button
+/// uses) — the always-visible "last activity" time now lives in the status
+/// row instead, so no bubble needs a permanently-painted timestamp. The
+/// `_is_last` param is kept for the caller's plumbing but no longer affects
+/// visibility. Returns `None` for entries without a real timestamp
+/// (`ms <= 0` is filtered upstream).
 fn render_message_time(
     created_ms: Option<i64>,
-    is_last: bool,
+    _is_last: bool,
     group_name: SharedString,
 ) -> Option<impl IntoElement> {
     let ms = created_ms.filter(|&ms| ms > 0)?;
     let dt = chrono::Utc.timestamp_millis_opt(ms).single()?;
-    let label = div().absolute().top_0p5().right_1p5().child(
-        Label::new(crate::status_row::format_hm(dt))
-            .size(LabelSize::XSmall)
-            .color(Color::Muted),
-    );
-    Some(if is_last {
-        label.into_any_element()
-    } else {
-        label.visible_on_hover(group_name).into_any_element()
-    })
+    Some(
+        div()
+            .absolute()
+            .top_0p5()
+            .right_1p5()
+            .child(
+                Label::new(crate::status_row::format_hm(dt))
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
+            .visible_on_hover(group_name),
+    )
 }
 
 pub(crate) fn render_tool_call(
