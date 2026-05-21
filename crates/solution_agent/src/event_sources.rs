@@ -132,10 +132,15 @@ pub(crate) fn build_message_appended_payload(
     entry_index: usize,
     cx: &App,
 ) -> serde_json::Value {
-    let role_preview_csid = SolutionAgentStore::try_global(cx).and_then(|store| {
+    let role_preview_csid_created_ms = SolutionAgentStore::try_global(cx).and_then(|store| {
         store.read_with(cx, |store, cx| {
             let session = store.session(session_id)?;
             let session_ref = session.read(cx);
+            let created_ms = session_ref
+                .entry_created_ms
+                .get(entry_index)
+                .copied()
+                .filter(|&ms| ms > 0);
             let thread = session_ref.acp_thread()?;
             let thread_ref = thread.read(cx);
             let entry = thread_ref.entries().get(entry_index)?;
@@ -160,20 +165,13 @@ pub(crate) fn build_message_appended_payload(
                 } else {
                     Vec::new()
                 };
-            Some((role.to_string(), preview, client_send_ids))
+            Some((role.to_string(), preview, client_send_ids, created_ms))
         })
     });
-    let created_ms = SolutionAgentStore::try_global(cx).and_then(|store| {
-        store.read_with(cx, |store, cx| {
-            let session = store.session(session_id)?;
-            session
-                .read(cx)
-                .entry_created_ms
-                .get(entry_index)
-                .copied()
-                .filter(|&ms| ms >= 0)
-        })
-    });
+    let (role_preview_csid, created_ms) = match role_preview_csid_created_ms {
+        Some((role, preview, csids, created_ms)) => (Some((role, preview, csids)), created_ms),
+        None => (None, None),
+    };
     let mut obj = match role_preview_csid {
         Some((role, preview, csids)) if !csids.is_empty() => json!({
             "session_id": session_id.to_string(),
