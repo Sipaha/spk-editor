@@ -44,6 +44,9 @@ pub fn register(cx: &mut App) {
         server.add_tool(CancelTurnTool);
     });
     editor_mcp::register_tool(cx, |server| {
+        server.add_tool(AuthorizeToolCallTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
         server.add_tool(RenameSessionTool);
     });
     editor_mcp::register_tool(cx, |server| {
@@ -648,6 +651,24 @@ pub struct ToolCallSummary {
     /// calls that haven't started yet).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_status_started_at_ms: Option<i64>,
+    /// Authorization options when this tool call is awaiting confirmation
+    /// (status == "waiting for confirmation"). Empty otherwise. The client
+    /// renders one button per option and answers via
+    /// `solution_agent.authorize_tool_call`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<ToolCallAuthOption>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ToolCallAuthOption {
+    /// Opaque option id — pass back verbatim to authorize_tool_call.
+    pub option_id: String,
+    /// Display label for the button.
+    pub label: String,
+    /// One of: "allow_once" | "allow_always" | "reject_once" | "reject_always".
+    pub kind: String,
+    /// True for allow-style options (render as primary), false for reject-style.
+    pub is_allow: bool,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -1102,12 +1123,48 @@ fn tool_call_summary(call: &acp_thread::ToolCall, cx: &App) -> ToolCallSummary {
         .map(|s| truncate_preview(&s, FIELD_PREVIEW_MAX_CHARS))
         .unwrap_or_default();
     let tool_status_started_at_ms = call.status_started_at.map(|t| t.timestamp_millis());
+    // Surface authorization choices only while the call is blocked on the
+    // user. Reuse the Q1 `permission_buttons` helper so the wire options
+    // and the desktop buttons are derived from the exact same flattening
+    // (Flat / Dropdown / DropdownWithPatterns all collapse identically),
+    // and so the server can later reconstruct the outcome from `option_id`.
+    let options = match &call.status {
+        acp_thread::ToolCallStatus::WaitingForConfirmation { options, .. } => {
+            crate::conversation_render::permission_buttons(options)
+                .into_iter()
+                .map(|button| ToolCallAuthOption {
+                    option_id: button.option_id.0.to_string(),
+                    label: button.label.to_string(),
+                    kind: permission_kind_str(button.kind).to_string(),
+                    is_allow: button.is_allow(),
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    };
     ToolCallSummary {
         name,
         status,
         args_preview,
         result_preview,
         tool_status_started_at_ms,
+        options,
+    }
+}
+
+/// Snake-case wire string for a `PermissionOptionKind`, matching the
+/// kinds documented on `ToolCallAuthOption.kind`. The ACP enum already
+/// serializes to exactly these strings (`#[serde(rename_all =
+/// "snake_case")]`), but spelling them out here keeps the wire contract
+/// stable even if the upstream serde representation ever drifts, and
+/// avoids a serde round-trip per option.
+fn permission_kind_str(kind: acp::PermissionOptionKind) -> &'static str {
+    match kind {
+        acp::PermissionOptionKind::AllowOnce => "allow_once",
+        acp::PermissionOptionKind::AllowAlways => "allow_always",
+        acp::PermissionOptionKind::RejectOnce => "reject_once",
+        acp::PermissionOptionKind::RejectAlways => "reject_always",
+        _ => "allow_once",
     }
 }
 
@@ -1787,6 +1844,148 @@ impl McpServerTool for CancelTurnTool {
                 text: "cancelled".to_string(),
             }],
             structured_content: CancelTurnResult {},
+        })
+    }
+}
+
+// =====================================================================
+// solution_agent.authorize_tool_call
+// =====================================================================
+
+/// Answer a tool call that is blocked `WaitingForConfirmation`. The
+/// client picks one of the `options` it received on the tool call's
+/// `ToolCallSummary` (see `solution_agent.get_session{,_entry}`) and
+/// sends back its `option_id`. The SERVER reconstructs the full
+/// `SelectedPermissionOutcome` (kind + any terminal sub-patterns) from
+/// the live options — the client only needs to echo the opaque id — so
+/// the answer can never drift from what the agent actually offered.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct AuthorizeToolCallParams {
+    pub session_id: String,
+    pub tool_call_id: String,
+    pub option_id: String,
+}
+
+impl<'de> Deserialize<'de> for AuthorizeToolCallParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            session_id: String,
+            tool_call_id: String,
+            option_id: String,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            session_id: inner.session_id,
+            tool_call_id: inner.tool_call_id,
+            option_id: inner.option_id,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct AuthorizeToolCallResult {
+    pub ok: bool,
+}
+
+/// Locate the `WaitingForConfirmation` tool call matching `tool_call_id`
+/// in `entries`, then resolve `option_id` against its live permission
+/// buttons and return the `SelectedPermissionOutcome` to hand to
+/// `AcpThread::authorize_tool_call`. Pure over the thread's entries +
+/// the client's request so the resolution logic is unit-testable
+/// without staging a live confirmation oneshot.
+fn resolve_authorization_outcome(
+    entries: &[acp_thread::AgentThreadEntry],
+    tool_call_id: &str,
+    option_id: &str,
+) -> Result<acp_thread::SelectedPermissionOutcome> {
+    let call = entries
+        .iter()
+        .find_map(|entry| match entry {
+            acp_thread::AgentThreadEntry::ToolCall(call) if call.id.0.as_ref() == tool_call_id => {
+                Some(call)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| anyhow!("tool_call_not_found: {}", tool_call_id))?;
+
+    let options = match &call.status {
+        acp_thread::ToolCallStatus::WaitingForConfirmation { options, .. } => options,
+        _ => {
+            anyhow::bail!("not_awaiting_confirmation: {}", tool_call_id);
+        }
+    };
+
+    crate::conversation_render::permission_buttons(options)
+        .into_iter()
+        .find(|button| button.option_id.0.as_ref() == option_id)
+        .map(|button| button.outcome())
+        .ok_or_else(|| anyhow!("unknown_option: {}", option_id))
+}
+
+#[derive(Clone)]
+pub struct AuthorizeToolCallTool;
+
+impl McpServerTool for AuthorizeToolCallTool {
+    type Input = AuthorizeToolCallParams;
+    type Output = AuthorizeToolCallResult;
+    const NAME: &'static str = "solution_agent.authorize_tool_call";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.session_id.is_empty(),
+            "invalid_params: session_id is required"
+        );
+        anyhow::ensure!(
+            !input.tool_call_id.is_empty(),
+            "invalid_params: tool_call_id is required"
+        );
+        anyhow::ensure!(
+            !input.option_id.is_empty(),
+            "invalid_params: option_id is required"
+        );
+        let session_id = SolutionSessionId::parse(&input.session_id)
+            .map_err(|e| anyhow!("bad session id: {e}"))?;
+        let tool_call_id = input.tool_call_id;
+        let option_id = input.option_id;
+
+        cx.update(|cx| -> Result<()> {
+            let store = SolutionAgentStore::global(cx);
+            let entity = store
+                .read_with(cx, |store, _| store.session(session_id))
+                .with_context(|| format!("session_not_found: {}", session_id))?;
+            let thread = entity
+                .read(cx)
+                .acp_thread()
+                .cloned()
+                .ok_or_else(|| anyhow!("session_has_no_thread: {}", session_id))?;
+            // Resolve against the live thread entries: the kind / terminal
+            // sub-patterns needed to build the outcome are reconstructed
+            // server-side from what the agent actually offered, never
+            // trusted from the client.
+            let outcome = thread.read_with(cx, |thread, _| {
+                resolve_authorization_outcome(thread.entries(), &tool_call_id, &option_id)
+            })?;
+            thread.update(cx, |thread, cx| {
+                thread.authorize_tool_call(
+                    acp::ToolCallId::new(tool_call_id.as_str()),
+                    outcome,
+                    cx,
+                );
+            });
+            Ok(())
+        })?;
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: "authorized".to_string(),
+            }],
+            structured_content: AuthorizeToolCallResult { ok: true },
         })
     }
 }
@@ -4350,6 +4549,165 @@ mod tests {
             result_sentinel.structured_content.entry.created_ms.is_none(),
             "GetSessionEntryTool must surface sentinel as None; got {:?}",
             result_sentinel.structured_content.entry.created_ms,
+        );
+    }
+
+    /// Stage a tool call sitting in `WaitingForConfirmation` with a Flat
+    /// allow/reject option pair, returning the session id, the tool call
+    /// id, and the authorization-outcome `Task` (held so the oneshot the
+    /// connection awaits stays alive — dropping it would cancel the
+    /// confirmation and flip the call off `WaitingForConfirmation`).
+    async fn seed_session_with_pending_authorization(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        crate::model::SolutionSessionId,
+        String,
+        gpui::Task<acp_thread::RequestPermissionOutcome>,
+        tempfile::TempDir,
+    ) {
+        let (session_id, acp_thread, tmp) = create_session_with_thread(cx).await;
+        let tool_call_id = "call-auth-1".to_string();
+        let auth_task = cx.update(|cx| {
+            acp_thread.update(cx, |thread, cx| {
+                let update = acp::ToolCallUpdate::new(
+                    acp::ToolCallId::new(tool_call_id.as_str()),
+                    acp::ToolCallUpdateFields::new()
+                        .kind(acp::ToolKind::Execute)
+                        .title("Bash".to_string()),
+                );
+                let options = acp_thread::PermissionOptions::Flat(vec![
+                    acp::PermissionOption::new(
+                        "opt-allow",
+                        "Allow".to_string(),
+                        acp::PermissionOptionKind::AllowOnce,
+                    ),
+                    acp::PermissionOption::new(
+                        "opt-reject",
+                        "Reject".to_string(),
+                        acp::PermissionOptionKind::RejectOnce,
+                    ),
+                ]);
+                thread
+                    .request_tool_call_authorization(update, options, cx)
+                    .expect("stage waiting-for-confirmation")
+            })
+        });
+        cx.executor().run_until_parked();
+        (session_id, tool_call_id, auth_task, tmp)
+    }
+
+    #[gpui::test]
+    async fn get_session_surfaces_auth_options_while_waiting(cx: &mut gpui::TestAppContext) {
+        let (session_id, tool_call_id, _auth_task, _tmp) =
+            seed_session_with_pending_authorization(cx).await;
+
+        let result = GetSessionTool
+            .run(
+                GetSessionParams {
+                    session_id: session_id.to_string(),
+                    ..Default::default()
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session");
+
+        let tool_call = result
+            .structured_content
+            .entries
+            .iter()
+            .find_map(|entry| entry.tool_call.as_ref())
+            .expect("a tool_call entry must be present");
+        assert_eq!(tool_call.status, "waiting for confirmation");
+        assert_eq!(tool_call.options.len(), 2, "both options must surface");
+        assert_eq!(tool_call.options[0].kind, "allow_once");
+        assert!(tool_call.options[0].is_allow);
+        assert_eq!(tool_call.options[1].kind, "reject_once");
+        assert!(!tool_call.options[1].is_allow);
+        // The option id is opaque but must round-trip verbatim.
+        assert_eq!(tool_call.options[0].option_id, "opt-allow");
+        // tool_call_id is what the client echoes back to authorize.
+        let _ = tool_call_id;
+    }
+
+    #[gpui::test]
+    async fn authorize_tool_call_resolves_waiting_call(cx: &mut gpui::TestAppContext) {
+        let (session_id, tool_call_id, _auth_task, _tmp) =
+            seed_session_with_pending_authorization(cx).await;
+
+        let result = AuthorizeToolCallTool
+            .run(
+                AuthorizeToolCallParams {
+                    session_id: session_id.to_string(),
+                    tool_call_id: tool_call_id.clone(),
+                    option_id: "opt-allow".to_string(),
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("authorize_tool_call should succeed");
+        assert!(result.structured_content.ok);
+        cx.executor().run_until_parked();
+
+        // The call must have flipped off WaitingForConfirmation — a
+        // second authorize attempt now reports not_awaiting_confirmation.
+        let err = AuthorizeToolCallTool
+            .run(
+                AuthorizeToolCallParams {
+                    session_id: session_id.to_string(),
+                    tool_call_id: tool_call_id.clone(),
+                    option_id: "opt-allow".to_string(),
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect_err("second authorize must fail; call no longer waiting");
+        assert!(
+            err.to_string().contains("not_awaiting_confirmation"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[gpui::test]
+    async fn authorize_tool_call_rejects_unknown_option(cx: &mut gpui::TestAppContext) {
+        let (session_id, tool_call_id, _auth_task, _tmp) =
+            seed_session_with_pending_authorization(cx).await;
+
+        let err = AuthorizeToolCallTool
+            .run(
+                AuthorizeToolCallParams {
+                    session_id: session_id.to_string(),
+                    tool_call_id,
+                    option_id: "opt-does-not-exist".to_string(),
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect_err("unknown option must error");
+        assert!(
+            err.to_string().contains("unknown_option"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[gpui::test]
+    async fn authorize_tool_call_unknown_tool_call_errors(cx: &mut gpui::TestAppContext) {
+        let (session_id, _img, _tmp) = seed_session_with_image(cx).await;
+
+        let err = AuthorizeToolCallTool
+            .run(
+                AuthorizeToolCallParams {
+                    session_id: session_id.to_string(),
+                    tool_call_id: "no-such-call".to_string(),
+                    option_id: "opt-allow".to_string(),
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect_err("missing tool call must error");
+        assert!(
+            err.to_string().contains("tool_call_not_found"),
+            "unexpected error: {err}"
         );
     }
 }
