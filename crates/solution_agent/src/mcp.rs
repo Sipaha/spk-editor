@@ -625,6 +625,10 @@ pub struct EntryImage {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ToolCallSummary {
+    /// Opaque tool-call id, matching the id `authorize_tool_call` resolves
+    /// against. Always populated. The client echoes this verbatim when
+    /// answering an authorization prompt.
+    pub tool_call_id: String,
     /// Human-readable tool name (e.g. "Read", "Edit", "Bash"). Derived
     /// from `tool_name` when set, falling back to the markdown source of
     /// the call's label entity.
@@ -1143,6 +1147,7 @@ fn tool_call_summary(call: &acp_thread::ToolCall, cx: &App) -> ToolCallSummary {
         _ => Vec::new(),
     };
     ToolCallSummary {
+        tool_call_id: call.id.0.to_string(),
         name,
         status,
         args_preview,
