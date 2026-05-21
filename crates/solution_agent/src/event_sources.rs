@@ -370,6 +370,96 @@ mod tests {
         });
     }
 
+    /// Build a text block carrying an `spk_client_send_id` stamp on its
+    /// `_meta`, mirroring what the mobile client sends.
+    fn stamped_text(text: &str, csid: i64) -> agent_client_protocol::schema::ContentBlock {
+        let mut block = agent_client_protocol::schema::TextContent::new(text.to_string());
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            acp_thread::SPK_CLIENT_SEND_ID_META_KEY.to_string(),
+            serde_json::json!(csid),
+        );
+        block.meta = Some(meta);
+        agent_client_protocol::schema::ContentBlock::Text(block)
+    }
+
+    fn image_block() -> agent_client_protocol::schema::ContentBlock {
+        agent_client_protocol::schema::ContentBlock::Image(
+            agent_client_protocol::schema::ImageContent::new(
+                "AAAA".to_string(),
+                "image/png".to_string(),
+            ),
+        )
+    }
+
+    #[gpui::test]
+    async fn queue_changed_payload_summarises_mixed_bundle(cx: &mut TestAppContext) {
+        let (session_id, _acp_thread, _tmp) =
+            crate::store::tests::create_session_with_thread(cx).await;
+
+        // Seed a single bundle mixing text (with two distinct csids) and two
+        // image blocks. `image_count` must count ONLY Image blocks.
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            let session = store.read(cx).session(session_id).expect("session");
+            session.update(cx, |s, _| {
+                s.pending_messages.push_back(vec![
+                    stamped_text("hello world", 111),
+                    image_block(),
+                    stamped_text("more", 222),
+                    image_block(),
+                ]);
+            });
+        });
+
+        cx.update(|cx| {
+            let payload = build_queue_changed_payload(session_id, cx);
+            let obj = payload.as_object().expect("object");
+            assert_eq!(
+                obj.get("session_id").and_then(|v| v.as_str()),
+                Some(session_id.to_string().as_str())
+            );
+            let bundles = obj.get("bundles").and_then(|v| v.as_array()).expect("bundles");
+            assert_eq!(bundles.len(), 1, "one seeded bundle → one descriptor");
+            let bundle = bundles[0].as_object().expect("bundle object");
+
+            let csids: Vec<i64> = bundle
+                .get("csids")
+                .and_then(|v| v.as_array())
+                .expect("csids")
+                .iter()
+                .filter_map(|v| v.as_i64())
+                .collect();
+            assert_eq!(csids, vec![111, 222], "csids in first-seen order, deduped");
+
+            let preview = bundle.get("preview").and_then(|v| v.as_str()).expect("preview");
+            assert!(
+                preview.contains("hello world") && preview.contains("more"),
+                "preview should carry both text blocks: {preview}"
+            );
+
+            assert_eq!(
+                bundle.get("image_count").and_then(|v| v.as_u64()),
+                Some(2),
+                "image_count counts ONLY image blocks, not all blocks"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn queue_changed_payload_empty_queue_emits_empty_bundles(cx: &mut TestAppContext) {
+        // Mobile relies on `bundles: []` to clear synthetic Queued bubbles.
+        let (session_id, _acp_thread, _tmp) =
+            crate::store::tests::create_session_with_thread(cx).await;
+
+        cx.update(|cx| {
+            let payload = build_queue_changed_payload(session_id, cx);
+            let obj = payload.as_object().expect("object");
+            let bundles = obj.get("bundles").and_then(|v| v.as_array()).expect("bundles");
+            assert!(bundles.is_empty(), "empty queue must emit an empty bundles array");
+        });
+    }
+
     #[gpui::test]
     async fn message_appended_payload_includes_created_ms(cx: &mut TestAppContext) {
         let (session_id, _acp_thread, _tmp) =

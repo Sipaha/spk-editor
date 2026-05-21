@@ -1986,3 +1986,126 @@ async fn rotate_context_clears_entry_created_ms(cx: &mut TestAppContext) {
         "rotate_context clears the timestamp vector with the entries"
     );
 }
+
+/// The `AcpThreadEvent::EntryUpdated` handler debounces re-emits of
+/// `SessionMessageAppended`: a 500 ms quiet window collapses a streaming
+/// burst into a single emit, and a 2 s max-stale guard forces an emit even
+/// when an entry is continuously dirty so the consumer never starves.
+///
+/// We observe the emit count by subscribing to the store's
+/// `SessionMessageAppended` events directly (no MCP socket needed) and
+/// driving GPUI's test clock with `advance_clock`.
+#[gpui::test]
+async fn entry_updated_burst_coalesces_then_force_emits(cx: &mut TestAppContext) {
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+
+    // Seed one real entry so EntryUpdated(0) targets a live index.
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.push_user_content_block(
+                Some(acp_thread::UserMessageId::new()),
+                agent_client_protocol::schema::ContentBlock::Text(
+                    agent_client_protocol::schema::TextContent::new("seed".to_string()),
+                ),
+                cx,
+            );
+        });
+    });
+    cx.executor().run_until_parked();
+
+    // Count SessionMessageAppended emits for our index via a store
+    // subscription. The subscription is held for the test's lifetime.
+    let appended = Rc::new(std::cell::RefCell::new(0usize));
+    let _subscription = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let appended = appended.clone();
+        cx.subscribe(&store, move |_store, event, _cx| {
+            if let SolutionAgentStoreEvent::SessionMessageAppended(id, idx) = event
+                && *id == session_id
+                && *idx == 0
+            {
+                *appended.borrow_mut() += 1;
+            }
+        })
+    });
+
+    // (a) Burst coalesces: fire several EntryUpdated(0) within the 500 ms
+    // quiet window. Each replaces the prior debounce Task, cancelling its
+    // timer, so only the final window's task survives.
+    for _ in 0..5 {
+        cx.update(|cx| {
+            acp_thread.update(cx, |_t, cx| {
+                cx.emit(acp_thread::AcpThreadEvent::EntryUpdated(0));
+            });
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(50));
+    }
+    cx.executor().run_until_parked();
+    assert_eq!(
+        *appended.borrow(),
+        0,
+        "no emit before the 500 ms quiet window elapses"
+    );
+
+    // Let the quiet window expire → exactly one coalesced emit.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    cx.executor().run_until_parked();
+    assert_eq!(
+        *appended.borrow(),
+        1,
+        "burst of 5 updates coalesces into a single emit"
+    );
+
+    // (b) Continuous dirtying still force-emits within max-stale.
+    //
+    // HARNESS LIMITATION: the max-stale guard compares wall-clock
+    // `std::time::Instant::now()` against `first_dirty_at`, and the GPUI
+    // test executor's `advance_clock` only moves the *dispatcher* timer
+    // (which drives the 500 ms debounce), NOT `Instant::now()`. So a
+    // microsecond-fast burst can never accumulate 2 s of real staleness
+    // and the force-emit branch can't be exercised by clock advancement.
+    //
+    // To assert the invariant deterministically we seed a throttle slot
+    // whose `first_dirty_at` is already 2 s+ in the past (as a long
+    // continuous stream would have left it), then fire one more
+    // EntryUpdated(0): the handler must take the max-stale branch and emit
+    // SYNCHRONOUSLY (no debounce wait), and clear the slot.
+    *appended.borrow_mut() = 0;
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, _cx| {
+            store.entry_update_throttles.insert(
+                (session_id, 0),
+                EntryUpdateThrottle {
+                    first_dirty_at: std::time::Instant::now()
+                        - std::time::Duration::from_millis(2_500),
+                    task: gpui::Task::ready(()),
+                },
+            );
+        });
+    });
+    cx.update(|cx| {
+        acp_thread.update(cx, |_t, cx| {
+            cx.emit(acp_thread::AcpThreadEvent::EntryUpdated(0));
+        });
+    });
+    cx.executor().run_until_parked();
+    assert_eq!(
+        *appended.borrow(),
+        1,
+        "max-stale breach must force a synchronous emit"
+    );
+    let still_throttled = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store
+            .read(cx)
+            .entry_update_throttles
+            .contains_key(&(session_id, 0))
+    });
+    assert!(
+        !still_throttled,
+        "force-emit must clear the throttle slot so the next window starts fresh"
+    );
+}

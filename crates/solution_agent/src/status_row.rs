@@ -966,7 +966,13 @@ mod tests {
 
     #[test]
     fn local_date_label_relative_today_yesterday() {
-        let now = chrono::Local::now();
+        use chrono::TimeZone;
+        // Pinned base with no DST edge so the relative-day math is
+        // deterministic (Local::now() can flake near a spring-forward).
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 6, 15, 12, 0, 0)
+            .single()
+            .unwrap();
         assert_eq!(local_date_label(now, now), "Today");
         let yest = now - chrono::Duration::days(1);
         assert_eq!(local_date_label(yest, now), "Yesterday");
