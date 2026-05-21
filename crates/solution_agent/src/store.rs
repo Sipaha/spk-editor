@@ -1415,6 +1415,11 @@ impl SolutionAgentStore {
         if let Some(list) = self.by_solution.get_mut(&solution_id) {
             list.retain(|sid| *sid != id);
         }
+        // Drop any per-entry update throttles for the closed session;
+        // each holds a live debounce `Task`, so leaving them would leak
+        // for the process lifetime (the throttle is only otherwise
+        // removed when its own timer fires against a still-open session).
+        self.entry_update_throttles.retain(|(sid, _), _| *sid != id);
         // Soft-close: keep the persisted blob so downstream tooling
         // (MCP read_session_history, future "View archived sessions"
         // UI, etc.) can still read the transcript. Hard-delete only
@@ -2121,9 +2126,9 @@ impl SolutionAgentStore {
                 // for a tool call or the first preview snapshot of a
                 // streaming assistant reply.
                 //
-                // Coalesced via a trailing-edge debounce: a 200 ms quiet
+                // Coalesced via a trailing-edge debounce: a 500 ms quiet
                 // window collapses a token-by-token streaming burst
-                // into roughly 5 emits/sec, and a 1 s max-stale guard
+                // into roughly 2 emits/sec, and a 2 s max-stale guard
                 // forces an emit when an entry is continuously dirty so
                 // the consumer doesn't starve. Replacing an entry in
                 // `entry_update_throttles` drops the previous `Task`,

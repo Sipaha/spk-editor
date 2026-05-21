@@ -188,6 +188,21 @@ impl PermissionButton {
     }
 }
 
+/// Pick the button to use when auto-resolving a pending authorization as a
+/// rejection (the queue path resolves a `WaitingForConfirmation` tool call
+/// before flushing a queued message — see `queue::pending_authorization_reject`).
+/// Prefers `RejectOnce`, falling back to any non-allow button. Returns `None`
+/// when the options offer ONLY allow-flavoured buttons: picking one would
+/// silently AUTO-APPROVE the tool call, so a stuck turn is the safer failure.
+pub(crate) fn pick_reject_button(options: &PermissionOptions) -> Option<PermissionButton> {
+    let buttons = permission_buttons(options);
+    buttons
+        .iter()
+        .find(|button| button.kind == acp::PermissionOptionKind::RejectOnce)
+        .or_else(|| buttons.iter().find(|button| !button.is_allow()))
+        .cloned()
+}
+
 /// Flatten a `PermissionOptions` into the list of buttons to render, in
 /// display order. Pure (no `cx`) so it can be unit-tested and reused by
 /// the future wire layer.
@@ -395,6 +410,33 @@ pub(crate) fn render_entry(
 /// ghost just clutters the preview without telling the user anything
 /// the "Queued — sends when agent finishes" caption doesn't already
 /// convey.
+/// Walk a pending-message bundle's content blocks and collect the
+/// deduplicated `spk_client_send_id` csids, preserving first-seen
+/// order. Shared by the `get_session` MCP surface and the live
+/// `queue_changed` notification path so both report identical csids.
+pub(crate) fn extract_bundle_csids(bundle: &[acp::ContentBlock]) -> Vec<i64> {
+    let mut out: Vec<i64> = Vec::new();
+    for block in bundle {
+        let meta = match block {
+            acp::ContentBlock::Text(t) => &t.meta,
+            acp::ContentBlock::Image(i) => &i.meta,
+            acp::ContentBlock::Audio(a) => &a.meta,
+            acp::ContentBlock::ResourceLink(r) => &r.meta,
+            acp::ContentBlock::Resource(r) => &r.meta,
+            _ => continue,
+        };
+        if let Some(id) = meta
+            .as_ref()
+            .and_then(|m| m.get(acp_thread::SPK_CLIENT_SEND_ID_META_KEY))
+            .and_then(|v| v.as_i64())
+            && !out.contains(&id)
+        {
+            out.push(id);
+        }
+    }
+    out
+}
+
 pub(crate) fn pending_blocks_preview(blocks: &[acp::ContentBlock], _cx: &App) -> String {
     let mut out = String::new();
     let mut image_idx = 1usize;
@@ -1512,6 +1554,34 @@ mod tests {
             }
             other => panic!("expected terminal params, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn pick_reject_button_none_when_only_allow_options() {
+        // A malformed server response offering ONLY allow options must NOT
+        // resolve to an auto-approve — `pick_reject_button` returns None so
+        // the queue path leaves the turn stuck rather than approving the call.
+        let options = PermissionOptions::Flat(vec![
+            opt("allow-once", "Allow once", acp::PermissionOptionKind::AllowOnce),
+            opt(
+                "allow-always",
+                "Allow always",
+                acp::PermissionOptionKind::AllowAlways,
+            ),
+        ]);
+        assert!(pick_reject_button(&options).is_none());
+    }
+
+    #[test]
+    fn pick_reject_button_prefers_reject_once() {
+        let options = PermissionOptions::Flat(vec![
+            opt("allow", "Allow", acp::PermissionOptionKind::AllowOnce),
+            opt("reject-always", "Reject always", acp::PermissionOptionKind::RejectAlways),
+            opt("reject-once", "Reject once", acp::PermissionOptionKind::RejectOnce),
+        ]);
+        let button = pick_reject_button(&options).expect("a reject button must be picked");
+        assert_eq!(button.kind, acp::PermissionOptionKind::RejectOnce);
+        assert_eq!(button.option_id, acp::PermissionOptionId::new("reject-once"));
     }
 
     #[test]

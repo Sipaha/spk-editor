@@ -72,12 +72,7 @@ pub(crate) fn pending_authorization_reject(
         let ToolCallStatus::WaitingForConfirmation { options, .. } = &call.status else {
             continue;
         };
-        let buttons = crate::conversation_render::permission_buttons(options);
-        let reject = buttons
-            .iter()
-            .find(|button| button.kind == acp::PermissionOptionKind::RejectOnce)
-            .or_else(|| buttons.iter().find(|button| !button.is_allow()));
-        if let Some(button) = reject {
+        if let Some(button) = crate::conversation_render::pick_reject_button(options) {
             return Some((call.id.clone(), button.outcome()));
         }
     }

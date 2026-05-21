@@ -236,28 +236,7 @@ pub(crate) fn build_queue_changed_payload(
                     .pending_messages
                     .iter()
                     .map(|bundle| {
-                        let csids: Vec<i64> = {
-                            let mut out: Vec<i64> = Vec::new();
-                            for block in bundle {
-                                let meta = match block {
-                                    agent_client_protocol::schema::ContentBlock::Text(t) => &t.meta,
-                                    agent_client_protocol::schema::ContentBlock::Image(i) => &i.meta,
-                                    agent_client_protocol::schema::ContentBlock::Audio(a) => &a.meta,
-                                    agent_client_protocol::schema::ContentBlock::ResourceLink(r) => &r.meta,
-                                    agent_client_protocol::schema::ContentBlock::Resource(r) => &r.meta,
-                                    _ => continue,
-                                };
-                                if let Some(id) = meta
-                                    .as_ref()
-                                    .and_then(|m| m.get(acp_thread::SPK_CLIENT_SEND_ID_META_KEY))
-                                    .and_then(|v| v.as_i64())
-                                    && !out.contains(&id)
-                                {
-                                    out.push(id);
-                                }
-                            }
-                            out
-                        };
+                        let csids = crate::conversation_render::extract_bundle_csids(bundle);
                         let preview = crate::conversation_render::pending_blocks_preview(bundle, cx);
                         let image_count: usize = bundle
                             .iter()

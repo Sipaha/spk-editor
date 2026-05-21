@@ -869,28 +869,7 @@ fn build_pending_bundle_summaries(
         .pending_messages
         .iter()
         .map(|bundle| {
-            let csids: Vec<i64> = {
-                let mut out: Vec<i64> = Vec::new();
-                for block in bundle {
-                    let meta = match block {
-                        acp::ContentBlock::Text(t) => &t.meta,
-                        acp::ContentBlock::Image(i) => &i.meta,
-                        acp::ContentBlock::Audio(a) => &a.meta,
-                        acp::ContentBlock::ResourceLink(r) => &r.meta,
-                        acp::ContentBlock::Resource(r) => &r.meta,
-                        _ => continue,
-                    };
-                    if let Some(id) = meta
-                        .as_ref()
-                        .and_then(|m| m.get(acp_thread::SPK_CLIENT_SEND_ID_META_KEY))
-                        .and_then(|v| v.as_i64())
-                        && !out.contains(&id)
-                    {
-                        out.push(id);
-                    }
-                }
-                out
-            };
+            let csids = crate::conversation_render::extract_bundle_csids(bundle);
             let preview = crate::conversation_render::pending_blocks_preview(bundle, _cx);
             let image_count: u32 = bundle
                 .iter()
@@ -4635,7 +4614,10 @@ mod tests {
         // The option id is opaque but must round-trip verbatim.
         assert_eq!(tool_call.options[0].option_id, "opt-allow");
         // tool_call_id is what the client echoes back to authorize.
-        let _ = tool_call_id;
+        assert_eq!(
+            tool_call.tool_call_id, tool_call_id,
+            "tool_call_id must round-trip verbatim to the client"
+        );
     }
 
     #[gpui::test]
