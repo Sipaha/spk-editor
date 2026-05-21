@@ -823,3 +823,54 @@ fn relative_time_short(
         format!("{}y ago", secs / (365 * 86_400))
     }
 }
+
+/// `HH:MM` in the machine's local timezone, 24-hour, zero-padded. Input is a
+/// UTC instant (created_ms reconstructs to UTC via `Utc.timestamp_millis_opt`).
+pub(crate) fn format_hm(when: chrono::DateTime<chrono::Utc>) -> String {
+    when.with_timezone(&chrono::Local).format("%H:%M").to_string()
+}
+
+/// Date-separator label for `when` relative to `now` (both compared on their
+/// local-tz calendar dates). "Today" / "Yesterday" for the two most recent
+/// days, else ISO `YYYY-MM-DD` (locale-independent — we deliberately don't pull
+/// in `icu` for localized month names on desktop).
+pub(crate) fn local_date_label<Tz: chrono::TimeZone>(
+    when: chrono::DateTime<Tz>,
+    now: chrono::DateTime<Tz>,
+) -> String {
+    use chrono::Datelike;
+    let when_d = when.date_naive();
+    let now_d = now.date_naive();
+    let days = (now_d - when_d).num_days();
+    match days {
+        0 => "Today".to_string(),
+        1 => "Yesterday".to_string(),
+        _ => format!("{:04}-{:02}-{:02}", when_d.year(), when_d.month(), when_d.day()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_hm_pads_to_24h() {
+        use chrono::TimeZone;
+        let dt = chrono::Utc.timestamp_millis_opt(0).unwrap(); // 1970-01-01 00:00 UTC
+        let s = format_hm(dt);
+        assert_eq!(s.len(), 5); // "HH:MM"
+        assert_eq!(s.as_bytes()[2], b':');
+    }
+
+    #[test]
+    fn local_date_label_relative_today_yesterday() {
+        let now = chrono::Local::now();
+        assert_eq!(local_date_label(now, now), "Today");
+        let yest = now - chrono::Duration::days(1);
+        assert_eq!(local_date_label(yest, now), "Yesterday");
+        let older = now - chrono::Duration::days(10);
+        let label = local_date_label(older, now);
+        assert_eq!(label.len(), 10); // YYYY-MM-DD
+        assert_eq!(label.as_bytes()[4], b'-');
+    }
+}
