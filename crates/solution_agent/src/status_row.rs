@@ -934,7 +934,13 @@ fn format_activity_tooltip(
     when: chrono::DateTime<chrono::Utc>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> String {
-    format!("{} {}", local_date_label(when, now), format_hm(when))
+    // `local_date_label` reads `date_naive()`, so feed it LOCAL-zone datetimes —
+    // otherwise the date label reads the UTC calendar date while `format_hm`
+    // renders local time, and the two disagree near midnight in non-UTC zones
+    // (e.g. 01:00 local = prior-day UTC would render "Yesterday 01:00").
+    let when_local = when.with_timezone(&chrono::Local);
+    let now_local = now.with_timezone(&chrono::Local);
+    format!("{} {}", local_date_label(when_local, now_local), format_hm(when))
 }
 
 #[cfg(test)]
