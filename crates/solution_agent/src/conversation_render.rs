@@ -657,15 +657,34 @@ pub(crate) fn render_user_message(
 pub(crate) fn clean_user_message_text(text: &str) -> String {
     let unmarked = strip_queue_marker(text);
     let mut ordinal: usize = 0;
-    let with_links = USER_IMAGE_PLACEHOLDER_RE.replace_all(&unmarked, |caps: &regex::Captures| {
+    let rewrite = |caps: &regex::Captures, ordinal: &mut usize| {
         let label_n = caps
             .get(1)
             .and_then(|m| m.as_str().parse::<usize>().ok())
-            .unwrap_or(ordinal + 1);
-        let idx = ordinal;
-        ordinal += 1;
+            .unwrap_or(*ordinal + 1);
+        let idx = *ordinal;
+        *ordinal += 1;
         format!("[image #{label_n}](spk-image://{idx})")
-    });
+    };
+    // A DESKTOP-composed image message carries BOTH a `[image #N]`
+    // paste-placeholder (in the typed text) AND a `\`Image\`` literal that
+    // acp_thread's `to_markdown` emits for the SAME image chunk — so matching
+    // both would render one attachment as two links (e.g. "image #6" +
+    // "image #2"). When explicit `[image #N]` placeholders are present, they
+    // already represent every attachment 1:1, so we rewrite ONLY those and
+    // drop the redundant `\`Image\`` chunk-literals. A message with no
+    // explicit placeholders (mobile-originated text+attachment bundle) carries
+    // only `\`Image\`` literals, so we rewrite those instead.
+    let with_links = if IMAGE_PLACEHOLDER_RE.is_match(&unmarked) {
+        let linked = IMAGE_PLACEHOLDER_RE.replace_all(&unmarked, |caps: &regex::Captures| {
+            rewrite(caps, &mut ordinal)
+        });
+        IMAGE_LITERAL_RE.replace_all(&linked, "").into_owned()
+    } else {
+        USER_IMAGE_PLACEHOLDER_RE
+            .replace_all(&unmarked, |caps: &regex::Captures| rewrite(caps, &mut ordinal))
+            .into_owned()
+    };
     // Reconstruct with explicit markdown line-break semantics:
     //   * single `\n` between non-empty lines → `  \n` (CommonMark
     //     hard break — two trailing spaces + newline). Without this the
@@ -724,6 +743,14 @@ pub(crate) static USER_IMAGE_PLACEHOLDER_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| {
         regex::Regex::new(r"\[image #(\d+)\]|`Image`").expect("static regex compiles")
     });
+
+/// The bare `\`Image\`` literal that `acp_thread::ContentBlock::append` emits
+/// for an image chunk. Used by [clean_user_message_text] to STRIP these
+/// redundant chunk-literals when the message also carries explicit
+/// `[image #N]` paste-placeholders (which already represent the same images),
+/// so a desktop-composed attachment doesn't render as two links.
+pub(crate) static IMAGE_LITERAL_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"`Image`").expect("static regex compiles"));
 
 /// Mirrors `acp_thread::ContentBlock::decode_image` (private upstream)
 /// so we can re-decode image chunks at render time without exposing a
@@ -1360,6 +1387,26 @@ mod tests {
         // message and it's the first.
         let out = clean_user_message_text("only [image #99]");
         assert_eq!(out, "only [image #99](spk-image://0)");
+    }
+
+    #[test]
+    fn desktop_image_message_does_not_double_render_placeholder_and_literal() {
+        // A desktop-composed image message carries BOTH the `[image #6]`
+        // paste-placeholder AND the `\`Image\`` literal that to_markdown emits
+        // for the same chunk. Only ONE link should render (the placeholder);
+        // the redundant `\`Image\`` literal is stripped — otherwise the single
+        // attachment showed up as "image #6" + "image #2".
+        let out = clean_user_message_text("Restart the runner now\n\n[image #6]\n\n`Image`");
+        assert_eq!(out, "Restart the runner now\n\n[image #6](spk-image://0)");
+    }
+
+    #[test]
+    fn mobile_image_literal_still_links_when_no_placeholder() {
+        // A message with no `[image #N]` placeholder (mobile-originated
+        // text+attachment bundle) still rewrites the bare `\`Image\`` literal
+        // into a clickable link.
+        let out = clean_user_message_text("see this\n\n`Image`");
+        assert_eq!(out, "see this\n\n[image #1](spk-image://0)");
     }
 
     #[test]
