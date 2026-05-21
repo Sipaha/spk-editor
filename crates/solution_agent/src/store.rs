@@ -1557,6 +1557,7 @@ impl SolutionAgentStore {
                     // hint should not survive past the rotation).
                     s.cached_total_tokens = None;
                     s.last_turn_duration = None;
+                    s.entry_created_ms.clear();
                     // `set_acp_thread` emits ThreadReplaced + notify;
                     // last so SessionView re-attaches against a fully
                     // updated session struct.
@@ -1690,6 +1691,7 @@ impl SolutionAgentStore {
                     s.cached_total_tokens = None;
                     s.last_turn_duration = None;
                     s.cold_entries.clear();
+                    s.entry_created_ms.clear();
                     // Cache the (possibly freshly-built headless) project so
                     // a subsequent reset/restart on this now-live session
                     // doesn't have to rebuild it.
@@ -1821,7 +1823,9 @@ impl SolutionAgentStore {
                 // Stamp creation time the first time an absolute index appears. The
                 // vector length is the high-water mark: a streamed in-place
                 // EntryUpdated reuses an existing index and must not grow or
-                // rewrite the vector.
+                // rewrite the vector. In practice the gap is always 0 or 1;
+                // filling any larger gap with `now_ms` is a safe defensive
+                // fallback, not an intended multi-entry stamp.
                 let now_ms = Utc::now().timestamp_millis();
                 session_entity.update(cx, |s, _| {
                     while s.entry_created_ms.len() <= entry_index {
@@ -2023,7 +2027,14 @@ impl SolutionAgentStore {
                 session_entity.update(cx, |s, _| s.title = new_title);
                 cx.emit(SolutionAgentStoreEvent::SessionTitleChanged(session_id));
             }
-            acp_thread::AcpThreadEvent::EntriesRemoved(_) => {
+            acp_thread::AcpThreadEvent::EntriesRemoved(range) => {
+                // Keep the parallel timestamp vector aligned: a rewind truncates the
+                // thread to `range.start`, so drop every stamp at or after it.
+                session_entity.update(cx, |s, _| {
+                    if range.start < s.entry_created_ms.len() {
+                        s.entry_created_ms.truncate(range.start);
+                    }
+                });
                 // The user-facing `/clear` does NOT reach this branch:
                 // it's intercepted client-side and routed through
                 // `reset_context` (which spawns a brand-new `AcpThread`

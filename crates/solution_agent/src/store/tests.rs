@@ -1469,3 +1469,57 @@ async fn append_stamps_entry_created_ms_once_per_index(cx: &mut TestAppContext) 
     assert_eq!(after.len(), 2, "in-place update must not add a timestamp");
     assert_eq!(after[1], stamps[1], "existing timestamp must be unchanged");
 }
+
+#[gpui::test]
+async fn reset_context_clears_entry_created_ms(cx: &mut TestAppContext) {
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+
+    // Append one user entry so entry_created_ms is non-empty.
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.push_user_content_block(
+                Some(acp_thread::UserMessageId::new()),
+                agent_client_protocol::schema::ContentBlock::Text(
+                    agent_client_protocol::schema::TextContent::new("hello".to_string()),
+                ),
+                cx,
+            );
+        });
+    });
+    cx.executor().run_until_parked();
+
+    let len_before = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store
+            .read(cx)
+            .session(session_id)
+            .expect("session exists")
+            .read(cx)
+            .entry_created_ms
+            .len()
+    });
+    assert_eq!(len_before, 1, "one append → one timestamp before reset");
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| store.reset_context(session_id, cx))
+    })
+    .await
+    .expect("reset_context");
+
+    let len_after = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store
+            .read(cx)
+            .session(session_id)
+            .expect("session exists")
+            .read(cx)
+            .entry_created_ms
+            .len()
+    });
+    assert_eq!(
+        len_after,
+        0,
+        "reset_context clears the timestamp vector with the entries"
+    );
+}
