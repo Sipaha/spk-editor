@@ -1523,3 +1523,140 @@ async fn reset_context_clears_entry_created_ms(cx: &mut TestAppContext) {
         "reset_context clears the timestamp vector with the entries"
     );
 }
+
+/// `EntriesRemoved` must truncate `entry_created_ms` at `range.start`,
+/// keeping the surviving prefix aligned with the surviving thread entries.
+/// This exercises the actual truncation path on a populated vector;
+/// `entries_removed_partial_rewind_preserves_token_state` covers the token
+/// state side independently.
+#[gpui::test]
+async fn entries_removed_truncates_entry_created_ms(cx: &mut TestAppContext) {
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+
+    // Append two entries so entry_created_ms.len() == 2.
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.push_user_content_block(
+                Some(acp_thread::UserMessageId::new()),
+                agent_client_protocol::schema::ContentBlock::Text(
+                    agent_client_protocol::schema::TextContent::new("first".to_string()),
+                ),
+                cx,
+            );
+        });
+    });
+    cx.executor().run_until_parked();
+
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.push_assistant_content_block(
+                agent_client_protocol::schema::ContentBlock::Text(
+                    agent_client_protocol::schema::TextContent::new("second".to_string()),
+                ),
+                false,
+                cx,
+            );
+        });
+    });
+    cx.executor().run_until_parked();
+
+    let stamps = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store
+            .read(cx)
+            .session(session_id)
+            .expect("session exists")
+            .read(cx)
+            .entry_created_ms
+            .clone()
+    });
+    assert_eq!(stamps.len(), 2, "two appends → two timestamps before removal");
+
+    // Emit EntriesRemoved(1..2) — removes the last entry. The live thread
+    // still has one surviving entry (the user message), so this is a
+    // partial rewind: the handler truncates entry_created_ms to length 1
+    // but does NOT reset token state.
+    cx.update(|cx| {
+        acp_thread.update(cx, |_t, cx| {
+            cx.emit(acp_thread::AcpThreadEvent::EntriesRemoved(1..2));
+        });
+    });
+    cx.executor().run_until_parked();
+
+    let after = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store
+            .read(cx)
+            .session(session_id)
+            .expect("session exists")
+            .read(cx)
+            .entry_created_ms
+            .clone()
+    });
+    assert_eq!(
+        after.len(),
+        1,
+        "EntriesRemoved(1..2) must truncate entry_created_ms to length 1"
+    );
+    assert_eq!(
+        after[0], stamps[0],
+        "surviving stamp at index 0 must be unchanged"
+    );
+}
+
+/// `rotate_context` swaps the underlying ACP thread and clears
+/// `entry_created_ms`. Without this, timestamps from the old thread
+/// would bleed into the new context.
+#[gpui::test]
+async fn rotate_context_clears_entry_created_ms(cx: &mut TestAppContext) {
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+
+    // Append one user entry so entry_created_ms is non-empty before rotation.
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.push_user_content_block(
+                Some(acp_thread::UserMessageId::new()),
+                agent_client_protocol::schema::ContentBlock::Text(
+                    agent_client_protocol::schema::TextContent::new("hello".to_string()),
+                ),
+                cx,
+            );
+        });
+    });
+    cx.executor().run_until_parked();
+
+    let len_before = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store
+            .read(cx)
+            .session(session_id)
+            .expect("session exists")
+            .read(cx)
+            .entry_created_ms
+            .len()
+    });
+    assert_eq!(len_before, 1, "one append → one timestamp before rotation");
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| store.rotate_context(session_id, cx))
+    })
+    .await
+    .expect("rotate_context");
+
+    let len_after = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store
+            .read(cx)
+            .session(session_id)
+            .expect("session exists")
+            .read(cx)
+            .entry_created_ms
+            .len()
+    });
+    assert_eq!(
+        len_after,
+        0,
+        "rotate_context clears the timestamp vector with the entries"
+    );
+}

@@ -2031,9 +2031,7 @@ impl SolutionAgentStore {
                 // Keep the parallel timestamp vector aligned: a rewind truncates the
                 // thread to `range.start`, so drop every stamp at or after it.
                 session_entity.update(cx, |s, _| {
-                    if range.start < s.entry_created_ms.len() {
-                        s.entry_created_ms.truncate(range.start);
-                    }
+                    s.entry_created_ms.truncate(range.start);
                 });
                 // The user-facing `/clear` does NOT reach this branch:
                 // it's intercepted client-side and routed through
