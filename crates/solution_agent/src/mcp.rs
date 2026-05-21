@@ -1164,7 +1164,10 @@ fn permission_kind_str(kind: acp::PermissionOptionKind) -> &'static str {
         acp::PermissionOptionKind::AllowAlways => "allow_always",
         acp::PermissionOptionKind::RejectOnce => "reject_once",
         acp::PermissionOptionKind::RejectAlways => "reject_always",
-        _ => "allow_once",
+        other => {
+            log::warn!("unknown PermissionOptionKind {other:?}; presenting as reject_once on the wire");
+            "reject_once"
+        }
     }
 }
 
