@@ -139,6 +139,12 @@ pub struct PersistedSession {
     /// time — see [`crate::cold_persistence::to_persisted`].
     #[serde(default)]
     pub entries_v2: Vec<crate::cold_persistence::PersistedEntryV2>,
+    /// Unix-millis creation time per persisted entry, index-aligned with
+    /// `entries_v2` (built with the same drop-in-flight-tool-calls filter).
+    /// `#[serde(default)]` → blobs written before this feature decode to an
+    /// empty vec, which the loader treats as "no captured times".
+    #[serde(default)]
+    pub entry_created_ms: Vec<i64>,
 }
 
 pub use crate::model::{PersistedEntry, PersistedRole};
@@ -270,15 +276,23 @@ fn serializable_snapshot(session: &SolutionSession, cx: &App) -> Vec<u8> {
         })
         .collect();
     let entry_summaries = entries.iter().map(|e| e.markdown.clone()).collect();
-    let entries_v2 = live_entries
-        .iter()
-        .filter_map(|entry| crate::cold_persistence::to_persisted(entry, cx))
-        .collect();
+    // Build `entries_v2` and the parallel `entry_created_ms` in one pass so
+    // the timestamp vector is filtered identically (in-flight tool calls are
+    // dropped by `to_persisted`) and stays index-aligned with `entries_v2`.
+    let mut entries_v2 = Vec::new();
+    let mut entry_created_ms = Vec::new();
+    for (index, entry) in live_entries.iter().enumerate() {
+        if let Some(persisted) = crate::cold_persistence::to_persisted(entry, cx) {
+            entries_v2.push(persisted);
+            entry_created_ms.push(session.entry_created_ms.get(index).copied().unwrap_or(0));
+        }
+    }
     let snapshot = PersistedSession {
         title: session.title.to_string(),
         entries,
         entry_summaries,
         entries_v2,
+        entry_created_ms,
     };
     serde_json::to_vec(&snapshot).unwrap_or_default()
 }
@@ -1118,9 +1132,19 @@ impl SolutionAgentStore {
                     // (no bubbles for User vs Assistant, but at least
                     // the text shows up — not worth a full migration
                     // round-trip just to recolour archived sessions).
-                    let cold_entries: Vec<acp_thread::AgentThreadEntry> = blobs
+                    let persisted = blobs
                         .remove(id)
-                        .and_then(|bytes| serde_json::from_slice::<PersistedSession>(&bytes).ok())
+                        .and_then(|bytes| serde_json::from_slice::<PersistedSession>(&bytes).ok());
+                    // `entry_created_ms` is index-aligned with `entries_v2`,
+                    // and the v2 path below maps every `entries_v2` element
+                    // 1:1 into `cold_entries`, so the restored vector stays
+                    // aligned with `cold_entries`. Legacy blobs carry an
+                    // empty vec (no captured times).
+                    let restored_created_ms = persisted
+                        .as_ref()
+                        .map(|p| p.entry_created_ms.clone())
+                        .unwrap_or_default();
+                    let cold_entries: Vec<acp_thread::AgentThreadEntry> = persisted
                         .map(|persisted| {
                             if !persisted.entries_v2.is_empty() {
                                 persisted
@@ -1172,6 +1196,7 @@ impl SolutionAgentStore {
                         s.context_count = meta.context_count;
                         s.cwd = meta.cwd.clone();
                         s.cold_entries = cold_entries;
+                        s.entry_created_ms = restored_created_ms;
                         // Seed from the persisted metadata so the
                         // status-row meter shows the last-known total
                         // for cold tabs (no live thread → no
@@ -1265,9 +1290,14 @@ impl SolutionAgentStore {
                     if this.sessions.contains_key(&meta.id) {
                         continue;
                     }
-                    let cold_entries: Vec<acp_thread::AgentThreadEntry> = blobs
+                    let persisted = blobs
                         .remove(&meta.id)
-                        .and_then(|bytes| serde_json::from_slice::<PersistedSession>(&bytes).ok())
+                        .and_then(|bytes| serde_json::from_slice::<PersistedSession>(&bytes).ok());
+                    let restored_created_ms = persisted
+                        .as_ref()
+                        .map(|p| p.entry_created_ms.clone())
+                        .unwrap_or_default();
+                    let cold_entries: Vec<acp_thread::AgentThreadEntry> = persisted
                         .map(|persisted| {
                             if !persisted.entries_v2.is_empty() {
                                 persisted
@@ -1319,6 +1349,7 @@ impl SolutionAgentStore {
                         s.context_count = meta.context_count;
                         s.cwd = meta.cwd.clone();
                         s.cold_entries = cold_entries;
+                        s.entry_created_ms = restored_created_ms;
                         s.cached_total_tokens = meta.total_tokens;
                         s.parent_session_id = meta.parent_session_id;
                         s

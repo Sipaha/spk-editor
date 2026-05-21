@@ -857,6 +857,7 @@ async fn restore_open_tabs_hydrates_cold_sessions(cx: &mut TestAppContext) {
         }],
         entry_summaries: vec!["first prompt".into()],
         entries_v2: vec![],
+        entry_created_ms: vec![],
     })
     .unwrap();
     db.save_blob(id_a, blob_a).await.expect("blob a");
@@ -930,6 +931,7 @@ fn persisted_session_roundtrips_with_structured_entries() {
         ],
         entry_summaries: vec!["Hello".into(), "Hi there!".into(), "ran tool x".into()],
         entries_v2: vec![],
+        entry_created_ms: vec![],
     };
     let bytes = serde_json::to_vec(&original).unwrap();
     let decoded: PersistedSession = serde_json::from_slice(&bytes).unwrap();
@@ -1468,6 +1470,71 @@ async fn append_stamps_entry_created_ms_once_per_index(cx: &mut TestAppContext) 
     });
     assert_eq!(after.len(), 2, "in-place update must not add a timestamp");
     assert_eq!(after[1], stamps[1], "existing timestamp must be unchanged");
+}
+
+#[gpui::test]
+async fn entry_created_ms_survives_persist_roundtrip(cx: &mut TestAppContext) {
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+
+    // Append two entries (user + assistant) so the hot `entry_created_ms`
+    // gets two stamps, index-aligned with the live thread entries.
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.push_user_content_block(
+                Some(acp_thread::UserMessageId::new()),
+                agent_client_protocol::schema::ContentBlock::Text(
+                    agent_client_protocol::schema::TextContent::new("hello".to_string()),
+                ),
+                cx,
+            );
+        });
+    });
+    cx.executor().run_until_parked();
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.push_assistant_content_block(
+                agent_client_protocol::schema::ContentBlock::Text(
+                    agent_client_protocol::schema::TextContent::new("world".to_string()),
+                ),
+                false,
+                cx,
+            );
+        });
+    });
+    cx.executor().run_until_parked();
+
+    // (a) Roundtrip: produce the real persisted blob via the same path the
+    // store writes, decode it, and assert the timestamps survive intact and
+    // stay index-aligned with the persisted entries.
+    let (original_stamps, decoded) = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(session_id).expect("session exists");
+        let session = session.read(cx);
+        let original_stamps = session.entry_created_ms.clone();
+        let bytes = serializable_snapshot(session, cx);
+        let decoded: PersistedSession = serde_json::from_slice(&bytes).unwrap();
+        (original_stamps, decoded)
+    });
+    assert_eq!(original_stamps.len(), 2, "two appends → two hot stamps");
+    assert_eq!(
+        decoded.entry_created_ms, original_stamps,
+        "persisted timestamps must roundtrip unchanged"
+    );
+    assert_eq!(
+        decoded.entry_created_ms.len(),
+        decoded.entries_v2.len(),
+        "timestamp vector must stay index-aligned with entries_v2"
+    );
+
+    // (b) Legacy decode: a blob without the `entry_created_ms` key decodes to
+    // an empty vec (proves `#[serde(default)]`).
+    let legacy = serde_json::json!({
+        "title": "t",
+        "entry_summaries": [],
+        "entries_v2": []
+    });
+    let decoded: PersistedSession = serde_json::from_value(legacy).unwrap();
+    assert!(decoded.entry_created_ms.is_empty());
 }
 
 #[gpui::test]
