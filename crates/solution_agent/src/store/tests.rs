@@ -377,6 +377,118 @@ async fn turn_complete_event_transitions_running_to_idle(cx: &mut TestAppContext
     });
 }
 
+/// Regression: sending a message while a tool call is blocked
+/// `WaitingForConfirmation` must NOT leave the turn stuck. The send path
+/// declines the pending authorization (reject) to unblock the turn, then
+/// the message rides the normal queue/flush. Here we assert the unblock:
+/// the tool call leaves `WaitingForConfirmation` (becomes `Rejected`) and
+/// the user's message is queued (not dropped) for the next turn.
+#[gpui::test]
+async fn send_while_waiting_for_confirmation_unblocks_the_turn(cx: &mut TestAppContext) {
+    use acp_thread::{AgentThreadEntry, ToolCallStatus};
+    use agent_client_protocol::schema as acp;
+
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+
+    // Stage a tool call sitting in WaitingForConfirmation with a flat
+    // allow/reject option pair, and HOLD the returned auth task so the
+    // oneshot the turn awaits stays alive (dropping it would itself flip
+    // the call off WaitingForConfirmation and defeat the test).
+    let _auth_task = cx.update(|cx| {
+        acp_thread.update(cx, |thread, cx| {
+            let update = acp::ToolCallUpdate::new(
+                acp::ToolCallId::new("call-auth-1"),
+                acp::ToolCallUpdateFields::new()
+                    .kind(acp::ToolKind::Execute)
+                    .title("Bash".to_string()),
+            );
+            let options = acp_thread::PermissionOptions::Flat(vec![
+                acp::PermissionOption::new(
+                    "opt-allow",
+                    "Allow".to_string(),
+                    acp::PermissionOptionKind::AllowOnce,
+                ),
+                acp::PermissionOption::new(
+                    "opt-reject",
+                    "Reject".to_string(),
+                    acp::PermissionOptionKind::RejectOnce,
+                ),
+            ]);
+            thread
+                .request_tool_call_authorization(update, options, cx)
+                .expect("stage waiting-for-confirmation")
+        })
+    });
+    cx.executor().run_until_parked();
+
+    // The turn is blocked → session is Running while it waits.
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let session = store.session(session_id).expect("session exists");
+            session.update(cx, |s, _| {
+                s.state = SessionState::Running {
+                    started_at: std::time::Instant::now(),
+                    notified: false,
+                };
+            });
+        });
+    });
+
+    // User types a new message instead of clicking a button.
+    let send_task = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            store.send_message_blocks(
+                session_id,
+                vec![acp::ContentBlock::Text(acp::TextContent::new(
+                    "never mind, do this instead".to_string(),
+                ))],
+                cx,
+            )
+        })
+    });
+    send_task.await.expect("send_message_blocks");
+    cx.executor().run_until_parked();
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            // The pending authorization must be resolved: the tool call has
+            // left WaitingForConfirmation (rejected), so the turn is no
+            // longer blocked.
+            let status_is_waiting = acp_thread.read(cx).entries().iter().any(|entry| {
+                matches!(
+                    entry,
+                    AgentThreadEntry::ToolCall(call)
+                        if matches!(call.status, ToolCallStatus::WaitingForConfirmation { .. })
+                )
+            });
+            assert!(
+                !status_is_waiting,
+                "tool call should no longer be WaitingForConfirmation after the send"
+            );
+            let rejected = acp_thread.read(cx).entries().iter().any(|entry| {
+                matches!(
+                    entry,
+                    AgentThreadEntry::ToolCall(call)
+                        if matches!(call.status, ToolCallStatus::Rejected)
+                )
+            });
+            assert!(rejected, "tool call should be Rejected (declined to unblock)");
+
+            // The user's message must not be lost — it's queued for the
+            // flush-on-Stopped that the now-unblocked turn will trigger.
+            let session = store.session(session_id).expect("session exists");
+            assert_eq!(
+                session.read(cx).pending_messages.len(),
+                1,
+                "the user's message must be queued for delivery, not dropped"
+            );
+        });
+    });
+}
+
 #[gpui::test]
 async fn error_event_transitions_to_errored_state(cx: &mut TestAppContext) {
     let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;

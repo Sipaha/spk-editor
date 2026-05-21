@@ -19,10 +19,69 @@
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use gpui::{AsyncApp, Context, SharedString, Task};
+use gpui::{AsyncApp, Context, Entity, SharedString, Task};
+
+use acp_thread::{AcpThread, AgentThreadEntry, SelectedPermissionOutcome, ToolCallStatus};
+use agent_client_protocol::schema as acp;
 
 use super::{SolutionAgentStore, SolutionAgentStoreEvent};
 use crate::model::{SessionState, SolutionSessionId, SolutionSessionMetadata};
+
+/// Scan a thread's entries for a tool call sitting in
+/// `WaitingForConfirmation` and, if found, return its id together with a
+/// REJECT-flavoured `SelectedPermissionOutcome` to unblock it.
+///
+/// WHY this exists: when the agent asks for authorization, the ACP turn
+/// BLOCKS on a oneshot inside `request_tool_call_authorization` until the
+/// client answers. If the user ignores the allow/reject buttons and just
+/// types a new message, the old behaviour silently queued the text into
+/// `pending_messages` and the turn stayed blocked forever — the reported
+/// "messages pile up and nothing happens" bug. Detecting the pending
+/// confirmation here lets the send path resolve it first (see
+/// `send_message_blocks`).
+///
+/// Reject-outcome selection: we reuse `conversation_render::permission_buttons`
+/// to flatten the live options into clickable buttons, then pick a
+/// non-allow (`!is_allow()`) button, preferring `RejectOnce` over
+/// `RejectAlways` (decline just this once, don't poison future prompts
+/// with a remembered "always reject"). If — unexpectedly — there is no
+/// reject-flavoured button at all, we fall back to the LAST button, which
+/// by ACP convention is the most-declining option offered.
+///
+/// NOTE on the "custom / free-text answer" branch: the agreed design also
+/// wanted, when a question offers a free-text answer, to submit the user's
+/// typed text AS that answer. The current ACP protocol cannot express
+/// this — `PermissionOptionKind` is only {AllowOnce, AllowAlways,
+/// RejectOnce, RejectAlways} and the only `SelectedPermissionParams`
+/// variant is `Terminal { patterns }` (terminal command globs, not
+/// arbitrary text). There is no option kind or params variant carrying a
+/// free-text answer, so the custom-answer branch is currently
+/// unreachable. If a future protocol adds one, build that outcome here
+/// instead of the reject outcome and short-circuit the send.
+pub(crate) fn pending_authorization_reject(
+    thread: &Entity<AcpThread>,
+    cx: &Context<SolutionAgentStore>,
+) -> Option<(acp::ToolCallId, SelectedPermissionOutcome)> {
+    let thread = thread.read(cx);
+    for entry in thread.entries() {
+        let AgentThreadEntry::ToolCall(call) = entry else {
+            continue;
+        };
+        let ToolCallStatus::WaitingForConfirmation { options, .. } = &call.status else {
+            continue;
+        };
+        let buttons = crate::conversation_render::permission_buttons(options);
+        let reject = buttons
+            .iter()
+            .find(|button| button.kind == acp::PermissionOptionKind::RejectOnce)
+            .or_else(|| buttons.iter().find(|button| !button.is_allow()))
+            .or_else(|| buttons.last());
+        if let Some(button) = reject {
+            return Some((call.id.clone(), button.outcome()));
+        }
+    }
+    None
+}
 
 /// Opening of every queue-marker text block. Shared with
 /// [`crate::conversation_render::strip_queue_marker`] so a future tweak to
@@ -197,6 +256,40 @@ impl SolutionAgentStore {
             return Task::ready(Err(anyhow!(
                 "send_message_blocks: at least one ContentBlock required"
             )));
+        }
+
+        // "Chat About This" path. If the open session has a tool call
+        // sitting in `WaitingForConfirmation`, the ACP turn is BLOCKED on a
+        // oneshot until someone answers the allow/reject prompt. Typing a
+        // new message used to just enqueue into `pending_messages` while the
+        // turn stayed blocked forever — the user appeared stuck and their
+        // follow-ups piled up invisibly. Instead, resolve the pending
+        // authorization with a REJECT outcome FIRST (so the agent stops
+        // waiting and the turn can run to `Stopped`), THEN fall through to
+        // the normal send below. Because the session is still `Running`, the
+        // message lands in `pending_messages` and the existing
+        // flush-on-`Stopped` machinery delivers it as the next turn once the
+        // (now-unblocked) turn ends — so it is never dropped.
+        //
+        // (The "submit typed text AS a custom/free-text answer" branch is
+        // intentionally absent: the current ACP protocol can't express a
+        // free-text permission answer — see `pending_authorization_reject`.)
+        if let Some(thread) = session_entity.read(cx).acp_thread().cloned()
+            && let Some((tool_call_id, reject_outcome)) =
+                pending_authorization_reject(&thread, cx)
+        {
+            log::info!(
+                target: "solution_agent::queue",
+                "session={session_id} send while tool call {tool_call_id} awaiting \
+                 authorization — declining (reject) to unblock the turn, then delivering \
+                 the user's message as the next turn",
+            );
+            thread.update(cx, |thread, cx| {
+                thread.authorize_tool_call(tool_call_id, reject_outcome, cx);
+            });
+            // Fall through. The session is still `Running` (the rejected
+            // turn hasn't emitted `Stopped` yet), so the block below enqueues
+            // this message and the `Stopped` handler flushes it.
         }
 
         // Already running? Queue the message instead of restarting the
