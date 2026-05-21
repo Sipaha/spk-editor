@@ -190,6 +190,14 @@ pub enum PersistedRole {
     Archived,
 }
 
+/// Sentinel stored in `SolutionSession::entry_created_ms` (and the persisted
+/// mirror) for an entry whose creation time was never captured — e.g. a
+/// message that predates the timestamp feature, surfaced through a resumed
+/// pre-feature session. Real unix-millis timestamps are always positive, so a
+/// negative marker is unambiguous. The wire layer maps this to "no time"
+/// rather than fabricating one.
+pub(crate) const NO_TIMESTAMP_MS: i64 = -1;
+
 /// Live, in-memory representation of one Solution-scoped AI session.
 ///
 /// `acp_thread` is `Option` because a `SolutionSession` may exist briefly
@@ -263,9 +271,12 @@ pub struct SolutionSession {
     /// the session is cold). Stamped once at first append — never restamped
     /// on in-place streaming updates. Truncated in lockstep with the
     /// entries on rewind/reset so index alignment holds. A length shorter
-    /// than the entries (or an absent value) means "no captured time" —
-    /// e.g. entries that predate this feature; callers surface those as no
-    /// timestamp rather than fabricating one.
+    /// than the entries means "trailing entries are absent". An absent entry
+    /// at any index holds [`NO_TIMESTAMP_MS`] — e.g. entries that predate this
+    /// feature, surfaced through a resumed pre-feature session whose history
+    /// gap is filled with the sentinel so the vector stays 1:1 with the
+    /// entries. Callers surface absent entries as no timestamp rather than
+    /// fabricating one.
     pub entry_created_ms: Vec<i64>,
     /// Wall-clock duration of the most recently completed turn (set on
     /// `Running → Idle`). The status row reads this to render

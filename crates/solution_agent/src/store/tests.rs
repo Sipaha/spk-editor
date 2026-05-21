@@ -1473,6 +1473,94 @@ async fn append_stamps_entry_created_ms_once_per_index(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+async fn append_after_resumed_unstamped_history_does_not_fabricate(cx: &mut TestAppContext) {
+    use crate::model::NO_TIMESTAMP_MS;
+
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+
+    // Append two entries (user + assistant). These get real stamps on the
+    // normal path.
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.push_user_content_block(
+                Some(acp_thread::UserMessageId::new()),
+                agent_client_protocol::schema::ContentBlock::Text(
+                    agent_client_protocol::schema::TextContent::new("hello".to_string()),
+                ),
+                cx,
+            );
+        });
+    });
+    cx.executor().run_until_parked();
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.push_assistant_content_block(
+                agent_client_protocol::schema::ContentBlock::Text(
+                    agent_client_protocol::schema::TextContent::new("world".to_string()),
+                ),
+                false,
+                cx,
+            );
+        });
+    });
+    cx.executor().run_until_parked();
+
+    // Simulate a resumed pre-feature session: the legacy blob carried no
+    // timestamps, so the restore path leaves `entry_created_ms` empty even
+    // though the live thread already holds historical entries. Force that
+    // state directly — empty vector under a populated (2-entry) thread.
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(session_id).expect("session exists");
+        session.update(cx, |s, _| s.entry_created_ms.clear());
+    });
+
+    // Now the user sends a new message → a genuinely-new entry arrives at
+    // `entry_index == 2` (the thread already has 2 historical entries).
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.push_user_content_block(
+                Some(acp_thread::UserMessageId::new()),
+                agent_client_protocol::schema::ContentBlock::Text(
+                    agent_client_protocol::schema::TextContent::new("new".to_string()),
+                ),
+                cx,
+            );
+        });
+    });
+    cx.executor().run_until_parked();
+
+    let stamps = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store
+            .read(cx)
+            .session(session_id)
+            .expect("session exists")
+            .read(cx)
+            .entry_created_ms
+            .clone()
+    });
+
+    // The vector must stay 1:1 with the thread's 3 entries.
+    assert_eq!(stamps.len(), 3, "gap-fill must keep the vector index-aligned");
+    // The two historical (gap-filled) indices must NOT be fabricated.
+    assert_eq!(
+        stamps[0], NO_TIMESTAMP_MS,
+        "historical gap entry must be marked absent, not fabricated"
+    );
+    assert_eq!(
+        stamps[1], NO_TIMESTAMP_MS,
+        "historical gap entry must be marked absent, not fabricated"
+    );
+    // Only the just-appended entry gets a real positive timestamp.
+    assert!(
+        stamps[2] > 0,
+        "the genuinely-new entry must hold a real positive timestamp, got {}",
+        stamps[2]
+    );
+}
+
+#[gpui::test]
 async fn entry_created_ms_survives_persist_roundtrip(cx: &mut TestAppContext) {
     let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
 
@@ -1526,7 +1614,34 @@ async fn entry_created_ms_survives_persist_roundtrip(cx: &mut TestAppContext) {
         "timestamp vector must stay index-aligned with entries_v2"
     );
 
-    // (b) Legacy decode: a blob without the `entry_created_ms` key decodes to
+    // (b) Absent sentinel roundtrips: force the first hot stamp to
+    // NO_TIMESTAMP_MS (an entry whose creation time was never captured) and
+    // confirm `serializable_snapshot` + serde preserves it rather than turning
+    // it into 0 or dropping it, and that the vector stays index-aligned.
+    use crate::model::NO_TIMESTAMP_MS;
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(session_id).expect("session exists");
+        session.update(cx, |s, _| s.entry_created_ms[0] = NO_TIMESTAMP_MS);
+    });
+    let decoded_sentinel = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(session_id).expect("session exists");
+        let session = session.read(cx);
+        let bytes = serializable_snapshot(session, cx);
+        serde_json::from_slice::<PersistedSession>(&bytes).unwrap()
+    });
+    assert_eq!(
+        decoded_sentinel.entry_created_ms[0], NO_TIMESTAMP_MS,
+        "absent sentinel must survive persist roundtrip, not become 0 or be dropped"
+    );
+    assert_eq!(
+        decoded_sentinel.entry_created_ms.len(),
+        decoded_sentinel.entries_v2.len(),
+        "sentinel-bearing vector must stay index-aligned with entries_v2"
+    );
+
+    // (c) Legacy decode: a blob without the `entry_created_ms` key decodes to
     // an empty vec (proves `#[serde(default)]`).
     let legacy = serde_json::json!({
         "title": "t",

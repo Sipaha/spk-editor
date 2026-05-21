@@ -284,7 +284,13 @@ fn serializable_snapshot(session: &SolutionSession, cx: &App) -> Vec<u8> {
     for (index, entry) in live_entries.iter().enumerate() {
         if let Some(persisted) = crate::cold_persistence::to_persisted(entry, cx) {
             entries_v2.push(persisted);
-            entry_created_ms.push(session.entry_created_ms.get(index).copied().unwrap_or(0));
+            entry_created_ms.push(
+                session
+                    .entry_created_ms
+                    .get(index)
+                    .copied()
+                    .unwrap_or(crate::model::NO_TIMESTAMP_MS),
+            );
         }
     }
     let snapshot = PersistedSession {
@@ -1854,14 +1860,20 @@ impl SolutionAgentStore {
                 // Stamp creation time the first time an absolute index appears. The
                 // vector length is the high-water mark: a streamed in-place
                 // EntryUpdated reuses an existing index and must not grow or
-                // rewrite the vector. In practice the gap is always 0 or 1;
-                // filling any larger gap with `now_ms` is a safe defensive
-                // fallback, not an intended multi-entry stamp.
+                // rewrite the vector.
                 let now_ms = Utc::now().timestamp_millis();
                 session_entity.update(cx, |s, _| {
-                    while s.entry_created_ms.len() <= entry_index {
+                    // Fill any gap below the new index with the absent sentinel: those are
+                    // pre-existing entries (e.g. a resumed pre-feature session's history) whose
+                    // real creation time we never captured — we must not fabricate it. Only the
+                    // genuinely-new entry that just arrived at `entry_index` gets `now_ms`.
+                    while s.entry_created_ms.len() < entry_index {
+                        s.entry_created_ms.push(crate::model::NO_TIMESTAMP_MS);
+                    }
+                    if s.entry_created_ms.len() == entry_index {
                         s.entry_created_ms.push(now_ms);
                     }
+                    // len > entry_index → in-place EntryUpdated on an existing entry: leave it.
                 });
                 cx.emit(SolutionAgentStoreEvent::SessionMessageAppended(
                     session_id,
