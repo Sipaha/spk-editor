@@ -124,9 +124,18 @@ pub fn client_send_id_from_user_message(message: &UserMessage) -> Option<i64> {
 /// fix the consumer only saw the first id and the other N-1 bubbles
 /// stayed orphaned.
 pub fn client_send_ids_from_user_message(message: &UserMessage) -> Vec<i64> {
+    csids_from_blocks(&message.chunks)
+}
+
+/// Canonical extraction of deduplicated `spk_client_send_id` csids from a
+/// slice of content blocks, preserving first-seen order. The single source
+/// of truth for this loop — both [client_send_ids_from_user_message] (here)
+/// and `solution_agent`'s pending-bundle / queue-changed paths route through
+/// it so every surface reports identical csids.
+pub fn csids_from_blocks(blocks: &[acp::ContentBlock]) -> Vec<i64> {
     let mut out: Vec<i64> = Vec::new();
-    for chunk in &message.chunks {
-        let meta = match chunk {
+    for block in blocks {
+        let meta = match block {
             acp::ContentBlock::Text(t) => &t.meta,
             acp::ContentBlock::Image(i) => &i.meta,
             acp::ContentBlock::Audio(a) => &a.meta,
@@ -138,10 +147,9 @@ pub fn client_send_ids_from_user_message(message: &UserMessage) -> Vec<i64> {
             .as_ref()
             .and_then(|m| m.get(SPK_CLIENT_SEND_ID_META_KEY))
             .and_then(|v| v.as_i64())
+            && !out.contains(&id)
         {
-            if !out.contains(&id) {
-                out.push(id);
-            }
+            out.push(id);
         }
     }
     out

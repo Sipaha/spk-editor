@@ -1037,18 +1037,20 @@ where
                             );
                             continue;
                         }
-                        // Diagnostic — info-level breadcrumb so a live
+                        // Diagnostic — debug-level breadcrumb so a live
                         // log tail can confirm chunks ARE reaching the
-                        // server. The header parse below is duplicated
-                        // by the handler; that's fine, this is a debug
-                        // aid not a hot path.
+                        // server. Per-chunk, so it stays at debug to
+                        // avoid flooding info on large uploads. The
+                        // header parse below is duplicated by the
+                        // handler; that's fine, this is a debug aid not
+                        // a hot path.
                         let upload_id_log = u64::from_be_bytes(
                             bytes[0..8].try_into().unwrap_or([0; 8]),
                         );
                         let offset_log = u64::from_be_bytes(
                             bytes[8..16].try_into().unwrap_or([0; 8]),
                         );
-                        log::info!(
+                        log::debug!(
                             target: "remote_control::upload",
                             "binary frame from {client_name:?}: upload_id={upload_id_log} offset={offset_log} payload_bytes={}",
                             bytes.len() - 16,
@@ -1069,7 +1071,7 @@ where
                                         "binary frame handler rejected upload_id={upload_id_log} offset={offset_log} (client={client_name:?}): {err}",
                                     );
                                 } else {
-                                    log::info!(
+                                    log::debug!(
                                         target: "remote_control::upload",
                                         "binary frame written: upload_id={upload_id_log} offset={offset_log}",
                                     );

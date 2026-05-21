@@ -236,7 +236,7 @@ pub(crate) fn build_queue_changed_payload(
                     .pending_messages
                     .iter()
                     .map(|bundle| {
-                        let csids = crate::conversation_render::extract_bundle_csids(bundle);
+                        let csids = acp_thread::csids_from_blocks(bundle);
                         let preview = crate::conversation_render::pending_blocks_preview(bundle, cx);
                         let image_count: usize = bundle
                             .iter()

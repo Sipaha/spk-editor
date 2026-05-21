@@ -869,7 +869,7 @@ fn build_pending_bundle_summaries(
         .pending_messages
         .iter()
         .map(|bundle| {
-            let csids = crate::conversation_render::extract_bundle_csids(bundle);
+            let csids = acp_thread::csids_from_blocks(bundle);
             let preview = crate::conversation_render::pending_blocks_preview(bundle, _cx);
             let image_count: u32 = bundle
                 .iter()
