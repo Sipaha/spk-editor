@@ -597,6 +597,13 @@ pub struct EntrySummary {
     /// or for user entries from clients that don't stamp ids.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub client_send_ids: Vec<i64>,
+    /// Unix-millis creation time of this entry, captured server-side at first
+    /// append. Absent (`None`, omitted from JSON) for entries that predate the
+    /// feature — clients show no time rather than a fabricated one. Only
+    /// positive values are real; the server maps the internal absent-sentinel
+    /// to `None` here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -764,15 +771,19 @@ impl McpServerTool for GetSessionTool {
                 // rely on `spk-image://N` URLs in markdown.
                 let after = input.after_index;
                 let before = input.before_index;
+                let created_times: Vec<i64> = session.entry_created_ms.clone();
                 let mut image_cursor = 0usize;
                 let mut kept: Vec<EntrySummary> = Vec::new();
                 for (index, entry) in entries_ref.iter().enumerate() {
                     let in_range = after.map_or(true, |a| index > a)
                         && before.map_or(true, |b| index < b);
                     if in_range {
+                        let created_ms =
+                            created_times.get(index).copied().filter(|&ms| ms > 0);
                         kept.push(summarize_entry(
                             entry,
                             index,
+                            created_ms,
                             input.include_full_content,
                             input.include_images,
                             &mut image_cursor,
@@ -914,6 +925,7 @@ const FIELD_PREVIEW_MAX_CHARS: usize = 500;
 fn summarize_entry(
     entry: &acp_thread::AgentThreadEntry,
     index: usize,
+    created_ms: Option<i64>,
     include_full_content: bool,
     include_images: bool,
     image_cursor: &mut usize,
@@ -969,6 +981,7 @@ fn summarize_entry(
         plan,
         client_send_id,
         client_send_ids,
+        created_ms,
     }
 }
 
@@ -1200,9 +1213,15 @@ impl McpServerTool for GetSessionEntryTool {
             let entry = entries
                 .get(want_index)
                 .ok_or_else(|| anyhow!("entry vanished mid-read"))?;
+            let created_ms = session
+                .entry_created_ms
+                .get(want_index)
+                .copied()
+                .filter(|&ms| ms > 0);
             let summary = summarize_entry(
                 entry,
                 want_index,
+                created_ms,
                 true,
                 include_images,
                 &mut image_cursor,
@@ -4208,5 +4227,112 @@ mod tests {
         let after = crate::upload::with_manager(|m| m.resolve(upload_id).is_some())
             .expect("manager installed");
         assert!(!after, "abort should drop the entry");
+    }
+
+    // -----------------------------------------------------------------
+    // A6: created_ms on wire EntrySummary
+    // -----------------------------------------------------------------
+
+    /// Verifies that `GetSessionTool` propagates `entry_created_ms` from the
+    /// session model to `EntrySummary.created_ms`:
+    /// - entries with a real positive stamp → `Some(ms)` with `ms > 0`
+    /// - entries whose stamp is the absent-sentinel → `None`
+    ///
+    /// `seed_session_with_n_entries` pushes all entries in a single batched
+    /// `cx.update`, so the store's `NewEntry` subscription sees the final
+    /// thread length each time and only stamps the last entry. We bypass that
+    /// by directly writing `entry_created_ms` on the session entity — the
+    /// same pattern used by the store's own unit tests (see
+    /// `store/tests.rs::append_stamps_entry_created_ms_once_per_index`).
+    #[gpui::test]
+    async fn get_session_entries_carry_created_ms(cx: &mut gpui::TestAppContext) {
+        use crate::model::NO_TIMESTAMP_MS;
+
+        let (session_id, _tmp) = seed_session_with_n_entries(cx, 3).await;
+
+        // Directly stamp: index 0 and 2 get real times, index 1 gets sentinel.
+        let fake_ms: i64 = 1_700_000_000_000;
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            let session_entity = store
+                .read(cx)
+                .session(session_id)
+                .expect("session exists");
+            session_entity.update(cx, |s, _| {
+                s.entry_created_ms = vec![fake_ms, NO_TIMESTAMP_MS, fake_ms + 1];
+            });
+        });
+
+        let result = GetSessionTool
+            .run(
+                GetSessionParams {
+                    session_id: session_id.to_string(),
+                    ..Default::default()
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session");
+
+        let entries = &result.structured_content.entries;
+        assert_eq!(entries.len(), 3, "all 3 entries returned");
+
+        // Entries 0 and 2 have real stamps.
+        assert!(
+            entries[0].created_ms.is_some_and(|ms| ms > 0),
+            "entry 0 must carry a positive created_ms; got {:?}",
+            entries[0].created_ms,
+        );
+        assert!(
+            entries[2].created_ms.is_some_and(|ms| ms > 0),
+            "entry 2 must carry a positive created_ms; got {:?}",
+            entries[2].created_ms,
+        );
+
+        // Entry 1 has the sentinel → must surface as None.
+        assert!(
+            entries[1].created_ms.is_none(),
+            "entry 1 (sentinel) must have created_ms=None; got {:?}",
+            entries[1].created_ms,
+        );
+    }
+
+    /// Verifies that `GetSessionEntryTool` also propagates `created_ms`.
+    #[gpui::test]
+    async fn get_session_entry_carries_created_ms(cx: &mut gpui::TestAppContext) {
+        use crate::model::NO_TIMESTAMP_MS;
+
+        let (session_id, _tmp) = seed_session_with_n_entries(cx, 2).await;
+
+        // Directly stamp entry 0 with a real time; leave entry 1 at sentinel.
+        let fake_ms: i64 = 1_700_000_000_000;
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            let session_entity = store
+                .read(cx)
+                .session(session_id)
+                .expect("session exists");
+            session_entity.update(cx, |s, _| {
+                s.entry_created_ms = vec![fake_ms, NO_TIMESTAMP_MS];
+            });
+        });
+
+        let result = GetSessionEntryTool
+            .run(
+                GetSessionEntryParams {
+                    session_id: session_id.to_string(),
+                    index: 0,
+                    include_images: false,
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session_entry");
+
+        assert!(
+            result.structured_content.entry.created_ms.is_some_and(|ms| ms > 0),
+            "GetSessionEntryTool must carry created_ms for a stamped entry; got {:?}",
+            result.structured_content.entry.created_ms,
+        );
     }
 }
