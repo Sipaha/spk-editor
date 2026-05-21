@@ -283,7 +283,11 @@ pub(crate) fn render_entry(
 
     // The separator (when present) renders ABOVE the bubble as a child of
     // the same list item, keeping the list's idx↔entry mapping 1:1.
+    // `w_full` is essential: without it this wrapper hugs its content, which
+    // collapses the inner bubble row's `w_full`/right-alignment and shrinks
+    // every bubble.
     v_flex()
+        .w_full()
         .when_some(date_separator, |this, label| {
             this.child(
                 h_flex()
