@@ -163,7 +163,18 @@ pub(crate) fn build_message_appended_payload(
             Some((role.to_string(), preview, client_send_ids))
         })
     });
-    match role_preview_csid {
+    let created_ms = SolutionAgentStore::try_global(cx).and_then(|store| {
+        store.read_with(cx, |store, cx| {
+            let session = store.session(session_id)?;
+            session
+                .read(cx)
+                .entry_created_ms
+                .get(entry_index)
+                .copied()
+                .filter(|&ms| ms >= 0)
+        })
+    });
+    let mut obj = match role_preview_csid {
         Some((role, preview, csids)) if !csids.is_empty() => json!({
             "session_id": session_id.to_string(),
             "entry_index": entry_index,
@@ -185,7 +196,11 @@ pub(crate) fn build_message_appended_payload(
             "session_id": session_id.to_string(),
             "entry_index": entry_index,
         }),
+    };
+    if let Some(ms) = created_ms {
+        obj["created_ms"] = serde_json::json!(ms);
     }
+    obj
 }
 
 /// Build the JSON payload for an `agent_session_queue_changed`
@@ -375,6 +390,76 @@ mod tests {
             assert_eq!(obj.get("entry_index").and_then(|v| v.as_u64()), Some(7));
             assert!(obj.get("role").is_none());
             assert!(obj.get("preview").is_none());
+        });
+    }
+
+    #[gpui::test]
+    async fn message_appended_payload_includes_created_ms(cx: &mut TestAppContext) {
+        let (session_id, _acp_thread, _tmp) =
+            crate::store::tests::create_session_with_thread(cx).await;
+
+        // Append a user entry; `run_until_parked` lets the store handle the
+        // `AcpThreadEvent::NewEntry` and stamp `entry_created_ms[0]`.
+        cx.update(|cx| {
+            let thread = {
+                let store = SolutionAgentStore::global(cx);
+                store.read(cx).session(session_id).and_then(|s| {
+                    s.read(cx).acp_thread().cloned()
+                })
+            }
+            .expect("thread");
+            thread.update(cx, |thread, cx| {
+                thread.push_user_content_block(
+                    None,
+                    agent_client_protocol::schema::ContentBlock::Text(
+                        agent_client_protocol::schema::TextContent::new("hello".to_string()),
+                    ),
+                    cx,
+                );
+            });
+        });
+        cx.executor().run_until_parked();
+
+        // Positive case: a real stamp must be surfaced as `created_ms > 0`.
+        cx.update(|cx| {
+            let payload = build_message_appended_payload(session_id, 0, cx);
+            let obj = payload.as_object().expect("object");
+            let created = obj.get("created_ms").and_then(|v| v.as_i64());
+            assert!(
+                created.is_some_and(|ms| ms > 0),
+                "real stamp must be surfaced as created_ms > 0, got: {created:?}"
+            );
+        });
+
+        // Absent case: when the index is beyond `entry_created_ms` (no stamp
+        // captured), the key must be omitted entirely.
+        cx.update(|cx| {
+            // Index 99 has no entry and no stamp.
+            let payload = build_message_appended_payload(session_id, 99, cx);
+            let obj = payload.as_object().expect("object");
+            assert!(
+                obj.get("created_ms").is_none(),
+                "missing stamp must not emit created_ms key"
+            );
+        });
+
+        // Sentinel case: manually set the stamp to NO_TIMESTAMP_MS and verify
+        // the key is omitted.
+        cx.update(|cx| {
+            use crate::model::NO_TIMESTAMP_MS;
+            let store = SolutionAgentStore::global(cx);
+            let session = store.read(cx).session(session_id).expect("session");
+            session.update(cx, |s, _| {
+                s.entry_created_ms[0] = NO_TIMESTAMP_MS;
+            });
+        });
+        cx.update(|cx| {
+            let payload = build_message_appended_payload(session_id, 0, cx);
+            let obj = payload.as_object().expect("object");
+            assert!(
+                obj.get("created_ms").is_none(),
+                "sentinel NO_TIMESTAMP_MS must not emit created_ms key"
+            );
         });
     }
 }
