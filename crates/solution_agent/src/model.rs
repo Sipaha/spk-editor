@@ -258,6 +258,15 @@ pub struct SolutionSession {
     /// paints identically to its live form. Cleared once
     /// `resume_session` attaches a real `AcpThread`.
     pub cold_entries: Vec<acp_thread::AgentThreadEntry>,
+    /// Unix-millis creation time per thread entry, index-aligned with the
+    /// live thread's absolute entry indices (and with `cold_entries` when
+    /// the session is cold). Stamped once at first append — never restamped
+    /// on in-place streaming updates. Truncated in lockstep with the
+    /// entries on rewind/reset so index alignment holds. A length shorter
+    /// than the entries (or an absent value) means "no captured time" —
+    /// e.g. entries that predate this feature; callers surface those as no
+    /// timestamp rather than fabricating one.
+    pub entry_created_ms: Vec<i64>,
     /// Wall-clock duration of the most recently completed turn (set on
     /// `Running → Idle`). The status row reads this to render
     /// "Done in 2m15s" instead of a bare "Idle" so the user has an
@@ -330,6 +339,7 @@ impl SolutionSession {
             pending_messages: VecDeque::new(),
             flush_after_cancel: false,
             cold_entries: Vec::new(),
+            entry_created_ms: Vec::new(),
             last_turn_duration: None,
             cached_total_tokens: None,
             cached_max_tokens: None,
@@ -442,6 +452,7 @@ mod tests {
             pending_messages: VecDeque::new(),
             flush_after_cancel: false,
             cold_entries: Vec::new(),
+            entry_created_ms: Vec::new(),
             last_turn_duration: None,
             cached_total_tokens: None,
             cached_max_tokens: None,
