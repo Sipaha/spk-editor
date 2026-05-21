@@ -2240,7 +2240,9 @@ impl Render for SolutionSessionView {
                                             .map(|d| {
                                                 d.with_timezone(&chrono::Local).date_naive()
                                             })
-                                            .map_or(true, |pd| pd != this_d),
+                                            // Unknown prev date (e.g. DST-fold ambiguity) → suppress the separator
+                                            // rather than render a spurious one.
+                                            .map_or(false, |pd| pd != this_d),
                                     };
                                     if show {
                                         Some(crate::status_row::local_date_label(
