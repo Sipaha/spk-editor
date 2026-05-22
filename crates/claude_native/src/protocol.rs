@@ -6,7 +6,8 @@
 //! so a future `claude` that adds message kinds (or emits a stray
 //! `{"type":"ping"}`) does not break the reader.
 
-use serde::Deserialize;
+use agent_client_protocol::schema as acp;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Deserialize)]
@@ -125,6 +126,89 @@ pub struct ControlResponseEnvelope {
     pub response: serde_json::Value,
 }
 
+/// A message written to `claude`'s stdin (NDJSON). Either a user turn or a
+/// control request/response on the same stream.
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum InputMessage {
+    User { message: UserPayload },
+    ControlRequest { request_id: String, request: ControlRequestOut },
+    ControlResponse { request_id: String, response: serde_json::Value },
+}
+
+#[derive(Debug, Serialize)]
+pub struct UserPayload {
+    pub role: &'static str,
+    pub content: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "subtype", rename_all = "snake_case")]
+pub enum ControlRequestOut {
+    Interrupt,
+}
+
+impl InputMessage {
+    /// A plain-text user turn: `content` is a bare string.
+    pub fn user_text(text: impl Into<String>) -> Self {
+        Self::User {
+            message: UserPayload {
+                role: "user",
+                content: serde_json::Value::String(text.into()),
+            },
+        }
+    }
+
+    /// A structured user turn (text + images). `content` is an array of
+    /// Anthropic content blocks. ACP blocks the compose row can't express as
+    /// text/image are skipped (the Foundation only produces those).
+    pub fn user_blocks(blocks: &[acp::ContentBlock]) -> Self {
+        let content: Vec<serde_json::Value> = blocks
+            .iter()
+            .filter_map(|block| match block {
+                acp::ContentBlock::Text(t) => Some(serde_json::json!({
+                    "type": "text",
+                    "text": t.text,
+                })),
+                acp::ContentBlock::Image(img) => Some(serde_json::json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": img.mime_type,
+                        "data": img.data,
+                    },
+                })),
+                _ => None,
+            })
+            .collect();
+        Self::User {
+            message: UserPayload {
+                role: "user",
+                content: serde_json::Value::Array(content),
+            },
+        }
+    }
+
+    /// The soft-interrupt control request (what the SDK's `query.interrupt()`
+    /// writes): `claude` cancels the current turn and emits a `result`.
+    pub fn interrupt(request_id: impl Into<String>) -> Self {
+        Self::ControlRequest {
+            request_id: request_id.into(),
+            request: ControlRequestOut::Interrupt,
+        }
+    }
+
+    /// Reply to a `can_use_tool` control request.
+    pub fn permission_response(request_id: impl Into<String>, allow: bool) -> Self {
+        Self::ControlResponse {
+            request_id: request_id.into(),
+            response: serde_json::json!({
+                "behavior": if allow { "allow" } else { "deny" },
+            }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,5 +280,45 @@ mod tests {
             OutputMessage::parse(r#"{"type":"rate_limit_event","x":1}"#).unwrap(),
             OutputMessage::Unknown
         ));
+    }
+
+    #[test]
+    fn serializes_user_text() {
+        let s = serde_json::to_string(&InputMessage::user_text("hi")).unwrap();
+        assert_eq!(s, r#"{"type":"user","message":{"role":"user","content":"hi"}}"#);
+    }
+    #[test]
+    fn serializes_user_blocks_text_and_image() {
+        let blocks = vec![
+            acp::ContentBlock::Text(acp::TextContent::new("hi".to_string())),
+            acp::ContentBlock::Image(acp::ImageContent::new(
+                "BASE64".to_string(),
+                "image/png".to_string(),
+            )),
+        ];
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&InputMessage::user_blocks(&blocks)).unwrap())
+                .unwrap();
+        let content = &v["message"]["content"];
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "hi");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "BASE64");
+    }
+    #[test]
+    fn serializes_interrupt_control() {
+        let s = serde_json::to_string(&InputMessage::interrupt("r1")).unwrap();
+        assert!(s.contains(r#""type":"control_request""#));
+        assert!(s.contains(r#""subtype":"interrupt""#));
+        assert!(s.contains(r#""request_id":"r1""#));
+    }
+    #[test]
+    fn serializes_permission_response_allow_and_deny() {
+        let allow = serde_json::to_string(&InputMessage::permission_response("r1", true)).unwrap();
+        assert!(allow.contains(r#""type":"control_response""#));
+        assert!(allow.contains(r#""behavior":"allow""#));
+        let deny = serde_json::to_string(&InputMessage::permission_response("r1", false)).unwrap();
+        assert!(deny.contains(r#""behavior":"deny""#));
     }
 }
