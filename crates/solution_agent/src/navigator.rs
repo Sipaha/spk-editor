@@ -100,6 +100,7 @@ fn session_status_indicator(state: &SessionState) -> SessionStatusIndicator {
     match state {
         SessionState::Idle => SessionStatusIndicator::Idle,
         SessionState::Running { .. } => SessionStatusIndicator::Working,
+        SessionState::Stopping => SessionStatusIndicator::Working,
         SessionState::AwaitingInput => SessionStatusIndicator::AwaitingUser,
         SessionState::Errored(_) => SessionStatusIndicator::Errored,
     }

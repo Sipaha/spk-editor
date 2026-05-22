@@ -123,6 +123,7 @@ fn state_color(state: &SessionState) -> StripStateColor {
     match state {
         SessionState::Idle => StripStateColor::Success,
         SessionState::Running { .. } => StripStateColor::Info,
+        SessionState::Stopping => StripStateColor::Info,
         SessionState::AwaitingInput => StripStateColor::Warning,
         SessionState::Errored(_) => StripStateColor::Error,
     }
@@ -135,6 +136,7 @@ fn state_label(state: &SessionState) -> &'static str {
     match state {
         SessionState::Idle => "idle",
         SessionState::Running { .. } => "running",
+        SessionState::Stopping => "stopping",
         SessionState::AwaitingInput => "awaiting input",
         SessionState::Errored(_) => "errored",
     }

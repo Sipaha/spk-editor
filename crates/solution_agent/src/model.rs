@@ -124,6 +124,10 @@ pub type AgentServerId = SharedString;
 pub enum SessionState {
     Idle,
     Running { started_at: Instant, notified: bool },
+    /// A cancel was requested; the turn has not yet ended. Bounded by the
+    /// backend's 30s interrupt→kill escalation. No fields — the UI shows an
+    /// indeterminate "Stopping…" indicator.
+    Stopping,
     AwaitingInput,
     Errored(SharedString),
 }
@@ -141,6 +145,7 @@ impl SessionState {
         match self {
             Self::Idle => "Idle",
             Self::Running { .. } => "Running",
+            Self::Stopping => "Stopping",
             Self::AwaitingInput => "Awaiting input",
             Self::Errored(_) => "Error",
         }

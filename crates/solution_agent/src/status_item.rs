@@ -36,7 +36,12 @@ impl Render for SolutionAgentStatusItem {
         let count = store.read_with(cx, |store, cx| {
             store
                 .all_sessions()
-                .filter(|session| matches!(session.read(cx).state, SessionState::Running { .. }))
+                .filter(|session| {
+                    matches!(
+                        session.read(cx).state,
+                        SessionState::Running { .. } | SessionState::Stopping
+                    )
+                })
                 .count()
         });
         if count == 0 {

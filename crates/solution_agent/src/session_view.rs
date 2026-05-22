@@ -1309,6 +1309,7 @@ impl SolutionSessionView {
             let session_id = self.session_id;
             let state_label = match self.session.read(cx).state {
                 SessionState::Running { .. } => "Running",
+                SessionState::Stopping => "Stopping",
                 SessionState::Idle => "Idle",
                 SessionState::AwaitingInput => "AwaitingInput",
                 SessionState::Errored(_) => "Errored",
