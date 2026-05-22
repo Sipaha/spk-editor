@@ -2937,6 +2937,7 @@ dependencies = [
  "serde_json",
  "settings",
  "smol",
+ "ui",
  "util",
 ]
 
@@ -16867,6 +16868,7 @@ dependencies = [
  "async-channel 2.5.0",
  "base64 0.22.1",
  "chrono",
+ "claude_native",
  "context_server",
  "editor",
  "editor_mcp",
