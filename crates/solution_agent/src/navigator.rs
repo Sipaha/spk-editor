@@ -189,6 +189,12 @@ pub struct SolutionSessionsNavigator {
     /// we kick off a fetch and store the result here for synchronous
     /// reads on subsequent frames.
     pub(crate) cached_models: HashMap<crate::model::SolutionSessionId, SharedString>,
+    /// Per-session last-known real (non-zero) context-window limit for the
+    /// token meter. claude-acp omits `max_tokens` on some usage updates (gated
+    /// by an upstream beta flag), so once a real limit is observed we keep it
+    /// here and reuse it instead of downgrading the meter to the global
+    /// fallback when a later update reports 0 (the 200k/1M flicker fix).
+    pub(crate) cached_max_tokens: HashMap<crate::model::SolutionSessionId, u64>,
     /// Sessions for which a model fetch is in-flight, used to dedupe
     /// the spawn so the status row doesn't fire a fresh request every
     /// time the agent emits a token-update event.
@@ -269,6 +275,7 @@ impl SolutionSessionsNavigator {
             historic_sessions: Vec::new(),
             tab_context_menu: None,
             cached_models: HashMap::default(),
+            cached_max_tokens: HashMap::default(),
             pending_model_fetches: HashSet::default(),
             thinking_tick: None,
             activity_tick: None,
@@ -1378,6 +1385,7 @@ impl SolutionSessionsNavigator {
             historic_sessions: Vec::new(),
             tab_context_menu: None,
             cached_models: HashMap::default(),
+            cached_max_tokens: HashMap::default(),
             pending_model_fetches: HashSet::default(),
             thinking_tick: None,
             activity_tick: None,

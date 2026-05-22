@@ -38,7 +38,7 @@ use crate::protocol::{
     ControlRequestEnvelope, ControlRequestKind, ControlRequestOut, InputMessage, OutputMessage,
     System,
 };
-use crate::translate::{TurnEnd, classify_result, translate, usage_update};
+use crate::translate::{TurnEnd, apply_usage, classify_result, translate};
 use crate::watchdog::{AnalyzerContext, ClaudeAnalyzer, Watchdog};
 
 /// Default grace period after a soft `interrupt` before the Stop escalates to
@@ -523,10 +523,7 @@ async fn run_update_pump(
         shared.last_output.set(cx.background_executor().now());
 
         if let OutputMessage::Result(result) = &message {
-            let update = usage_update(result, shared.sticky_window.get());
-            if let Some(window) = result.context_window_for_active_model() {
-                shared.sticky_window.set(Some(window));
-            }
+            let update = apply_usage(result, &shared.sticky_window);
             if let Some(update) = update {
                 thread
                     .update(cx, |thread, cx| {

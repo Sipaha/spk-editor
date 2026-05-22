@@ -2,6 +2,8 @@
 //! `acp::SessionUpdate` values `AcpThread::handle_session_update` already
 //! consumes, plus turn-end classification. No GPUI / I/O.
 
+use std::cell::Cell;
+
 use agent_client_protocol::schema as acp;
 
 use crate::protocol::{ConversationMessage, OutputMessage, ResultMessage, StreamEvent};
@@ -122,7 +124,7 @@ pub fn classify_result(r: &ResultMessage) -> TurnEnd {
 /// limit never regresses (the 200k/1M flicker fix). Returns `None` when neither
 /// a window nor a used-token count is available.
 pub fn usage_update(r: &ResultMessage, sticky_window: Option<u64>) -> Option<acp::SessionUpdate> {
-    let window = r.context_window_for_active_model().or(sticky_window);
+    let window = real_window(r).or(sticky_window);
     let used = r.usage.as_ref().map(|u| u.input_tokens + u.output_tokens);
     match (used, window) {
         (None, None) => None,
@@ -131,6 +133,29 @@ pub fn usage_update(r: &ResultMessage, sticky_window: Option<u64>) -> Option<acp
             window.unwrap_or(0),
         ))),
     }
+}
+
+/// Build the `UsageUpdate` for a `result` against a session's sticky-window
+/// cell, then advance the cell: a freshly-observed real (non-zero) window
+/// becomes the new sticky baseline, while a missing or zero window leaves the
+/// prior baseline untouched. This is the stateful counterpart to
+/// [`usage_update`] — the update-pump calls it once per `result` so a later
+/// result that omits (or zeroes) `contextWindow` never downgrades the meter
+/// limit (the 200k/1M flicker fix).
+pub fn apply_usage(r: &ResultMessage, sticky_window: &Cell<Option<u64>>) -> Option<acp::SessionUpdate> {
+    let update = usage_update(r, sticky_window.get());
+    if let Some(window) = real_window(r) {
+        sticky_window.set(Some(window));
+    }
+    update
+}
+
+/// The model's advertised context window, but only when it is a real (non-zero)
+/// value. `claude` occasionally reports `contextWindow: 0` (or omits it); a 0 is
+/// not a meaningful limit, so it is treated identically to "missing" — the
+/// sticky fallback applies instead of overwriting a known window with 0.
+fn real_window(r: &ResultMessage) -> Option<u64> {
+    r.context_window_for_active_model().filter(|window| *window > 0)
 }
 
 fn text_block(text: &str) -> acp::ContentBlock {
@@ -264,6 +289,52 @@ mod tests {
             TurnEnd::Error(e) => assert!(e.contains("boom")),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn apply_usage_makes_window_sticky_across_results() {
+        use std::cell::Cell;
+
+        let sticky: Cell<Option<u64>> = Cell::new(None);
+
+        // First result advertises a real window; the emitted update carries it
+        // and the cell retains it.
+        let first = serde_json::from_str::<ResultMessage>(
+            r#"{"subtype":"success","modelUsage":{"m":{"contextWindow":1000000}},"usage":{"input_tokens":10,"output_tokens":5}}"#,
+        )
+        .unwrap();
+        match apply_usage(&first, &sticky) {
+            Some(acp::SessionUpdate::UsageUpdate(u)) => assert_eq!(u.size, 1_000_000),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(sticky.get(), Some(1_000_000));
+
+        // A later result with NO window must NOT downgrade the emitted size to 0
+        // — the cell keeps the prior real window sticky.
+        let second = serde_json::from_str::<ResultMessage>(
+            r#"{"subtype":"success","usage":{"input_tokens":20,"output_tokens":7}}"#,
+        )
+        .unwrap();
+        match apply_usage(&second, &sticky) {
+            Some(acp::SessionUpdate::UsageUpdate(u)) => {
+                assert_eq!(u.size, 1_000_000, "window stays sticky, never 0");
+                assert_eq!(u.used, 27);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(sticky.get(), Some(1_000_000));
+
+        // A still-later result with a zero window is treated as "no window" and
+        // must also stay sticky rather than overwrite the cell with 0.
+        let zero = serde_json::from_str::<ResultMessage>(
+            r#"{"subtype":"success","modelUsage":{"m":{"contextWindow":0}},"usage":{"input_tokens":1,"output_tokens":1}}"#,
+        )
+        .unwrap();
+        match apply_usage(&zero, &sticky) {
+            Some(acp::SessionUpdate::UsageUpdate(u)) => assert_eq!(u.size, 1_000_000),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(sticky.get(), Some(1_000_000));
     }
 
     #[test]

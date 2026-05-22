@@ -464,13 +464,16 @@ impl SolutionSessionsNavigator {
 
         let used = usage.as_ref().map(|u| u.used_tokens).unwrap_or(0);
         // claude-acp doesn't always populate `max_tokens` (it's gated by an
-        // upstream beta flag). Fall back to the Claude Opus 4 context
-        // window so the meter and the compact button stay meaningful.
-        let max = usage
-            .as_ref()
-            .map(|u| u.max_tokens)
-            .filter(|m| *m > 0)
-            .unwrap_or(DEFAULT_CONTEXT_WINDOW);
+        // upstream beta flag). Once a real limit has been seen for this session
+        // we keep it (cached below) so a later 0/missing update never downgrades
+        // the meter to the global fallback (the 200k/1M flicker). The Claude
+        // Opus 4 window is the fallback only until a real value first arrives.
+        let advertised_max = usage.as_ref().map(|u| u.max_tokens);
+        let (max, new_cached_max) =
+            resolve_max_tokens(advertised_max, self.cached_max_tokens.get(&session_id).copied());
+        if let Some(cached) = new_cached_max {
+            self.cached_max_tokens.insert(session_id, cached);
+        }
         let pct = if max == 0 {
             0.0
         } else {
@@ -827,6 +830,24 @@ impl SolutionSessionsNavigator {
 /// is the default for this fork.
 pub(crate) const DEFAULT_CONTEXT_WINDOW: u64 = 1_000_000;
 
+/// Resolve the context-window limit for the meter, hardened against the
+/// 200k/1M flicker: claude-acp does not advertise `max_tokens` on every usage
+/// update (it is gated by an upstream beta flag), so a later update can arrive
+/// with `max_tokens == 0`. Once a real (non-zero) limit has been seen for a
+/// session we keep it — a subsequent 0/missing value must NOT downgrade the
+/// meter to the global [`DEFAULT_CONTEXT_WINDOW`] fallback (which made the meter
+/// jump 1M → cached → 1M as updates raced). Returns the limit to display and the
+/// value to persist as the session's cached max for the next render.
+pub(crate) fn resolve_max_tokens(advertised: Option<u64>, cached: Option<u64>) -> (u64, Option<u64>) {
+    match advertised.filter(|max| *max > 0) {
+        Some(real) => (real, Some(real)),
+        None => match cached {
+            Some(cached) => (cached, Some(cached)),
+            None => (DEFAULT_CONTEXT_WINDOW, None),
+        },
+    }
+}
+
 /// Char-count truncation with ellipsis for History-popover entry labels.
 /// Operates on `chars()` (not bytes) so it never splits a multibyte
 /// codepoint. Returns the input unchanged when shorter than `max_chars`.
@@ -960,6 +981,33 @@ fn format_activity_tooltip(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_max_tokens_keeps_real_value_once_known() {
+        // No real value yet, nothing cached → global fallback, nothing to cache.
+        assert_eq!(resolve_max_tokens(None, None), (DEFAULT_CONTEXT_WINDOW, None));
+        assert_eq!(resolve_max_tokens(Some(0), None), (DEFAULT_CONTEXT_WINDOW, None));
+
+        // A real advertised value is used and becomes the cache.
+        assert_eq!(resolve_max_tokens(Some(200_000), None), (200_000, Some(200_000)));
+
+        // A later 0/missing update after a real value was known must NOT
+        // downgrade to the global fallback — the cached max is kept.
+        assert_eq!(
+            resolve_max_tokens(None, Some(200_000)),
+            (200_000, Some(200_000))
+        );
+        assert_eq!(
+            resolve_max_tokens(Some(0), Some(200_000)),
+            (200_000, Some(200_000))
+        );
+
+        // A new real value supersedes the cache.
+        assert_eq!(
+            resolve_max_tokens(Some(1_000_000), Some(200_000)),
+            (1_000_000, Some(1_000_000))
+        );
+    }
 
     #[test]
     fn format_hm_pads_to_24h() {
