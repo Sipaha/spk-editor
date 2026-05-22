@@ -27,6 +27,7 @@ use futures::channel::oneshot;
 use futures::{FutureExt as _, StreamExt as _, select_biased};
 use gpui::{App, AppContext as _, Entity, SharedString, Task, WeakEntity};
 use project::{AgentId, Project};
+use scheduler::Instant;
 use ui::IconName;
 use util::ResultExt as _;
 use util::path_list::PathList;
@@ -38,11 +39,17 @@ use crate::protocol::{
     System,
 };
 use crate::translate::{TurnEnd, classify_result, translate, usage_update};
+use crate::watchdog::{AnalyzerContext, ClaudeAnalyzer, Watchdog};
 
 /// Default grace period after a soft `interrupt` before the Stop escalates to
 /// a hard kill + `--resume` respawn. Overridable for tests via
 /// [`ClaudeNativeConnection::set_escalation_timeout_for_test`].
 const DEFAULT_ESCALATION_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default quiet period a turn may go without any output before the silence
+/// watchdog asks the analyzer whether `claude` is hung. Overridable for tests
+/// via [`ClaudeNativeConnection::set_silence_window_for_test`].
+const DEFAULT_SILENCE_WINDOW: Duration = Duration::from_secs(15 * 60);
 
 /// `AgentServer` that spawns the `claude` binary directly (no node wrapper).
 pub struct ClaudeNativeAgentServer {
@@ -96,6 +103,7 @@ impl AgentServer for ClaudeNativeAgentServer {
             extra_env: self.extra_env.clone(),
             sessions: RefCell::new(HashMap::new()),
             escalation_timeout: Cell::new(DEFAULT_ESCALATION_TIMEOUT),
+            silence_window: Cell::new(DEFAULT_SILENCE_WINDOW),
             self_handle: RefCell::new(std::rc::Weak::new()),
         });
         *connection.self_handle.borrow_mut() = Rc::downgrade(&connection);
@@ -115,6 +123,12 @@ impl AgentServer for ClaudeNativeAgentServer {
 struct SessionShared {
     prompt_tx: RefCell<Option<oneshot::Sender<Result<TurnEnd>>>>,
     sticky_window: Cell<Option<u64>>,
+    /// Wall time (executor clock) of the last message the pump pulled off
+    /// `incoming`. The silence watchdog reads this to know how long the turn
+    /// has been quiet; the pump bumps it on every message (deltas AND control
+    /// requests) so any progress resets the silence timer. An `Rc` so the
+    /// watchdog timer task shares the very same cell the pump bumps.
+    last_output: Rc<Cell<Instant>>,
 }
 
 /// Everything needed to respawn a session's `claude` process under the same
@@ -139,6 +153,10 @@ struct SessionState {
     /// `result(cancelled)` (which resolves the prompt oneshot) can drop it and
     /// thereby cancel the pending kill+resume. `None` when no Stop is in flight.
     escalation: Option<Task<()>>,
+    /// The silence watchdog for the in-flight turn. Armed when a prompt starts,
+    /// dropped (which cancels its timer) when the prompt resolves. `None` while
+    /// the session is idle.
+    watchdog: Option<Watchdog>,
 }
 
 /// Per-process connection to one or more `claude` subprocesses (one per
@@ -151,6 +169,9 @@ pub struct ClaudeNativeConnection {
     /// Grace period between a soft `interrupt` and the hard kill+resume
     /// escalation. A `Cell` so tests can shrink it to milliseconds.
     escalation_timeout: Cell<Duration>,
+    /// Quiet period the silence watchdog waits before analyzing a turn. A `Cell`
+    /// so a test can shrink it to milliseconds.
+    silence_window: Cell<Duration>,
     /// A handle back to the `Rc` that owns this connection, set once right after
     /// construction. `cancel` (a `&self` method) needs an owned `Rc<Self>` to
     /// arm the escalation task that may outlive the call; upgrading this weak
@@ -175,6 +196,12 @@ impl ClaudeNativeConnection {
     /// the kill+resume path without waiting the real 30 seconds.
     pub fn set_escalation_timeout_for_test(&self, timeout: Duration) {
         self.escalation_timeout.set(timeout);
+    }
+
+    /// Shrink the silence watchdog window so a test drives the analyzer path
+    /// without waiting the real 15 minutes.
+    pub fn set_silence_window_for_test(&self, window: Duration) {
+        self.silence_window.set(window);
     }
 
     /// The OS process id backing a session, or `None` if the session is gone.
@@ -234,6 +261,7 @@ impl ClaudeNativeConnection {
             let shared = Rc::new(SessionShared {
                 prompt_tx: RefCell::new(None),
                 sticky_window: Cell::new(None),
+                last_output: Rc::new(Cell::new(cx.background_executor().now())),
             });
 
             let thread: Entity<AcpThread> = cx.update(|cx| {
@@ -273,11 +301,59 @@ impl ClaudeNativeConnection {
                     blueprint,
                     _update_pump: update_pump,
                     escalation: None,
+                    watchdog: None,
                 },
             );
 
             Ok(thread)
         })
+    }
+
+    /// Arm a silence watchdog for the just-started turn on `session_id`. On a
+    /// `Hung` verdict it routes through the same `recover_session` recovery as
+    /// the Stop-escalation; on `Working`/`Unknown`/analyzer-failure it re-arms.
+    /// Stores the watchdog on the session so the prompt's resolution can drop it.
+    fn arm_watchdog(self: &Rc<Self>, session_id: &acp::SessionId, cx: &mut App) {
+        let mut sessions = self.sessions.borrow_mut();
+        let Some(session) = sessions.get_mut(session_id) else {
+            return;
+        };
+
+        let last_output = session.shared.last_output.clone();
+        let process_id = session.process.process_id();
+        let window = self.silence_window.get();
+        let analyzer: Rc<dyn crate::watchdog::Analyzer> =
+            Rc::new(ClaudeAnalyzer::new(self.binary.clone()));
+
+        // The watchdog asks for fresh context at fire time, not arm time. The
+        // thread's full event history isn't cheaply readable from a plain `Fn`
+        // (it needs a `cx` to `read`); the Foundation analyzer prompt works from
+        // silence-duration + pid alone. SP2 can enrich `recent_events`.
+        let context_provider: Rc<dyn Fn() -> AnalyzerContext> = Rc::new(move || AnalyzerContext {
+            silence_duration: window,
+            process_id: Some(process_id),
+            recent_events: Vec::new(),
+            pending_tool_use: None,
+        });
+
+        let connection = Rc::downgrade(self);
+        let session_id_for_recovery = session_id.clone();
+        let recovery: crate::watchdog::RecoveryCallback = Rc::new(move |cx: &mut gpui::AsyncApp| {
+            if let Some(connection) = connection.upgrade() {
+                connection.recover_session(session_id_for_recovery.clone(), cx);
+            }
+        });
+
+        let mut async_cx = cx.to_async();
+        let watchdog = Watchdog::arm(
+            last_output,
+            window,
+            analyzer,
+            context_provider,
+            recovery,
+            &mut async_cx,
+        );
+        session.watchdog = Some(watchdog);
     }
 
     /// Recovery primitive shared by Stop-escalation and (Phase 7.2) the
@@ -354,6 +430,7 @@ impl ClaudeNativeConnection {
             let shared = Rc::new(SessionShared {
                 prompt_tx: RefCell::new(None),
                 sticky_window: Cell::new(None),
+                last_output: Rc::new(Cell::new(cx.background_executor().now())),
             });
             let incoming = process.take_incoming();
             let exited = process.wait_status();
@@ -371,6 +448,10 @@ impl ClaudeNativeConnection {
                 session.process = process;
                 session.shared = shared;
                 session._update_pump = update_pump;
+                // The recovered turn is force-resolved Cancelled; drop the
+                // watchdog so its timer (which referenced the old `last_output`)
+                // stops. A fresh prompt arms a new one.
+                session.watchdog = None;
             }
             // If the session vanished while we were respawning (closed), the new
             // `process`/`update_pump` drop here and tear themselves down.
@@ -436,6 +517,10 @@ async fn run_update_pump(
             }
             return;
         };
+
+        // Any output (partial delta or control request) is progress — reset the
+        // silence watchdog's baseline before dispatching the message.
+        shared.last_output.set(cx.background_executor().now());
 
         if let OutputMessage::Result(result) = &message {
             let update = usage_update(result, shared.sticky_window.get());
@@ -608,29 +693,46 @@ impl AgentConnection for ClaudeNativeConnection {
         params: acp::PromptRequest,
         cx: &mut App,
     ) -> Task<Result<acp::PromptResponse>> {
-        let sessions = self.sessions.borrow();
-        let Some(session) = sessions.get(&params.session_id) else {
-            return Task::ready(Err(anyhow!(
-                "no native claude session for {}",
-                params.session_id.0
-            )));
-        };
-
-        let (sender, receiver) = oneshot::channel();
-        *session.shared.prompt_tx.borrow_mut() = Some(sender);
-
-        if let Err(error) = session
-            .process
-            .outgoing
-            .unbounded_send(InputMessage::user_blocks(&params.prompt))
+        let thread;
+        let receiver;
         {
-            session.shared.prompt_tx.borrow_mut().take();
-            return Task::ready(Err(anyhow!("claude stdin closed: {error}")));
+            let sessions = self.sessions.borrow();
+            let Some(session) = sessions.get(&params.session_id) else {
+                return Task::ready(Err(anyhow!(
+                    "no native claude session for {}",
+                    params.session_id.0
+                )));
+            };
+
+            let (sender, prompt_receiver) = oneshot::channel();
+            *session.shared.prompt_tx.borrow_mut() = Some(sender);
+
+            if let Err(error) = session
+                .process
+                .outgoing
+                .unbounded_send(InputMessage::user_blocks(&params.prompt))
+            {
+                session.shared.prompt_tx.borrow_mut().take();
+                return Task::ready(Err(anyhow!("claude stdin closed: {error}")));
+            }
+
+            thread = session.thread.clone();
+            receiver = prompt_receiver;
         }
 
-        let thread = session.thread.clone();
+        // Arm the silence watchdog for this turn (re-borrow mutably now that the
+        // immutable borrow above is dropped). Disarmed below once the prompt
+        // resolves, by whichever path resolves it. `arm_watchdog` needs an owned
+        // `Rc<Self>` for the recovery callback; the `self_handle` weak yields it.
+        let connection = self.self_handle.borrow().clone();
+        if let Some(connection) = connection.upgrade() {
+            connection.arm_watchdog(&params.session_id, cx);
+        }
+
+        let session_id = params.session_id.clone();
+        let connection = self.self_handle.borrow().clone();
         cx.spawn(async move |cx| {
-            match receiver.await {
+            let outcome = match receiver.await {
                 Ok(Ok(TurnEnd::Stop(stop_reason))) => Ok(acp::PromptResponse::new(stop_reason)),
                 Ok(Ok(TurnEnd::Error(detail))) => {
                     thread
@@ -642,7 +744,17 @@ impl AgentConnection for ClaudeNativeConnection {
                 // Sender dropped without sending (session torn down): treat as a
                 // cancellation rather than a hard error.
                 Err(_) => Ok(acp::PromptResponse::new(acp::StopReason::Cancelled)),
+            };
+
+            // Turn ended (any path) — drop the watchdog so its silence timer
+            // stops until the next prompt re-arms it.
+            if let Some(connection) = connection.upgrade()
+                && let Some(session) = connection.sessions.borrow_mut().get_mut(&session_id)
+            {
+                session.watchdog = None;
             }
+
+            outcome
         })
     }
 
