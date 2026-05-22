@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gpui::{App, AppContext, SharedString, Task};
+use util::ResultExt as _;
 
 /// AgentConnection mock that returns a real `AcpThread` from `new_session`
 /// so `create_session` can complete without going through a real subprocess.
@@ -22,6 +23,9 @@ use gpui::{App, AppContext, SharedString, Task};
 pub struct MockConnection {
     next_session: Cell<u64>,
     prompt_gate: parking_lot::Mutex<Option<async_channel::Receiver<()>>>,
+    // Counts `cancel()` calls so tests can assert the store forwarded a stop
+    // exactly once (and didn't double-forward on a repeated cancel).
+    cancel_count: Arc<AtomicUsize>,
 }
 
 impl MockConnection {
@@ -29,6 +33,7 @@ impl MockConnection {
         Self {
             next_session: Cell::new(0),
             prompt_gate: parking_lot::Mutex::new(None),
+            cancel_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -36,6 +41,15 @@ impl MockConnection {
         Self {
             next_session: Cell::new(0),
             prompt_gate: parking_lot::Mutex::new(Some(gate)),
+            cancel_count: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    pub fn with_cancel_count(cancel_count: Arc<AtomicUsize>) -> Self {
+        Self {
+            next_session: Cell::new(0),
+            prompt_gate: parking_lot::Mutex::new(None),
+            cancel_count,
         }
     }
 }
@@ -111,7 +125,9 @@ impl acp_thread::AgentConnection for MockConnection {
             }),
         }
     }
-    fn cancel(&self, _session_id: &agent_client_protocol::schema::SessionId, _cx: &mut App) {}
+    fn cancel(&self, _session_id: &agent_client_protocol::schema::SessionId, _cx: &mut App) {
+        self.cancel_count.fetch_add(1, Ordering::SeqCst);
+    }
     fn into_any(self: Rc<Self>) -> Rc<dyn std::any::Any> {
         self
     }
@@ -130,6 +146,9 @@ pub struct MockAgentServer {
     gate: parking_lot::Mutex<Option<async_channel::Receiver<()>>>,
     // Optional gate forwarded to the spawned `MockConnection::prompt`.
     prompt_gate: parking_lot::Mutex<Option<async_channel::Receiver<()>>>,
+    // Optional cancel counter forwarded to the spawned `MockConnection` so a
+    // test can assert how many times the store forwarded `cancel()`.
+    cancel_count: Option<Arc<AtomicUsize>>,
 }
 
 // SAFETY: We only ever touch `gate` from the foreground thread (its
@@ -143,6 +162,7 @@ impl MockAgentServer {
             connect_count,
             gate: parking_lot::Mutex::new(None),
             prompt_gate: parking_lot::Mutex::new(None),
+            cancel_count: None,
         }
     }
 
@@ -151,6 +171,7 @@ impl MockAgentServer {
             connect_count,
             gate: parking_lot::Mutex::new(Some(gate)),
             prompt_gate: parking_lot::Mutex::new(None),
+            cancel_count: None,
         }
     }
 
@@ -162,6 +183,19 @@ impl MockAgentServer {
             connect_count,
             gate: parking_lot::Mutex::new(None),
             prompt_gate: parking_lot::Mutex::new(Some(prompt_gate)),
+            cancel_count: None,
+        }
+    }
+
+    pub fn with_cancel_count(
+        connect_count: Arc<AtomicUsize>,
+        cancel_count: Arc<AtomicUsize>,
+    ) -> Self {
+        Self {
+            connect_count,
+            gate: parking_lot::Mutex::new(None),
+            prompt_gate: parking_lot::Mutex::new(None),
+            cancel_count: Some(cancel_count),
         }
     }
 }
@@ -182,13 +216,15 @@ impl agent_servers::AgentServer for MockAgentServer {
         self.connect_count.fetch_add(1, Ordering::SeqCst);
         let gate = self.gate.lock().clone();
         let prompt_gate = self.prompt_gate.lock().clone();
+        let cancel_count = self.cancel_count.clone();
         cx.spawn(async move |_| {
             if let Some(gate) = gate {
-                let _ = gate.recv().await;
+                gate.recv().await.log_err();
             }
-            let connection: Rc<dyn acp_thread::AgentConnection> = match prompt_gate {
-                Some(prompt_gate) => Rc::new(MockConnection::with_prompt_gate(prompt_gate)),
-                None => Rc::new(MockConnection::new()),
+            let connection: Rc<dyn acp_thread::AgentConnection> = match (prompt_gate, cancel_count) {
+                (Some(prompt_gate), _) => Rc::new(MockConnection::with_prompt_gate(prompt_gate)),
+                (None, Some(cancel_count)) => Rc::new(MockConnection::with_cancel_count(cancel_count)),
+                (None, None) => Rc::new(MockConnection::new()),
             };
             Ok(connection)
         })

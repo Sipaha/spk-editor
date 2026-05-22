@@ -337,6 +337,93 @@ pub(crate) async fn create_session_with_thread(
     (session_id, acp_thread, tmp)
 }
 
+/// Like `create_session_with_thread`, but backs the session with a
+/// `MockConnection` whose `cancel()` increments the returned counter, so a
+/// test can assert how many times the store forwarded a stop to the backend.
+async fn create_session_with_cancel_counter(
+    cx: &mut TestAppContext,
+) -> (
+    SolutionSessionId,
+    Arc<AtomicUsize>,
+    tempfile::TempDir,
+) {
+    let (solution_id, tmp, project) = setup_solution_and_project(cx).await;
+    let agent_id = SharedString::from("mock-agent");
+
+    let connect_count = Arc::new(AtomicUsize::new(0));
+    let cancel_count = Arc::new(AtomicUsize::new(0));
+    cx.update(|cx| {
+        let registry = Arc::new(AdapterRegistry::new());
+        SolutionAgentStore::init_global(cx, registry);
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, _| {
+            store.register_agent_server(
+                agent_id.clone(),
+                Rc::new(MockAgentServer::with_cancel_count(
+                    connect_count.clone(),
+                    cancel_count.clone(),
+                )),
+            );
+        });
+    });
+
+    let session_id = cx
+        .update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| {
+                store.create_session(solution_id.clone(), agent_id.clone(), project.clone(), cx)
+            })
+        })
+        .await
+        .expect("create_session");
+
+    (session_id, cancel_count, tmp)
+}
+
+#[gpui::test]
+async fn cancel_turn_sets_stopping_and_is_idempotent(cx: &mut TestAppContext) {
+    let (session_id, cancel_calls, _tmp) = create_session_with_cancel_counter(cx).await;
+
+    // Put the session in Running so cancel has an in-flight turn to stop.
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let session = store.session(session_id).expect("session exists");
+            session.update(cx, |s, _| {
+                s.state = SessionState::Running {
+                    started_at: std::time::Instant::now(),
+                    notified: false,
+                };
+            });
+        });
+    });
+
+    let read_state = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.read(cx).session(session_id).expect("session").read(cx).state.clone()
+        })
+    };
+
+    // First cancel: Running -> Stopping, connection.cancel forwarded once.
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| store.cancel_turn(session_id, cx))
+    })
+    .expect("cancel_turn");
+    assert!(matches!(read_state(cx), SessionState::Stopping));
+    assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
+
+    // Second cancel while Stopping: no-op, no extra forward.
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| store.cancel_turn(session_id, cx))
+    })
+    .expect("cancel_turn idempotent");
+    assert!(matches!(read_state(cx), SessionState::Stopping));
+    assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
+}
+
 #[gpui::test]
 async fn turn_complete_event_transitions_running_to_idle(cx: &mut TestAppContext) {
     let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;

@@ -176,10 +176,24 @@ impl SolutionAgentStore {
     /// or has no live `AcpThread` yet — once the connection accepts the
     /// cancel request, downstream `AcpThreadEvent::Stopped` (or `Error`)
     /// drives the state transition through `handle_acp_event`.
-    pub fn cancel_turn(&self, session_id: SolutionSessionId, cx: &mut Context<Self>) -> Result<()> {
+    pub fn cancel_turn(
+        &mut self,
+        session_id: SolutionSessionId,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
         let session = self
             .session(session_id)
             .ok_or_else(|| anyhow!("unknown session {session_id}"))?;
+        // Idempotent: only an in-flight turn can be stopped. A cancel in
+        // Stopping/Idle/Errored is a safe no-op (covers repeated taps and the
+        // mobile's deferred resend-on-reconnect).
+        let in_flight = matches!(
+            session.read(cx).state,
+            SessionState::Running { .. } | SessionState::AwaitingInput
+        );
+        if !in_flight {
+            return Ok(());
+        }
         let (connection, acp_session_id) = {
             let s = session.read(cx);
             let thread = s
@@ -190,6 +204,10 @@ impl SolutionAgentStore {
                 s.acp_session_id.clone(),
             )
         };
+        // Authoritative, backend-agnostic: flip to Stopping (broadcasts
+        // SessionStateChanged) BEFORE forwarding. Stopping -> Idle still arrives
+        // via the AcpThreadEvent::Stopped handler.
+        self.mutate_state(session_id, |state| *state = SessionState::Stopping, cx);
         connection.cancel(&acp_session_id, cx);
         Ok(())
     }
