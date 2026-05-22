@@ -70,7 +70,9 @@ while IFS= read -r line; do
 
       if [ -n "${MOCK_CLAUDE_OBEY_INTERRUPT:-}" ]; then
         # Honor a soft interrupt: hold the turn open until an `interrupt`
-        # control_request arrives, then end it with a cancelled `result`.
+        # control_request arrives, then end it the way the real `claude` does —
+        # NOT a clean cancel, but an `error_during_execution` result (which the
+        # connection maps to Cancelled because it knows it requested the stop).
         while IFS= read -r reply; do
           if [ -n "${MOCK_CLAUDE_CAPTURE:-}" ]; then
             printf '%s\n' "$reply" >> "$MOCK_CLAUDE_CAPTURE"
@@ -79,7 +81,7 @@ while IFS= read -r line; do
             *'"subtype":"interrupt"'*) break ;;
           esac
         done
-        emit '{"type":"result","subtype":"success","is_error":false,"result":"","stop_reason":"cancelled","usage":{"input_tokens":1,"output_tokens":0},"uuid":"u2","session_id":"mock-session"}'
+        emit '{"type":"result","subtype":"error_during_execution","is_error":true,"result":null,"stop_reason":"tool_use","errors":["[ede_diagnostic] interrupted"],"usage":{"input_tokens":1,"output_tokens":0},"uuid":"u2","session_id":"mock-session"}'
       elif [ -n "${MOCK_CLAUDE_IGNORE_INTERRUPT:-}" ]; then
         # Never emit `result`, even after an interrupt: forces the escalation
         # kill+resume path. Keep capturing stdin so the test can assert the

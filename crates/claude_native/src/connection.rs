@@ -128,6 +128,13 @@ struct SessionShared {
     /// requests) so any progress resets the silence timer. An `Rc` so the
     /// watchdog timer task shares the very same cell the pump bumps.
     last_output: Rc<Cell<Instant>>,
+    /// Set by `cancel` when a soft interrupt is sent. The real `claude` does NOT
+    /// emit a clean `result(cancelled)` on interrupt — mid-tool it emits
+    /// `result(subtype="error_during_execution", is_error=true)`, which
+    /// `classify_result` would otherwise turn into an `Errored` turn. We can't
+    /// infer "cancelled" from claude's encoding, so we record that *we* asked:
+    /// the pump resolves the next `result` as `Cancelled` when this is set.
+    cancel_requested: Cell<bool>,
 }
 
 /// Everything needed to respawn a session's `claude` process under the same
@@ -261,6 +268,7 @@ impl ClaudeNativeConnection {
                 prompt_tx: RefCell::new(None),
                 sticky_window: Cell::new(None),
                 last_output: Rc::new(Cell::new(cx.background_executor().now())),
+                cancel_requested: Cell::new(false),
             });
 
             let thread: Entity<AcpThread> = cx.update(|cx| {
@@ -429,6 +437,7 @@ impl ClaudeNativeConnection {
                 prompt_tx: RefCell::new(None),
                 sticky_window: Cell::new(None),
                 last_output: Rc::new(Cell::new(cx.background_executor().now())),
+                cancel_requested: Cell::new(false),
             });
             let incoming = process.take_incoming();
             let exited = process.wait_status();
@@ -515,7 +524,14 @@ async fn run_update_pump(
                     .ok();
             }
 
-            let turn_end = classify_result(result);
+            // If we asked claude to stop, treat whatever terminal `result` it
+            // sends as a cancellation — claude reports an interrupted turn as an
+            // error (`error_during_execution`), not a clean cancel.
+            let turn_end = if shared.cancel_requested.take() {
+                TurnEnd::Stop(acp::StopReason::Cancelled)
+            } else {
+                classify_result(result)
+            };
             if let Some(sender) = shared.prompt_tx.borrow_mut().take() {
                 sender.send(Ok(turn_end)).ok();
             }
@@ -751,6 +767,9 @@ impl AgentConnection for ClaudeNativeConnection {
             if session.shared.prompt_tx.borrow().is_none() {
                 return;
             }
+            // Mark the cancellation so the pump maps claude's interrupt result
+            // (an error, not a clean cancel) to `Cancelled` rather than `Errored`.
+            session.shared.cancel_requested.set(true);
             // The interrupt's control_response (the returned receiver) is
             // irrelevant to escalation timing — we escalate on the prompt
             // staying pending, not on the ack — so it is dropped here.
