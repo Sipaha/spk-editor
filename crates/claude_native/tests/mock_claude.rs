@@ -591,3 +591,63 @@ async fn prompt_stays_pending_without_result(cx: &mut TestAppContext) {
         _ = timeout => {}
     }
 }
+
+/// On Linux a SIGKILL'd child that hasn't been reaped lingers as a zombie
+/// (`/proc/<pid>/stat` state `Z`); a fully gone process has no `/proc` entry.
+/// Either state means the process is no longer running.
+fn process_is_killed(process_id: u32) -> bool {
+    match std::fs::read_to_string(format!("/proc/{process_id}/stat")) {
+        Err(_) => true,
+        Ok(stat) => stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .map(|state| state == "Z")
+            .unwrap_or(true),
+    }
+}
+
+#[gpui::test]
+async fn close_session_kills_process_and_removes_session(cx: &mut TestAppContext) {
+    let project = init_test(cx).await;
+    let connection = connect_mock(&project, Vec::new(), cx).await;
+
+    let task = cx.update(|cx| {
+        Rc::clone(&connection).new_session(
+            project.clone(),
+            PathList::new(&[std::env::temp_dir().as_path()]),
+            cx,
+        )
+    });
+    let thread = await_thread(task, cx).await;
+    let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
+
+    let process_id = connection
+        .session_process_id_for_test(&session_id)
+        .expect("live session has a process id");
+
+    let close = cx.update(|cx| Rc::clone(&connection).close_session(&session_id, cx));
+    close.await.expect("close_session ok");
+
+    // Session is removed from the map.
+    assert_eq!(
+        connection.session_process_id_for_test(&session_id),
+        None,
+        "session must be removed after close"
+    );
+
+    // The backing process is killed (gone or zombie). Poll briefly: kill is
+    // delivered synchronously but the OS may take a beat to tear it down.
+    let deadline = cx.background_executor.timer(Duration::from_secs(10)).fuse();
+    futures::pin_mut!(deadline);
+    loop {
+        if process_is_killed(process_id) {
+            break;
+        }
+        let tick = cx.background_executor.timer(Duration::from_millis(20)).fuse();
+        futures::pin_mut!(tick);
+        futures::select! {
+            _ = tick => continue,
+            _ = deadline => panic!("process {process_id} still running after close"),
+        }
+    }
+}
