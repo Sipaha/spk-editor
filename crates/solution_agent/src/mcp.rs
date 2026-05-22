@@ -131,13 +131,42 @@ impl<'de> Deserialize<'de> for ListSessionsParams {
     }
 }
 
+/// Structured, serde-tagged wire representation of `SessionState`. Replaces the
+/// former `format!("{:?}", state)` string — `Debug` output is not a stable
+/// protocol. `Running` carries the wall-clock start anchor (the monotonic
+/// `Instant` isn't serialisable); `Errored` carries the message.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionStateDto {
+    Idle,
+    Running { started_at_ms: i64 },
+    Stopping,
+    AwaitingInput,
+    Errored { message: String },
+}
+
+impl SessionStateDto {
+    fn from_state(state: &crate::model::SessionState, started_at_ms: i64) -> Self {
+        use crate::model::SessionState;
+        match state {
+            SessionState::Idle => SessionStateDto::Idle,
+            SessionState::Running { .. } => SessionStateDto::Running { started_at_ms },
+            SessionState::Stopping => SessionStateDto::Stopping,
+            SessionState::AwaitingInput => SessionStateDto::AwaitingInput,
+            SessionState::Errored(msg) => SessionStateDto::Errored {
+                message: msg.to_string(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SessionSummary {
     pub id: String,
     pub solution_id: String,
     pub agent_id: String,
     pub title: String,
-    pub state: String,
+    pub state: SessionStateDto,
     pub created_at: i64,
     pub last_activity_at: i64,
     /// F: cumulative tokens reported by the agent for this session.
@@ -159,15 +188,6 @@ pub struct SessionSummary {
     /// unknown model).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
-    /// Wall-clock ms when the session's current `state` last flipped to
-    /// `Running`. Computed at serialisation time from the monotonic
-    /// `SessionState::Running { started_at: Instant }` via
-    /// `Utc::now() - started_at.elapsed()`. `None` when state isn't
-    /// Running. Lets clients render a live "Running for Xs" badge
-    /// without the server having to push elapsed-tick updates — the
-    /// client ticks locally from this anchor.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state_started_at_ms: Option<i64>,
     /// F: parent session reference for sub-agent indication. `None` for
     /// top-level sessions. Set at creation time via
     /// `solution_agent.create_session({parent_session_id})`.
@@ -291,29 +311,26 @@ fn session_summary(session: &SolutionSession, cx: &App) -> SessionSummary {
         .map(|usage| usage.max_tokens)
         .filter(|m| *m > 0)
         .or(session.cached_max_tokens);
-    // Wall-clock anchor for the live Running counter. SessionState's
-    // started_at is a monotonic Instant (not serialisable); convert by
-    // subtracting its elapsed from Utc::now(). Sub-ms clock skew is
-    // negligible at the human-visible tick rate (1 Hz).
-    let state_started_at_ms = match &session.state {
+    // Wall-clock anchor for a Running turn's live counter (monotonic Instant →
+    // serialisable ms). Only meaningful for Running; folded into the DTO.
+    let started_at_ms = match &session.state {
         crate::model::SessionState::Running { started_at, .. } => {
             let wall = chrono::Utc::now()
                 - chrono::Duration::from_std(started_at.elapsed()).unwrap_or_default();
-            Some(wall.timestamp_millis())
+            wall.timestamp_millis()
         }
-        _ => None,
+        _ => 0,
     };
     SessionSummary {
         id: session.id.to_string(),
         solution_id: session.solution_id.0.clone(),
         agent_id: session.agent_id.to_string(),
         title: session.title.to_string(),
-        state: format!("{:?}", session.state),
+        state: SessionStateDto::from_state(&session.state, started_at_ms),
         created_at: session.created_at.timestamp_millis(),
         last_activity_at: session.last_activity_at.timestamp_millis(),
         total_tokens,
         max_tokens,
-        state_started_at_ms,
         parent_session_id: session.parent_session_id.map(|id| id.to_string()),
     }
 }
@@ -688,7 +705,7 @@ pub struct GetSessionResult {
     pub solution_id: String,
     pub agent_id: String,
     pub title: String,
-    pub state: String,
+    pub state: SessionStateDto,
     pub created_at: i64,
     pub last_activity_at: i64,
     /// F: cumulative tokens for the session (live thread > cached
@@ -3032,6 +3049,32 @@ mod tests {
     use super::*;
     use crate::store::tests::create_session_with_thread;
     use context_server::listener::McpServerTool;
+
+    #[test]
+    fn session_state_dto_serializes_structured() {
+        use crate::model::SessionState;
+        let json = |s: &SessionState, ms: i64| {
+            serde_json::to_value(SessionStateDto::from_state(s, ms)).unwrap()
+        };
+        assert_eq!(json(&SessionState::Idle, 0), serde_json::json!({"kind":"idle"}));
+        assert_eq!(json(&SessionState::Stopping, 0), serde_json::json!({"kind":"stopping"}));
+        assert_eq!(
+            json(&SessionState::AwaitingInput, 0),
+            serde_json::json!({"kind":"awaiting_input"})
+        );
+        assert_eq!(
+            json(&SessionState::Errored("boom".into()), 0),
+            serde_json::json!({"kind":"errored","message":"boom"})
+        );
+        let running = SessionState::Running {
+            started_at: std::time::Instant::now(),
+            notified: false,
+        };
+        assert_eq!(
+            json(&running, 1779),
+            serde_json::json!({"kind":"running","started_at_ms":1779})
+        );
+    }
 
     fn fake_user_text_chunk(text: &str) -> acp::ContentBlock {
         acp::ContentBlock::Text(acp::TextContent::new(text.to_string()))
