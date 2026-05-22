@@ -9,6 +9,15 @@
 #                           on stdin before emitting `result`.
 #   MOCK_CLAUDE_NO_RESULT - if set, stream text but never emit the final `result`
 #                           (the hang scenario).
+#   MOCK_CLAUDE_OBEY_INTERRUPT
+#                         - if set, the turn streams text but withholds its
+#                           `result` until an `interrupt` control_request arrives
+#                           on stdin, then emits `result(cancelled)` (the clean
+#                           two-stage Stop: interrupt is honored, no kill needed).
+#   MOCK_CLAUDE_IGNORE_INTERRUPT
+#                         - if set, the turn streams text and never emits a
+#                           `result` at all, even after an `interrupt` arrives
+#                           (forces the escalation kill+resume path).
 #
 # On startup it emits the `init` system message (matching the real `claude`
 # stream-json binary, which announces the session id before any input). Then on
@@ -45,7 +54,28 @@ while IFS= read -r line; do
 
       emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}},"uuid":"u1","session_id":"mock-session"}'
 
-      if [ -z "${MOCK_CLAUDE_NO_RESULT:-}" ]; then
+      if [ -n "${MOCK_CLAUDE_OBEY_INTERRUPT:-}" ]; then
+        # Honor a soft interrupt: hold the turn open until an `interrupt`
+        # control_request arrives, then end it with a cancelled `result`.
+        while IFS= read -r reply; do
+          if [ -n "${MOCK_CLAUDE_CAPTURE:-}" ]; then
+            printf '%s\n' "$reply" >> "$MOCK_CLAUDE_CAPTURE"
+          fi
+          case "$reply" in
+            *'"subtype":"interrupt"'*) break ;;
+          esac
+        done
+        emit '{"type":"result","subtype":"success","is_error":false,"result":"","stop_reason":"cancelled","usage":{"input_tokens":1,"output_tokens":0},"uuid":"u2","session_id":"mock-session"}'
+      elif [ -n "${MOCK_CLAUDE_IGNORE_INTERRUPT:-}" ]; then
+        # Never emit `result`, even after an interrupt: forces the escalation
+        # kill+resume path. Keep capturing stdin so the test can assert the
+        # interrupt was written before the kill.
+        while IFS= read -r reply; do
+          if [ -n "${MOCK_CLAUDE_CAPTURE:-}" ]; then
+            printf '%s\n' "$reply" >> "$MOCK_CLAUDE_CAPTURE"
+          fi
+        done
+      elif [ -z "${MOCK_CLAUDE_NO_RESULT:-}" ]; then
         emit '{"type":"result","subtype":"success","is_error":false,"result":"Hi","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2},"uuid":"u2","session_id":"mock-session"}'
       fi
       ;;

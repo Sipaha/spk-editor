@@ -137,6 +137,13 @@ impl ClaudeProcess {
             .context("claude process stdin closed")
     }
 
+    /// The OS process id of the running child. Distinguishes one spawn from a
+    /// later respawn (the Stop-escalation / watchdog recovery replaces the
+    /// process, so a changed pid is how callers detect a kill+resume happened).
+    pub fn process_id(&self) -> u32 {
+        self.child.id()
+    }
+
     /// SIGKILL the process group. Used by Stop escalation / close_session in
     /// later phases; kept here next to spawn so the OS surface stays in one
     /// place.

@@ -396,6 +396,163 @@ async fn wait_for_authorization(
     }
 }
 
+/// Race a prompt task against a timer, returning the prompt's response if it
+/// resolves first or panicking on timeout. Used by the cancel tests where the
+/// turn must be force-resolved (clean interrupt or escalation kill+resume).
+async fn await_prompt(
+    prompt_task: gpui::Task<anyhow::Result<acp::PromptResponse>>,
+    cx: &mut TestAppContext,
+    timeout: Duration,
+) -> acp::PromptResponse {
+    let timer = cx.background_executor.timer(timeout).fuse();
+    let prompt_task = prompt_task.fuse();
+    futures::pin_mut!(timer, prompt_task);
+    futures::select! {
+        response = prompt_task => response.expect("prompt resolved Ok"),
+        _ = timer => panic!("prompt did not resolve within {timeout:?}"),
+    }
+}
+
+#[gpui::test]
+async fn cancel_clean_interrupt_resolves_without_kill(cx: &mut TestAppContext) {
+    let capture = std::env::temp_dir().join(format!(
+        "claude_native_cancel_clean_{}.ndjson",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&capture);
+
+    let project = init_test(cx).await;
+    let connection = connect_mock(
+        &project,
+        vec![
+            ("MOCK_CLAUDE_OBEY_INTERRUPT".to_string(), "1".to_string()),
+            (
+                "MOCK_CLAUDE_CAPTURE".to_string(),
+                capture.to_string_lossy().into_owned(),
+            ),
+        ],
+        cx,
+    )
+    .await;
+    // A short escalation window so a regression (escalation firing despite the
+    // clean interrupt) would surface, while the mock's `result(cancelled)` still
+    // wins the race.
+    connection.set_escalation_timeout_for_test(Duration::from_secs(30));
+
+    let task = cx.update(|cx| {
+        Rc::clone(&connection).new_session(
+            project.clone(),
+            PathList::new(&[std::env::temp_dir().as_path()]),
+            cx,
+        )
+    });
+    let thread = await_thread(task, cx).await;
+    let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
+
+    // Record the spawned process's pid so we can prove it was NOT replaced.
+    let pid_before = connection.session_process_id_for_test(&session_id);
+    assert!(pid_before.is_some(), "session should have a live process");
+
+    let prompt = vec![acp::ContentBlock::Text(acp::TextContent::new(
+        "hello".to_string(),
+    ))];
+    let request = acp::PromptRequest::new(session_id.clone(), prompt);
+    let prompt_task =
+        cx.update(|cx| connection.prompt(acp_thread::UserMessageId::new(), request, cx));
+
+    // Let the turn start streaming before cancelling.
+    cx.run_until_parked();
+    cx.update(|cx| connection.cancel(&session_id, cx));
+
+    let response = await_prompt(prompt_task, cx, Duration::from_secs(10)).await;
+    assert_eq!(response.stop_reason, acp::StopReason::Cancelled);
+
+    // The interrupt must have been written to claude's stdin.
+    let captured = std::fs::read_to_string(&capture).expect("read capture");
+    assert!(
+        captured.contains(r#""subtype":"interrupt""#),
+        "captured stdin missing interrupt control_request: {captured}"
+    );
+
+    // The session must still be present with the SAME process (no kill+respawn).
+    let pid_after = connection.session_process_id_for_test(&session_id);
+    assert_eq!(
+        pid_after, pid_before,
+        "clean interrupt must not kill/replace the process"
+    );
+    let _ = std::fs::remove_file(&capture);
+}
+
+#[gpui::test]
+async fn cancel_escalates_to_kill_and_resume(cx: &mut TestAppContext) {
+    let project = init_test(cx).await;
+    let connection = connect_mock(
+        &project,
+        vec![(
+            "MOCK_CLAUDE_IGNORE_INTERRUPT".to_string(),
+            "1".to_string(),
+        )],
+        cx,
+    )
+    .await;
+    // Tiny escalation window so the test does not wait the real 30s.
+    connection.set_escalation_timeout_for_test(Duration::from_millis(50));
+
+    let task = cx.update(|cx| {
+        Rc::clone(&connection).new_session(
+            project.clone(),
+            PathList::new(&[std::env::temp_dir().as_path()]),
+            cx,
+        )
+    });
+    let thread = await_thread(task, cx).await;
+    let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
+
+    let pid_before = connection.session_process_id_for_test(&session_id);
+    assert!(pid_before.is_some());
+
+    let prompt = vec![acp::ContentBlock::Text(acp::TextContent::new(
+        "hello".to_string(),
+    ))];
+    let request = acp::PromptRequest::new(session_id.clone(), prompt);
+    let prompt_task =
+        cx.update(|cx| connection.prompt(acp_thread::UserMessageId::new(), request, cx));
+
+    cx.run_until_parked();
+    cx.update(|cx| connection.cancel(&session_id, cx));
+
+    // The mock ignores the interrupt and never sends `result`; only the
+    // escalation (kill + resume + force-resolve) can resolve the prompt.
+    let response = await_prompt(prompt_task, cx, Duration::from_secs(10)).await;
+    assert_eq!(response.stop_reason, acp::StopReason::Cancelled);
+
+    // The prompt resolves the instant the escalation force-resolves the oneshot,
+    // which is before the resume spawn + `init` completes. Poll until the new
+    // process lands in the map (or fail on timeout).
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let pid_after = loop {
+        cx.run_until_parked();
+        let pid = connection.session_process_id_for_test(&session_id);
+        if pid.is_some() && pid != pid_before {
+            break pid;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("escalation never respawned the process (pid still {pid:?})");
+        }
+        cx.background_executor.timer(Duration::from_millis(20)).await;
+    };
+    // After escalation the session must still exist (resumed) but be backed by a
+    // different process than the one we killed.
+    assert!(
+        pid_after.is_some(),
+        "session must survive escalation (resumed)"
+    );
+    assert_ne!(
+        pid_after, pid_before,
+        "escalation must kill and respawn the process"
+    );
+}
+
 #[gpui::test]
 async fn prompt_stays_pending_without_result(cx: &mut TestAppContext) {
     let project = init_test(cx).await;

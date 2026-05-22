@@ -14,6 +14,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::Duration;
 
 use acp_thread::{
     AcpThread, AcpThreadEvent, AgentConnection, RequestPermissionOutcome, UserMessageId,
@@ -33,9 +34,15 @@ use util::path_list::PathList;
 use crate::command::{ClaudeCommandSpec, SessionArg, mcp_config_json};
 use crate::process::ClaudeProcess;
 use crate::protocol::{
-    ControlRequestEnvelope, ControlRequestKind, InputMessage, OutputMessage, System,
+    ControlRequestEnvelope, ControlRequestKind, ControlRequestOut, InputMessage, OutputMessage,
+    System,
 };
 use crate::translate::{TurnEnd, classify_result, translate, usage_update};
+
+/// Default grace period after a soft `interrupt` before the Stop escalates to
+/// a hard kill + `--resume` respawn. Overridable for tests via
+/// [`ClaudeNativeConnection::set_escalation_timeout_for_test`].
+const DEFAULT_ESCALATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `AgentServer` that spawns the `claude` binary directly (no node wrapper).
 pub struct ClaudeNativeAgentServer {
@@ -88,7 +95,10 @@ impl AgentServer for ClaudeNativeAgentServer {
             binary: self.binary.clone(),
             extra_env: self.extra_env.clone(),
             sessions: RefCell::new(HashMap::new()),
+            escalation_timeout: Cell::new(DEFAULT_ESCALATION_TIMEOUT),
+            self_handle: RefCell::new(std::rc::Weak::new()),
         });
+        *connection.self_handle.borrow_mut() = Rc::downgrade(&connection);
         Task::ready(Ok(connection as Rc<dyn AgentConnection>))
     }
 
@@ -107,12 +117,28 @@ struct SessionShared {
     sticky_window: Cell<Option<u64>>,
 }
 
+/// Everything needed to respawn a session's `claude` process under the same
+/// session id (Stop-escalation kill+resume, and — in Phase 7.2 — the watchdog's
+/// `Hung` recovery). Kept separate from the live process so a respawn can build
+/// a fresh `ClaudeCommandSpec` without re-deriving it from scratch.
+#[derive(Clone)]
+struct RespawnBlueprint {
+    project: Entity<Project>,
+    work_dirs: PathList,
+    append_system_prompt: Option<String>,
+}
+
 struct SessionState {
     process: ClaudeProcess,
     thread: WeakEntity<AcpThread>,
     shared: Rc<SessionShared>,
+    blueprint: RespawnBlueprint,
     /// The update-pump task. Stored so dropping the session cancels it.
     _update_pump: Task<()>,
+    /// The Stop-escalation task armed by `cancel`. Held so a clean
+    /// `result(cancelled)` (which resolves the prompt oneshot) can drop it and
+    /// thereby cancel the pending kill+resume. `None` when no Stop is in flight.
+    escalation: Option<Task<()>>,
 }
 
 /// Per-process connection to one or more `claude` subprocesses (one per
@@ -122,6 +148,14 @@ pub struct ClaudeNativeConnection {
     binary: PathBuf,
     extra_env: Vec<(String, String)>,
     sessions: RefCell<HashMap<acp::SessionId, SessionState>>,
+    /// Grace period between a soft `interrupt` and the hard kill+resume
+    /// escalation. A `Cell` so tests can shrink it to milliseconds.
+    escalation_timeout: Cell<Duration>,
+    /// A handle back to the `Rc` that owns this connection, set once right after
+    /// construction. `cancel` (a `&self` method) needs an owned `Rc<Self>` to
+    /// arm the escalation task that may outlive the call; upgrading this weak
+    /// handle yields it without changing the trait signature.
+    self_handle: RefCell<std::rc::Weak<ClaudeNativeConnection>>,
 }
 
 impl ClaudeNativeConnection {
@@ -135,6 +169,21 @@ impl ClaudeNativeConnection {
             .get("append")?
             .as_str()
             .map(|text| text.to_string())
+    }
+
+    /// Shrink the Stop-escalation grace period so an integration test can drive
+    /// the kill+resume path without waiting the real 30 seconds.
+    pub fn set_escalation_timeout_for_test(&self, timeout: Duration) {
+        self.escalation_timeout.set(timeout);
+    }
+
+    /// The OS process id backing a session, or `None` if the session is gone.
+    /// A changed value across a cancel proves the process was killed+respawned.
+    pub fn session_process_id_for_test(&self, session_id: &acp::SessionId) -> Option<u32> {
+        self.sessions
+            .borrow()
+            .get(session_id)
+            .map(|session| session.process.process_id())
     }
 
     /// Spawn a `claude` subprocess for `session`, await its `init` message to
@@ -155,6 +204,12 @@ impl ClaudeNativeConnection {
         let mcp_servers = mcp_servers_for_project(&project, cx);
         let append_system_prompt = Self::append_system_prompt_from_meta(&extra_meta);
 
+        let blueprint = RespawnBlueprint {
+            project: project.clone(),
+            work_dirs: work_dirs.clone(),
+            append_system_prompt: append_system_prompt.clone(),
+        };
+
         let spec = ClaudeCommandSpec {
             binary: self.binary.clone(),
             work_dir,
@@ -174,16 +229,7 @@ impl ClaudeNativeConnection {
             // id before any turn output. We must adopt that id (a resumed
             // session reports its existing id; a new one echoes the uuid we
             // requested, but going through `init` keeps both paths identical).
-            let session_id = loop {
-                let next = process.incoming.next().await;
-                match next {
-                    Some(OutputMessage::System(System::Init { session_id, .. })) => {
-                        break acp::SessionId::new(session_id);
-                    }
-                    Some(_) => continue,
-                    None => return Err(anyhow!("claude exited before init message")),
-                }
-            };
+            let session_id = await_init(&mut process).await?;
 
             let shared = Rc::new(SessionShared {
                 prompt_tx: RefCell::new(None),
@@ -224,12 +270,126 @@ impl ClaudeNativeConnection {
                     process,
                     thread: thread.downgrade(),
                     shared,
+                    blueprint,
                     _update_pump: update_pump,
+                    escalation: None,
                 },
             );
 
             Ok(thread)
         })
+    }
+
+    /// Recovery primitive shared by Stop-escalation and (Phase 7.2) the
+    /// watchdog's `Hung` verdict: SIGKILL the wedged `claude`, respawn it under
+    /// the same session id with `--resume`, rewire a fresh update-pump onto the
+    /// *existing* `AcpThread`, and force-resolve the in-flight prompt oneshot
+    /// `Ok(TurnEnd::Stop(Cancelled))` so `store.rs`'s Cancelled queue logic runs.
+    ///
+    /// Spawned (not awaited) by the caller — it must not hold the `sessions`
+    /// `RefCell` borrow across its `.await`s, so it re-borrows for the swap.
+    fn recover_session(self: Rc<Self>, session_id: acp::SessionId, cx: &mut gpui::AsyncApp) {
+        cx.spawn(async move |cx| {
+            // Take only what we need out of the borrow, then drop it before any
+            // await — `await_init` and `cx.update` below mustn't run while the
+            // `sessions` map is borrowed (re-entrancy + borrow-across-await).
+            let Some((blueprint, thread, prompt_tx)) = ({
+                let mut sessions = self.sessions.borrow_mut();
+                sessions.get_mut(&session_id).map(|session| {
+                    session.escalation = None;
+                    (
+                        session.blueprint.clone(),
+                        session.thread.clone(),
+                        session.shared.prompt_tx.borrow_mut().take(),
+                    )
+                })
+            }) else {
+                return;
+            };
+
+            // Resolve the wedged prompt first so the UI leaves Running even if
+            // the respawn below fails for any reason.
+            if let Some(prompt_tx) = prompt_tx {
+                prompt_tx
+                    .send(Ok(TurnEnd::Stop(acp::StopReason::Cancelled)))
+                    .ok();
+            }
+
+            // Kill the old process. Done via a short-lived borrow so the kill
+            // call doesn't straddle an await.
+            {
+                let mut sessions = self.sessions.borrow_mut();
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    session.process.kill().log_err();
+                }
+            }
+
+            let Some(work_dir) = blueprint.work_dirs.ordered_paths().next().cloned() else {
+                return;
+            };
+            let spec = cx.update(|cx| ClaudeCommandSpec {
+                binary: self.binary.clone(),
+                work_dir,
+                session: SessionArg::Resume(session_id.0.to_string()),
+                mcp_servers_json: mcp_config_json(&mcp_servers_for_project(
+                    &blueprint.project,
+                    cx,
+                )),
+                append_system_prompt: blueprint.append_system_prompt.clone(),
+                extra_env: self.extra_env.clone(),
+            });
+
+            let mut process = match cx.update(|cx| ClaudeProcess::spawn(spec, cx)) {
+                Ok(process) => process,
+                Err(error) => {
+                    log::error!("claude_native: respawn on Stop escalation failed: {error}");
+                    return;
+                }
+            };
+
+            if await_init(&mut process).await.log_err().is_none() {
+                return;
+            }
+
+            let shared = Rc::new(SessionShared {
+                prompt_tx: RefCell::new(None),
+                sticky_window: Cell::new(None),
+            });
+            let incoming = process.take_incoming();
+            let exited = process.wait_status();
+            let outgoing = process.outgoing.clone();
+            let update_pump = cx.spawn({
+                let thread = thread.clone();
+                let shared = shared.clone();
+                async move |cx| {
+                    run_update_pump(incoming, exited, outgoing, thread, shared, cx).await;
+                }
+            });
+
+            let mut sessions = self.sessions.borrow_mut();
+            if let Some(session) = sessions.get_mut(&session_id) {
+                session.process = process;
+                session.shared = shared;
+                session._update_pump = update_pump;
+            }
+            // If the session vanished while we were respawning (closed), the new
+            // `process`/`update_pump` drop here and tear themselves down.
+        })
+        .detach();
+    }
+}
+
+/// Await the `claude` `init` system message that announces the canonical
+/// session id. Shared by initial spawn and the recovery respawn.
+async fn await_init(process: &mut ClaudeProcess) -> Result<acp::SessionId> {
+    loop {
+        match process.incoming.next().await {
+            Some(OutputMessage::System(System::Init { session_id, .. })) => {
+                return Ok(acp::SessionId::new(session_id));
+            }
+            Some(_) => continue,
+            None => return Err(anyhow!("claude exited before init message")),
+        }
     }
 }
 
@@ -486,8 +646,56 @@ impl AgentConnection for ClaudeNativeConnection {
         })
     }
 
-    fn cancel(&self, _session_id: &acp::SessionId, _cx: &mut App) {
-        // Implemented in Phase 7 (two-stage interrupt + watchdog).
+    fn cancel(&self, session_id: &acp::SessionId, cx: &mut App) {
+        // Stage 1: a soft `interrupt` control request. A well-behaved `claude`
+        // ends the turn with `result(cancelled)`, which the update-pump resolves
+        // through the prompt oneshot (the normal path) — no escalation needed.
+        {
+            let sessions = self.sessions.borrow();
+            let Some(session) = sessions.get(session_id) else {
+                return;
+            };
+            // No turn in flight → nothing to cancel.
+            if session.shared.prompt_tx.borrow().is_none() {
+                return;
+            }
+            // The interrupt's control_response (the returned receiver) is
+            // irrelevant to escalation timing — we escalate on the prompt
+            // staying pending, not on the ack — so it is dropped here.
+            match session.process.send_control(ControlRequestOut::Interrupt) {
+                Ok(_receiver) => {}
+                Err(error) => log::warn!("claude_native: interrupt write failed: {error}"),
+            }
+        }
+
+        // Stage 2: arm the escalation. After the grace period, if the prompt
+        // oneshot is still pending (claude ignored the interrupt), kill + resume.
+        // Capture a *weak* handle so the stored task (owned by the session, owned
+        // by this `Rc`) doesn't form a strong cycle that pins the connection.
+        let connection = self.self_handle.borrow().clone();
+        let timeout = self.escalation_timeout.get();
+        let session_id_for_task = session_id.clone();
+        let escalation = cx.spawn(async move |cx| {
+            cx.background_executor().timer(timeout).await;
+            let Some(connection) = connection.upgrade() else {
+                return;
+            };
+            // Re-check under the borrow: a clean `result(cancelled)` resolves
+            // (takes) the prompt oneshot via the pump, so a still-present sender
+            // is the signal that the interrupt was ignored and we must escalate.
+            let still_pending = connection
+                .sessions
+                .borrow()
+                .get(&session_id_for_task)
+                .map(|session| session.shared.prompt_tx.borrow().is_some())
+                .unwrap_or(false);
+            if still_pending {
+                connection.recover_session(session_id_for_task, cx);
+            }
+        });
+        if let Some(session) = self.sessions.borrow_mut().get_mut(session_id) {
+            session.escalation = Some(escalation);
+        }
     }
 
     fn close_session(
