@@ -2922,6 +2922,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1d728cc89cf3aee9ff92b05e62b19ee65a02b5702cff7d5a377e32c6ae29d8d"
 
 [[package]]
+name = "claude_native"
+version = "0.1.0"
+dependencies = [
+ "acp_thread",
+ "agent-client-protocol",
+ "agent_servers",
+ "anyhow",
+ "futures 0.3.32",
+ "gpui",
+ "log",
+ "project",
+ "serde",
+ "serde_json",
+ "settings",
+ "smol",
+ "util",
+]
+
+[[package]]
 name = "cli"
 version = "0.1.0"
 dependencies = [
