@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use acp_thread::{AcpThread, AgentConnection, UserMessageId};
+use acp_thread::{AcpThread, AgentConnection, AcpThreadEvent, UserMessageId};
 use action_log::ActionLog;
 use agent_client_protocol::schema as acp;
 use agent_servers::{AgentServer, AgentServerDelegate, mcp_servers_for_project};
@@ -30,7 +30,7 @@ use util::path_list::PathList;
 
 use crate::command::{ClaudeCommandSpec, SessionArg, mcp_config_json};
 use crate::process::ClaudeProcess;
-use crate::protocol::{OutputMessage, System};
+use crate::protocol::{InputMessage, OutputMessage, System};
 use crate::translate::{TurnEnd, classify_result, translate, usage_update};
 
 /// `AgentServer` that spawns the `claude` binary directly (no node wrapper).
@@ -356,10 +356,45 @@ impl AgentConnection for ClaudeNativeConnection {
     fn prompt(
         &self,
         _user_message_id: UserMessageId,
-        _params: acp::PromptRequest,
-        _cx: &mut App,
+        params: acp::PromptRequest,
+        cx: &mut App,
     ) -> Task<Result<acp::PromptResponse>> {
-        Task::ready(Err(anyhow!("native claude prompt not yet implemented")))
+        let sessions = self.sessions.borrow();
+        let Some(session) = sessions.get(&params.session_id) else {
+            return Task::ready(Err(anyhow!(
+                "no native claude session for {}",
+                params.session_id.0
+            )));
+        };
+
+        let (sender, receiver) = oneshot::channel();
+        *session.shared.prompt_tx.borrow_mut() = Some(sender);
+
+        if let Err(error) = session
+            .process
+            .outgoing
+            .unbounded_send(InputMessage::user_blocks(&params.prompt))
+        {
+            session.shared.prompt_tx.borrow_mut().take();
+            return Task::ready(Err(anyhow!("claude stdin closed: {error}")));
+        }
+
+        let thread = session.thread.clone();
+        cx.spawn(async move |cx| {
+            match receiver.await {
+                Ok(Ok(TurnEnd::Stop(stop_reason))) => Ok(acp::PromptResponse::new(stop_reason)),
+                Ok(Ok(TurnEnd::Error(detail))) => {
+                    thread
+                        .update(cx, |_thread, cx| cx.emit(AcpThreadEvent::Error))
+                        .ok();
+                    Err(anyhow!(detail))
+                }
+                Ok(Err(error)) => Err(error),
+                // Sender dropped without sending (session torn down): treat as a
+                // cancellation rather than a hard error.
+                Err(_) => Ok(acp::PromptResponse::new(acp::StopReason::Cancelled)),
+            }
+        })
     }
 
     fn cancel(&self, _session_id: &acp::SessionId, _cx: &mut App) {

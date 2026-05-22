@@ -253,7 +253,6 @@ async fn new_session_captures_init_session_id(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-#[ignore = "prompt lands in Task 5.2"]
 async fn prompt_resolves_on_result_and_streams_text(cx: &mut TestAppContext) {
     let project = init_test(cx).await;
     let connection = connect_mock(&project, Vec::new(), cx).await;
@@ -295,7 +294,6 @@ async fn prompt_resolves_on_result_and_streams_text(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-#[ignore = "prompt lands in Task 5.2"]
 async fn prompt_stays_pending_without_result(cx: &mut TestAppContext) {
     let project = init_test(cx).await;
     let connection = connect_mock(
