@@ -2542,7 +2542,11 @@ impl Render for SolutionSessionView {
                                 }
                                 let is_working = matches!(
                                     self.session.read(cx).state,
-                                    SessionState::Running { .. }
+                                    SessionState::Running { .. } | SessionState::Stopping
+                                );
+                                let stopping = matches!(
+                                    self.session.read(cx).state,
+                                    SessionState::Stopping
                                 );
                                 let pending_count = self.session.read(cx).pending_messages.len();
                                 let resuming = self.resuming;
@@ -2603,8 +2607,19 @@ impl Render for SolutionSessionView {
                                     )
                                 })
                                 .when(is_working, |this| {
-                                    this.child(
-                                        IconButton::new("solution-session-stop", IconName::Stop)
+                                    if stopping {
+                                        // Stop is already in flight. Render a
+                                        // non-interactive indicator instead of a
+                                        // second clickable Stop — the backend's
+                                        // 30s escalation handles a wedged stop, so
+                                        // a second press would be a no-op at best.
+                                        this.child(LoadingLabel::new("Stopping"))
+                                    } else {
+                                        this.child(
+                                            IconButton::new(
+                                                "solution-session-stop",
+                                                IconName::Stop,
+                                            )
                                             .icon_color(Color::Error)
                                             .tooltip(Tooltip::text(
                                                 "Stop response (Esc) — clears queued follow-ups",
@@ -2612,7 +2627,8 @@ impl Render for SolutionSessionView {
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.cancel_turn(cx);
                                             })),
-                                    )
+                                        )
+                                    }
                                 })
                             }),
                     );
