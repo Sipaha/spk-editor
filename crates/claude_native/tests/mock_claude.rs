@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use acp_thread::{AcpThread, AgentConnection as _};
+use acp_thread::{AcpThread, AgentConnection as _, AgentThreadEntry, SelectedPermissionOutcome, ToolCall, ToolCallStatus};
 use agent_client_protocol::schema as acp;
 use agent_servers::{AgentServer, AgentServerDelegate};
 use claude_native::command::{ClaudeCommandSpec, SessionArg};
@@ -169,12 +169,7 @@ async fn closes_incoming_and_resolves_wait_on_exit(cx: &mut TestAppContext) {
         .close_channel();
 
     // Reader must observe EOF and close `incoming`.
-    loop {
-        match recv_with_timeout(&mut process, cx).await {
-            Some(_) => continue,
-            None => break,
-        }
-    }
+    while recv_with_timeout(&mut process, cx).await.is_some() {}
 
     let status = {
         let timeout = cx.background_executor.timer(Duration::from_secs(10)).fuse();
@@ -291,6 +286,114 @@ async fn prompt_resolves_on_result_and_streams_text(cx: &mut TestAppContext) {
         markdown.contains("Hi"),
         "streamed assistant text missing from thread: {markdown}"
     );
+}
+
+#[gpui::test]
+async fn can_use_tool_bridges_authorization_to_control_response(cx: &mut TestAppContext) {
+    let capture = std::env::temp_dir().join(format!(
+        "claude_native_authz_capture_{}.ndjson",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&capture);
+
+    let project = init_test(cx).await;
+    let connection = connect_mock(
+        &project,
+        vec![
+            ("MOCK_CLAUDE_CONTROL".to_string(), "1".to_string()),
+            (
+                "MOCK_CLAUDE_CAPTURE".to_string(),
+                capture.to_string_lossy().into_owned(),
+            ),
+        ],
+        cx,
+    )
+    .await;
+
+    let task = cx.update(|cx| {
+        Rc::clone(&connection).new_session(
+            project.clone(),
+            PathList::new(&[std::env::temp_dir().as_path()]),
+            cx,
+        )
+    });
+    let thread = await_thread(task, cx).await;
+    let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
+
+    let prompt = vec![acp::ContentBlock::Text(acp::TextContent::new(
+        "run a command".to_string(),
+    ))];
+    let request = acp::PromptRequest::new(session_id, prompt);
+    let prompt_task = cx.update(|cx| {
+        connection.prompt(acp_thread::UserMessageId::new(), request, cx)
+    });
+
+    // The mock emits a `can_use_tool` control request; the connection's
+    // update-pump must surface it as a pending tool-call authorization.
+    let tool_call_id = wait_for_authorization(&thread, cx).await;
+
+    // Simulate the user approving the tool call. The connection must translate
+    // the approval into a `control_response{behavior:"allow"}` on claude's stdin,
+    // which lets the mock finish the turn.
+    thread.update(cx, |thread, cx| {
+        thread.authorize_tool_call(
+            tool_call_id,
+            SelectedPermissionOutcome::new(
+                acp::PermissionOptionId::new("allow"),
+                acp::PermissionOptionKind::AllowOnce,
+            ),
+            cx,
+        );
+    });
+
+    let response = {
+        let timeout = cx.background_executor.timer(Duration::from_secs(10)).fuse();
+        let prompt_task = prompt_task.fuse();
+        futures::pin_mut!(timeout, prompt_task);
+        futures::select! {
+            response = prompt_task => response.expect("prompt resolved Ok"),
+            _ = timeout => panic!("prompt did not resolve after authorization"),
+        }
+    };
+    assert_eq!(response.stop_reason, acp::StopReason::EndTurn);
+
+    let captured = std::fs::read_to_string(&capture).expect("read capture");
+    assert!(
+        captured.contains(r#""type":"control_response""#)
+            && captured.contains(r#""behavior":"allow""#),
+        "captured stdin missing allow control_response: {captured}"
+    );
+    let _ = std::fs::remove_file(&capture);
+}
+
+/// Pump the executor until the thread has a tool call awaiting confirmation,
+/// returning its id. Fails the test on timeout so a missing bridge is a failure
+/// rather than a hang.
+async fn wait_for_authorization(
+    thread: &Entity<AcpThread>,
+    cx: &mut TestAppContext,
+) -> acp::ToolCallId {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        cx.run_until_parked();
+        let pending = thread.read_with(cx, |thread, _| {
+            thread.entries().iter().find_map(|entry| match entry {
+                AgentThreadEntry::ToolCall(ToolCall {
+                    id,
+                    status: ToolCallStatus::WaitingForConfirmation { .. },
+                    ..
+                }) => Some(id.clone()),
+                _ => None,
+            })
+        });
+        if let Some(id) = pending {
+            return id;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("thread never entered WaitingForConfirmation");
+        }
+        cx.background_executor.timer(Duration::from_millis(20)).await;
+    }
 }
 
 #[gpui::test]
