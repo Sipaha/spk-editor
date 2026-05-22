@@ -563,6 +563,93 @@ async fn cancel_escalates_to_kill_and_resume(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn repeated_cancel_does_not_double_escalate(cx: &mut TestAppContext) {
+    let project = init_test(cx).await;
+    let connection = connect_mock(
+        &project,
+        vec![(
+            "MOCK_CLAUDE_IGNORE_INTERRUPT".to_string(),
+            "1".to_string(),
+        )],
+        cx,
+    )
+    .await;
+    // Tiny escalation window so the test does not wait the real 30s.
+    connection.set_escalation_timeout_for_test(Duration::from_millis(50));
+
+    let task = cx.update(|cx| {
+        Rc::clone(&connection).new_session(
+            project.clone(),
+            PathList::new(&[std::env::temp_dir().as_path()]),
+            cx,
+        )
+    });
+    let thread = await_thread(task, cx).await;
+    let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
+
+    let pid_before = connection.session_process_id_for_test(&session_id);
+    assert!(pid_before.is_some());
+
+    let prompt = vec![acp::ContentBlock::Text(acp::TextContent::new(
+        "hello".to_string(),
+    ))];
+    let request = acp::PromptRequest::new(session_id.clone(), prompt);
+    let prompt_task =
+        cx.update(|cx| connection.prompt(acp_thread::UserMessageId::new(), request, cx));
+
+    cx.run_until_parked();
+
+    // Cancel TWICE in quick succession, before the (50ms) escalation can fire.
+    // A non-idempotent cancel would arm a second escalation, restarting the
+    // clock and ultimately killing+resuming twice.
+    cx.update(|cx| connection.cancel(&session_id, cx));
+    cx.update(|cx| connection.cancel(&session_id, cx));
+
+    // The double cancel must have armed exactly ONE escalation — this is the
+    // direct idempotency assertion (a second arm restarts the 30s clock and
+    // schedules a second kill+resume).
+    assert_eq!(
+        connection.escalations_armed_for_test(),
+        1,
+        "repeated cancel for one in-flight turn must arm a single escalation"
+    );
+
+    // The mock ignores the interrupt and never sends `result`; only the
+    // escalation (kill + resume + force-resolve) can resolve the prompt.
+    let response = await_prompt(prompt_task, cx, Duration::from_secs(10)).await;
+    assert_eq!(response.stop_reason, acp::StopReason::Cancelled);
+
+    // Poll until the (single) escalation respawns the process.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let pid_after = loop {
+        cx.run_until_parked();
+        let pid = connection.session_process_id_for_test(&session_id);
+        if pid.is_some() && pid != pid_before {
+            break pid;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("escalation never respawned the process (pid still {pid:?})");
+        }
+        cx.background_executor.timer(Duration::from_millis(20)).await;
+    };
+    assert_ne!(
+        pid_after, pid_before,
+        "escalation must kill and respawn the process once"
+    );
+
+    // The new process must be stable: a second escalation (from the double
+    // cancel) would kill+resume again, changing the pid a second time. Advance
+    // the clock well past another escalation window and assert the pid holds.
+    cx.background_executor.timer(Duration::from_millis(200)).await;
+    cx.run_until_parked();
+    let pid_settled = connection.session_process_id_for_test(&session_id);
+    assert_eq!(
+        pid_settled, pid_after,
+        "a repeated cancel must not arm a second escalation (pid changed again)"
+    );
+}
+
+#[gpui::test]
 async fn prompt_stays_pending_without_result(cx: &mut TestAppContext) {
     let project = init_test(cx).await;
     let connection = connect_mock(

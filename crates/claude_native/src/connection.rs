@@ -104,6 +104,7 @@ impl AgentServer for ClaudeNativeAgentServer {
             escalation_timeout: Cell::new(DEFAULT_ESCALATION_TIMEOUT),
             silence_window: Cell::new(DEFAULT_SILENCE_WINDOW),
             self_handle: RefCell::new(std::rc::Weak::new()),
+            escalations_armed: Cell::new(0),
         });
         *connection.self_handle.borrow_mut() = Rc::downgrade(&connection);
         Task::ready(Ok(connection as Rc<dyn AgentConnection>))
@@ -183,6 +184,10 @@ pub struct ClaudeNativeConnection {
     /// arm the escalation task that may outlive the call; upgrading this weak
     /// handle yields it without changing the trait signature.
     self_handle: RefCell<std::rc::Weak<ClaudeNativeConnection>>,
+    /// Test-only tally of how many Stop-escalations `cancel` has armed. The
+    /// idempotency guard means a burst of repeated cancels for one in-flight
+    /// turn arms exactly one — observable without racing the respawn.
+    escalations_armed: Cell<usize>,
 }
 
 impl ClaudeNativeConnection {
@@ -208,6 +213,12 @@ impl ClaudeNativeConnection {
     /// without waiting the real 15 minutes.
     pub fn set_silence_window_for_test(&self, window: Duration) {
         self.silence_window.set(window);
+    }
+
+    /// How many Stop-escalations `cancel` has armed so far. A repeated cancel
+    /// for the same in-flight turn must not increment this (idempotency guard).
+    pub fn escalations_armed_for_test(&self) -> usize {
+        self.escalations_armed.get()
     }
 
     /// The OS process id backing a session, or `None` if the session is gone.
@@ -767,6 +778,11 @@ impl AgentConnection for ClaudeNativeConnection {
             if session.shared.prompt_tx.borrow().is_none() {
                 return;
             }
+            // Idempotent: a Stop is already in flight for this session — keep the
+            // single 30s clock, don't restart it on a repeated cancel.
+            if session.escalation.is_some() {
+                return;
+            }
             // Mark the cancellation so the pump maps claude's interrupt result
             // (an error, not a clean cancel) to `Cancelled` rather than `Errored`.
             session.shared.cancel_requested.set(true);
@@ -806,6 +822,7 @@ impl AgentConnection for ClaudeNativeConnection {
         });
         if let Some(session) = self.sessions.borrow_mut().get_mut(session_id) {
             session.escalation = Some(escalation);
+            self.escalations_armed.set(self.escalations_armed.get() + 1);
         }
     }
 
