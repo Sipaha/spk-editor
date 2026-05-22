@@ -10,13 +10,17 @@
 #   MOCK_CLAUDE_NO_RESULT - if set, stream text but never emit the final `result`
 #                           (the hang scenario).
 #
-# On the first user message it emits: an `init` system message, a text delta
-# stream_event, then (unless suppressed) a success `result`. It exits when stdin
-# reaches EOF.
+# On startup it emits the `init` system message (matching the real `claude`
+# stream-json binary, which announces the session id before any input). Then on
+# the first user message it emits a text delta stream_event, then (unless
+# suppressed) a success `result`. It exits when stdin reaches EOF.
 
 emit() { printf '%s\n' "$1"; }
 
-emitted_init=0
+# Real `claude --output-format stream-json` emits `system/init` immediately on
+# startup, before reading any input. The connection's `new_session` awaits this
+# to learn the canonical session id, so it must not be gated behind a user turn.
+emit '{"type":"system","subtype":"init","session_id":"mock-session","uuid":"u-init"}'
 
 while IFS= read -r line; do
   if [ -n "${MOCK_CLAUDE_CAPTURE:-}" ]; then
@@ -26,11 +30,6 @@ while IFS= read -r line; do
   # Only react to user turns; ignore control responses for stream sequencing.
   case "$line" in
     *'"type":"user"'*)
-      if [ "$emitted_init" -eq 0 ]; then
-        emit '{"type":"system","subtype":"init","session_id":"mock-session","uuid":"u-init"}'
-        emitted_init=1
-      fi
-
       if [ -n "${MOCK_CLAUDE_CONTROL:-}" ]; then
         emit '{"type":"control_request","request_id":"req-1","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"t1","input":{"command":"ls"}}}'
         # Wait for the control_response before finishing the turn.

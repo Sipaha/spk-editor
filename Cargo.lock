@@ -2926,6 +2926,7 @@ name = "claude_native"
 version = "0.1.0"
 dependencies = [
  "acp_thread",
+ "action_log",
  "agent-client-protocol",
  "agent_servers",
  "anyhow",
@@ -2939,6 +2940,8 @@ dependencies = [
  "smol",
  "ui",
  "util",
+ "uuid",
+ "watch",
 ]
 
 [[package]]

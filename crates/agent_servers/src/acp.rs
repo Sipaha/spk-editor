@@ -2998,7 +2998,7 @@ mod tests {
     }
 }
 
-fn mcp_servers_for_project(project: &Entity<Project>, cx: &App) -> Vec<acp::McpServer> {
+pub fn mcp_servers_for_project(project: &Entity<Project>, cx: &App) -> Vec<acp::McpServer> {
     let context_server_store = project.read(cx).context_server_store().read(cx);
     let is_local = project.read(cx).is_local();
     let mut servers: Vec<acp::McpServer> = spk_editor_mcp_bridge_server().into_iter().collect();

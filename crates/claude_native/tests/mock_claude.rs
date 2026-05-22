@@ -5,11 +5,18 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use acp_thread::{AcpThread, AgentConnection as _};
+use agent_client_protocol::schema as acp;
+use agent_servers::{AgentServer, AgentServerDelegate};
 use claude_native::command::{ClaudeCommandSpec, SessionArg};
 use claude_native::process::ClaudeProcess;
 use claude_native::protocol::{InputMessage, OutputMessage, System};
+use claude_native::{ClaudeNativeAgentServer, ClaudeNativeConnection};
 use futures::{FutureExt as _, StreamExt as _};
-use gpui::TestAppContext;
+use gpui::{Entity, TestAppContext};
+use project::{AgentId, FakeFs, Project};
+use std::rc::Rc;
+use util::path_list::PathList;
 
 fn mock_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -179,4 +186,150 @@ async fn closes_incoming_and_resolves_wait_on_exit(cx: &mut TestAppContext) {
         }
     };
     assert!(status.is_some(), "wait_status resolved without an exit status");
+}
+
+async fn init_test(cx: &mut TestAppContext) -> Entity<Project> {
+    cx.update(|cx| {
+        let settings_store = settings::SettingsStore::test(cx);
+        cx.set_global(settings_store);
+    });
+    cx.executor().allow_parking();
+    let fs = FakeFs::new(cx.executor());
+    Project::test(fs, [], cx).await
+}
+
+/// Build a native connection wired to the mock `claude` script, plus the extra
+/// env a scenario needs (capture path, control/no-result toggles).
+async fn connect_mock(
+    project: &Entity<Project>,
+    extra_env: Vec<(String, String)>,
+    cx: &mut TestAppContext,
+) -> Rc<ClaudeNativeConnection> {
+    let server =
+        ClaudeNativeAgentServer::with_binary(AgentId::new("claude-acp"), mock_binary(), extra_env);
+    let store = project.read_with(cx, |project, _| project.agent_server_store().clone());
+    let delegate = AgentServerDelegate::new(store, None);
+    let connection = cx
+        .update(|cx| AgentServer::connect(&server, delegate, project.clone(), cx))
+        .await
+        .expect("connect native backend");
+    connection
+        .into_any()
+        .downcast::<ClaudeNativeConnection>()
+        .expect("native connection type")
+}
+
+async fn await_thread(
+    task: gpui::Task<anyhow::Result<Entity<AcpThread>>>,
+    cx: &mut TestAppContext,
+) -> Entity<AcpThread> {
+    let timeout = cx.background_executor.timer(Duration::from_secs(10)).fuse();
+    let task = task.fuse();
+    futures::pin_mut!(timeout, task);
+    futures::select! {
+        thread = task => thread.expect("session created"),
+        _ = timeout => panic!("timed out creating session"),
+    }
+}
+
+#[gpui::test]
+async fn new_session_captures_init_session_id(cx: &mut TestAppContext) {
+    let project = init_test(cx).await;
+    let connection = connect_mock(&project, Vec::new(), cx).await;
+
+    let task = cx.update(|cx| {
+        Rc::clone(&connection).new_session(
+            project.clone(),
+            PathList::new(&[std::env::temp_dir().as_path()]),
+            cx,
+        )
+    });
+    let thread = await_thread(task, cx).await;
+
+    // The mock emits `init` with session_id "mock-session"; the thread the
+    // connection returns must adopt that id (not the random uuid we spawned with).
+    let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
+    assert_eq!(session_id.0.as_ref(), "mock-session");
+}
+
+#[gpui::test]
+#[ignore = "prompt lands in Task 5.2"]
+async fn prompt_resolves_on_result_and_streams_text(cx: &mut TestAppContext) {
+    let project = init_test(cx).await;
+    let connection = connect_mock(&project, Vec::new(), cx).await;
+
+    let task = cx.update(|cx| {
+        Rc::clone(&connection).new_session(
+            project.clone(),
+            PathList::new(&[std::env::temp_dir().as_path()]),
+            cx,
+        )
+    });
+    let thread = await_thread(task, cx).await;
+    let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
+
+    let prompt = vec![acp::ContentBlock::Text(acp::TextContent::new(
+        "hello".to_string(),
+    ))];
+    let request = acp::PromptRequest::new(session_id, prompt);
+    let prompt_task = cx.update(|cx| {
+        connection.prompt(acp_thread::UserMessageId::new(), request, cx)
+    });
+
+    let response = {
+        let timeout = cx.background_executor.timer(Duration::from_secs(10)).fuse();
+        let prompt_task = prompt_task.fuse();
+        futures::pin_mut!(timeout, prompt_task);
+        futures::select! {
+            response = prompt_task => response.expect("prompt resolved Ok"),
+            _ = timeout => panic!("prompt did not resolve on result message"),
+        }
+    };
+    assert_eq!(response.stop_reason, acp::StopReason::EndTurn);
+
+    let markdown = thread.read_with(cx, |thread, cx| thread.to_markdown(cx));
+    assert!(
+        markdown.contains("Hi"),
+        "streamed assistant text missing from thread: {markdown}"
+    );
+}
+
+#[gpui::test]
+#[ignore = "prompt lands in Task 5.2"]
+async fn prompt_stays_pending_without_result(cx: &mut TestAppContext) {
+    let project = init_test(cx).await;
+    let connection = connect_mock(
+        &project,
+        vec![("MOCK_CLAUDE_NO_RESULT".to_string(), "1".to_string())],
+        cx,
+    )
+    .await;
+
+    let task = cx.update(|cx| {
+        Rc::clone(&connection).new_session(
+            project.clone(),
+            PathList::new(&[std::env::temp_dir().as_path()]),
+            cx,
+        )
+    });
+    let thread = await_thread(task, cx).await;
+    let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
+
+    let prompt = vec![acp::ContentBlock::Text(acp::TextContent::new(
+        "hello".to_string(),
+    ))];
+    let request = acp::PromptRequest::new(session_id, prompt);
+    let prompt_task = cx.update(|cx| {
+        connection.prompt(acp_thread::UserMessageId::new(), request, cx)
+    });
+
+    // The mock streams text but never sends `result`; the prompt must remain
+    // pending. Race it against a short timer and assert the timer wins.
+    let timeout = cx.background_executor.timer(Duration::from_secs(2)).fuse();
+    let prompt_task = prompt_task.fuse();
+    futures::pin_mut!(timeout, prompt_task);
+    futures::select! {
+        _ = prompt_task => panic!("prompt resolved despite no result message (hang scenario)"),
+        _ = timeout => {}
+    }
 }

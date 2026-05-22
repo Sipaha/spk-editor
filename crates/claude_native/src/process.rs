@@ -89,6 +89,16 @@ impl ClaudeProcess {
         })
     }
 
+    /// Take ownership of the `incoming` output stream, leaving a closed stream
+    /// in its place. The connection's per-session update-pump owns the receiver
+    /// (it drains it to translate output into thread updates), while the rest of
+    /// `ClaudeProcess` stays in `SessionState` for stdin writes / control / kill.
+    pub fn take_incoming(&mut self) -> UnboundedReceiver<OutputMessage> {
+        let (sender, closed) = mpsc::unbounded::<OutputMessage>();
+        drop(sender);
+        std::mem::replace(&mut self.incoming, closed)
+    }
+
     /// Resolves with the child's exit status once it terminates (or `None` if
     /// the status could not be collected). Cheap to call repeatedly — each call
     /// returns a clone of the same shared future.
