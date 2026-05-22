@@ -58,9 +58,16 @@ pub fn init(cx: &mut App) {
     // command via the per-Project `AgentServerStore` at session-creation time,
     // so this single registration is enough to enable real `claude` spawning
     // for any open Solution that the user has the CLI installed for.
+    let backend = agent_settings::SolutionAgentSettings::try_get(cx)
+        .map(|s| s.claude_backend)
+        .unwrap_or_default();
     let claude_id = AgentId(SharedString::from(claude_adapter::CLAUDE_ACP_AGENT_ID));
-    let claude_server: Rc<dyn agent_servers::AgentServer> =
-        Rc::new(CustomAgentServer::new(claude_id));
+    let claude_server: Rc<dyn agent_servers::AgentServer> = match backend {
+        agent_settings::ClaudeBackend::Acp => Rc::new(CustomAgentServer::new(claude_id)),
+        agent_settings::ClaudeBackend::Native => {
+            Rc::new(claude_native::ClaudeNativeAgentServer::new(claude_id))
+        }
+    };
     store::SolutionAgentStore::global(cx).update(cx, |store, _cx| {
         store.register_agent_server(
             SharedString::from(claude_adapter::CLAUDE_ACP_AGENT_ID),
