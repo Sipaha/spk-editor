@@ -3,10 +3,10 @@
 //! Implements `acp_thread::AgentConnection`; selected via the
 //! `solution_agent.claude_backend = "native"` setting.
 
-mod command;
+pub mod command;
 mod connection;
-mod process;
-mod protocol;
+pub mod process;
+pub mod protocol;
 mod translate;
 mod watchdog;
 
