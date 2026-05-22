@@ -36,6 +36,10 @@ pub struct Capabilities {
     /// operator's memory of whether they restarted. `<unknown>` if the
     /// path / metadata can't be read.
     pub binary_built_at: String,
+    /// Monotonic chat-wire schema version. Bumped on every breaking change to
+    /// the session/entry wire DTOs. Clients refuse to operate against a server
+    /// whose value exceeds what they support, prompting the user to update.
+    pub wire_schema_version: u32,
 }
 
 /// Resolve `(path, mtime-as-local-time-string)` for the running binary.
@@ -80,6 +84,7 @@ impl McpServerTool for CapabilitiesTool {
             experiments: vec![],
             binary_path,
             binary_built_at,
+            wire_schema_version: 1,
         };
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text {

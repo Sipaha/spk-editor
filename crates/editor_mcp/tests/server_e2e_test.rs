@@ -111,6 +111,15 @@ async fn end_to_end_capabilities_via_socket(cx: &mut TestAppContext) {
         .and_then(|v| v.as_str())
         .expect("protocol_version field");
     assert_eq!(proto_version, "2024-11-05");
+    let wire_schema_version = caps
+        .get("wire_schema_version")
+        .and_then(|v| v.as_u64())
+        .expect("wire_schema_version field");
+    assert!(
+        wire_schema_version >= 1,
+        "wire_schema_version should be >= 1; got {}",
+        wire_schema_version
+    );
 }
 
 async fn read_line(stream: &mut UnixStream) -> Vec<u8> {
