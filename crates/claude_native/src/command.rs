@@ -21,6 +21,17 @@ pub enum SessionArg {
     Resume(String),
 }
 
+impl SessionArg {
+    /// The session id this invocation binds to. `claude` honors the
+    /// `--session-id`/`--resume` value we pass and echoes it back in its `init`
+    /// message, so we can adopt it up front without waiting for `init`.
+    pub fn session_id(&self) -> &str {
+        match self {
+            SessionArg::New(id) | SessionArg::Resume(id) => id,
+        }
+    }
+}
+
 /// Everything needed to build one `claude` invocation.
 pub struct ClaudeCommandSpec {
     pub binary: PathBuf,

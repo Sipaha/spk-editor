@@ -36,7 +36,6 @@ use crate::command::{ClaudeCommandSpec, SessionArg, mcp_config_json};
 use crate::process::ClaudeProcess;
 use crate::protocol::{
     ControlRequestEnvelope, ControlRequestKind, ControlRequestOut, InputMessage, OutputMessage,
-    System,
 };
 use crate::translate::{TurnEnd, apply_usage, classify_result, translate};
 use crate::watchdog::{AnalyzerContext, ClaudeAnalyzer, Watchdog};
@@ -231,6 +230,12 @@ impl ClaudeNativeConnection {
         let mcp_servers = mcp_servers_for_project(&project, cx);
         let append_system_prompt = Self::append_system_prompt_from_meta(&extra_meta);
 
+        // `claude --input-format stream-json` does NOT emit `init` on spawn — it
+        // blocks on stdin and only emits `init` (echoing this id) after the first
+        // user message. So we adopt the id we pass via `--session-id`/`--resume`
+        // up front; waiting for `init` here would deadlock session creation.
+        let session_id = acp::SessionId::new(session.session_id().to_string());
+
         let blueprint = RespawnBlueprint {
             project: project.clone(),
             work_dirs: work_dirs.clone(),
@@ -252,12 +257,6 @@ impl ClaudeNativeConnection {
         };
 
         cx.spawn(async move |cx| {
-            // `claude` emits an `init` system message with the canonical session
-            // id before any turn output. We must adopt that id (a resumed
-            // session reports its existing id; a new one echoes the uuid we
-            // requested, but going through `init` keeps both paths identical).
-            let session_id = await_init(&mut process).await?;
-
             let shared = Rc::new(SessionShared {
                 prompt_tx: RefCell::new(None),
                 sticky_window: Cell::new(None),
@@ -423,9 +422,8 @@ impl ClaudeNativeConnection {
                 }
             };
 
-            if await_init(&mut process).await.log_err().is_none() {
-                return;
-            }
+            // No `init` wait: the resumed `claude` only emits `init` after its
+            // next user turn, and we already know the (unchanged) session id.
 
             let shared = Rc::new(SessionShared {
                 prompt_tx: RefCell::new(None),
@@ -436,7 +434,6 @@ impl ClaudeNativeConnection {
             let exited = process.wait_status();
             let outgoing = process.outgoing.clone();
             let update_pump = cx.spawn({
-                let thread = thread.clone();
                 let shared = shared.clone();
                 async move |cx| {
                     run_update_pump(incoming, exited, outgoing, thread, shared, cx).await;
@@ -457,20 +454,6 @@ impl ClaudeNativeConnection {
             // `process`/`update_pump` drop here and tear themselves down.
         })
         .detach();
-    }
-}
-
-/// Await the `claude` `init` system message that announces the canonical
-/// session id. Shared by initial spawn and the recovery respawn.
-async fn await_init(process: &mut ClaudeProcess) -> Result<acp::SessionId> {
-    loop {
-        match process.incoming.next().await {
-            Some(OutputMessage::System(System::Init { session_id, .. })) => {
-                return Ok(acp::SessionId::new(session_id));
-            }
-            Some(_) => continue,
-            None => return Err(anyhow!("claude exited before init message")),
-        }
     }
 }
 

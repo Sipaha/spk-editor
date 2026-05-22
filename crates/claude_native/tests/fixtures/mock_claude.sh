@@ -19,17 +19,25 @@
 #                           `result` at all, even after an `interrupt` arrives
 #                           (forces the escalation kill+resume path).
 #
-# On startup it emits the `init` system message (matching the real `claude`
-# stream-json binary, which announces the session id before any input). Then on
-# the first user message it emits a text delta stream_event, then (unless
-# suppressed) a success `result`. It exits when stdin reaches EOF.
+# Faithful to the real `claude --input-format stream-json` binary: it does NOT
+# emit `system/init` on startup — it blocks on stdin and emits `init` (echoing
+# the `--session-id`/`--resume` id it was given) only AFTER the first user
+# message, followed by a text delta and (unless suppressed) a success `result`.
+# It exits when stdin reaches EOF.
 
 emit() { printf '%s\n' "$1"; }
 
-# Real `claude --output-format stream-json` emits `system/init` immediately on
-# startup, before reading any input. The connection's `new_session` awaits this
-# to learn the canonical session id, so it must not be gated behind a user turn.
-emit '{"type":"system","subtype":"init","session_id":"mock-session","uuid":"u-init"}'
+# Echo back whatever session id we were launched with, like the real binary.
+session_id="mock-session"
+prev=""
+for arg in "$@"; do
+  case "$prev" in
+    --session-id|--resume) session_id="$arg" ;;
+  esac
+  prev="$arg"
+done
+
+emitted_init=""
 
 while IFS= read -r line; do
   if [ -n "${MOCK_CLAUDE_CAPTURE:-}" ]; then
@@ -39,6 +47,12 @@ while IFS= read -r line; do
   # Only react to user turns; ignore control responses for stream sequencing.
   case "$line" in
     *'"type":"user"'*)
+      # Real `claude` emits `init` only once the first turn begins.
+      if [ -z "$emitted_init" ]; then
+        emit '{"type":"system","subtype":"init","session_id":"'"$session_id"'","uuid":"u-init"}'
+        emitted_init="1"
+      fi
+
       if [ -n "${MOCK_CLAUDE_CONTROL:-}" ]; then
         emit '{"type":"control_request","request_id":"req-1","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"t1","input":{"command":"ls"}}}'
         # Wait for the control_response before finishing the turn.

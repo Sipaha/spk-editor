@@ -239,12 +239,21 @@ async fn new_session_captures_init_session_id(cx: &mut TestAppContext) {
             cx,
         )
     });
+    // Session creation must NOT block on `init`: the real `claude` only emits
+    // `init` after the first user turn, so `new_session` returns immediately
+    // adopting the id it spawned with (regression test for the startup deadlock).
     let thread = await_thread(task, cx).await;
 
-    // The mock emits `init` with session_id "mock-session"; the thread the
-    // connection returns must adopt that id (not the random uuid we spawned with).
     let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
-    assert_eq!(session_id.0.as_ref(), "mock-session");
+    assert!(!session_id.0.is_empty(), "thread must have a session id");
+    // The thread's id is the one the connection registered the live process
+    // under — proving the adopted id is consistent end to end.
+    assert!(
+        connection
+            .session_process_id_for_test(&session_id)
+            .is_some(),
+        "session must be registered under the thread's id"
+    );
 }
 
 #[gpui::test]
