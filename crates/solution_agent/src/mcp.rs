@@ -566,10 +566,40 @@ impl<'de> Deserialize<'de> for GetSessionParams {
     }
 }
 
+/// Structured wire role for an `EntrySummary`. Replaces the former
+/// free-form `"user"|"assistant"|"tool_call"|"plan"` string — the
+/// client matched on those exact strings, so a typed enum makes the
+/// contract explicit and unbreakable.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryRoleDto {
+    User,
+    Assistant,
+    ToolCall,
+    Plan,
+}
+
+/// Structured wire status for a tool call. Mirrors the
+/// `conversation_render::tool_call_status_text` mapping (kept for the
+/// desktop UI), but as a typed enum so the client need not string-match.
+/// Note `WaitingForConfirmation` serializes to `"waiting_for_confirmation"`
+/// (snake_case), not the desktop UI's `"waiting for confirmation"` label.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallStatusDto {
+    Pending,
+    WaitingForConfirmation,
+    Running,
+    Done,
+    Failed,
+    Rejected,
+    Canceled,
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct EntrySummary {
-    /// One of "user" | "assistant" | "tool_call" | "plan".
-    pub role: String,
+    /// Role of this entry: user / assistant / tool_call / plan.
+    pub role: EntryRoleDto,
     /// R-6e: absolute 0-based index in the session, stable across
     /// paginated calls. Always populated regardless of whether the
     /// caller requested a slice — lets the client reassemble a sparse
@@ -649,11 +679,9 @@ pub struct ToolCallSummary {
     /// from `tool_name` when set, falling back to the markdown source of
     /// the call's label entity.
     pub name: String,
-    /// Status string mirrors `conversation_render::tool_call_status_text`
-    /// so the wire string matches what the desktop UI shows:
-    /// "pending" | "waiting for confirmation" | "running" | "done" |
-    /// "failed" | "rejected" | "canceled".
-    pub status: String,
+    /// Tool-call status as a structured enum. Mirrors the desktop UI's
+    /// `conversation_render::tool_call_status_text` mapping, but typed.
+    pub status: ToolCallStatusDto,
     /// JSON-serialised `raw_input`, truncated to ~500 chars. Empty
     /// string when the agent didn't supply structured args.
     pub args_preview: String,
@@ -903,12 +931,28 @@ fn build_pending_bundle_summaries(
         .collect()
 }
 
-fn entry_role(entry: &acp_thread::AgentThreadEntry) -> &'static str {
+fn entry_role(entry: &acp_thread::AgentThreadEntry) -> EntryRoleDto {
     match entry {
-        acp_thread::AgentThreadEntry::UserMessage(_) => "user",
-        acp_thread::AgentThreadEntry::AssistantMessage(_) => "assistant",
-        acp_thread::AgentThreadEntry::ToolCall(_) => "tool_call",
-        acp_thread::AgentThreadEntry::CompletedPlan(_) => "plan",
+        acp_thread::AgentThreadEntry::UserMessage(_) => EntryRoleDto::User,
+        acp_thread::AgentThreadEntry::AssistantMessage(_) => EntryRoleDto::Assistant,
+        acp_thread::AgentThreadEntry::ToolCall(_) => EntryRoleDto::ToolCall,
+        acp_thread::AgentThreadEntry::CompletedPlan(_) => EntryRoleDto::Plan,
+    }
+}
+
+/// Maps a `ToolCallStatus` to the structured wire enum. Parallels
+/// `conversation_render::tool_call_status_text` (which stays for the
+/// desktop UI's human labels) but emits the typed wire variant.
+fn tool_call_status_dto(status: &acp_thread::ToolCallStatus) -> ToolCallStatusDto {
+    use acp_thread::ToolCallStatus;
+    match status {
+        ToolCallStatus::Pending => ToolCallStatusDto::Pending,
+        ToolCallStatus::WaitingForConfirmation { .. } => ToolCallStatusDto::WaitingForConfirmation,
+        ToolCallStatus::InProgress => ToolCallStatusDto::Running,
+        ToolCallStatus::Completed => ToolCallStatusDto::Done,
+        ToolCallStatus::Failed => ToolCallStatusDto::Failed,
+        ToolCallStatus::Rejected => ToolCallStatusDto::Rejected,
+        ToolCallStatus::Canceled => ToolCallStatusDto::Canceled,
     }
 }
 
@@ -994,7 +1038,7 @@ fn summarize_entry(
     let client_send_id = client_send_ids.first().copied();
 
     EntrySummary {
-        role: role.to_string(),
+        role,
         index,
         preview,
         markdown,
@@ -1108,7 +1152,7 @@ fn tool_call_summary(call: &acp_thread::ToolCall, cx: &App) -> ToolCallSummary {
         .as_ref()
         .map(|s| s.to_string())
         .unwrap_or_else(|| call.label.read(cx).source().to_string());
-    let status = crate::conversation_render::tool_call_status_text(&call.status).to_string();
+    let status = tool_call_status_dto(&call.status);
     let args_preview = call
         .raw_input
         .as_ref()
@@ -3051,6 +3095,16 @@ mod tests {
     use context_server::listener::McpServerTool;
 
     #[test]
+    fn entry_role_and_status_dto_serialize_snake_case() {
+        assert_eq!(serde_json::to_value(EntryRoleDto::ToolCall).unwrap(), serde_json::json!("tool_call"));
+        assert_eq!(
+            serde_json::to_value(ToolCallStatusDto::WaitingForConfirmation).unwrap(),
+            serde_json::json!("waiting_for_confirmation")
+        );
+        assert_eq!(serde_json::to_value(ToolCallStatusDto::Running).unwrap(), serde_json::json!("running"));
+    }
+
+    #[test]
     fn session_state_dto_serializes_structured() {
         use crate::model::SessionState;
         let json = |s: &SessionState, ms: i64| {
@@ -3271,7 +3325,7 @@ mod tests {
             .expect("get_session_entry");
 
         let entry = result.structured_content.entry;
-        assert_eq!(entry.role, "user");
+        assert_eq!(entry.role, EntryRoleDto::User);
         // R-6e: every EntrySummary carries its absolute index.
         assert_eq!(entry.index, 0);
         let md = entry
@@ -3343,7 +3397,7 @@ mod tests {
             .structured_content
             .entries
             .iter()
-            .find(|e| e.role == "tool_call")
+            .find(|e| e.role == EntryRoleDto::ToolCall)
             .expect("tool_call entry");
         let tool = tool_entry
             .tool_call
@@ -3351,7 +3405,7 @@ mod tests {
             .expect("tool_call summary populated");
         // Reuses `tool_call_status_text` — pending status maps to the
         // literal string "pending".
-        assert_eq!(tool.status, "pending");
+        assert_eq!(tool.status, ToolCallStatusDto::Pending);
         assert!(
             tool.args_preview.contains("\"cmd\""),
             "args_preview should serialize raw_input JSON, got: {}",
@@ -3404,10 +3458,10 @@ mod tests {
             .structured_content
             .entries
             .iter()
-            .find(|e| e.role == "tool_call")
+            .find(|e| e.role == EntryRoleDto::ToolCall)
             .and_then(|e| e.tool_call.as_ref())
             .expect("tool_call summary populated");
-        assert_eq!(tool.status, "running");
+        assert_eq!(tool.status, ToolCallStatusDto::Running);
         let stamp = tool
             .tool_status_started_at_ms
             .expect("InProgress tool call must surface a started_at timestamp");
@@ -3464,7 +3518,7 @@ mod tests {
             .structured_content
             .entries
             .iter()
-            .find(|e| e.role == "plan")
+            .find(|e| e.role == EntryRoleDto::Plan)
         {
             let plan = plan_entry
                 .plan
@@ -4599,7 +4653,7 @@ mod tests {
             .iter()
             .find_map(|entry| entry.tool_call.as_ref())
             .expect("a tool_call entry must be present");
-        assert_eq!(tool_call.status, "waiting for confirmation");
+        assert_eq!(tool_call.status, ToolCallStatusDto::WaitingForConfirmation);
         assert_eq!(tool_call.options.len(), 2, "both options must surface");
         assert_eq!(tool_call.options[0].kind, "allow_once");
         assert!(tool_call.options[0].is_allow);
