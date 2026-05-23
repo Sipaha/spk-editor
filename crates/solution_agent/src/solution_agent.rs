@@ -39,7 +39,6 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agent_servers::CustomAgentServer;
 use gpui::{App, AppContext, AsyncApp, SharedString};
 use project::agent_server_store::AgentId;
 
@@ -53,21 +52,14 @@ pub fn init(cx: &mut App) {
 
     store::SolutionAgentStore::init_global(cx, adapters);
 
-    // Register the AgentServer instance for `claude-acp`. `CustomAgentServer`
-    // is a thin wrapper — its `connect()` looks up the actual subprocess
-    // command via the per-Project `AgentServerStore` at session-creation time,
-    // so this single registration is enough to enable real `claude` spawning
-    // for any open Solution that the user has the CLI installed for.
-    let backend = agent_settings::SolutionAgentSettings::try_get(cx)
-        .map(|s| s.claude_backend)
-        .unwrap_or_default();
+    // Register the AgentServer instance for `claude-acp`. The native Rust
+    // stream-json backend (`claude_native::ClaudeNativeAgentServer`) spawns the
+    // `claude` binary directly — no node wrapper. The legacy
+    // `@agentclientprotocol/claude-agent-acp` path was retired in commit
+    // history; revert via git if it ever needs to come back.
     let claude_id = AgentId(SharedString::from(claude_adapter::CLAUDE_ACP_AGENT_ID));
-    let claude_server: Rc<dyn agent_servers::AgentServer> = match backend {
-        agent_settings::ClaudeBackend::Acp => Rc::new(CustomAgentServer::new(claude_id)),
-        agent_settings::ClaudeBackend::Native => {
-            Rc::new(claude_native::ClaudeNativeAgentServer::new(claude_id))
-        }
-    };
+    let claude_server: Rc<dyn agent_servers::AgentServer> =
+        Rc::new(claude_native::ClaudeNativeAgentServer::new(claude_id));
     store::SolutionAgentStore::global(cx).update(cx, |store, _cx| {
         store.register_agent_server(
             SharedString::from(claude_adapter::CLAUDE_ACP_AGENT_ID),

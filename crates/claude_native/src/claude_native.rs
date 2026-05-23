@@ -1,7 +1,7 @@
-//! Native Rust connection to the `claude` binary's stream-json protocol,
-//! replacing the `@agentclientprotocol/claude-agent-acp` node wrapper.
-//! Implements `acp_thread::AgentConnection`; selected via the
-//! `solution_agent.claude_backend = "native"` setting.
+//! Native Rust connection to the `claude` binary's stream-json protocol.
+//! Implements `acp_thread::AgentConnection`. This is the sole Claude backend
+//! since the `@agentclientprotocol/claude-agent-acp` node wrapper path was
+//! retired (revert via git history if it ever needs to come back).
 
 pub mod command;
 mod connection;

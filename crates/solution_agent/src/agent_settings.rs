@@ -1,17 +1,9 @@
 use settings::{RegisterSetting, Settings};
 use std::time::Duration;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum ClaudeBackend {
-    Acp,
-    #[default]
-    Native,
-}
-
 #[derive(Clone, Debug, Default, RegisterSetting)]
 pub struct SolutionAgentSettings {
     pub ephemeral: EphemeralPoolSettings,
-    pub claude_backend: ClaudeBackend,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,22 +42,7 @@ impl Settings for SolutionAgentSettings {
                     .unwrap_or(defaults.idle_ttl),
             })
             .unwrap_or(defaults);
-        let claude_backend = content
-            .solution_agent
-            .as_ref()
-            .and_then(|s| s.claude_backend.as_deref())
-            .map(|v| {
-                if v.eq_ignore_ascii_case("native") {
-                    ClaudeBackend::Native
-                } else {
-                    ClaudeBackend::Acp
-                }
-            })
-            .unwrap_or_default();
-        Self {
-            ephemeral,
-            claude_backend,
-        }
+        Self { ephemeral }
     }
 }
 
@@ -82,12 +59,3 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod claude_backend_tests {
-    use super::*;
-
-    #[test]
-    fn defaults_to_native() {
-        assert_eq!(SolutionAgentSettings::default().claude_backend, ClaudeBackend::Native);
-    }
-}

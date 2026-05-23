@@ -1209,13 +1209,6 @@ pub struct SolutionAgentSettingsContent {
     /// Ephemeral-task pool sizing. Optional — when absent, defaults apply
     /// (3 concurrent / 30s queue timeout / 60s idle TTL).
     pub ephemeral: Option<SolutionAgentEphemeralSettingsContent>,
-
-    /// Which Claude backend to use for solution-agent sessions.
-    /// `"acp"` (default) uses the existing ACP node-wrapper subprocess;
-    /// `"native"` uses the new native Anthropic API backend.
-    ///
-    /// Default: "acp"
-    pub claude_backend: Option<String>,
 }
 
 #[with_fallible_options]
