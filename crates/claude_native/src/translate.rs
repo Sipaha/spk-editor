@@ -70,14 +70,62 @@ fn translate_assistant(m: &ConversationMessage) -> Vec<acp::SessionUpdate> {
             }
             let id = block.get("id").and_then(|v| v.as_str())?;
             let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
+            // Map Claude Code's tool name to the ACP ToolKind so the desktop
+            // UI picks the right widget (Edit shows diff, Read shows file
+            // preview, Bash shows terminal output, etc.). Default Other
+            // would render a bare "Tool: Name (done)" header with no body.
+            let kind = tool_kind_for(name);
             let mut call = acp::ToolCall::new(acp::ToolCallId::new(id), name.to_string())
+                .kind(kind)
                 .status(acp::ToolCallStatus::InProgress);
             if let Some(input) = block.get("input") {
+                // For file-based tools, also surface the path as a
+                // ToolCallLocation so the UI can render a clickable file
+                // link header.
+                let locs = tool_locations_from_input(name, input);
+                if !locs.is_empty() {
+                    call = call.locations(locs);
+                }
                 call = call.raw_input(input.clone());
             }
             Some(acp::SessionUpdate::ToolCall(call))
         })
         .collect()
+}
+
+/// Map a Claude Code tool name to the ACP `ToolKind` so the desktop UI
+/// picks the right rendering widget. Names not recognised fall through
+/// to `Other` (the default), which is the safe rendering.
+fn tool_kind_for(name: &str) -> acp::ToolKind {
+    match name {
+        "Read" | "NotebookRead" => acp::ToolKind::Read,
+        "Edit" | "Write" | "NotebookEdit" | "MultiEdit" => acp::ToolKind::Edit,
+        "Bash" | "BashOutput" | "KillShell" => acp::ToolKind::Execute,
+        "Glob" | "Grep" => acp::ToolKind::Search,
+        "WebFetch" | "WebSearch" => acp::ToolKind::Fetch,
+        "TodoWrite" | "Think" => acp::ToolKind::Think,
+        _ => acp::ToolKind::Other,
+    }
+}
+
+/// Extract file paths from a Claude Code tool's `input` JSON as ACP
+/// `ToolCallLocation`s so the desktop UI can render clickable file
+/// links above the tool body. Empty vec when no path field is found
+/// or the tool is non-file (Bash, WebFetch, etc.).
+fn tool_locations_from_input(
+    name: &str,
+    input: &serde_json::Value,
+) -> Vec<acp::ToolCallLocation> {
+    let path_field = match name {
+        "Read" | "Edit" | "Write" | "NotebookRead" | "NotebookEdit" | "MultiEdit" => "file_path",
+        "Glob" => "path",
+        _ => return Vec::new(),
+    };
+    input
+        .get(path_field)
+        .and_then(|v| v.as_str())
+        .map(|p| vec![acp::ToolCallLocation::new(std::path::PathBuf::from(p))])
+        .unwrap_or_default()
 }
 
 fn translate_user(m: &ConversationMessage) -> Vec<acp::SessionUpdate> {
