@@ -923,7 +923,11 @@ impl SolutionAgentStore {
                         session.pending_messages.clear();
                         session.flush_after_cancel = false;
                         session.cwd = resume_cwd.clone();
-                        session.cold_entries.clear();
+                        // KEEP `cold_entries`: claude --resume does NOT re-emit
+                        // the transcript through stream-json, so clearing them
+                        // wipes the chat history from the UI — old code assumed
+                        // a replay that the native backend doesn't get. The
+                        // build-entries path now concatenates cold + live.
                         // `set_acp_thread` emits ThreadReplaced + notify;
                         // it must be the last mutation so SessionView
                         // observers see a fully-populated session when

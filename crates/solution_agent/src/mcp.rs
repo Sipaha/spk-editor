@@ -819,11 +819,20 @@ impl McpServerTool for GetSessionTool {
             // session whose subprocess hasn't been respawned yet (a
             // common state for any session you scroll past without
             // tapping into).
-            let live_entries: Option<Vec<&acp_thread::AgentThreadEntry>> = session
+            // History after restart lives in `cold_entries` (rebuilt from
+            // the persisted blob on disk); messages produced AFTER the
+            // resume land in the new `AcpThread.entries()`. `claude
+            // --resume <id>` does NOT re-emit the transcript through
+            // stream-json — it just continues from where it left off —
+            // so without concatenating, the chat shows only post-restart
+            // messages and the user thinks history was wiped.
+            let live_entries: Vec<&acp_thread::AgentThreadEntry> = session
                 .acp_thread()
-                .map(|thread| thread.read(cx).entries().iter().collect());
-            let entries_ref: Vec<&acp_thread::AgentThreadEntry> =
-                live_entries.unwrap_or_else(|| session.cold_entries.iter().collect());
+                .map(|thread| thread.read(cx).entries().iter().collect())
+                .unwrap_or_default();
+            let mut entries_ref: Vec<&acp_thread::AgentThreadEntry> =
+                session.cold_entries.iter().collect();
+            entries_ref.extend(live_entries);
             let (entries, total_count) = {
                 let total = entries_ref.len();
                 // R-6e: index-anchored slice. `after_index` /
