@@ -143,11 +143,36 @@ pub enum ControlRequestKind {
     Other,
 }
 
+/// Wire shape claude actually sends for control_response:
+///   {"type":"control_response","response":{"subtype":"success","request_id":"…","response":{…}}}
+/// The `request_id` lives INSIDE the `response` object — the previous
+/// deser put it at the outer level and silently rejected every claude
+/// response with `missing field 'request_id'` (most visible: the
+/// `initialize` reply carrying commands/skills/agents was lost on every
+/// session start). `inner.response` (the doubly-nested field) is the
+/// actual payload (success-body / hook-output / etc).
 #[derive(Debug, Deserialize)]
 pub struct ControlResponseEnvelope {
+    #[serde(rename = "response")]
+    pub inner: ControlResponseBody,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ControlResponseBody {
+    #[serde(default)]
+    pub subtype: String,
     pub request_id: String,
     #[serde(default)]
     pub response: serde_json::Value,
+}
+
+impl ControlResponseEnvelope {
+    pub fn request_id(&self) -> &str {
+        &self.inner.request_id
+    }
+    pub fn into_response(self) -> serde_json::Value {
+        self.inner.response
+    }
 }
 
 /// A message written to `claude`'s stdin (NDJSON). Either a user turn or a

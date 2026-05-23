@@ -711,6 +711,32 @@ async fn run_update_pump(
             } else {
                 classify_result(result)
             };
+            // Diagnostic: log EVERY turn-end so a "no response where I
+            // expected one" report can be cross-referenced against what
+            // claude actually emitted. `result_text_len` == 0 with
+            // `stop_reason == "end_turn"` and no is_error is the
+            // smoking-gun signature of "claude chose to say nothing"
+            // (vs a real error, a cancel, or a tool-call sequence still
+            // in flight). Logged at info so it's grep-able without
+            // raising verbosity.
+            let result_preview: String = result
+                .result
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .take(120)
+                .collect();
+            log::info!(
+                target: "claude_native::turn_end",
+                "subtype={subtype:?} stop_reason={stop:?} is_error={is_err} text_chars={chars} cancel_requested={cancel} classified={classified:?} text_preview={preview:?}",
+                subtype = result.subtype,
+                stop = result.stop_reason,
+                is_err = result.is_error,
+                chars = result.result.as_deref().map(|s| s.chars().count()).unwrap_or(0),
+                cancel = matches!(turn_end, TurnEnd::Stop(acp::StopReason::Cancelled)),
+                classified = turn_end,
+                preview = result_preview,
+            );
             if let Some(sender) = shared.prompt_tx.borrow_mut().take() {
                 sender.send(Ok(turn_end)).ok();
             }

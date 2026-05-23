@@ -173,22 +173,28 @@ async fn read_stdout(
             // Control responses fulfil a pending `send_control`; route them to
             // the matching oneshot rather than the general output stream.
             Ok(OutputMessage::ControlResponse(envelope)) => {
+                let request_id = envelope.request_id().to_string();
+                let payload = envelope.into_response();
                 let sender = pending_controls
                     .lock()
                     .unwrap_or_else(|guard| guard.into_inner())
-                    .remove(&envelope.request_id);
+                    .remove(&request_id);
                 match sender {
                     Some(sender) => {
-                        if sender.send(envelope.response).is_err() {
+                        if sender.send(payload).is_err() {
                             log::debug!(
-                                "control response for {} dropped: caller gone",
-                                envelope.request_id
+                                "control response for {request_id} dropped: caller gone"
                             );
                         }
                     }
-                    None => log::warn!(
-                        "control response for unknown request_id {}",
-                        envelope.request_id
+                    // Expected for fire-and-forget control_requests (we send
+                    // `initialize` via the outgoing channel directly, not via
+                    // `send_control`, so its response has no pending sender)
+                    // and for any unsolicited acks claude may emit. Logged at
+                    // debug so SpkEditor.log isn't flooded — set RUST_LOG to
+                    // include it if you're debugging the control plane.
+                    None => log::debug!(
+                        "control response for unknown request_id {request_id}"
                     ),
                 }
             }
