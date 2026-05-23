@@ -125,7 +125,15 @@ pub fn classify_result(r: &ResultMessage) -> TurnEnd {
 /// a window nor a used-token count is available.
 pub fn usage_update(r: &ResultMessage, sticky_window: Option<u64>) -> Option<acp::SessionUpdate> {
     let window = real_window(r).or(sticky_window);
-    let used = r.usage.as_ref().map(|u| u.input_tokens + u.output_tokens);
+    // `input_tokens` is only what's NEW this turn after the prompt cache
+    // pre-loads everything else; the bulk of a deep session's context lives
+    // in `cache_read_input_tokens`. Summing all four matches the
+    // meter the legacy ACP wrapper showed — without it, the counter sits
+    // near zero on every restart because the per-turn `input + output` is
+    // tiny compared to the cached carry-over.
+    let used = r.usage.as_ref().map(|u| {
+        u.input_tokens + u.output_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
+    });
     match (used, window) {
         (None, None) => None,
         (used, window) => Some(acp::SessionUpdate::UsageUpdate(acp::UsageUpdate::new(

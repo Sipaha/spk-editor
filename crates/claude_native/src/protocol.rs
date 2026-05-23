@@ -86,6 +86,18 @@ pub struct ModelUsage {
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Tokens read from the prompt cache this turn — i.e. the bulk of the
+    /// previously-built conversation context that the model didn't have to
+    /// re-process. Without this in the meter sum, a deep session shows a
+    /// near-zero token count because `input_tokens` only reflects what's NEW
+    /// this turn after the cache pre-loads the rest.
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    /// Tokens written to the cache this turn (new context entries that get
+    /// reused on later turns). Counted toward the live context window for the
+    /// same reason as cache reads.
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
 }
 
 impl ResultMessage {
