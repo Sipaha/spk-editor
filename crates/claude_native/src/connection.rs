@@ -298,6 +298,37 @@ impl ClaudeNativeConnection {
         }
     }
 
+    /// Like [`inject_user_message`], but on a collision with an unconsumed
+    /// previous buffer, appends the new text after a blank-line separator
+    /// instead of replacing it. Mirrors the merge UX of the pre-existing
+    /// `pending_messages` queue: two follow-ups typed in the same Running
+    /// window land as one growing message at the next hook boundary, never
+    /// losing the earlier text. Returns `true` if the session existed (and
+    /// the slot was updated), `false` if the session is unknown.
+    pub fn inject_user_message_append(&self, session_id: &acp::SessionId, text: String) -> bool {
+        let sessions = self.sessions.borrow();
+        let Some(session) = sessions.get(session_id) else {
+            return false;
+        };
+        let mut slot = session.shared.pending_inject.borrow_mut();
+        *slot = Some(match slot.take() {
+            Some(previous) if !previous.is_empty() => format!("{previous}\n\n{text}"),
+            _ => text,
+        });
+        true
+    }
+
+    /// Test-only accessor for the per-session `pending_inject` buffer. Returns
+    /// `None` for unknown sessions or for a session whose slot is currently
+    /// empty (`Some(None)` is collapsed to `None` for ergonomics).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn inject_slot_for_test(&self, session_id: &acp::SessionId) -> Option<String> {
+        self.sessions
+            .borrow()
+            .get(session_id)
+            .and_then(|session| session.shared.pending_inject.borrow().clone())
+    }
+
     /// Extract the `--append-system-prompt` text from the ACP `_meta` extension
     /// the fork uses: `{ "systemPrompt": { "append": "<text>" } }`. Absent /
     /// malformed meta yields `None` (no flag added).

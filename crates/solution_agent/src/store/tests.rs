@@ -2214,3 +2214,231 @@ async fn entry_updated_burst_coalesces_then_force_emits(cx: &mut TestAppContext)
         "force-emit must clear the throttle slot so the next window starts fresh"
     );
 }
+
+/// Path to the `claude_native` mock binary (a bash script) used by the
+/// integration tests in `crates/claude_native/tests/`. Reuses the same fixture
+/// here so a Phase-2 store-routing test can stand up a real
+/// `ClaudeNativeConnection` without a system-installed `claude`.
+fn native_mock_binary() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("claude_native")
+        .join("tests")
+        .join("fixtures")
+        .join("mock_claude.sh")
+}
+
+/// Phase 2 routing: when the session is `Running` and the backing connection
+/// is the native `claude` backend, a follow-up send must
+///   (a) append a real user entry to the `AcpThread` (so the chat list shows
+///       the user's bubble — claude won't echo the injected text as a
+///       UserMessage update),
+///   (b) buffer the text on the connection's `pending_inject` slot (so the
+///       next hook_callback delivers it as additionalContext mid-turn),
+///   (c) NOT push into `pending_messages` (that's the non-native fallback).
+#[gpui::test]
+async fn send_during_running_on_native_connection_routes_to_inject(
+    cx: &mut TestAppContext,
+) {
+    use acp_thread::{AgentConnection, AgentThreadEntry};
+    use agent_client_protocol::schema as acp;
+    use agent_servers::{AgentServer, AgentServerDelegate};
+    use claude_native::{ClaudeNativeAgentServer, ClaudeNativeConnection};
+    use project::AgentId;
+
+    let mock_binary = native_mock_binary();
+    if !mock_binary.exists() {
+        panic!(
+            "mock claude binary missing at {} — tests/fixtures/mock_claude.sh not bundled?",
+            mock_binary.display()
+        );
+    }
+    cx.executor().allow_parking();
+
+    let (solution_id, _tmp, project) = setup_solution_and_project(cx).await;
+    let agent_id = SharedString::from("claude-native");
+
+    let server = Rc::new(ClaudeNativeAgentServer::with_binary(
+        AgentId::new("claude-native"),
+        mock_binary,
+        Vec::new(),
+    ));
+
+    cx.update(|cx| {
+        let registry = Arc::new(AdapterRegistry::new());
+        SolutionAgentStore::init_global(cx, registry);
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, _| {
+            store.register_agent_server(agent_id.clone(), server.clone());
+        });
+    });
+
+    // Connect directly so we can hand-build a session whose `AcpThread` is
+    // backed by a real `ClaudeNativeConnection`. Going through
+    // `create_session` would also work but it routes via the pool +
+    // adapter — this stays focused on the queue-routing decision.
+    let connection: Rc<dyn acp_thread::AgentConnection> = cx
+        .update(|cx| {
+            let store = project.read(cx).agent_server_store().clone();
+            let delegate = AgentServerDelegate::new(store, None);
+            AgentServer::connect(server.as_ref(), delegate, project.clone(), cx)
+        })
+        .await
+        .expect("native connect");
+    let native = connection
+        .clone()
+        .downcast::<ClaudeNativeConnection>()
+        .expect("downcast to ClaudeNativeConnection");
+
+    let work_dirs = util::path_list::PathList::new(&[std::env::temp_dir().as_path()]);
+    let acp_thread = cx
+        .update(|cx| {
+            Rc::clone(&native).new_session(project.clone(), work_dirs, cx)
+        })
+        .await
+        .expect("new_session");
+
+    let acp_session_id = acp_thread.read_with(cx, |t, _| t.session_id().clone());
+
+    // Insert the session into the store by hand, pointing its `acp_thread`
+    // at the live native-backed thread. This skips `create_session` (which
+    // would require a fully-wired solution-agent pool entry) while still
+    // exercising the exact `send_message_blocks` codepath the production
+    // mobile/desktop client takes.
+    let session_id = SolutionSessionId::new();
+    cx.update(|cx| {
+        let session = cx.new(|_| {
+            let mut s = crate::model::SolutionSession::new_idle(
+                session_id,
+                solution_id.clone(),
+                agent_id.clone(),
+                acp_session_id.clone(),
+            );
+            s.title = SharedString::from("native-test");
+            s.project = Some(project.clone());
+            s.state = SessionState::Running {
+                started_at: std::time::Instant::now(),
+                notified: false,
+            };
+            s
+        });
+        session.update(cx, |session, cx| {
+            session.set_acp_thread(Some(acp_thread.clone()), cx);
+        });
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, _store_cx| {
+            store.sessions.insert(session_id, session);
+            store
+                .by_solution
+                .entry(solution_id.clone())
+                .or_default()
+                .push(session_id);
+        });
+    });
+
+    let send_result = cx
+        .update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| {
+                store.send_message_blocks(
+                    session_id,
+                    vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "PURPLE_PINEAPPLE".to_string(),
+                    ))],
+                    cx,
+                )
+            })
+        })
+        .await;
+    send_result.expect("send_message_blocks during Running on native");
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let session = store.session(session_id).expect("session exists");
+            let s = session.read(cx);
+
+            // (c) Non-native fallback queue is NOT touched.
+            assert!(
+                s.pending_messages.is_empty(),
+                "native-backed Running send must bypass pending_messages, queue_len={}",
+                s.pending_messages.len()
+            );
+
+            // (a) AcpThread has a freshly appended user entry containing the
+            //     sent text — claude won't echo it as a UserMessage update,
+            //     so without this append the chat would silently miss the
+            //     bubble.
+            let entries = acp_thread.read(cx).entries();
+            let last_user = entries.iter().rev().find_map(|entry| match entry {
+                AgentThreadEntry::UserMessage(message) => Some(message),
+                _ => None,
+            });
+            let user_text = last_user
+                .expect("native inject path must append a user entry")
+                .chunks
+                .iter()
+                .filter_map(|chunk| match chunk {
+                    acp::ContentBlock::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            assert!(
+                user_text.contains("PURPLE_PINEAPPLE"),
+                "appended user entry must carry the sent text, got {user_text:?}"
+            );
+        });
+    });
+
+    // (b) The connection's pending_inject slot is buffered for the next
+    //     hook_callback to deliver as additionalContext.
+    let buffered = native
+        .inject_slot_for_test(&acp_session_id)
+        .expect("inject slot must hold the injected text");
+    assert!(
+        buffered.contains("PURPLE_PINEAPPLE"),
+        "inject slot must hold the sent text, got {buffered:?}"
+    );
+
+    // A second send in the same Running window must merge into the slot
+    // (blank-line separator) instead of overwriting, mirroring the
+    // legacy pending_messages merge UX.
+    let send_result = cx
+        .update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| {
+                store.send_message_blocks(
+                    session_id,
+                    vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "FOLLOW_UP".to_string(),
+                    ))],
+                    cx,
+                )
+            })
+        })
+        .await;
+    send_result.expect("second send_message_blocks during Running on native");
+
+    let merged = native
+        .inject_slot_for_test(&acp_session_id)
+        .expect("inject slot still buffered after second send");
+    assert!(
+        merged.contains("PURPLE_PINEAPPLE") && merged.contains("FOLLOW_UP"),
+        "second send must merge with first, got {merged:?}"
+    );
+    assert!(
+        merged.contains("\n\n"),
+        "merged buffer must use a blank-line separator, got {merged:?}"
+    );
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store
+            .update(cx, |store, cx| store.close_session(session_id, cx))
+            .ok();
+    });
+    drop(acp_thread);
+    drop(native);
+    drop(server);
+}

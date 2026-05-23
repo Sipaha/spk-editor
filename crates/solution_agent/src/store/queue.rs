@@ -23,6 +23,7 @@ use gpui::{AsyncApp, Context, Entity, SharedString, Task};
 
 use acp_thread::{AcpThread, AgentThreadEntry, SelectedPermissionOutcome, ToolCallStatus};
 use agent_client_protocol::schema as acp;
+use claude_native::ClaudeNativeConnection;
 
 use super::{SolutionAgentStore, SolutionAgentStoreEvent};
 use crate::model::{SessionState, SolutionSessionId, SolutionSessionMetadata};
@@ -170,6 +171,36 @@ pub(crate) fn summarize_blocks_for_log(
     out
 }
 
+/// Flatten a content-block bundle into a single human-readable string the
+/// native backend can hand to the agent as `additionalContext`. Text blocks
+/// are concatenated verbatim; image blocks collapse to numbered placeholders
+/// (`[image #1]`, `[image #2]`, …) so a text-only side channel can still
+/// signal "the user attached an image" without trying to ship the bytes.
+/// Other variants are silently dropped — the inject side channel is text-only.
+fn inject_text_from_blocks(blocks: &[acp::ContentBlock]) -> String {
+    let mut out = String::new();
+    let mut image_idx = 1usize;
+    for block in blocks {
+        match block {
+            acp::ContentBlock::Text(t) => {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str(&t.text);
+            }
+            acp::ContentBlock::Image(_) => {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str(&format!("[image #{image_idx}]"));
+                image_idx += 1;
+            }
+            _ => {}
+        }
+    }
+    out.trim().to_string()
+}
+
 impl SolutionAgentStore {
     /// Best-effort cancel of an in-flight turn. Forwards to the underlying
     /// `AgentConnection::cancel`. Errors only when the session is unknown
@@ -311,15 +342,59 @@ impl SolutionAgentStore {
             // this message and the `Stopped` handler flushes it.
         }
 
-        // Already running? Queue the message instead of restarting the
-        // turn — matches Claude Code CLI's "type follow-ups while the
-        // agent is still working" behaviour. Subsequent queued sends
-        // are *merged* into the existing pending entry (separated by a
-        // blank line) so the user sees a single ghost bubble that
-        // grows, not a stack of fragments. Flush is one big prompt to
-        // the agent, sent once `Stopped` fires.
+        // Already running? Two routes:
+        //
+        //   (a) Native `claude` backend → push the user message into the
+        //       live `AcpThread` as a real user entry AND buffer the text
+        //       on the `ClaudeNativeConnection`'s `pending_inject` slot.
+        //       The next `hook_callback` (PostToolUse or Stop) consumes the
+        //       slot and feeds it to the running turn as `additionalContext`
+        //       — the agent reacts in the SAME turn, no interrupt, no new
+        //       prompt, no broken tool. The chat history stays a single
+        //       timeline (user bubble + the agent's response that follows).
+        //
+        //   (b) Anything else → fall through to the legacy
+        //       `pending_messages` queue: merge the new bundle into the
+        //       existing pending entry (separated by a blank line) and flush
+        //       on `Stopped`. Realistically there's no non-native backend
+        //       wired up right now (the ACP wrapper path was retired), but
+        //       the fallback stays for safety and for tests using
+        //       `MockConnection`.
+        //
+        // For repeated sends in the same Running window on the native path:
+        // we use `inject_user_message_append`, NOT `inject_user_message`, so
+        // a second send before the next hook fires merges with the first
+        // (blank-line separator) instead of overwriting it — mirroring the
+        // queue's existing "one growing message" UX.
         let already_running = matches!(session_entity.read(cx).state, SessionState::Running { .. });
         if already_running {
+            if let Some(thread) = session_entity.read(cx).acp_thread().cloned() {
+                let connection = thread.read(cx).connection().clone();
+                if let Some(native) = connection.downcast::<ClaudeNativeConnection>() {
+                    let blocks_text_summary = summarize_blocks_for_log(&blocks);
+                    let injected_text = inject_text_from_blocks(&blocks);
+                    let acp_session_id =
+                        session_entity.read(cx).acp_session_id.clone();
+                    let chars = injected_text.chars().count();
+                    let appended =
+                        native.inject_user_message_append(&acp_session_id, injected_text);
+                    thread.update(cx, |thread, cx| {
+                        for block in blocks {
+                            thread.push_user_content_block(None, block, cx);
+                        }
+                    });
+                    session_entity.update(cx, |s, _| {
+                        s.last_activity_at = Utc::now();
+                    });
+                    log::info!(
+                        target: "solution_agent::queue",
+                        "session={session_id} via=hook chars={chars} appended={appended} preview={blocks_text_summary}",
+                    );
+                    cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+                    cx.notify();
+                    return Task::ready(Ok(()));
+                }
+            }
             // Audit log: queueing is a frequent source of "where did
             // my message go?" bug reports — having every enqueue +
             // queue size in the log lets us reconstruct what reached

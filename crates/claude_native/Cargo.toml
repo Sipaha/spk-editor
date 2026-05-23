@@ -12,6 +12,9 @@ workspace = true
 path = "src/claude_native.rs"
 doctest = false
 
+[features]
+test-support = []
+
 [dependencies]
 acp_thread.workspace = true
 action_log.workspace = true

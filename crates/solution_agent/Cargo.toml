@@ -76,6 +76,7 @@ acp_thread = { workspace = true, features = ["test-support"] }
 action_log.workspace = true
 agent_servers = { workspace = true, features = ["test-support"] }
 async-channel.workspace = true
+claude_native = { workspace = true, features = ["test-support"] }
 fs.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 project = { workspace = true, features = ["test-support"] }
