@@ -1856,6 +1856,12 @@ impl SolutionAgentStore {
                 // First user message appends a NewEntry — refresh DB so the
                 // History popover preview stops being NULL.
                 self.persist_session_row(session_id, cx);
+                // Also flush the transcript blob: a mid-Running crash/restart
+                // used to lose every entry added since the last successful
+                // turn end (`persist_session_blob` was called only from the
+                // queue's success path). Re-snapshot on every new entry so a
+                // resume after a crash shows up-to-date history.
+                self.persist_session_blob(session_id, cx);
                 let entry_index = session_entity
                     .read(cx)
                     .acp_thread()
@@ -2146,6 +2152,10 @@ impl SolutionAgentStore {
                     cx.emit(SolutionAgentStoreEvent::SessionMessageAppended(
                         session_id, *idx,
                     ));
+                    // Crash-recovery: flush the transcript blob on the same
+                    // trailing-edge so a mid-Running restart doesn't lose
+                    // streamed text since the last NewEntry persist.
+                    self.persist_session_blob(session_id, cx);
                 } else {
                     let first_dirty_at = existing_first_dirty_at.unwrap_or(now);
                     let entry_index = *idx;
@@ -2159,6 +2169,7 @@ impl SolutionAgentStore {
                                     session_id,
                                     entry_index,
                                 ));
+                                this.persist_session_blob(session_id, cx);
                             }
                         })
                         .ok();
