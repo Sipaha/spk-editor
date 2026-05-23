@@ -1648,6 +1648,43 @@ impl AcpThread {
         }
     }
 
+    /// Always push a brand-new `UserMessage` entry built from `blocks`,
+    /// regardless of whether the last entry is also a `UserMessage`. This is
+    /// for mid-turn user injections (the hook-based live-injection path):
+    /// a follow-up sent while the agent is working is a *separate* message
+    /// — never coalesce it with the previous user bubble, which would make
+    /// two distinct sends look like one merged message.
+    pub fn push_user_message_entry(
+        &mut self,
+        message_id: Option<UserMessageId>,
+        blocks: Vec<acp::ContentBlock>,
+        cx: &mut Context<Self>,
+    ) {
+        if blocks.is_empty() {
+            return;
+        }
+        let language_registry = self.project.read(cx).languages().clone();
+        let path_style = self.project.read(cx).path_style(cx);
+        let mut iter = blocks.into_iter();
+        let first = iter.next().expect("non-empty blocks");
+        let mut content = ContentBlock::new(first.clone(), &language_registry, path_style, cx);
+        let mut chunks: Vec<acp::ContentBlock> = vec![first];
+        for block in iter {
+            content.append(block.clone(), &language_registry, path_style, cx);
+            chunks.push(block);
+        }
+        self.push_entry(
+            AgentThreadEntry::UserMessage(UserMessage {
+                id: message_id,
+                content,
+                chunks,
+                checkpoint: None,
+                indented: false,
+            }),
+            cx,
+        );
+    }
+
     pub fn push_assistant_content_block(
         &mut self,
         chunk: acp::ContentBlock,

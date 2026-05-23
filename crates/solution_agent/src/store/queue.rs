@@ -378,10 +378,14 @@ impl SolutionAgentStore {
                     let chars = injected_text.chars().count();
                     let appended =
                         native.inject_user_message_append(&acp_session_id, injected_text);
+                    // Mid-turn injection: ALWAYS create a separate user
+                    // entry. `push_user_content_block` would coalesce with
+                    // the previous user bubble if the agent hadn't started
+                    // streaming yet, which makes two distinct sends look
+                    // like one merged message (the inject is conceptually
+                    // a new follow-up, never a continuation).
                     thread.update(cx, |thread, cx| {
-                        for block in blocks {
-                            thread.push_user_content_block(None, block, cx);
-                        }
+                        thread.push_user_message_entry(None, blocks, cx);
                     });
                     session_entity.update(cx, |s, _| {
                         s.last_activity_at = Utc::now();
