@@ -2552,8 +2552,6 @@ impl Render for SolutionSessionView {
                                 let resuming = self.resuming;
                                 let send_label: SharedString = if resuming {
                                     "Starting…".into()
-                                } else if is_working {
-                                    "Queue".into()
                                 } else {
                                     "Send".into()
                                 };
@@ -2562,11 +2560,20 @@ impl Render for SolutionSessionView {
                                      subprocess finishes its handshake (3-4s)."
                                         .into()
                                 } else if is_working {
+                                    // Mid-turn send goes through the native backend's hook-based
+                                    // live injection: the agent sees the follow-up between tool
+                                    // calls in the SAME turn and reacts in-thread, no interrupt,
+                                    // no broken tool. (Non-native backends fall back to a
+                                    // server-side queue that flushes on turn end.)
                                     if pending_count > 0 {
-                                        format!("Queue follow-up — {pending_count} already waiting")
-                                            .into()
+                                        format!(
+                                            "Send follow-up — agent picks it up between tool \
+                                             calls ({pending_count} already queued)"
+                                        )
+                                        .into()
                                     } else {
-                                        "Queue follow-up — runs after current turn".into()
+                                        "Send follow-up — agent picks it up between tool calls"
+                                            .into()
                                     }
                                 } else {
                                     "Send message".into()
