@@ -35,10 +35,18 @@ use util::path_list::PathList;
 use crate::command::{ClaudeCommandSpec, SessionArg, mcp_config_json};
 use crate::process::ClaudeProcess;
 use crate::protocol::{
-    ControlRequestEnvelope, ControlRequestKind, ControlRequestOut, InputMessage, OutputMessage,
+    ControlRequestEnvelope, ControlRequestKind, ControlRequestOut, HookConfig, InputMessage,
+    OutputMessage,
 };
 use crate::translate::{TurnEnd, apply_usage, classify_result, translate};
 use crate::watchdog::{AnalyzerContext, ClaudeAnalyzer, Watchdog};
+
+/// Stable id for the `PostToolUse` hook callback registered in `initialize`.
+const HOOK_CALLBACK_POST_TOOL_USE: &str = "pti";
+/// Stable id for the `Stop` hook callback registered in `initialize`. When a
+/// follow-up is pending and `Stop` fires (no tool ran), we respond with
+/// `decision: "block"` so the agent keeps generating to address it.
+const HOOK_CALLBACK_STOP: &str = "stop_inj";
 
 /// Default grace period after a soft `interrupt` before the Stop escalates to
 /// a hard kill + `--resume` respawn. Overridable for tests via
@@ -136,6 +144,11 @@ struct SessionShared {
     /// infer "cancelled" from claude's encoding, so we record that *we* asked:
     /// the pump resolves the next `result` as `Cancelled` when this is set.
     cancel_requested: Cell<bool>,
+    /// User message accumulated while a turn is in flight; consumed by the
+    /// next `hook_callback` (PostToolUse or Stop) and injected as
+    /// `additionalContext`. `Some` while a follow-up is pending; cleared the
+    /// moment the next hook fires.
+    pending_inject: RefCell<Option<String>>,
 }
 
 /// Everything needed to respawn a session's `claude` process under the same
@@ -190,7 +203,101 @@ pub struct ClaudeNativeConnection {
     escalations_armed: Cell<usize>,
 }
 
+/// Hook map registered in the `initialize` control_request. `PostToolUse`
+/// gives us a callback at every safe tool boundary (between `tool_result` and
+/// the next assistant block); `Stop` gives us a callback at end-of-turn so a
+/// pending follow-up still lands even if no tool fires before the agent tries
+/// to stop.
+fn build_default_hooks() -> std::collections::BTreeMap<String, Vec<HookConfig>> {
+    let mut hooks = std::collections::BTreeMap::new();
+    hooks.insert(
+        "PostToolUse".to_string(),
+        vec![HookConfig {
+            matcher: None,
+            hook_callback_ids: vec![HOOK_CALLBACK_POST_TOOL_USE.to_string()],
+            timeout: 30_000,
+        }],
+    );
+    hooks.insert(
+        "Stop".to_string(),
+        vec![HookConfig {
+            matcher: None,
+            hook_callback_ids: vec![HOOK_CALLBACK_STOP.to_string()],
+            timeout: 30_000,
+        }],
+    );
+    hooks
+}
+
+/// Format a pending follow-up so the agent can tell apart "the user said this
+/// at the start of the turn" from "the user added this mid-turn at HH:MM:SS".
+fn format_inject_message(message: &str) -> String {
+    let now = chrono::Local::now().format("%H:%M:%S");
+    format!("[The user added a new message mid-turn at {now}]:\n<<<\n{message}\n>>>")
+}
+
+/// Build the `response` value passed to `InputMessage::ControlResponse{response: …}`
+/// for an inbound `hook_callback`. When `pending` is `Some`, the agent receives
+/// the formatted user message as `additionalContext` (and, for `Stop`, a
+/// `decision: "block"` + `reason` so it keeps generating to address it).
+/// `request_id` is duplicated inside the response payload because some Claude
+/// builds key off the inner id; keeping both consistent is harmless when they
+/// don't.
+fn build_hook_response(
+    request_id: &str,
+    callback_id: &str,
+    pending: Option<String>,
+) -> serde_json::Value {
+    let Some(message) = pending else {
+        return serde_json::json!({
+            "subtype": "success",
+            "request_id": request_id,
+            "response": {},
+        });
+    };
+
+    let formatted = format_inject_message(&message);
+    let is_stop = callback_id == HOOK_CALLBACK_STOP;
+    let event_name = if is_stop { "Stop" } else { "PostToolUse" };
+
+    let mut response = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": event_name,
+            "additionalContext": formatted,
+        },
+        "continue": true,
+        "suppressOutput": false,
+    });
+    if is_stop {
+        // `decision: "block"` on a Stop hook prevents the agent from ending the
+        // turn — it keeps generating to address `reason`.
+        if let Some(object) = response.as_object_mut() {
+            object.insert("decision".to_string(), serde_json::json!("block"));
+            object.insert("reason".to_string(), serde_json::json!(formatted));
+        }
+    }
+
+    serde_json::json!({
+        "subtype": "success",
+        "request_id": request_id,
+        "response": response,
+    })
+}
+
 impl ClaudeNativeConnection {
+    /// Buffer a user-typed follow-up to be injected into the running turn at
+    /// the next safe boundary (next `PostToolUse` hook firing, or the `Stop`
+    /// hook if no tool fires before end-of-turn). Idempotent on repeated calls
+    /// — replaces any previously-buffered, not-yet-consumed text. Caller is
+    /// responsible for adding the user message to the AcpThread separately;
+    /// this is purely the inject side-channel.
+    pub fn inject_user_message(&self, session_id: &acp::SessionId, text: String) {
+        let sessions = self.sessions.borrow();
+        if let Some(session) = sessions.get(session_id) {
+            *session.shared.pending_inject.borrow_mut() = Some(text);
+        }
+    }
+
     /// Extract the `--append-system-prompt` text from the ACP `_meta` extension
     /// the fork uses: `{ "systemPrompt": { "append": "<text>" } }`. Absent /
     /// malformed meta yields `None` (no flag added).
@@ -274,12 +381,28 @@ impl ClaudeNativeConnection {
             Err(error) => return Task::ready(Err(error)),
         };
 
+        // Register our hook callbacks. Fire-and-forget on purpose: the real
+        // `claude` only emits `init` after the first user turn, so awaiting
+        // any response here would deadlock session creation (the same lesson
+        // as the `--session-id` adoption above). The pump consumes the eventual
+        // success response like any other control_response.
+        process
+            .outgoing
+            .unbounded_send(InputMessage::ControlRequest {
+                request_id: "init-1".to_string(),
+                request: ControlRequestOut::Initialize {
+                    hooks: build_default_hooks(),
+                },
+            })
+            .log_err();
+
         cx.spawn(async move |cx| {
             let shared = Rc::new(SessionShared {
                 prompt_tx: RefCell::new(None),
                 sticky_window: Cell::new(None),
                 last_output: Rc::new(Cell::new(cx.background_executor().now())),
                 cancel_requested: Cell::new(false),
+                pending_inject: RefCell::new(None),
             });
 
             let thread: Entity<AcpThread> = cx.update(|cx| {
@@ -441,6 +564,19 @@ impl ClaudeNativeConnection {
                 }
             };
 
+            // Same fire-and-forget `initialize` as `open_session`: the resumed
+            // process needs its hook callbacks re-registered or live injection
+            // would stop working after any escalation/respawn.
+            process
+                .outgoing
+                .unbounded_send(InputMessage::ControlRequest {
+                    request_id: "init-1".to_string(),
+                    request: ControlRequestOut::Initialize {
+                        hooks: build_default_hooks(),
+                    },
+                })
+                .log_err();
+
             // No `init` wait: the resumed `claude` only emits `init` after its
             // next user turn, and we already know the (unchanged) session id.
 
@@ -449,6 +585,7 @@ impl ClaudeNativeConnection {
                 sticky_window: Cell::new(None),
                 last_output: Rc::new(Cell::new(cx.background_executor().now())),
                 cancel_requested: Cell::new(false),
+                pending_inject: RefCell::new(None),
             });
             let incoming = process.take_incoming();
             let exited = process.wait_status();
@@ -550,10 +687,34 @@ async fn run_update_pump(
         }
 
         if let OutputMessage::ControlRequest(envelope) = message {
-            if let Some(task) =
-                spawn_tool_authorization(envelope, outgoing.clone(), thread.clone(), cx)
-            {
-                authorization_tasks.push(task);
+            match &envelope.request {
+                ControlRequestKind::HookCallback { callback_id, .. } => {
+                    // Consume any pending injected user message and ship it back
+                    // as `additionalContext` (or, for Stop, also as `reason` with
+                    // `decision: "block"`). No pending → empty success no-op.
+                    let pending = shared.pending_inject.borrow_mut().take();
+                    let response =
+                        build_hook_response(&envelope.request_id, callback_id, pending);
+                    outgoing
+                        .unbounded_send(InputMessage::ControlResponse {
+                            request_id: envelope.request_id.clone(),
+                            response,
+                        })
+                        .log_err();
+                }
+                ControlRequestKind::CanUseTool { .. } => {
+                    if let Some(task) =
+                        spawn_tool_authorization(envelope, outgoing.clone(), thread.clone(), cx)
+                    {
+                        authorization_tasks.push(task);
+                    }
+                }
+                ControlRequestKind::Other => {
+                    log::debug!(
+                        "claude_native: ignoring unknown control_request {}",
+                        envelope.request_id
+                    );
+                }
             }
             continue;
         }
@@ -839,5 +1000,54 @@ impl AgentConnection for ClaudeNativeConnection {
 
     fn into_any(self: Rc<Self>) -> Rc<dyn Any> {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_default_hooks_registers_post_tool_use_and_stop() {
+        let hooks = build_default_hooks();
+        let post = hooks.get("PostToolUse").expect("PostToolUse registered");
+        assert_eq!(post.len(), 1);
+        assert_eq!(post[0].hook_callback_ids, vec!["pti".to_string()]);
+        let stop = hooks.get("Stop").expect("Stop registered");
+        assert_eq!(stop.len(), 1);
+        assert_eq!(stop[0].hook_callback_ids, vec!["stop_inj".to_string()]);
+    }
+
+    #[test]
+    fn hook_response_empty_when_no_pending_inject() {
+        let response = build_hook_response("hk1", "pti", None);
+        assert_eq!(response["subtype"], "success");
+        assert_eq!(response["request_id"], "hk1");
+        assert!(response["response"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn hook_response_post_tool_use_carries_additional_context() {
+        let response = build_hook_response("hk1", "pti", Some("PURPLE_PINEAPPLE".to_string()));
+        assert_eq!(response["subtype"], "success");
+        let inner = &response["response"];
+        assert_eq!(inner["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+        let ctx = inner["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(ctx.contains("PURPLE_PINEAPPLE"), "ctx={ctx}");
+        assert!(ctx.contains("mid-turn"), "ctx={ctx}");
+        assert!(inner.get("decision").is_none());
+        assert!(inner.get("reason").is_none());
+    }
+
+    #[test]
+    fn hook_response_stop_blocks_with_reason() {
+        let response = build_hook_response("hk2", "stop_inj", Some("FOLLOWUP".to_string()));
+        let inner = &response["response"];
+        assert_eq!(inner["hookSpecificOutput"]["hookEventName"], "Stop");
+        assert_eq!(inner["decision"], "block");
+        let reason = inner["reason"].as_str().unwrap();
+        assert!(reason.contains("FOLLOWUP"), "reason={reason}");
     }
 }

@@ -115,6 +115,18 @@ pub enum ControlRequestKind {
         #[serde(default)]
         permission_suggestions: Vec<serde_json::Value>,
     },
+    /// `PostToolUse` / `Stop` hook firing from the SDK. Sent between the
+    /// previous tool's `tool_result` and the next assistant generation; our
+    /// reply may include an `additionalContext` string that the agent reads
+    /// in the SAME turn (the live-injection mechanism — no interrupt, no
+    /// new turn, no broken tool).
+    HookCallback {
+        callback_id: String,
+        #[serde(default)]
+        tool_use_id: Option<String>,
+        #[serde(default)]
+        input: serde_json::Value,
+    },
     #[serde(other)]
     Other,
 }
@@ -142,10 +154,32 @@ pub struct UserPayload {
     pub content: serde_json::Value,
 }
 
+/// One entry in the `hooks` map of an `initialize` control_request: a matcher
+/// pattern (or `null` for "all"), the list of callback ids the SDK should
+/// invoke when this event fires (we pick stable names like `pti`/`stop_inj`),
+/// and a per-callback timeout in milliseconds.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HookConfig {
+    pub matcher: Option<String>,
+    pub hook_callback_ids: Vec<String>,
+    pub timeout: u32,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "subtype", rename_all = "snake_case")]
 pub enum ControlRequestOut {
     Interrupt,
+    /// Outbound SDK handshake registering our hook callback ids. Sent
+    /// fire-and-forget on session spawn so the agent will emit
+    /// `hook_callback` control_requests at `PostToolUse` and `Stop` event
+    /// boundaries. Keys of `hooks` are PascalCase Claude Code event names
+    /// (`PostToolUse`, `Stop`) — leaving them as `BTreeMap<String, …>`
+    /// keeps the wire literal and lets us add events later without an
+    /// enum bump.
+    Initialize {
+        hooks: std::collections::BTreeMap<String, Vec<HookConfig>>,
+    },
 }
 
 impl InputMessage {
@@ -312,6 +346,50 @@ mod tests {
         assert!(s.contains(r#""type":"control_request""#));
         assert!(s.contains(r#""subtype":"interrupt""#));
         assert!(s.contains(r#""request_id":"r1""#));
+    }
+    #[test]
+    fn parses_hook_callback_control_request() {
+        let v = r#"{"type":"control_request","request_id":"hk1","request":{"subtype":"hook_callback","callback_id":"pti","tool_use_id":"t1","input":{"tool_name":"Bash"}}}"#;
+        match OutputMessage::parse(v).unwrap() {
+            OutputMessage::ControlRequest(env) => {
+                assert_eq!(env.request_id, "hk1");
+                match env.request {
+                    ControlRequestKind::HookCallback {
+                        callback_id,
+                        tool_use_id,
+                        ..
+                    } => {
+                        assert_eq!(callback_id, "pti");
+                        assert_eq!(tool_use_id.as_deref(), Some("t1"));
+                    }
+                    other => panic!("{other:?}"),
+                }
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    #[test]
+    fn serializes_initialize_control_request_with_hooks() {
+        let mut hooks = std::collections::BTreeMap::new();
+        hooks.insert(
+            "PostToolUse".to_string(),
+            vec![HookConfig {
+                matcher: None,
+                hook_callback_ids: vec!["pti".to_string()],
+                timeout: 30000,
+            }],
+        );
+        let s = serde_json::to_string(&InputMessage::ControlRequest {
+            request_id: "init-1".to_string(),
+            request: ControlRequestOut::Initialize { hooks },
+        })
+        .unwrap();
+        assert!(s.contains(r#""type":"control_request""#), "{s}");
+        assert!(s.contains(r#""subtype":"initialize""#), "{s}");
+        assert!(s.contains(r#""PostToolUse""#), "{s}");
+        // camelCase required by the SDK.
+        assert!(s.contains(r#""hookCallbackIds":["pti"]"#), "{s}");
+        assert!(s.contains(r#""timeout":30000"#), "{s}");
     }
     #[test]
     fn serializes_permission_response_allow_and_deny() {

@@ -2930,6 +2930,7 @@ dependencies = [
  "agent-client-protocol",
  "agent_servers",
  "anyhow",
+ "chrono",
  "futures 0.3.32",
  "gpui",
  "log",

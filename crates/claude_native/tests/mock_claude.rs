@@ -703,6 +703,84 @@ fn process_is_killed(process_id: u32) -> bool {
 }
 
 #[gpui::test]
+async fn hook_inject_round_trips_additional_context(cx: &mut TestAppContext) {
+    let capture = std::env::temp_dir().join(format!(
+        "claude_native_hook_inject_{}.ndjson",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&capture);
+
+    let project = init_test(cx).await;
+    let connection = connect_mock(
+        &project,
+        vec![
+            ("MOCK_CLAUDE_HOOK_INJECT".to_string(), "1".to_string()),
+            (
+                "MOCK_CLAUDE_CAPTURE".to_string(),
+                capture.to_string_lossy().into_owned(),
+            ),
+        ],
+        cx,
+    )
+    .await;
+
+    let task = cx.update(|cx| {
+        Rc::clone(&connection).new_session(
+            project.clone(),
+            PathList::new(&[std::env::temp_dir().as_path()]),
+            cx,
+        )
+    });
+    let thread = await_thread(task, cx).await;
+    let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
+
+    // Buffer the follow-up BEFORE sending the prompt. The mock fires its hook
+    // callback after the text delta; the pump will respond with our marker as
+    // `additionalContext`, and the mock echoes it in the final `result.result`.
+    connection.inject_user_message(&session_id, "MOCK_HOOK_MARKER".to_string());
+
+    let prompt = vec![acp::ContentBlock::Text(acp::TextContent::new(
+        "hello".to_string(),
+    ))];
+    let request = acp::PromptRequest::new(session_id, prompt);
+    let prompt_task =
+        cx.update(|cx| connection.prompt(acp_thread::UserMessageId::new(), request, cx));
+
+    let response = {
+        let timeout = cx.background_executor.timer(Duration::from_secs(10)).fuse();
+        let prompt_task = prompt_task.fuse();
+        futures::pin_mut!(timeout, prompt_task);
+        futures::select! {
+            response = prompt_task => response.expect("prompt resolved Ok"),
+            _ = timeout => panic!("prompt did not resolve after hook round trip"),
+        }
+    };
+    assert_eq!(response.stop_reason, acp::StopReason::EndTurn);
+
+    // The connection must have written an `initialize` (hooks registration) and
+    // a `control_response` carrying our marker as `additionalContext`. The
+    // `result.result` field (where the mock echoes the marker) is not surfaced
+    // through `acp::PromptResponse`; the capture-side assertions below are the
+    // end-to-end proof that our hook reply reached the mock with the marker.
+    let captured = std::fs::read_to_string(&capture).expect("read capture");
+    assert!(
+        captured.contains(r#""subtype":"initialize""#),
+        "captured stdin missing initialize control_request: {captured}"
+    );
+    assert!(
+        captured.contains(r#""hookCallbackIds":["pti"]"#),
+        "captured stdin missing PostToolUse hook callback id: {captured}"
+    );
+    assert!(
+        captured.contains(r#""type":"control_response""#)
+            && captured.contains("MOCK_HOOK_MARKER")
+            && captured.contains("additionalContext"),
+        "captured stdin missing hook control_response with additionalContext: {captured}"
+    );
+    let _ = std::fs::remove_file(&capture);
+}
+
+#[gpui::test]
 async fn close_session_kills_process_and_removes_session(cx: &mut TestAppContext) {
     let project = init_test(cx).await;
     let connection = connect_mock(&project, Vec::new(), cx).await;

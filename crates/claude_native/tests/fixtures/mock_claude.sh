@@ -18,6 +18,14 @@
 #                         - if set, the turn streams text and never emits a
 #                           `result` at all, even after an `interrupt` arrives
 #                           (forces the escalation kill+resume path).
+#   MOCK_CLAUDE_HOOK_INJECT
+#                         - if set, after streaming the text delta the mock
+#                           emits a `hook_callback` control_request, reads ONE
+#                           line of stdin (the control_response), and if its
+#                           response carries the substring `MOCK_HOOK_MARKER`
+#                           in `additionalContext`, the final `result.result`
+#                           text echoes that marker. Lets the integration test
+#                           assert the agent "saw" the injected context.
 #
 # Faithful to the real `claude --input-format stream-json` binary: it does NOT
 # emit `system/init` on startup — it blocks on stdin and emits `init` (echoing
@@ -68,6 +76,23 @@ while IFS= read -r line; do
 
       emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}},"uuid":"u1","session_id":"mock-session"}'
 
+      hook_echo="none"
+      if [ -n "${MOCK_CLAUDE_HOOK_INJECT:-}" ]; then
+        # Fire a single PostToolUse-style hook_callback and wait for the
+        # connection's control_response. If the response carries our marker
+        # substring, the final `result` echoes it so the test can prove the
+        # round trip.
+        emit '{"type":"control_request","request_id":"hookreq-1","request":{"subtype":"hook_callback","callback_id":"pti","tool_use_id":"toolu_mock_1","input":{"tool_name":"Bash"}}}'
+        if IFS= read -r hook_reply; then
+          if [ -n "${MOCK_CLAUDE_CAPTURE:-}" ]; then
+            printf '%s\n' "$hook_reply" >> "$MOCK_CLAUDE_CAPTURE"
+          fi
+          case "$hook_reply" in
+            *MOCK_HOOK_MARKER*) hook_echo="MOCK_HOOK_MARKER" ;;
+          esac
+        fi
+      fi
+
       if [ -n "${MOCK_CLAUDE_OBEY_INTERRUPT:-}" ]; then
         # Honor a soft interrupt: hold the turn open until an `interrupt`
         # control_request arrives, then end it the way the real `claude` does —
@@ -92,7 +117,11 @@ while IFS= read -r line; do
           fi
         done
       elif [ -z "${MOCK_CLAUDE_NO_RESULT:-}" ]; then
-        emit '{"type":"result","subtype":"success","is_error":false,"result":"Hi","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2},"uuid":"u2","session_id":"mock-session"}'
+        if [ -n "${MOCK_CLAUDE_HOOK_INJECT:-}" ]; then
+          emit '{"type":"result","subtype":"success","is_error":false,"result":"echoed: '"$hook_echo"'","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2},"uuid":"u2","session_id":"mock-session"}'
+        else
+          emit '{"type":"result","subtype":"success","is_error":false,"result":"Hi","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2},"uuid":"u2","session_id":"mock-session"}'
+        fi
       fi
       ;;
   esac
