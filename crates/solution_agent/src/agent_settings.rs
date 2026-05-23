@@ -3,8 +3,8 @@ use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ClaudeBackend {
-    #[default]
     Acp,
+    #[default]
     Native,
 }
 
@@ -87,7 +87,7 @@ mod claude_backend_tests {
     use super::*;
 
     #[test]
-    fn defaults_to_acp() {
-        assert_eq!(SolutionAgentSettings::default().claude_backend, ClaudeBackend::Acp);
+    fn defaults_to_native() {
+        assert_eq!(SolutionAgentSettings::default().claude_backend, ClaudeBackend::Native);
     }
 }
