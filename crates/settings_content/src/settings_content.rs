@@ -1,5 +1,6 @@
 mod action;
 mod agent;
+mod console_panel;
 mod editor;
 mod extension;
 mod fallible_options;
@@ -15,6 +16,7 @@ mod workspace;
 
 pub use action::{ActionName, ActionWithArguments};
 pub use agent::*;
+pub use console_panel::*;
 pub use editor::*;
 pub use extension::*;
 pub use fallible_options::*;
@@ -134,6 +136,9 @@ pub struct SettingsContent {
 
     /// Configuration for the collab panel visual settings.
     pub collaboration_panel: Option<PanelSettingsContent>,
+
+    /// Configuration for the console panel (unified terminal + AI-chat tabs).
+    pub console_panel: Option<ConsolePanelSettingsContent>,
 
     pub debugger: Option<DebuggerSettingsContent>,
 
