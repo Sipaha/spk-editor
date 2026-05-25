@@ -218,10 +218,13 @@ pub struct SubagentTab {
     /// tool call's `raw_input["description"]` when present (the agent author
     /// wrote it), else `subagent_type#<short-id>`, else `Agent <short-id>`.
     pub label: SharedString,
-    /// Wall-clock instant the subagent was first observed in-flight. Useful
-    /// for "running for Xs" decorations in the tab pill; not load-bearing
-    /// for tab lifecycle (which keys off ToolCall status transitions).
-    pub started_at: Instant,
+    /// Wall-clock time the subagent was first observed in-flight. Stored as
+    /// `chrono::DateTime<Utc>` (not `std::time::Instant`) so the MCP wire
+    /// layer can serialize it as unix-millis without rebasing a monotonic
+    /// clock onto wall time at every emit. Useful for "running for Xs"
+    /// decorations in the tab pill; not load-bearing for tab lifecycle
+    /// (which keys off ToolCall status transitions).
+    pub started_at: DateTime<Utc>,
 }
 
 /// Sentinel stored in `SolutionSession::entry_created_ms` (and the persisted

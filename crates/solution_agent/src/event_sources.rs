@@ -89,12 +89,13 @@ pub fn install(cx: &mut App) {
                     let payload = build_queue_changed_payload(*id, cx);
                     editor_mcp::emit_notification(cx, "agent_session_queue_changed", payload);
                 }
-                SolutionAgentStoreEvent::SessionSubagentsChanged(_id) => {
-                    // Etap 5 wires the MCP `session_active_subagents_changed`
-                    // notification here. For Etap 3 (lifecycle only) the
-                    // event is fired but not forwarded to remote consumers;
-                    // the desktop session_view (Etap 4) subscribes
-                    // in-process via `cx.subscribe(&store, ...)`.
+                SolutionAgentStoreEvent::SessionSubagentsChanged(id) => {
+                    let payload = build_active_subagents_changed_payload(*id, cx);
+                    editor_mcp::emit_notification(
+                        cx,
+                        "agent_session_active_subagents_changed",
+                        payload,
+                    );
                 }
                 SolutionAgentStoreEvent::SessionNotified(id, kind) => {
                     let kind_str = match kind {
@@ -258,6 +259,34 @@ pub(crate) fn build_queue_changed_payload(
     json!({
         "session_id": session_id.to_string(),
         "bundles": bundles,
+    })
+}
+
+/// Build the JSON payload for an `agent_session_active_subagents_changed`
+/// notification. Walks the session's insertion-ordered subagent vec via
+/// the shared `mcp::build_active_subagents_vec` helper so the wire shape
+/// matches what `get_session` / `list_sessions` would have returned on a
+/// cold fetch — clients can apply either path interchangeably.
+///
+/// When the session is gone (race between close + queued notification),
+/// emits `active_subagents: []` so the consumer's "clear the strip"
+/// handler still fires correctly.
+pub(crate) fn build_active_subagents_changed_payload(
+    session_id: crate::model::SolutionSessionId,
+    cx: &App,
+) -> serde_json::Value {
+    let subagents: Vec<crate::mcp::SubagentDto> = SolutionAgentStore::try_global(cx)
+        .and_then(|store| {
+            store.read_with(cx, |store, cx| {
+                let session = store.session(session_id)?;
+                let session_ref = session.read(cx);
+                Some(crate::mcp::build_active_subagents_vec(session_ref))
+            })
+        })
+        .unwrap_or_default();
+    json!({
+        "session_id": session_id.to_string(),
+        "active_subagents": subagents,
     })
 }
 

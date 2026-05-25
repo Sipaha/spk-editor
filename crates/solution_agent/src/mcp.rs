@@ -224,6 +224,37 @@ pub struct SessionSummary {
     /// 'claude .* --resume <uuid>'`) without having to guess from
     /// process start times.
     pub acp_session_id: String,
+    /// In-flight `Task` / `Agent` subagents the parent thread has spawned,
+    /// in spawn order. Mirrors `SolutionSession::active_subagent_order` +
+    /// `active_subagents` — the desktop session_view renders these as the
+    /// pill strip under the status row, and the mobile client mirrors the
+    /// same shape. Empty (and omitted) when the session has no subagents
+    /// currently in-flight (the typical state outside an active Task turn).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_subagents: Vec<SubagentDto>,
+}
+
+/// One in-flight subagent surfaced to MCP consumers. Mirrors the in-memory
+/// `SolutionSession::active_subagents` entry: an `id` (parent `Task`/`Agent`
+/// tool_use id, `toolu_xxx`) + the human-readable label that the desktop
+/// pill displays + the wall-clock start time as unix-millis (so mobile can
+/// render "running for Xs" without a separate clock-sync round-trip).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SubagentDto {
+    /// Parent tool_use id (`toolu_xxx`) — matches every entry whose
+    /// `subagent_id` field equals this value, so the client filters its
+    /// conversation view by exact-id match.
+    pub id: String,
+    /// Tab label as picked by [`SolutionSession::active_subagents`]'s
+    /// label-fallback chain (`description` → `subagent_type#<short-id>` →
+    /// `Agent <short-id>`). Label-locked at first observation — late
+    /// `EntryUpdated`s that finally fill `raw_input.description` do NOT
+    /// relabel the tab to keep the strip stable.
+    pub label: String,
+    /// Unix-millis the subagent was first observed in-flight. Strictly
+    /// positive — there is no "missing" sentinel since the field is
+    /// always stamped on insert with `chrono::Utc::now()`.
+    pub started_at_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -375,7 +406,43 @@ fn session_summary(session: &SolutionSession, cx: &App) -> SessionSummary {
         max_tokens,
         parent_session_id: session.parent_session_id.map(|id| id.to_string()),
         acp_session_id: session.acp_session_id.0.to_string(),
+        active_subagents: build_active_subagents_vec(session),
     }
+}
+
+/// Walks `SolutionSession::active_subagent_order` in insertion order and
+/// converts each tracked subagent into its wire form. Skips ids that
+/// don't have a matching map entry (defensive — `active_subagent_order`
+/// is supposed to be kept 1:1 with `active_subagents`, so a mismatch is
+/// a bug worth logging). Shared by:
+///
+///   * `session_summary` — populates [`SessionSummary::active_subagents`]
+///     on `list_sessions` / `get_session`.
+///   * `event_sources::build_active_subagents_changed_payload` — wire
+///     payload for the live `agent_session_active_subagents_changed`
+///     notification.
+///
+/// Both paths must agree on the shape, hence the single helper.
+pub(crate) fn build_active_subagents_vec(
+    session: &crate::model::SolutionSession,
+) -> Vec<SubagentDto> {
+    let mut out = Vec::with_capacity(session.active_subagent_order.len());
+    for id in &session.active_subagent_order {
+        match session.active_subagents.get(id) {
+            Some(tab) => out.push(SubagentDto {
+                id: id.to_string(),
+                label: tab.label.to_string(),
+                started_at_ms: tab.started_at.timestamp_millis(),
+            }),
+            None => {
+                log::warn!(
+                    "active_subagent_order has id {id} with no matching active_subagents entry \
+                     (insertion-order vector drifted from the map — see store::apply_subagent_lifecycle)"
+                );
+            }
+        }
+    }
+    out
 }
 
 // =====================================================================
@@ -696,6 +763,14 @@ pub struct EntrySummary {
     /// to `None` here.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_ms: Option<i64>,
+    /// Parent `Task` / `Agent` tool_use id (`toolu_xxx`) when this entry was
+    /// produced inside a claude subagent context, `None` for parent-level /
+    /// user / plan entries. Sourced from `AgentThreadEntry::subagent_id()`
+    /// which itself reads `_meta.claudeCode.parentToolUseId` off the
+    /// underlying `acp::Meta`. Lets the client filter the conversation view
+    /// by subagent tab — match against `SessionSummary::active_subagents[*].id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -806,6 +881,14 @@ pub struct GetSessionResult {
     /// cross-client queue display.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_bundles: Vec<QueuedBundleSummary>,
+    /// Mirrors [`SessionSummary::active_subagents`] — the in-flight
+    /// `Task`/`Agent` pills the desktop renders under the status row.
+    /// Paired with the live `agent_session_active_subagents_changed`
+    /// notification this is the cold-start seed for the mobile's
+    /// subagent-tab strip. Empty (and omitted) when no Task subagents
+    /// are currently in-flight.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_subagents: Vec<SubagentDto>,
 }
 
 /// One descriptor from `SolutionSession::pending_messages` exposed to
@@ -944,6 +1027,7 @@ impl McpServerTool for GetSessionTool {
                 entries,
                 total_count,
                 pending_bundles,
+                active_subagents: summary.active_subagents,
             })
         })?;
 
@@ -1105,6 +1189,7 @@ fn summarize_entry(
             Vec::new()
         };
     let client_send_id = client_send_ids.first().copied();
+    let subagent_id = entry.subagent_id().map(|s| s.to_string());
 
     EntrySummary {
         role,
@@ -1117,6 +1202,7 @@ fn summarize_entry(
         client_send_id,
         client_send_ids,
         created_ms,
+        subagent_id,
     }
 }
 
@@ -4930,5 +5016,209 @@ mod tests {
             err.to_string().contains("tool_call_not_found"),
             "unexpected error: {err}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Etap 5: subagent_id + active_subagents on session DTOs.
+    // -----------------------------------------------------------------
+
+    /// Seed the session's `active_subagents` map directly with two tabs
+    /// inserted in known order. Stays out of `apply_subagent_lifecycle` so
+    /// the test exercises the wire-shape path in isolation from claude's
+    /// `ToolCall` plumbing.
+    fn seed_subagent_tabs(
+        session_id: crate::model::SolutionSessionId,
+        labels: &[(&str, &str)],
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            let session = store
+                .read(cx)
+                .session(session_id)
+                .expect("session must exist");
+            session.update(cx, |s, _| {
+                for (id, label) in labels {
+                    let id_shared = gpui::SharedString::from((*id).to_string());
+                    s.active_subagents.insert(
+                        id_shared.clone(),
+                        crate::model::SubagentTab {
+                            label: gpui::SharedString::from((*label).to_string()),
+                            started_at: chrono::Utc::now(),
+                        },
+                    );
+                    s.active_subagent_order.push(id_shared);
+                }
+            });
+        });
+    }
+
+    #[gpui::test]
+    async fn session_summary_lists_active_subagents_in_insertion_order(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (session_id, _img, _tmp) = seed_session_with_image(cx).await;
+        // Pick ids whose lexicographic order disagrees with insertion order
+        // so a hash-map iteration regression would visibly flip them.
+        seed_subagent_tabs(
+            session_id,
+            &[("toolu_zzz", "First"), ("toolu_aaa", "Second")],
+            cx,
+        );
+
+        let result = GetSessionTool
+            .run(
+                GetSessionParams {
+                    session_id: session_id.to_string(),
+                    ..Default::default()
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session");
+
+        let active = &result.structured_content.active_subagents;
+        assert_eq!(active.len(), 2, "both seeded tabs surface on the wire");
+        assert_eq!(
+            active[0].id, "toolu_zzz",
+            "insertion order must win over lexicographic order"
+        );
+        assert_eq!(active[0].label, "First");
+        assert!(
+            active[0].started_at_ms > 0,
+            "started_at_ms must be a real unix-millis stamp, got {}",
+            active[0].started_at_ms
+        );
+        assert_eq!(active[1].id, "toolu_aaa");
+        assert_eq!(active[1].label, "Second");
+    }
+
+    #[gpui::test]
+    async fn session_summary_active_subagents_empty_when_no_tabs(cx: &mut gpui::TestAppContext) {
+        let (session_id, _img, _tmp) = seed_session_with_image(cx).await;
+
+        let result = GetSessionTool
+            .run(
+                GetSessionParams {
+                    session_id: session_id.to_string(),
+                    ..Default::default()
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session");
+
+        assert!(
+            result.structured_content.active_subagents.is_empty(),
+            "no seeded tabs → empty active_subagents"
+        );
+    }
+
+    #[gpui::test]
+    async fn entry_summary_carries_subagent_id_when_meta_present(cx: &mut gpui::TestAppContext) {
+        // Push one assistant chunk stamped with a parent tool_use id via the
+        // same meta key claude_native emits. The wire builder must surface it
+        // verbatim on the resulting EntrySummary.
+        let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+
+        cx.update(|cx| {
+            acp_thread.update(cx, |thread, cx| {
+                // `_meta.claudeCode.parentToolUseId` is the wire shape
+                // claude_native stamps; matches `subagent_id_from_meta` in
+                // acp_thread. Goes on the ContentChunk envelope, NOT on
+                // the inner content block — that's where the helper looks.
+                let mut meta = serde_json::Map::new();
+                meta.insert(
+                    "claudeCode".into(),
+                    serde_json::json!({ "parentToolUseId": "toolu_parent_xyz" }),
+                );
+                let mut chunk = acp::ContentChunk::new(acp::ContentBlock::Text(
+                    acp::TextContent::new("subagent says hi".to_string()),
+                ));
+                chunk.meta = Some(meta);
+                thread
+                    .handle_session_update(acp::SessionUpdate::AgentMessageChunk(chunk), cx)
+                    .expect("handle_session_update");
+            });
+        });
+        cx.executor().run_until_parked();
+
+        let result = GetSessionTool
+            .run(
+                GetSessionParams {
+                    session_id: session_id.to_string(),
+                    ..Default::default()
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session");
+
+        let assistant = result
+            .structured_content
+            .entries
+            .iter()
+            .find(|e| matches!(e.role, EntryRoleDto::Assistant))
+            .expect("assistant entry should be present");
+        assert_eq!(
+            assistant.subagent_id.as_deref(),
+            Some("toolu_parent_xyz"),
+            "EntrySummary must carry the parent tool_use id"
+        );
+    }
+
+    #[gpui::test]
+    async fn entry_summary_subagent_id_absent_for_parent_entries(cx: &mut gpui::TestAppContext) {
+        let (session_id, _img, _tmp) = seed_session_with_image(cx).await;
+
+        let result = GetSessionTool
+            .run(
+                GetSessionParams {
+                    session_id: session_id.to_string(),
+                    ..Default::default()
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session");
+
+        for entry in &result.structured_content.entries {
+            assert!(
+                entry.subagent_id.is_none(),
+                "seeded session has only parent-level entries; got subagent_id={:?} on {:?}",
+                entry.subagent_id,
+                entry.role
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn build_active_subagents_changed_payload_shape(cx: &mut gpui::TestAppContext) {
+        let (session_id, _img, _tmp) = seed_session_with_image(cx).await;
+        seed_subagent_tabs(session_id, &[("toolu_one", "Alpha")], cx);
+
+        cx.update(|cx| {
+            let payload = crate::event_sources::build_active_subagents_changed_payload(
+                session_id, cx,
+            );
+            let obj = payload.as_object().expect("object");
+            assert_eq!(
+                obj.get("session_id").and_then(|v| v.as_str()),
+                Some(session_id.to_string().as_str())
+            );
+            let arr = obj
+                .get("active_subagents")
+                .and_then(|v| v.as_array())
+                .expect("active_subagents array");
+            assert_eq!(arr.len(), 1, "one seeded tab → one descriptor");
+            let entry = arr[0].as_object().expect("dto object");
+            assert_eq!(entry.get("id").and_then(|v| v.as_str()), Some("toolu_one"));
+            assert_eq!(entry.get("label").and_then(|v| v.as_str()), Some("Alpha"));
+            let started_at = entry
+                .get("started_at_ms")
+                .and_then(|v| v.as_i64())
+                .expect("started_at_ms");
+            assert!(started_at > 0, "started_at_ms must be positive");
+        });
     }
 }

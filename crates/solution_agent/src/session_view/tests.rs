@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::time::Instant;
 
 use agent_client_protocol::schema as acp;
 use gpui::SharedString;
@@ -82,7 +81,7 @@ fn subagent_matches_picked_tab_filters_by_id() {
 fn make_tab(label: &str) -> SubagentTab {
     SubagentTab {
         label: SharedString::from(label.to_string()),
-        started_at: Instant::now(),
+        started_at: chrono::Utc::now(),
     }
 }
 

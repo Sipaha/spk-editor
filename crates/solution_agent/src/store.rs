@@ -2098,7 +2098,7 @@ impl SolutionAgentStore {
                         id_for_closure.clone(),
                         SubagentTab {
                             label,
-                            started_at: std::time::Instant::now(),
+                            started_at: chrono::Utc::now(),
                         },
                     );
                     s.active_subagent_order.push(id_for_closure);
