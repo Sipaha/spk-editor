@@ -764,7 +764,19 @@ impl SolutionSessionView {
     /// whose `subagent_id` is also `None`; `Some(id)` shows only entries
     /// stamped with that exact id. Plan-level entries and user messages
     /// have no subagent affiliation, so they fall under "Main".
-    pub(crate) fn should_render_entry(&self, entry: &AgentThreadEntry) -> bool {
+    ///
+    /// Cold-restart bypass: when the session has no active subagents,
+    /// the strip is hidden anyway, so we render EVERY entry regardless
+    /// of `subagent_id`. Otherwise persisted entries stamped with a now-
+    /// dead `toolu_xxx` would silently disappear from Main after restart.
+    pub(crate) fn should_render_entry(
+        &self,
+        entry: &AgentThreadEntry,
+        cx: &App,
+    ) -> bool {
+        if self.session.read(cx).active_subagents.is_empty() {
+            return true;
+        }
         subagent_matches(self.selected_subagent.as_ref(), entry.subagent_id())
     }
 
@@ -2356,7 +2368,7 @@ impl Render for SolutionSessionView {
                                 // switch — preferable to a full
                                 // `list_state.reset()` that would jump the
                                 // viewport.
-                                if !this.should_render_entry(entry) {
+                                if !this.should_render_entry(entry, cx) {
                                     return Empty.into_any_element();
                                 }
                                 let rewind_target = if supports_rewind
