@@ -59,6 +59,22 @@ pub struct ConversationMessage {
     pub parent_tool_use_id: Option<String>,
 }
 
+impl ConversationMessage {
+    /// The Anthropic-API `usage` block attached to this assistant message,
+    /// if any. Within a single user-perceived turn there can be several
+    /// assistant messages (one per API roundtrip when tools fire); each
+    /// carries its own `usage` whose `cache_read_input_tokens` reflects
+    /// everything the model saw on THAT call. The terminal `result` event
+    /// from the SDK only summarises the last sub-call, so it can drop to
+    /// a tiny number once the cache is warm — drive the meter off
+    /// assistant-message usage instead. Mirrors how Claude Code itself
+    /// computes `context_window.current_usage` (cli.js `zD1`).
+    pub fn usage(&self) -> Option<Usage> {
+        let raw = self.message.get("usage")?;
+        serde_json::from_value(raw.clone()).ok()
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ResultMessage {
     pub subtype: String,
@@ -74,6 +90,12 @@ pub struct ResultMessage {
     pub model_usage: BTreeMap<String, ModelUsage>,
     #[serde(default)]
     pub usage: Option<Usage>,
+    /// Cumulative session cost in USD reported by the SDK at turn end.
+    /// Mirrors JS `acp-agent.js:632` (`message.total_cost_usd`). Optional
+    /// because not every result carries it (local-only slash-command turns
+    /// report `0` or omit the field).
+    #[serde(default)]
+    pub total_cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,9 +104,11 @@ pub struct ModelUsage {
     pub context_window: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct Usage {
+    #[serde(default)]
     pub input_tokens: u64,
+    #[serde(default)]
     pub output_tokens: u64,
     /// Tokens read from the prompt cache this turn — i.e. the bulk of the
     /// previously-built conversation context that the model didn't have to

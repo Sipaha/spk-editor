@@ -34,12 +34,38 @@ pub struct ClaudeProcess {
     child: Child,
     pub outgoing: UnboundedSender<InputMessage>,
     pub incoming: UnboundedReceiver<OutputMessage>,
+    /// Stream of critical stderr lines that downstream layers MUST react to —
+    /// currently just the "Error in hook callback" pattern, which is the
+    /// observed leading edge of the "Thinking forever after background-task
+    /// container restart" hang (claude's own `Result` never lands so the
+    /// pump's prompt oneshot would otherwise wait forever). Routine stderr
+    /// stays in the log; only escalations come through here. Take with
+    /// `take_critical_stderr` and select! it alongside `incoming` in the
+    /// update pump.
+    critical_stderr: UnboundedReceiver<CriticalStderr>,
     pending_controls: PendingControls,
     next_request_id: AtomicU64,
     exited: Shared<Task<Option<ExitStatus>>>,
     _reader: Task<()>,
     _writer: Task<()>,
     _stderr: Task<()>,
+}
+
+/// Categorised stderr line worth waking the update pump for.
+#[derive(Clone, Debug)]
+pub enum CriticalStderr {
+    /// `Error in hook callback <id>: …` — claude is reporting a failure
+    /// in its own hook handling. Empirically (seen in production on
+    /// 2026-05-25 with `stop_inj`) the agent then never emits a
+    /// terminating `Result` for the in-flight turn, so the prompt
+    /// oneshot needs to be force-resolved by the pump.
+    HookCallbackError {
+        callback_id: String,
+        /// Trimmed first line of the error so the user-facing message
+        /// has something concrete to show (e.g.
+        /// `"The container was restarted. …"`).
+        first_line: String,
+    },
 }
 
 impl ClaudeProcess {
@@ -57,6 +83,7 @@ impl ClaudeProcess {
 
         let (incoming_sender, incoming) = mpsc::unbounded::<OutputMessage>();
         let (outgoing, outgoing_receiver) = mpsc::unbounded::<InputMessage>();
+        let (critical_stderr_tx, critical_stderr) = mpsc::unbounded::<CriticalStderr>();
         let pending_controls: PendingControls = Arc::new(Mutex::new(HashMap::new()));
 
         let executor = cx.background_executor();
@@ -66,7 +93,7 @@ impl ClaudeProcess {
             pending_controls.clone(),
         ));
         let writer = executor.spawn(write_stdin(stdin, outgoing_receiver));
-        let stderr_task = executor.spawn(drain_stderr(stderr));
+        let stderr_task = executor.spawn(drain_stderr(stderr, critical_stderr_tx));
 
         // `Child::status` clones an internal handle, so the resulting future is
         // independent of the `Child` we keep around (for `kill`). Driving it in
@@ -80,6 +107,7 @@ impl ClaudeProcess {
             child,
             outgoing,
             incoming,
+            critical_stderr,
             pending_controls,
             next_request_id: AtomicU64::new(0),
             exited,
@@ -87,6 +115,16 @@ impl ClaudeProcess {
             _writer: writer,
             _stderr: stderr_task,
         })
+    }
+
+    /// Take the per-process critical-stderr stream (one-shot — subsequent
+    /// calls return a closed stream). The connection's update pump owns it
+    /// after spawn so it can `select!` it alongside `incoming` and force-
+    /// resolve in-flight prompts on a hook-callback error.
+    pub fn take_critical_stderr(&mut self) -> UnboundedReceiver<CriticalStderr> {
+        let (sender, closed) = mpsc::unbounded::<CriticalStderr>();
+        drop(sender);
+        std::mem::replace(&mut self.critical_stderr, closed)
     }
 
     /// Take ownership of the `incoming` output stream, leaving a closed stream
@@ -199,6 +237,21 @@ async fn read_stdout(
                 }
             }
             Ok(message) => {
+                // Diagnostic: a successful parse that lands in `Unknown`
+                // means claude emitted a top-level message type our
+                // protocol enum doesn't cover (`#[serde(other)]` catch-all).
+                // Without surfacing the raw payload here, a new SDK
+                // message kind (ping, rate_limit_event, future additions)
+                // disappears silently — grepping for this target tells us
+                // what we're missing. Truncated to 2 KB to keep the log
+                // bounded; the message type is at the head so it survives.
+                if matches!(message, OutputMessage::Unknown) {
+                    let preview: String = line.chars().take(2048).collect();
+                    log::debug!(
+                        target: "claude_native::unknown",
+                        "OutputMessage::Unknown — raw line: {preview}"
+                    );
+                }
                 if incoming_sender.unbounded_send(message).is_err() {
                     // Receiver dropped — nobody is listening anymore.
                     break;
@@ -226,6 +279,17 @@ async fn write_stdin(
                 continue;
             }
         };
+        // Diagnostic mirror of `claude_native::stream`/`turn_end`: log what
+        // we're writing to claude's stdin so a "we sent user message X but
+        // claude emitted Result(end_turn, text='')" report can be checked
+        // wire-vs-model without instrumenting per call site. Long inline
+        // base64 image payloads make the log line useless, so cap at
+        // ~2 KB; the rest is irrelevant to "did the bytes go out".
+        log::debug!(
+            target: "claude_native::stdin",
+            "→ {preview}",
+            preview = stdin_preview(&line)
+        );
         line.push('\n');
         if let Err(error) = stdin.write_all(line.as_bytes()).await {
             log::warn!("claude stdin write error: {error}");
@@ -238,15 +302,59 @@ async fn write_stdin(
     }
 }
 
-async fn drain_stderr(stderr: impl futures::AsyncRead + Unpin) {
+/// Trim a serialised stdin message for the diagnostic log: cap at ~2 KB and
+/// note the original length so a truncated entry is obviously truncated
+/// (vs. mysteriously short). 2 KB is enough to see the JSON skeleton plus a
+/// preview of any user text/prompt content; long base64 blobs (images,
+/// uploads) get cut here and don't drown the log file.
+fn stdin_preview(line: &str) -> String {
+    const CAP: usize = 2048;
+    if line.len() <= CAP {
+        line.to_string()
+    } else {
+        let head: String = line.chars().take(CAP).collect();
+        format!("{head}…[truncated, full_len={}]", line.len())
+    }
+}
+
+async fn drain_stderr(
+    stderr: impl futures::AsyncRead + Unpin,
+    critical: UnboundedSender<CriticalStderr>,
+) {
     let mut reader = BufReader::new(stderr);
     let mut line = String::new();
+    // Multi-line errors (claude dumps a JS source fragment after the header)
+    // belong to the most recently seen `Error in hook callback <id>:` —
+    // hold on to the id+first-content-line so the critical signal carries
+    // a useful preview instead of just the bare header.
+    let mut pending_hook_error: Option<(String, Option<String>)> = None;
     loop {
         line.clear();
         match reader.read_line(&mut line).await {
             Ok(0) | Err(_) => break,
             Ok(_) => {
                 let trimmed = line.trim_end_matches(['\n', '\r']);
+                if let Some(callback_id) = parse_hook_callback_error(trimmed) {
+                    log::warn!("claude stderr: {trimmed}");
+                    pending_hook_error = Some((callback_id, None));
+                    continue;
+                }
+                if let Some((cb_id, first_line_slot)) = pending_hook_error.as_mut() {
+                    // Capture the first non-empty, non-line-number content
+                    // line as the human preview. claude's dump intersperses
+                    // `<lineno> | <text>` markers; we strip the leader so
+                    // the user-facing preview reads cleanly.
+                    if first_line_slot.is_none() {
+                        let content = strip_line_number_prefix(trimmed);
+                        if !content.is_empty() {
+                            *first_line_slot = Some(content.to_string());
+                            let _ = critical.unbounded_send(CriticalStderr::HookCallbackError {
+                                callback_id: cb_id.clone(),
+                                first_line: content.to_string(),
+                            });
+                        }
+                    }
+                }
                 if is_benign_agent_stderr(trimmed) {
                     log::debug!("claude stderr: {trimmed}");
                 } else {
@@ -257,9 +365,81 @@ async fn drain_stderr(stderr: impl futures::AsyncRead + Unpin) {
     }
 }
 
+/// Match the `Error in hook callback <id>:` header claude writes to stderr
+/// when a hook callback fails inside its runtime (the leading edge of the
+/// container-restart hang). Returns the callback id when matched.
+fn parse_hook_callback_error(line: &str) -> Option<String> {
+    let stripped = line.strip_prefix("Error in hook callback ")?;
+    // `<id>: …` or `<id>` alone.
+    let id_end = stripped.find(':').unwrap_or(stripped.len());
+    let id = stripped[..id_end].trim();
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_string())
+    }
+}
+
+/// Drop a leading `<digits> | ` marker claude inserts on every line of its
+/// dumped source fragment (e.g. `12368 | The container was restarted.`).
+/// Returns the input unchanged when the marker isn't present, so this is
+/// safe to call on any line.
+fn strip_line_number_prefix(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    let mut chars = trimmed.char_indices();
+    let mut last_digit_end = 0;
+    while let Some((i, c)) = chars.next() {
+        if c.is_ascii_digit() {
+            last_digit_end = i + 1;
+        } else {
+            break;
+        }
+    }
+    if last_digit_end == 0 {
+        return trimmed;
+    }
+    let rest = &trimmed[last_digit_end..];
+    if let Some(rest) = rest.strip_prefix(" | ") {
+        rest
+    } else {
+        trimmed
+    }
+}
+
 /// Mirrors `agent_servers::acp::is_benign_agent_stderr`: lines that fire on
 /// routine internals (and the `{"type":"ping"}` keepalive the SDK sometimes
 /// writes to stderr) are downgraded to debug so they don't look like errors.
 fn is_benign_agent_stderr(line: &str) -> bool {
     line.contains("No onPostToolUseHook found for tool use ID") || line.contains(r#""type":"ping""#)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_hook_callback_error_header() {
+        assert_eq!(
+            parse_hook_callback_error("Error in hook callback stop_inj: ..."),
+            Some("stop_inj".to_string())
+        );
+        assert_eq!(
+            parse_hook_callback_error("Error in hook callback pti"),
+            Some("pti".to_string())
+        );
+        assert!(parse_hook_callback_error("not a hook error").is_none());
+        assert!(parse_hook_callback_error("Error in hook callback : empty").is_none());
+    }
+
+    #[test]
+    fn strips_line_number_prefix_from_dumped_source() {
+        assert_eq!(
+            strip_line_number_prefix("12368 | The container was restarted."),
+            "The container was restarted."
+        );
+        // No marker → returned unchanged (trimmed).
+        assert_eq!(strip_line_number_prefix("plain line"), "plain line");
+        // Leading whitespace stripped.
+        assert_eq!(strip_line_number_prefix("   foo"), "foo");
+    }
 }

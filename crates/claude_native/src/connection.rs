@@ -38,7 +38,10 @@ use crate::protocol::{
     ControlRequestEnvelope, ControlRequestKind, ControlRequestOut, HookConfig, InputMessage,
     OutputMessage,
 };
-use crate::translate::{TurnEnd, apply_usage, classify_result, translate};
+use crate::translate::{
+    DEFAULT_CONTEXT_WINDOW, TurnEnd, apply_stream_usage, apply_usage, assistant_usage_update,
+    classify_result, image_block_from_anthropic, infer_context_window_from_model, translate,
+};
 use crate::watchdog::{AnalyzerContext, ClaudeAnalyzer, Watchdog};
 
 /// Stable id for the `PostToolUse` hook callback registered in `initialize`.
@@ -149,6 +152,23 @@ struct SessionShared {
     /// `additionalContext`. `Some` while a follow-up is pending; cleared the
     /// moment the next hook fires.
     pending_inject: RefCell<Option<String>>,
+    /// Cumulative usage snapshot for the in-flight assistant turn, built up
+    /// from `message_start` + `message_delta` stream events. Anthropic
+    /// reports `message_delta.usage` *cumulatively* (each delta supersedes
+    /// the prior), so the meter has to merge into the running snapshot
+    /// rather than sum. Cleared on `result`. Mirrors JS's
+    /// `lastAssistantUsage` (`acp-agent.js:427`,`705–741`).
+    stream_usage: RefCell<Option<crate::protocol::Usage>>,
+    /// Last emitted meter `used_tokens` for the in-flight turn — only emit a
+    /// fresh `UsageUpdate` when the new total changes. JS does the same to
+    /// avoid spamming the client with repeats (`acp-agent.js:739`).
+    stream_used_total: Cell<Option<u64>>,
+    /// The most recently observed `message.model` for this session, latched
+    /// from `message_start` stream events. Used as a fallback for the
+    /// context-window limit when no `result.modelUsage.contextWindow` has
+    /// been seen yet (`inferContextWindowFromModel` in JS:`acp-agent.js:716`).
+    /// Reset on session restart but persists across turns within a session.
+    active_model: RefCell<Option<String>>,
 }
 
 /// Everything needed to respawn a session's `claude` process under the same
@@ -284,6 +304,124 @@ fn build_hook_response(
     })
 }
 
+/// Slash commands the upstream `@agentclientprotocol/claude-agent-acp` shim
+/// strips from the `available_commands_update` it forwards to the client —
+/// they are CLI-local concerns (auth, keybindings help, etc.) that don't make
+/// sense over ACP. Mirror that filter so the UI matches the JS-shim path.
+const UNSUPPORTED_SLASH_COMMANDS: &[&str] = &[
+    "clear",
+    "cost",
+    "keybindings-help",
+    "login",
+    "logout",
+    "output-style:new",
+    "release-notes",
+    "todos",
+];
+
+/// Map the `commands` array of an `initialize` control_response payload to
+/// `acp::AvailableCommand`s. Each element is shaped
+/// `{ name: string, description?: string, argumentHint?: string|string[] }`
+/// — `argumentHint` becomes an `Unstructured` input hint when present,
+/// matching what the upstream `getAvailableSlashCommands` in
+/// `acp-agent.js` produces. Unknown / malformed entries are silently
+/// skipped (a single bad entry mustn't blank out the whole command list).
+fn parse_available_commands(payload: &serde_json::Value) -> Vec<acp::AvailableCommand> {
+    let Some(commands) = payload.get("commands").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    commands
+        .iter()
+        .filter_map(|entry| {
+            let name = entry.get("name").and_then(|v| v.as_str())?.to_string();
+            if UNSUPPORTED_SLASH_COMMANDS.contains(&name.as_str()) {
+                return None;
+            }
+            let description = entry
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let mut command = acp::AvailableCommand::new(name, description);
+            if let Some(hint) = entry.get("argumentHint") {
+                let hint_text = match hint {
+                    serde_json::Value::String(s) => Some(s.clone()),
+                    serde_json::Value::Array(arr) => Some(
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    ),
+                    _ => None,
+                };
+                if let Some(hint) = hint_text.filter(|s| !s.is_empty()) {
+                    command = command.input(acp::AvailableCommandInput::Unstructured(
+                        acp::UnstructuredCommandInput::new(hint),
+                    ));
+                }
+            }
+            Some(command)
+        })
+        .collect()
+}
+
+/// Send the `initialize` control_request and spawn a detached task that
+/// awaits its response, parses out the agent's slash-command list, and
+/// pushes it to the `AcpThread` as an `AvailableCommandsUpdate`. Used by
+/// both `open_session` (new) and `recover_session` (kill+resume) so a
+/// respawned process re-advertises commands too. The real `claude` only
+/// emits the response *after* the first user turn, so this MUST stay
+/// detached — awaiting it inline would deadlock session creation.
+fn dispatch_initialize(
+    process: &ClaudeProcess,
+    thread: WeakEntity<AcpThread>,
+    cx: &mut gpui::AsyncApp,
+) {
+    let Ok(receiver) = process.send_control(ControlRequestOut::Initialize {
+        hooks: build_default_hooks(),
+    }) else {
+        log::warn!(
+            target: "claude_native::initialize",
+            "stdin closed before initialize could be sent — agent commands won't be advertised"
+        );
+        return;
+    };
+    cx.spawn(async move |cx| {
+        let payload = match receiver.await {
+            Ok(payload) => payload,
+            Err(_) => {
+                log::debug!(
+                    target: "claude_native::initialize",
+                    "initialize response sender dropped (process gone before first turn)"
+                );
+                return;
+            }
+        };
+        let commands = parse_available_commands(&payload);
+        log::debug!(
+            target: "claude_native::initialize",
+            "initialize response received: {} command(s) after filter",
+            commands.len(),
+        );
+        if commands.is_empty() {
+            return;
+        }
+        thread
+            .update(cx, |thread, cx| {
+                thread
+                    .handle_session_update(
+                        acp::SessionUpdate::AvailableCommandsUpdate(
+                            acp::AvailableCommandsUpdate::new(commands),
+                        ),
+                        cx,
+                    )
+                    .log_err();
+            })
+            .ok();
+    })
+    .detach();
+}
+
 impl ClaudeNativeConnection {
     /// Buffer a user-typed follow-up to be injected into the running turn at
     /// the next safe boundary (next `PostToolUse` hook firing, or the `Stop`
@@ -412,21 +550,6 @@ impl ClaudeNativeConnection {
             Err(error) => return Task::ready(Err(error)),
         };
 
-        // Register our hook callbacks. Fire-and-forget on purpose: the real
-        // `claude` only emits `init` after the first user turn, so awaiting
-        // any response here would deadlock session creation (the same lesson
-        // as the `--session-id` adoption above). The pump consumes the eventual
-        // success response like any other control_response.
-        process
-            .outgoing
-            .unbounded_send(InputMessage::ControlRequest {
-                request_id: "init-1".to_string(),
-                request: ControlRequestOut::Initialize {
-                    hooks: build_default_hooks(),
-                },
-            })
-            .log_err();
-
         cx.spawn(async move |cx| {
             let shared = Rc::new(SessionShared {
                 prompt_tx: RefCell::new(None),
@@ -434,6 +557,9 @@ impl ClaudeNativeConnection {
                 last_output: Rc::new(Cell::new(cx.background_executor().now())),
                 cancel_requested: Cell::new(false),
                 pending_inject: RefCell::new(None),
+                stream_usage: RefCell::new(None),
+                stream_used_total: Cell::new(None),
+                active_model: RefCell::new(None),
             });
 
             let thread: Entity<AcpThread> = cx.update(|cx| {
@@ -453,14 +579,32 @@ impl ClaudeNativeConnection {
                 })
             });
 
+            // Register our hook callbacks AND ask claude for its slash-command
+            // list. The real `claude` only emits this response after the first
+            // user turn (same constraint as `--session-id` adoption above), so
+            // `dispatch_initialize` does NOT block session creation — it spawns
+            // a detached task that fires `AvailableCommandsUpdate` on the
+            // AcpThread whenever the response eventually arrives.
+            dispatch_initialize(&process, thread.downgrade(), cx);
+
             let incoming = process.take_incoming();
+            let critical_stderr = process.take_critical_stderr();
             let exited = process.wait_status();
             let outgoing = process.outgoing.clone();
             let update_pump = cx.spawn({
                 let thread = thread.downgrade();
                 let shared = shared.clone();
                 async move |cx| {
-                    run_update_pump(incoming, exited, outgoing, thread, shared, cx).await;
+                    run_update_pump(
+                        incoming,
+                        critical_stderr,
+                        exited,
+                        outgoing,
+                        thread,
+                        shared,
+                        cx,
+                    )
+                    .await;
                 }
             });
 
@@ -490,6 +634,21 @@ impl ClaudeNativeConnection {
         let Some(session) = sessions.get_mut(session_id) else {
             return;
         };
+
+        // Reset the silence baseline to NOW. `last_output` is the wall-time
+        // of the last message the pump pulled off `incoming`, and it
+        // survives across turns (it's stored on `SessionShared`, which
+        // outlives a single prompt). If the user idles for longer than
+        // `silence_window` between turns, the next `arm_watchdog` would
+        // otherwise see `elapsed > silence_window` immediately, skip the
+        // sleep, and dispatch the analyzer right away. The analyzer is a
+        // separate `claude -p` call — 5-10s of latency — so a `Hung`
+        // verdict on a fresh turn that's barely started fires
+        // `recover_session` and silently cancels the user's brand-new
+        // message ("опять в Done ушел втихую" bug). Stamping `now()` here
+        // tells the watchdog "this turn just started; wait the full
+        // window before second-guessing it".
+        session.shared.last_output.set(cx.background_executor().now());
 
         let last_output = session.shared.last_output.clone();
         let process_id = session.process.process_id();
@@ -558,9 +717,20 @@ impl ClaudeNativeConnection {
             // Resolve the wedged prompt first so the UI leaves Running even if
             // the respawn below fails for any reason.
             if let Some(prompt_tx) = prompt_tx {
+                log::warn!(
+                    target: "claude_native::prompt_tx",
+                    "recover_session took prompt_tx and force-resolved it as Cancelled \
+                     (escalation path for stuck cancel / hung turn)"
+                );
                 prompt_tx
                     .send(Ok(TurnEnd::Stop(acp::StopReason::Cancelled)))
                     .ok();
+            } else {
+                log::debug!(
+                    target: "claude_native::prompt_tx",
+                    "recover_session found prompt_tx already None (turn ended between escalation \
+                     arming and recovery firing)"
+                );
             }
 
             // Kill the old process. Done via a short-lived borrow so the kill
@@ -595,18 +765,12 @@ impl ClaudeNativeConnection {
                 }
             };
 
-            // Same fire-and-forget `initialize` as `open_session`: the resumed
-            // process needs its hook callbacks re-registered or live injection
-            // would stop working after any escalation/respawn.
-            process
-                .outgoing
-                .unbounded_send(InputMessage::ControlRequest {
-                    request_id: "init-1".to_string(),
-                    request: ControlRequestOut::Initialize {
-                        hooks: build_default_hooks(),
-                    },
-                })
-                .log_err();
+            // Same `initialize` as `open_session`: the resumed process needs
+            // its hook callbacks re-registered or live injection would stop
+            // working after any escalation/respawn, AND it needs to re-pump
+            // the slash-command list to the (preserved) AcpThread. Detached
+            // task, just like the initial spawn.
+            dispatch_initialize(&process, thread.clone(), cx);
 
             // No `init` wait: the resumed `claude` only emits `init` after its
             // next user turn, and we already know the (unchanged) session id.
@@ -617,14 +781,27 @@ impl ClaudeNativeConnection {
                 last_output: Rc::new(Cell::new(cx.background_executor().now())),
                 cancel_requested: Cell::new(false),
                 pending_inject: RefCell::new(None),
+                stream_usage: RefCell::new(None),
+                stream_used_total: Cell::new(None),
+                active_model: RefCell::new(None),
             });
             let incoming = process.take_incoming();
+            let critical_stderr = process.take_critical_stderr();
             let exited = process.wait_status();
             let outgoing = process.outgoing.clone();
             let update_pump = cx.spawn({
                 let shared = shared.clone();
                 async move |cx| {
-                    run_update_pump(incoming, exited, outgoing, thread, shared, cx).await;
+                    run_update_pump(
+                        incoming,
+                        critical_stderr,
+                        exited,
+                        outgoing,
+                        thread,
+                        shared,
+                        cx,
+                    )
+                    .await;
                 }
             });
 
@@ -645,6 +822,33 @@ impl ClaudeNativeConnection {
     }
 }
 
+/// Per-turn diagnostic counters; see the `turn_stats` doc comment in
+/// `run_update_pump`. All counters reset to zero on each terminating
+/// `Result`.
+#[derive(Default, Debug)]
+struct TurnStats {
+    /// Total characters of assistant TEXT content surfaced via
+    /// `stream_event{content_block_delta, text_delta}` — what the user
+    /// sees as the agent's reply.
+    text_chars_streamed: usize,
+    /// Same but for extended-thinking blocks. A turn with thinking>0 and
+    /// text=0 means the agent thought but said nothing.
+    thinking_chars_streamed: usize,
+    /// Number of `tool_use` blocks the agent emitted (one per tool call).
+    tool_calls_emitted: usize,
+    /// Number of top-level `OutputMessage::Assistant` messages seen
+    /// (subagent ones excluded — they have `parent_tool_use_id != None`).
+    assistant_messages_received: usize,
+    /// Number of TEXT content blocks inside `OutputMessage::Assistant`
+    /// messages that `translate.rs` silently dropped on the assumption
+    /// that text always arrives via stream_event deltas. If this is >0
+    /// while `text_chars_streamed == 0`, the SDK's claude path
+    /// accumulated those text blocks but our native pump loses them —
+    /// strong candidate for the "silent end_turn" the user reports
+    /// happens only with the native backend.
+    assistant_text_blocks_dropped: usize,
+}
+
 /// Drain the process's `incoming` stream until EOF or process exit, applying
 /// each message to the `AcpThread` and resolving the in-flight prompt oneshot on
 /// the turn-ending `result`. On process exit with a prompt still pending, the
@@ -652,6 +856,9 @@ impl ClaudeNativeConnection {
 /// rather than hanging.
 async fn run_update_pump(
     mut incoming: futures::channel::mpsc::UnboundedReceiver<OutputMessage>,
+    mut critical_stderr: futures::channel::mpsc::UnboundedReceiver<
+        crate::process::CriticalStderr,
+    >,
     exited: impl std::future::Future<Output = Option<std::process::ExitStatus>>,
     outgoing: futures::channel::mpsc::UnboundedSender<InputMessage>,
     thread: WeakEntity<AcpThread>,
@@ -664,9 +871,63 @@ async fn run_update_pump(
     // session's) so they aren't cancelled before the user responds.
     let mut authorization_tasks: Vec<Task<()>> = Vec::new();
     let mut exited = std::pin::pin!(exited.fuse());
+    // Per-turn diagnostic accumulator. Reset after each terminating `Result`
+    // and logged alongside the turn_end summary so a "no response where I
+    // expected one" report can be cross-referenced with what actually
+    // streamed during the turn. Catches: silent-end-turn (all counters 0,
+    // text_chars=0 in result), thinking-only turns (thinking_chars>0,
+    // text_chars=0), translation drops (assistant_text_blocks_dropped>0
+    // means claude emitted text via OutputMessage::Assistant that
+    // translate.rs skipped — the SDK accumulated those, we currently
+    // don't), or "agent finished without saying anything despite tools"
+    // (tool_calls_emitted>0, text_chars=0).
+    let mut turn_stats = TurnStats::default();
+    // Per-assistant-message flags: true once a `stream_event(*_delta)` for
+    // text/thinking has arrived for the message currently being built; reset
+    // on every `stream_event(message_start)` and on every
+    // `OutputMessage::Assistant` (the boundary between sub-calls within a
+    // multi-step turn). Used to distinguish "normal turn (text/thinking
+    // already streamed → assistant block would double-render)" from "no
+    // stream events → assistant block carries the only copy". Without this,
+    // local slash commands like `/context` produce a `result.result` with
+    // 9k chars of markdown but zero rendered UI bubbles, and extended-
+    // thinking-only turns lose their `thinking` blocks the same way.
+    let mut text_streamed_for_current_message: bool = false;
+    let mut thinking_streamed_for_current_message: bool = false;
     loop {
         let message = select_biased! {
             message = incoming.next().fuse() => message,
+            critical = critical_stderr.next().fuse() => {
+                // Critical stderr: claude reported an internal failure that
+                // means the in-flight `Result` will never arrive (observed:
+                // `Error in hook callback stop_inj` during a background-task
+                // container restart leaves the turn hung indefinitely with
+                // no terminating Result). Force-resolve the prompt oneshot
+                // with an error so the AcpThread transitions to Errored
+                // and the user sees "agent hook error: <detail>" instead
+                // of an infinite "Thinking…".
+                if let Some(crate::process::CriticalStderr::HookCallbackError {
+                    callback_id,
+                    first_line,
+                }) = critical
+                {
+                    log::warn!(
+                        target: "claude_native::stderr_watchdog",
+                        "hook callback {callback_id} errored: {first_line} — force-resolving in-flight prompt"
+                    );
+                    if let Some(sender) = shared.prompt_tx.borrow_mut().take() {
+                        sender
+                            .send(Err(anyhow!(
+                                "agent hook callback {callback_id} failed: {first_line}"
+                            )))
+                            .ok();
+                    }
+                }
+                // The pump keeps running — claude may recover and emit more
+                // messages on the same process. Only an exit / EOF tears it
+                // down. Re-loop to await the next message.
+                continue;
+            }
             status = exited.as_mut() => {
                 // Process died. If a turn was in flight, fail it so the thread
                 // surfaces an error instead of hanging forever.
@@ -675,6 +936,10 @@ async fn run_update_pump(
                         Some(status) => format!("claude exited: {status}"),
                         None => "claude exited".to_string(),
                     };
+                    log::warn!(
+                        target: "claude_native::prompt_tx",
+                        "process exit took prompt_tx and failed it: {detail}"
+                    );
                     sender.send(Err(anyhow!(detail))).ok();
                 }
                 return;
@@ -684,6 +949,10 @@ async fn run_update_pump(
         let Some(message) = message else {
             // stdout EOF. Fail any in-flight turn for the same reason as exit.
             if let Some(sender) = shared.prompt_tx.borrow_mut().take() {
+                log::warn!(
+                    target: "claude_native::prompt_tx",
+                    "stdout EOF took prompt_tx and failed it"
+                );
                 sender.send(Err(anyhow!("claude output stream closed"))).ok();
             }
             return;
@@ -694,7 +963,11 @@ async fn run_update_pump(
         shared.last_output.set(cx.background_executor().now());
 
         if let OutputMessage::Result(result) = &message {
-            let update = apply_usage(result, &shared.sticky_window);
+            // Pass the per-turn stream/message-derived `used` so
+            // `apply_usage` doesn't overwrite the meter with `result.usage`,
+            // which the SDK aggregates across all sub-calls in a multi-step
+            // turn (drives the meter past 100 % — observed 1.8M/1.0M).
+            let update = apply_usage(result, &shared.sticky_window, shared.stream_used_total.get());
             if let Some(update) = update {
                 thread
                     .update(cx, |thread, cx| {
@@ -702,6 +975,12 @@ async fn run_update_pump(
                     })
                     .ok();
             }
+            // End-of-turn — drop the per-turn cumulative snapshot built up
+            // from message_start/message_delta so the next turn starts
+            // fresh. The dedup cell is reset too (next turn may legitimately
+            // emit the same total as the prior one as its first sample).
+            shared.stream_usage.borrow_mut().take();
+            shared.stream_used_total.set(None);
 
             // If we asked claude to stop, treat whatever terminal `result` it
             // sends as a cancellation — claude reports an interrupted turn as an
@@ -726,19 +1005,90 @@ async fn run_update_pump(
                 .chars()
                 .take(120)
                 .collect();
+            let result_text_chars = result
+                .result
+                .as_deref()
+                .map(|s| s.chars().count())
+                .unwrap_or(0);
             log::info!(
                 target: "claude_native::turn_end",
-                "subtype={subtype:?} stop_reason={stop:?} is_error={is_err} text_chars={chars} cancel_requested={cancel} classified={classified:?} text_preview={preview:?}",
+                "subtype={subtype:?} stop_reason={stop:?} is_error={is_err} \
+                 result_text_chars={result_chars} cancel_requested={cancel} classified={classified:?} \
+                 streamed_text_chars={streamed_text} streamed_thinking_chars={streamed_thinking} \
+                 tool_calls={tool_calls} assistant_msgs={assistant_msgs} \
+                 dropped_assistant_text_blocks={dropped_text} text_preview={preview:?}",
                 subtype = result.subtype,
                 stop = result.stop_reason,
                 is_err = result.is_error,
-                chars = result.result.as_deref().map(|s| s.chars().count()).unwrap_or(0),
+                result_chars = result_text_chars,
                 cancel = matches!(turn_end, TurnEnd::Stop(acp::StopReason::Cancelled)),
                 classified = turn_end,
+                streamed_text = turn_stats.text_chars_streamed,
+                streamed_thinking = turn_stats.thinking_chars_streamed,
+                tool_calls = turn_stats.tool_calls_emitted,
+                assistant_msgs = turn_stats.assistant_messages_received,
+                dropped_text = turn_stats.assistant_text_blocks_dropped,
                 preview = result_preview,
             );
+            // Explicit silent-end warning so the smoking-gun case stands out
+            // from the normal turn_end info stream without having to grep
+            // for `text_chars=0`.
+            if !result.is_error
+                && result_text_chars == 0
+                && turn_stats.text_chars_streamed == 0
+                && turn_stats.tool_calls_emitted == 0
+                && !matches!(turn_end, TurnEnd::Stop(acp::StopReason::Cancelled))
+            {
+                log::warn!(
+                    target: "claude_native::turn_end",
+                    "SILENT END: agent produced no text, no tool calls, and the result text is empty \
+                     (stop_reason={stop:?}, thinking_chars={think}, dropped_text_blocks={dropped}). \
+                     If thinking > 0, the model only reasoned. If dropped > 0, our translate path \
+                     silenced something the SDK would have surfaced.",
+                    stop = result.stop_reason,
+                    think = turn_stats.thinking_chars_streamed,
+                    dropped = turn_stats.assistant_text_blocks_dropped,
+                );
+            }
+            turn_stats = TurnStats::default();
             if let Some(sender) = shared.prompt_tx.borrow_mut().take() {
+                log::debug!(
+                    target: "claude_native::prompt_tx",
+                    "Result handler took prompt_tx and resolved with {turn_end:?}"
+                );
                 sender.send(Ok(turn_end)).ok();
+            } else {
+                // Orphan result: claude emitted a terminating `result` with no
+                // matching `prompt()` in flight. Observed shape — the agent
+                // launched `Bash(run_in_background=true)`, finished the main
+                // turn cleanly (prompt_tx taken by the previous result), and
+                // minutes later when the background command completed claude
+                // resumed on its own, streamed `BashOutput` + a follow-up
+                // assistant message, and emitted a SECOND terminating result
+                // here. The intermediate assistant deltas already promoted
+                // session state Idle→Running via the store's NewEntry
+                // handler (store.rs:1951 — assumes a NewEntry implies a
+                // turn is in flight). Without a Stopped event the session
+                // sticks on Running forever, and a follow-up user message
+                // gets routed to hook injection (queue.rs Running branch)
+                // that never delivers because claude is actually idle.
+                // Synthesize Stopped on the AcpThread so the store flips
+                // back to Idle and the next user message starts a fresh
+                // prompt().
+                let stop_reason = match &turn_end {
+                    TurnEnd::Stop(reason) => *reason,
+                    TurnEnd::Error(_) => acp::StopReason::EndTurn,
+                };
+                log::warn!(
+                    target: "claude_native::prompt_tx",
+                    "Result handler found prompt_tx already None — synthesizing Stopped({stop_reason:?}) on the \
+                     AcpThread (orphan result, likely background-bash continuation; turn_end={turn_end:?})"
+                );
+                thread
+                    .update(cx, |_thread, cx| {
+                        cx.emit(AcpThreadEvent::Stopped(stop_reason));
+                    })
+                    .ok();
             }
             continue;
         }
@@ -774,6 +1124,308 @@ async fn run_update_pump(
                 }
             }
             continue;
+        }
+
+        // Diagnostic: count text/thinking chars per turn from stream
+        // deltas. This is what actually gets rendered to the user; the
+        // turn_end log line compares it against `result.result` so a
+        // mismatch flags translation drops.
+        if let OutputMessage::StreamEvent(ev) = &message
+            && ev.event.get("type").and_then(|t| t.as_str()) == Some("content_block_delta")
+            && let Some(delta) = ev.event.get("delta")
+        {
+            match delta.get("type").and_then(|t| t.as_str()) {
+                Some("text_delta") => {
+                    if let Some(t) = delta.get("text").and_then(|v| v.as_str()) {
+                        turn_stats.text_chars_streamed += t.chars().count();
+                        text_streamed_for_current_message = true;
+                    }
+                }
+                Some("thinking_delta") => {
+                    if let Some(t) = delta.get("thinking").and_then(|v| v.as_str()) {
+                        turn_stats.thinking_chars_streamed += t.chars().count();
+                        thinking_streamed_for_current_message = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        // `message_start` opens a fresh assistant message — reset the
+        // streamed-* flags so we can detect the next message's local-vs-
+        // streamed nature independently.
+        if let OutputMessage::StreamEvent(ev) = &message
+            && ev.event.get("type").and_then(|t| t.as_str()) == Some("message_start")
+        {
+            text_streamed_for_current_message = false;
+            thinking_streamed_for_current_message = false;
+        }
+
+        // Mid-turn usage: `message_start` snapshots `event.message.usage`
+        // and latches the active model; `message_delta` carries cumulative
+        // replacement updates. Emitting from each tick keeps the meter
+        // moving on long cache-warm turns instead of jumping only at the
+        // terminal `result`. See translate::apply_stream_usage.
+        if let OutputMessage::StreamEvent(ev) = &message {
+            let prev_usage = shared.stream_usage.borrow().clone();
+            let outcome = apply_stream_usage(
+                ev,
+                prev_usage.as_ref(),
+                shared.stream_used_total.get(),
+                shared.sticky_window.get(),
+            );
+            if let Some(model) = outcome.new_model {
+                let mut active = shared.active_model.borrow_mut();
+                let model_changed = active.as_deref() != Some(model.as_str());
+                *active = Some(model.clone());
+                drop(active);
+                // If we haven't seen a real `result.contextWindow` yet,
+                // upgrade the meter limit from the 200k default to the
+                // model-inferred window so the first delta doesn't render
+                // the meter against a wrong limit. Once a real result
+                // value arrives `apply_usage` overwrites sticky_window.
+                if model_changed
+                    && let Some(inferred) = infer_context_window_from_model(&model)
+                    && shared
+                        .sticky_window
+                        .get()
+                        .is_none_or(|w| w == 0 || w == DEFAULT_CONTEXT_WINDOW)
+                {
+                    shared.sticky_window.set(Some(inferred));
+                }
+            }
+            if let Some(usage) = outcome.new_usage {
+                *shared.stream_usage.borrow_mut() = Some(usage);
+            }
+            if let Some(update) = outcome.update {
+                if let acp::SessionUpdate::UsageUpdate(ref u) = update {
+                    shared.stream_used_total.set(Some(u.used));
+                }
+                thread
+                    .update(cx, |thread, cx| {
+                        thread.handle_session_update(update, cx).log_err();
+                    })
+                    .ok();
+            }
+        }
+
+        // Per-call usage from assistant messages drives the meter mid-turn.
+        // The terminal `result` event can drop to a tiny number once the
+        // cache is warm (the SDK only reports the last sub-call's usage),
+        // so depending solely on `apply_usage(result)` makes the meter
+        // collapse on cached turns. See translate::assistant_usage_update.
+        if let OutputMessage::Assistant(m) = &message
+            && m.parent_tool_use_id.is_none()
+            && let Some(update) = assistant_usage_update(m, shared.sticky_window.get())
+        {
+            thread
+                .update(cx, |thread, cx| {
+                    thread.handle_session_update(update, cx).log_err();
+                })
+                .ok();
+        }
+
+        // Diagnostic: dump every top-level assistant message's content
+        // block summary (types, text length per block, tool-use names),
+        // and count any TEXT blocks that translate.rs will silently drop
+        // because it assumes text always arrives via stream_event deltas.
+        // If `dropped_assistant_text_blocks > 0 && text_chars_streamed == 0`
+        // at turn-end, that's the smoking gun: the SDK's claude path
+        // surfaces those blocks; our native pump does not.
+        if let OutputMessage::Assistant(m) = &message {
+            // Subagent (`parent_tool_use_id.is_some()`) goes through the same
+            // diagnostic and fallback paths as a top-level assistant message —
+            // we now render subagent text / thinking / image / tool_use so
+            // the user sees what the Task subagent did. The only place that
+            // still gates on `parent_tool_use_id.is_none()` is the
+            // assistant-usage meter (above), which must NOT count subagent
+            // sub-calls in the parent's context window.
+            if m.parent_tool_use_id.is_none() {
+                turn_stats.assistant_messages_received += 1;
+            }
+            let blocks = m
+                .message
+                .get("content")
+                .and_then(|c| c.as_array())
+                .cloned()
+                .unwrap_or_default();
+            // Local-command path + extended-thinking + agent-emitted images +
+            // redacted reasoning: claude can ship these block types in an
+            // `Assistant` message WITHOUT corresponding stream-event deltas.
+            // Surface each as the right ACP update so nothing's invisible.
+            // Skipped when the corresponding stream-delta arrived for this
+            // message — would otherwise double-render. Tracks fallbacks per
+            // turn so the diagnostic stats reflect real drops.
+            let mut text_blocks_recovered: usize = 0;
+            let mut thinking_blocks_recovered: usize = 0;
+            let mut image_blocks_recovered: usize = 0;
+            let mut redacted_blocks_recovered: usize = 0;
+            for block in &blocks {
+                let kind = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                match kind {
+                    "text" if !text_streamed_for_current_message => {
+                        if let Some(text) = block.get("text").and_then(|v| v.as_str())
+                            && !text.is_empty()
+                        {
+                            let chunk = acp::ContentChunk::new(acp::ContentBlock::Text(
+                                acp::TextContent::new(text.to_string()),
+                            ));
+                            thread
+                                .update(cx, |thread, cx| {
+                                    thread
+                                        .handle_session_update(
+                                            acp::SessionUpdate::AgentMessageChunk(chunk),
+                                            cx,
+                                        )
+                                        .log_err();
+                                })
+                                .ok();
+                            text_blocks_recovered += 1;
+                        }
+                    }
+                    "thinking" if !thinking_streamed_for_current_message => {
+                        if let Some(text) = block.get("thinking").and_then(|v| v.as_str())
+                            && !text.is_empty()
+                        {
+                            let chunk = acp::ContentChunk::new(acp::ContentBlock::Text(
+                                acp::TextContent::new(text.to_string()),
+                            ));
+                            thread
+                                .update(cx, |thread, cx| {
+                                    thread
+                                        .handle_session_update(
+                                            acp::SessionUpdate::AgentThoughtChunk(chunk),
+                                            cx,
+                                        )
+                                        .log_err();
+                                })
+                                .ok();
+                            thinking_blocks_recovered += 1;
+                        }
+                    }
+                    "image" => {
+                        // Agent-emitted image: same wire shape Anthropic uses
+                        // for user-attached images
+                        // (`source.{type:"base64"|"url", media_type, data|url}`).
+                        // Reuse the existing `ContentBlock::Image` render path
+                        // the compose row already feeds for human-attached
+                        // images so the UI handles either side identically.
+                        if let Some(image) = image_block_from_anthropic(block) {
+                            let chunk = acp::ContentChunk::new(image);
+                            thread
+                                .update(cx, |thread, cx| {
+                                    thread
+                                        .handle_session_update(
+                                            acp::SessionUpdate::AgentMessageChunk(chunk),
+                                            cx,
+                                        )
+                                        .log_err();
+                                })
+                                .ok();
+                            image_blocks_recovered += 1;
+                        } else {
+                            log::debug!(
+                                target: "claude_native::dropped",
+                                "assistant image block had no base64/url source — skipped"
+                            );
+                        }
+                    }
+                    "redacted_thinking" => {
+                        // Anthropic returns reasoning whose content the
+                        // safety layer can't expose; just put a placeholder
+                        // in the thought stream so the user sees that
+                        // SOMETHING was reasoned about, instead of a
+                        // mysterious gap in the timeline.
+                        let chunk = acp::ContentChunk::new(acp::ContentBlock::Text(
+                            acp::TextContent::new(
+                                "[encrypted reasoning hidden by Anthropic safety layer]"
+                                    .to_string(),
+                            ),
+                        ));
+                        thread
+                            .update(cx, |thread, cx| {
+                                thread
+                                    .handle_session_update(
+                                        acp::SessionUpdate::AgentThoughtChunk(chunk),
+                                        cx,
+                                    )
+                                    .log_err();
+                            })
+                            .ok();
+                        redacted_blocks_recovered += 1;
+                    }
+                    "server_tool_use" | "web_search_tool_result" => log::debug!(
+                        target: "claude_native::dropped",
+                        "assistant block {kind} dropped (server-side tool, not surfaced as ACP tool call)"
+                    ),
+                    _ => {}
+                }
+            }
+            // Reset flags for next message (or sub-call).
+            text_streamed_for_current_message = false;
+            thinking_streamed_for_current_message = false;
+            // Per-message recovery counts feed the assistant_blocks debug
+            // line so a "smoking gun" report can tell apart a normal
+            // streaming turn from a local-command / image / redacted
+            // fallback. Subagent messages don't increment
+            // `assistant_messages_received`, so they show as #0 here —
+            // that's the on-purpose marker for "this is sub-output".
+            log::debug!(
+                target: "claude_native::dropped",
+                "assistant message #{} recovered: text={text_blocks_recovered} thinking={thinking_blocks_recovered} image={image_blocks_recovered} redacted={redacted_blocks_recovered}",
+                turn_stats.assistant_messages_received,
+            );
+            let summary: Vec<String> = blocks
+                .iter()
+                .map(|b| {
+                    let kind = b.get("type").and_then(|t| t.as_str()).unwrap_or("?");
+                    match kind {
+                        "text" => {
+                            let chars = b
+                                .get("text")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.chars().count())
+                                .unwrap_or(0);
+                            // Counter reflects REAL drops only — the fallback
+                            // above emits text blocks when no stream-text
+                            // arrived for this message. We increment only
+                            // when the stream-text path won (block was a
+                            // duplicate of already-streamed bytes) — that's
+                            // not a "drop" so log it under recovered=0.
+                            // When the recovery path emitted the block we
+                            // don't count it as dropped; the counter then
+                            // matches what the legacy `dropped_assistant_*`
+                            // diagnostic was actually trying to surface.
+                            if text_blocks_recovered == 0 {
+                                turn_stats.assistant_text_blocks_dropped += 1;
+                            }
+                            format!("text({chars}ch)")
+                        }
+                        "thinking" => {
+                            let chars = b
+                                .get("thinking")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.chars().count())
+                                .unwrap_or(0);
+                            format!("thinking({chars}ch)")
+                        }
+                        "tool_use" => {
+                            let name = b
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("?");
+                            turn_stats.tool_calls_emitted += 1;
+                            format!("tool_use({name})")
+                        }
+                        other => other.to_string(),
+                    }
+                })
+                .collect();
+            log::debug!(
+                target: "claude_native::assistant_blocks",
+                "assistant message #{count} blocks=[{summary}]",
+                count = turn_stats.assistant_messages_received,
+                summary = summary.join(", "),
+            );
         }
 
         for update in translate(&message) {
@@ -931,6 +1583,10 @@ impl AgentConnection for ClaudeNativeConnection {
 
             let (sender, prompt_receiver) = oneshot::channel();
             *session.shared.prompt_tx.borrow_mut() = Some(sender);
+            log::debug!(
+                target: "claude_native::prompt_tx",
+                "prompt() armed prompt_tx for session {}", params.session_id.0
+            );
 
             if let Err(error) = session
                 .process
@@ -1025,17 +1681,36 @@ impl AgentConnection for ClaudeNativeConnection {
             let Some(connection) = connection.upgrade() else {
                 return;
             };
-            // Re-check under the borrow: a clean `result(cancelled)` resolves
-            // (takes) the prompt oneshot via the pump, so a still-present sender
-            // is the signal that the interrupt was ignored and we must escalate.
-            let still_pending = connection
-                .sessions
-                .borrow()
-                .get(&session_id_for_task)
-                .map(|session| session.shared.prompt_tx.borrow().is_some())
-                .unwrap_or(false);
-            if still_pending {
+            // Two-signal check. A `prompt_tx` that's still `Some` is no
+            // longer enough on its own to mean "claude ignored the
+            // interrupt": when a well-behaved cancel resolves (pump's
+            // Result handler `take`s `prompt_tx` AND `take`s
+            // `cancel_requested` → false), the user can immediately
+            // arm a fresh `prompt_tx` by sending a new message before
+            // this 30s timer expires — that fresh sender belongs to a
+            // turn this escalation never targeted, and `recover_session`
+            // would force-Cancel a healthy in-flight turn the user just
+            // started ("опять в Done ушел втихую" bug). Only escalate
+            // when BOTH the prompt is still pending AND
+            // `cancel_requested` is still set — i.e. the same cancel
+            // we armed this task for is still un-acknowledged by claude.
+            let sessions = connection.sessions.borrow();
+            let Some(session) = sessions.get(&session_id_for_task) else {
+                return;
+            };
+            let prompt_pending = session.shared.prompt_tx.borrow().is_some();
+            let cancel_still_outstanding = session.shared.cancel_requested.get();
+            drop(sessions);
+            if prompt_pending && cancel_still_outstanding {
                 connection.recover_session(session_id_for_task, cx);
+            } else if let Some(session) = connection
+                .sessions
+                .borrow_mut()
+                .get_mut(&session_id_for_task)
+            {
+                // Cancel was acknowledged before our timer fired; clear the
+                // armed task slot so the next `cancel()` can re-arm cleanly.
+                session.escalation = None;
             }
         });
         if let Some(session) = self.sessions.borrow_mut().get_mut(session_id) {
@@ -1106,5 +1781,55 @@ mod tests {
         assert_eq!(inner["decision"], "block");
         let reason = inner["reason"].as_str().unwrap();
         assert!(reason.contains("FOLLOWUP"), "reason={reason}");
+    }
+
+    #[test]
+    fn parse_available_commands_extracts_name_description_and_filters_unsupported() {
+        let payload = serde_json::json!({
+            "commands": [
+                {"name": "context", "description": "Show context usage"},
+                {"name": "compact", "description": "Compact context"},
+                {"name": "login"},
+                {"name": "cost", "description": "Show cost"},
+                {"name": "agents", "description": "List agents", "argumentHint": "[name]"},
+                {"name": "skill", "argumentHint": ["one", "two"]},
+                {"description": "missing name — must drop"},
+                {"name": "todos", "description": "filtered"},
+            ],
+        });
+        let commands = parse_available_commands(&payload);
+        let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["context", "compact", "agents", "skill"]);
+        let agents = commands.iter().find(|c| c.name == "agents").unwrap();
+        match &agents.input {
+            Some(acp::AvailableCommandInput::Unstructured(input)) => {
+                assert_eq!(input.hint, "[name]");
+            }
+            other => panic!("expected unstructured input, got {other:?}"),
+        }
+        let skill = commands.iter().find(|c| c.name == "skill").unwrap();
+        match &skill.input {
+            Some(acp::AvailableCommandInput::Unstructured(input)) => {
+                assert_eq!(input.hint, "one two");
+            }
+            other => panic!("expected unstructured input for skill, got {other:?}"),
+        }
+        // Missing description on `skill` becomes empty — never None.
+        assert_eq!(skill.description, "");
+    }
+
+    #[test]
+    fn parse_available_commands_handles_missing_or_malformed_array() {
+        assert!(parse_available_commands(&serde_json::json!({})).is_empty());
+        assert!(
+            parse_available_commands(&serde_json::json!({ "commands": "not-an-array" })).is_empty()
+        );
+        // A single non-object entry must not blank out the rest.
+        let payload = serde_json::json!({
+            "commands": ["garbage", {"name": "context", "description": "ok"}],
+        });
+        let commands = parse_available_commands(&payload);
+        let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["context"]);
     }
 }
