@@ -62,8 +62,9 @@ pub fn stamp_subagent_meta(update: &mut acp::SessionUpdate, parent_tool_use_id: 
 
 /// Translate one output message into zero or more `SessionUpdate`s.
 ///
-/// Subagent output (`parent_tool_use_id.is_some()`) is collapsed in the
-/// Foundation — only `parent_tool_use_id == None` (top-level) is rendered.
+/// Subagent output (`parent_tool_use_id.is_some()`) is passed through: tool_use
+/// blocks surface as `ToolCall` entries so the user can see the subagent's work;
+/// usage gating still keeps subagent token counts out of the parent meter.
 pub fn translate(msg: &OutputMessage) -> Vec<acp::SessionUpdate> {
     match msg {
         OutputMessage::StreamEvent(ev) => translate_stream_event(ev),
