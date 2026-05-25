@@ -79,6 +79,9 @@ pub fn register(cx: &mut App) {
     editor_mcp::register_tool(cx, |server| {
         server.add_tool(UploadAbortTool);
     });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(ForceIdleTool);
+    });
 }
 
 // =====================================================================
@@ -139,19 +142,39 @@ impl<'de> Deserialize<'de> for ListSessionsParams {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionStateDto {
     Idle,
-    Running { started_at_ms: i64 },
-    Stopping,
+    Running {
+        started_at_ms: i64,
+    },
+    /// Carries the wall-clock instant the user-facing Stopping state
+    /// started so diagnostics tools (and a stuck-session triage script)
+    /// can see "Stopping since N seconds ago" without guessing.
+    /// `started_at_ms` is the same anchor scheme as `Running`: monotonic
+    /// `Instant` rebased onto unix-millis via the current wall clock at
+    /// serialization time.
+    Stopping {
+        started_at_ms: i64,
+    },
     AwaitingInput,
-    Errored { message: String },
+    Errored {
+        message: String,
+    },
 }
 
 impl SessionStateDto {
-    fn from_state(state: &crate::model::SessionState, started_at_ms: i64) -> Self {
+    fn from_state(
+        state: &crate::model::SessionState,
+        running_started_at_ms: i64,
+        stopping_started_at_ms: i64,
+    ) -> Self {
         use crate::model::SessionState;
         match state {
             SessionState::Idle => SessionStateDto::Idle,
-            SessionState::Running { .. } => SessionStateDto::Running { started_at_ms },
-            SessionState::Stopping => SessionStateDto::Stopping,
+            SessionState::Running { .. } => SessionStateDto::Running {
+                started_at_ms: running_started_at_ms,
+            },
+            SessionState::Stopping { .. } => SessionStateDto::Stopping {
+                started_at_ms: stopping_started_at_ms,
+            },
             SessionState::AwaitingInput => SessionStateDto::AwaitingInput,
             SessionState::Errored(msg) => SessionStateDto::Errored {
                 message: msg.to_string(),
@@ -193,6 +216,14 @@ pub struct SessionSummary {
     /// `solution_agent.create_session({parent_session_id})`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
+    /// Underlying ACP session id — for the `claude-acp` agent this is
+    /// the same UUID claude prints to `~/.claude/projects/<cwd>/<uuid>.jsonl`,
+    /// which is what `claude --resume <uuid>` takes. Exposed for
+    /// diagnostics: lets a triage script correlate a hung
+    /// `SolutionSession` with its concrete subprocess (`pgrep -af
+    /// 'claude .* --resume <uuid>'`) without having to guess from
+    /// process start times.
+    pub acp_session_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -311,14 +342,21 @@ fn session_summary(session: &SolutionSession, cx: &App) -> SessionSummary {
         .map(|usage| usage.max_tokens)
         .filter(|m| *m > 0)
         .or(session.cached_max_tokens);
-    // Wall-clock anchor for a Running turn's live counter (monotonic Instant →
-    // serialisable ms). Only meaningful for Running; folded into the DTO.
-    let started_at_ms = match &session.state {
-        crate::model::SessionState::Running { started_at, .. } => {
-            let wall = chrono::Utc::now()
-                - chrono::Duration::from_std(started_at.elapsed()).unwrap_or_default();
-            wall.timestamp_millis()
-        }
+    // Wall-clock anchors for Running / Stopping live counters (monotonic
+    // Instant → serialisable ms). Each rebases `Instant` onto unix-millis
+    // via the current wall clock at serialization time; only the variant
+    // matching the current state ends up in the DTO.
+    let instant_to_ms = |started_at: std::time::Instant| -> i64 {
+        let wall = chrono::Utc::now()
+            - chrono::Duration::from_std(started_at.elapsed()).unwrap_or_default();
+        wall.timestamp_millis()
+    };
+    let running_started_at_ms = match &session.state {
+        crate::model::SessionState::Running { started_at, .. } => instant_to_ms(*started_at),
+        _ => 0,
+    };
+    let stopping_started_at_ms = match &session.state {
+        crate::model::SessionState::Stopping { started_at } => instant_to_ms(*started_at),
         _ => 0,
     };
     SessionSummary {
@@ -326,12 +364,17 @@ fn session_summary(session: &SolutionSession, cx: &App) -> SessionSummary {
         solution_id: session.solution_id.0.clone(),
         agent_id: session.agent_id.to_string(),
         title: session.title.to_string(),
-        state: SessionStateDto::from_state(&session.state, started_at_ms),
+        state: SessionStateDto::from_state(
+            &session.state,
+            running_started_at_ms,
+            stopping_started_at_ms,
+        ),
         created_at: session.created_at.timestamp_millis(),
         last_activity_at: session.last_activity_at.timestamp_millis(),
         total_tokens,
         max_tokens,
         parent_session_id: session.parent_session_id.map(|id| id.to_string()),
+        acp_session_id: session.acp_session_id.0.to_string(),
     }
 }
 
@@ -1007,7 +1050,24 @@ fn summarize_entry(
     cx: &App,
 ) -> EntrySummary {
     let role = entry_role(entry);
-    let markdown_source = entry.to_markdown(cx);
+    let raw_markdown = entry.to_markdown(cx);
+    // Snapshot the image cursor BEFORE the entry's images are extracted /
+    // counted so we have a stable base for rewriting `` `Image` ``
+    // placeholders in assistant markdown into `spk-image://N` links. The
+    // global cursor advances by `count_images_in_entry` after this call
+    // (either via `extract_images_for_entry` or the count_only branch
+    // below) so the next entry's base lines up correctly.
+    let image_index_base = *image_cursor;
+    let markdown_source = if matches!(role, EntryRoleDto::Assistant) {
+        // Rewrite agent-emitted image chunks into clickable `spk-image://N`
+        // links so mobile (and any other ACP client) renders them through
+        // the same path it already uses for user-attached images. The
+        // base index is the cursor at this entry's start — see
+        // `clean_assistant_message_text` in conversation_render.
+        crate::conversation_render::clean_assistant_message_text(&raw_markdown, image_index_base)
+    } else {
+        raw_markdown
+    };
     let preview = truncate_preview(&markdown_source, 200);
     let markdown = if include_full_content {
         Some(markdown_source)
@@ -3092,6 +3152,108 @@ impl McpServerTool for UploadAbortTool {
     }
 }
 
+// =====================================================================
+// solution_agent.force_idle
+// =====================================================================
+
+/// Diagnostics-only escape hatch: forcibly transition `session_id`'s
+/// state to `Idle` regardless of what it currently is. Intended for
+/// triaging stuck sessions (e.g. an `claude_native::connection::cancel`
+/// race that leaves the queue in `Stopping` forever — see
+/// `queue::STOPPING_SAFETY_NET` for the automatic recovery path; this
+/// is the manual lever for the same situation, plus arbitrary
+/// `Errored`/`AwaitingInput` stuckness).
+///
+/// Does NOT touch the underlying subprocess, the `AcpThread`, or
+/// pending messages — only the in-memory session state. If the agent
+/// is genuinely mid-turn, the next `Stopped`/`Error` event will simply
+/// re-overwrite the state, so a misclick is recoverable. Returns the
+/// previous state's `kind` discriminant so a triage script can log
+/// the transition.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct ForceIdleParams {
+    pub session_id: String,
+}
+
+impl<'de> Deserialize<'de> for ForceIdleParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            session_id: String,
+        }
+        Ok(Self {
+            session_id: Option::<Inner>::deserialize(de)?
+                .unwrap_or_default()
+                .session_id,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct ForceIdleResult {
+    /// Snake-case discriminant of the state we replaced (e.g. `stopping`,
+    /// `errored`). Lets the caller log "was Stopping, now Idle".
+    pub previous_kind: String,
+}
+
+#[derive(Clone)]
+pub struct ForceIdleTool;
+
+impl McpServerTool for ForceIdleTool {
+    type Input = ForceIdleParams;
+    type Output = ForceIdleResult;
+    const NAME: &'static str = "solution_agent.force_idle";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.session_id.is_empty(),
+            "invalid_params: session_id is required"
+        );
+        let session_id = SolutionSessionId::parse(&input.session_id)
+            .map_err(|e| anyhow!("bad session id: {e}"))?;
+
+        let previous_kind = cx.update(|cx| -> Result<String> {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| -> Result<String> {
+                let session = store
+                    .session(session_id)
+                    .ok_or_else(|| anyhow!("unknown session {session_id}"))?;
+                let previous = session.read(cx).state.clone();
+                let kind = match &previous {
+                    crate::model::SessionState::Idle => "idle",
+                    crate::model::SessionState::Running { .. } => "running",
+                    crate::model::SessionState::Stopping { .. } => "stopping",
+                    crate::model::SessionState::AwaitingInput => "awaiting_input",
+                    crate::model::SessionState::Errored(_) => "errored",
+                };
+                log::warn!(
+                    target: "solution_agent",
+                    "session={session_id} force_idle: replacing state={previous:?} with Idle \
+                     (MCP-driven diagnostic recovery)"
+                );
+                store.mutate_state(
+                    session_id,
+                    |state| *state = crate::model::SessionState::Idle,
+                    cx,
+                );
+                Ok(kind.to_string())
+            })
+        })?;
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("forced Idle (was {previous_kind})"),
+            }],
+            structured_content: ForceIdleResult { previous_kind },
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! R-5e enrichment coverage. These tests build a real `AcpThread`
@@ -3116,17 +3278,29 @@ mod tests {
     #[test]
     fn session_state_dto_serializes_structured() {
         use crate::model::SessionState;
-        let json = |s: &SessionState, ms: i64| {
-            serde_json::to_value(SessionStateDto::from_state(s, ms)).unwrap()
+        let json = |s: &SessionState, running_ms: i64, stopping_ms: i64| {
+            serde_json::to_value(SessionStateDto::from_state(s, running_ms, stopping_ms)).unwrap()
         };
-        assert_eq!(json(&SessionState::Idle, 0), serde_json::json!({"kind":"idle"}));
-        assert_eq!(json(&SessionState::Stopping, 0), serde_json::json!({"kind":"stopping"}));
         assert_eq!(
-            json(&SessionState::AwaitingInput, 0),
+            json(&SessionState::Idle, 0, 0),
+            serde_json::json!({"kind":"idle"})
+        );
+        assert_eq!(
+            json(
+                &SessionState::Stopping {
+                    started_at: std::time::Instant::now()
+                },
+                0,
+                1779000
+            ),
+            serde_json::json!({"kind":"stopping","started_at_ms":1779000})
+        );
+        assert_eq!(
+            json(&SessionState::AwaitingInput, 0, 0),
             serde_json::json!({"kind":"awaiting_input"})
         );
         assert_eq!(
-            json(&SessionState::Errored("boom".into()), 0),
+            json(&SessionState::Errored("boom".into()), 0, 0),
             serde_json::json!({"kind":"errored","message":"boom"})
         );
         let running = SessionState::Running {
@@ -3134,7 +3308,7 @@ mod tests {
             notified: false,
         };
         assert_eq!(
-            json(&running, 1779),
+            json(&running, 1779, 0),
             serde_json::json!({"kind":"running","started_at_ms":1779})
         );
     }

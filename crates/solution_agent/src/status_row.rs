@@ -462,7 +462,12 @@ impl SolutionSessionsNavigator {
         self.ensure_model_loaded(session_id, cx);
         let model_text = self.cached_models.get(&session_id).cloned();
 
-        let used = usage.as_ref().map(|u| u.used_tokens).unwrap_or(0);
+        let raw_used = usage.as_ref().map(|u| u.used_tokens).unwrap_or(0);
+        let peak = self.peak_used_tokens.get(&session_id).copied().unwrap_or(0);
+        let used = smooth_used_tokens(raw_used, peak);
+        if used != peak {
+            self.peak_used_tokens.insert(session_id, used);
+        }
         // claude-acp doesn't always populate `max_tokens` (it's gated by an
         // upstream beta flag). Once a real limit has been seen for this session
         // we keep it (cached below) so a later 0/missing update never downgrades
@@ -474,6 +479,15 @@ impl SolutionSessionsNavigator {
         if let Some(cached) = new_cached_max {
             self.cached_max_tokens.insert(session_id, cached);
         }
+        // Display clamp: tokens-in-context can never legitimately exceed the
+        // window. A previously-poisoned reading (the pre-fix
+        // `claude_native::apply_usage` ratcheted peak to the SDK's
+        // sub-call-aggregated `result.usage`, which for a multi-step turn
+        // can be 2-3× the window — observed "1.8M / 1.0M · 100.0%") would
+        // otherwise stay visible across restarts because `cached_total_tokens`
+        // and `peak_used_tokens` carry over. The source fix prevents NEW
+        // overflows; this clamp neutralises the old ones in the UI.
+        let used = used.min(max);
         let pct = if max == 0 {
             0.0
         } else {
@@ -848,6 +862,27 @@ pub(crate) fn resolve_max_tokens(advertised: Option<u64>, cached: Option<u64>) -
     }
 }
 
+/// Smooth the per-session `used_tokens` against per-API-call flicker. The
+/// real source fix lives in `claude_native::translate::assistant_usage_update`
+/// (drive the meter off per-assistant-message usage, not the terminal
+/// `result` event whose SDK-side aggregation can collapse to the last
+/// sub-call's tiny numbers on cache-warm follow-up turns). This helper is
+/// the second line of defence: ratchet `peak` UP freely (real context never
+/// shrinks on its own), and only ratchet DOWN when `raw_used` collapses
+/// to ≤ 10 % of the peak — the signature of an explicit context reset
+/// (`/clear`, or a `/compact` that summarised the prior context down to a
+/// fraction). Anything between 10 % and 100 % of peak is treated as
+/// per-call wobble and the peak is held. Returns the value to display.
+pub(crate) fn smooth_used_tokens(raw_used: u64, peak: u64) -> u64 {
+    if raw_used >= peak {
+        raw_used
+    } else if raw_used.saturating_mul(10) <= peak {
+        raw_used
+    } else {
+        peak
+    }
+}
+
 /// Char-count truncation with ellipsis for History-popover entry labels.
 /// Operates on `chars()` (not bytes) so it never splits a multibyte
 /// codepoint. Returns the input unchanged when shorter than `max_chars`.
@@ -1007,6 +1042,31 @@ mod tests {
             resolve_max_tokens(Some(1_000_000), Some(200_000)),
             (1_000_000, Some(1_000_000))
         );
+    }
+
+    #[test]
+    fn smooth_used_tokens_ratchets_up_holds_through_flicker_resets_on_compact() {
+        // First observation — no prior peak, displayed value = raw.
+        assert_eq!(smooth_used_tokens(50_000, 0), 50_000);
+
+        // Ratchets up freely as the conversation grows.
+        assert_eq!(smooth_used_tokens(200_000, 50_000), 200_000);
+
+        // Per-API-call flicker (the 212k → 37k bug): SDK reports the last
+        // sub-call's usage on a cache-warm follow-up turn, dropping raw to
+        // ~18 % of peak. Above the 10 % floor, so display HOLDS the peak.
+        assert_eq!(smooth_used_tokens(37_000, 200_000), 200_000);
+
+        // An even nastier flicker case — 25 k out of 200 k peak (12.5 %)
+        // is still above the floor and held.
+        assert_eq!(smooth_used_tokens(25_000, 200_000), 200_000);
+
+        // A real context reset shows up as a near-total collapse:
+        //   /clear → raw ~= 0 (only the system prompt is left)
+        //   /compact → summary + system prompt, often << 10 % of peak
+        // Both signatures cross the floor and the display follows down.
+        assert_eq!(smooth_used_tokens(20_000, 200_000), 20_000);
+        assert_eq!(smooth_used_tokens(0, 200_000), 0);
     }
 
     #[test]
