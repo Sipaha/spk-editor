@@ -4297,22 +4297,9 @@ fn window_and_layout_page() -> SettingsPage {
         ]
     }
 
-    fn layout_section() -> [SettingsPageItem; 6] {
+    fn layout_section() -> [SettingsPageItem; 5] {
         [
             SettingsPageItem::SectionHeader("Layout"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Bottom Dock Layout",
-                description: "Layout mode for the bottom dock.",
-                field: Box::new(SettingField {
-                    json_path: Some("bottom_dock_layout"),
-                    pick: |settings_content| settings_content.workspace.bottom_dock_layout.as_ref(),
-                    write: |settings_content, value, _| {
-                        settings_content.workspace.bottom_dock_layout = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
             SettingsPageItem::SettingItem(SettingItem {
                 files: USER,
                 title: "Centered Layout Left Padding",

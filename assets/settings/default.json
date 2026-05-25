@@ -85,10 +85,6 @@
     // Values are clamped to the [0.0, 1.0] range.
     "inactive_opacity": 1.0,
   },
-  // Layout mode of the bottom dock. Fork default is "full" (IDEA-style: the
-  // bottom dock spans the full window width, with the left/right docks above it).
-  //   choices: contained, full, left_aligned, right_aligned
-  "bottom_dock_layout": "full",
   // The direction that you want to split panes horizontally. Defaults to "down"
   "pane_split_direction_horizontal": "down",
   // The direction that you want to split panes vertically. Defaults to "right"
