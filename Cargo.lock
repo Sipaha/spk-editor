@@ -3523,6 +3523,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "console_panel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "db",
+ "gpui",
+ "icons",
+ "language",
+ "project",
+ "schemars 1.0.4",
+ "serde",
+ "serde_json",
+ "settings",
+ "settings_content",
+ "solution_agent",
+ "solutions",
+ "terminal",
+ "terminal_view",
+ "theme",
+ "ui",
+ "util",
+ "workspace",
+ "zed_actions",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
