@@ -1073,6 +1073,7 @@ async fn reset_context_clears_cold_entries(cx: &mut TestAppContext) {
                             chunks: Vec::new(),
                             indented: false,
                             is_subagent_output: false,
+                            subagent_id: None,
                         },
                     ));
             });

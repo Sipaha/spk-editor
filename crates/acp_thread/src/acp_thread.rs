@@ -88,6 +88,29 @@ pub fn subagent_session_info_from_meta(meta: &Option<acp::Meta>) -> Option<Subag
         .and_then(|v| serde_json::from_value(v.clone()).ok())
 }
 
+/// Outer `_meta` key carrying claude-code-specific passthrough fields.
+///
+/// The wire shape is `{"claudeCode": {"parentToolUseId": "<toolu_xxx>"}}`,
+/// stamped on subagent-originated SessionUpdates by `claude_native::translate`
+/// (see `stamp_subagent_meta`). We duplicate the key strings here rather than
+/// depending on `claude_native` so the `acp_thread` crate stays standalone —
+/// the wire shape IS the contract.
+pub const CLAUDE_CODE_META_KEY: &str = "claudeCode";
+/// Nested key under [`CLAUDE_CODE_META_KEY`] carrying the parent tool_use id
+/// (`toolu_xxx`) of a subagent emission. `None` for top-level (parent) output.
+pub const PARENT_TOOL_USE_ID_META_KEY: &str = "parentToolUseId";
+
+/// Extract `_meta.claudeCode.parentToolUseId` from an ACP meta object.
+/// Returns `None` for any malformed shape (missing key, non-object nesting,
+/// non-string id) — callers treat absence as "parent-level emission".
+pub fn subagent_id_from_meta(meta: &Option<acp::Meta>) -> Option<SharedString> {
+    meta.as_ref()
+        .and_then(|m| m.get(CLAUDE_CODE_META_KEY))
+        .and_then(|cc| cc.get(PARENT_TOOL_USE_ID_META_KEY))
+        .and_then(|v| v.as_str())
+        .map(|s| SharedString::from(s.to_owned()))
+}
+
 /// Key under which a client (the phone today, possibly other UIs later)
 /// can stamp a locally-generated send id onto a user message's content
 /// blocks via the ACP `_meta` mechanism. The server treats the value
@@ -196,6 +219,18 @@ pub struct AssistantMessage {
     pub chunks: Vec<AssistantMessageChunk>,
     pub indented: bool,
     pub is_subagent_output: bool,
+    /// Parent tool_use id (`toolu_xxx`) when this message was emitted by a
+    /// claude_native subagent (Task tool spawn); `None` for parent-level
+    /// output. Populated from `_meta.claudeCode.parentToolUseId` on the
+    /// originating chunk. Two consecutive chunks with DIFFERENT
+    /// `subagent_id`s do NOT coalesce — they start separate entries so the
+    /// per-subagent grouping logic in higher layers can split them.
+    ///
+    /// Coexists with the older `is_subagent_output` boolean: that one is set
+    /// after-the-fact by the legacy upstream `agent` crate; this one is set
+    /// up-front from the wire by the claude_native path. No auto-derive
+    /// between them — both flags live independently for now.
+    pub subagent_id: Option<SharedString>,
 }
 
 impl AssistantMessage {
@@ -327,6 +362,10 @@ pub struct ToolCall {
     pub raw_output: Option<serde_json::Value>,
     pub tool_name: Option<SharedString>,
     pub subagent_session_info: Option<SubagentSessionInfo>,
+    /// Parent tool_use id (`toolu_xxx`) when this tool call was emitted from
+    /// inside a claude_native subagent; `None` for parent-level tool calls.
+    /// See `AssistantMessage::subagent_id` for the wire-shape contract.
+    pub subagent_id: Option<SharedString>,
     /// Wall-clock timestamp captured the first time `status` becomes
     /// `InProgress`. Kept across the transition to terminal statuses so
     /// renderers can show "ran for Xs" without a second source of
@@ -376,6 +415,8 @@ impl ToolCall {
 
         let subagent_session_info = subagent_session_info_from_meta(&tool_call.meta);
 
+        let subagent_id = subagent_id_from_meta(&tool_call.meta);
+
         let status_started_at = matches!(status, ToolCallStatus::InProgress).then(Utc::now);
 
         let result = Self {
@@ -392,6 +433,7 @@ impl ToolCall {
             raw_output: tool_call.raw_output,
             tool_name,
             subagent_session_info,
+            subagent_id,
             status_started_at,
         };
         Ok(result)
@@ -1538,11 +1580,25 @@ impl AcpThread {
                     self.push_user_content_block(None, content, cx);
                 }
             }
-            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk { content, .. }) => {
-                self.push_assistant_content_block(content, false, cx);
+            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk { content, meta, .. }) => {
+                let subagent_id = subagent_id_from_meta(&meta);
+                self.push_assistant_content_block_with_subagent_id(
+                    content,
+                    false,
+                    false,
+                    subagent_id,
+                    cx,
+                );
             }
-            acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk { content, .. }) => {
-                self.push_assistant_content_block(content, true, cx);
+            acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk { content, meta, .. }) => {
+                let subagent_id = subagent_id_from_meta(&meta);
+                self.push_assistant_content_block_with_subagent_id(
+                    content,
+                    true,
+                    false,
+                    subagent_id,
+                    cx,
+                );
             }
             acp::SessionUpdate::ToolCall(tool_call) => {
                 self.upsert_tool_call(tool_call, cx)?;
@@ -1701,12 +1757,31 @@ impl AcpThread {
         indented: bool,
         cx: &mut Context<Self>,
     ) {
+        self.push_assistant_content_block_with_subagent_id(chunk, is_thought, indented, None, cx)
+    }
+
+    /// Internal core that all `push_assistant_content_block*` variants funnel
+    /// through. `subagent_id` is the parent tool_use id when this chunk was
+    /// produced by a claude_native subagent; coalescing onto an existing
+    /// `AssistantMessage` requires that the existing message's `subagent_id`
+    /// match — a mismatch (boundary between two subagents in the same turn,
+    /// or parent→subagent transition) starts a fresh entry.
+    pub(crate) fn push_assistant_content_block_with_subagent_id(
+        &mut self,
+        chunk: acp::ContentBlock,
+        is_thought: bool,
+        indented: bool,
+        subagent_id: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
         let path_style = self.project.read(cx).path_style(cx);
 
         // For text chunks going to an existing Markdown block, buffer for smooth
         // streaming instead of appending all at once which may feel more choppy.
         if let acp::ContentBlock::Text(text_content) = &chunk {
-            if let Some(markdown) = self.streaming_markdown_target(is_thought, indented) {
+            if let Some(markdown) =
+                self.streaming_markdown_target(is_thought, indented, &subagent_id)
+            {
                 let entries_len = self.entries.len();
                 cx.emit(AcpThreadEvent::EntryUpdated(entries_len - 1));
                 self.buffer_streaming_text(&markdown, text_content.text.clone(), cx);
@@ -1721,8 +1796,10 @@ impl AcpThread {
                 chunks,
                 indented: existing_indented,
                 is_subagent_output: _,
+                subagent_id: existing_subagent_id,
             }) = last_entry
             && *existing_indented == indented
+            && *existing_subagent_id == subagent_id
         {
             let idx = entries_len - 1;
             Self::flush_streaming_text(&mut self.streaming_text_buffer, cx);
@@ -1754,6 +1831,7 @@ impl AcpThread {
                     chunks: vec![chunk],
                     indented,
                     is_subagent_output: false,
+                    subagent_id,
                 }),
                 cx,
             );
@@ -1764,14 +1842,17 @@ impl AcpThread {
         &self,
         is_thought: bool,
         indented: bool,
+        subagent_id: &Option<SharedString>,
     ) -> Option<Entity<Markdown>> {
         let last_entry = self.entries.last()?;
         if let AgentThreadEntry::AssistantMessage(AssistantMessage {
             chunks,
             indented: existing_indented,
+            subagent_id: existing_subagent_id,
             ..
         }) = last_entry
             && *existing_indented == indented
+            && existing_subagent_id == subagent_id
             && let [.., chunk] = chunks.as_slice()
         {
             match (chunk, is_thought) {
@@ -1967,6 +2048,7 @@ impl AcpThread {
                     raw_output: None,
                     tool_name: None,
                     subagent_session_info: None,
+                    subagent_id: None,
                     // Synthetic Failed call — never observed an
                     // InProgress transition, so no timestamp.
                     status_started_at: None,
@@ -5737,6 +5819,248 @@ mod tests {
                 thread.cost().is_none(),
                 "cost should be cleared when token usage is cleared"
             );
+        });
+    }
+
+    fn meta_with_subagent(parent_tool_use_id: &str) -> acp::Meta {
+        let mut nested = serde_json::Map::new();
+        nested.insert(
+            PARENT_TOOL_USE_ID_META_KEY.to_string(),
+            serde_json::Value::String(parent_tool_use_id.to_string()),
+        );
+        let mut outer = serde_json::Map::new();
+        outer.insert(
+            CLAUDE_CODE_META_KEY.to_string(),
+            serde_json::Value::Object(nested),
+        );
+        outer
+    }
+
+    fn chunk_with_subagent(text: &str, parent_tool_use_id: &str) -> acp::ContentChunk {
+        let mut chunk = acp::ContentChunk::new(text.into());
+        chunk.meta = Some(meta_with_subagent(parent_tool_use_id));
+        chunk
+    }
+
+    #[test]
+    fn subagent_id_from_meta_parses_expected_shapes() {
+        assert_eq!(subagent_id_from_meta(&None), None);
+
+        let empty: acp::Meta = serde_json::Map::new();
+        assert_eq!(subagent_id_from_meta(&Some(empty)), None);
+
+        let mut wrong_outer: acp::Meta = serde_json::Map::new();
+        wrong_outer.insert("otherKey".into(), serde_json::Value::String("x".into()));
+        assert_eq!(subagent_id_from_meta(&Some(wrong_outer)), None);
+
+        let mut not_object: acp::Meta = serde_json::Map::new();
+        not_object.insert(
+            CLAUDE_CODE_META_KEY.into(),
+            serde_json::Value::String("flat".into()),
+        );
+        assert_eq!(subagent_id_from_meta(&Some(not_object)), None);
+
+        let mut wrong_inner_type: acp::Meta = serde_json::Map::new();
+        let mut nested = serde_json::Map::new();
+        nested.insert(
+            PARENT_TOOL_USE_ID_META_KEY.into(),
+            serde_json::Value::Number(42.into()),
+        );
+        wrong_inner_type.insert(
+            CLAUDE_CODE_META_KEY.into(),
+            serde_json::Value::Object(nested),
+        );
+        assert_eq!(subagent_id_from_meta(&Some(wrong_inner_type)), None);
+
+        let valid = meta_with_subagent("toolu_abc");
+        assert_eq!(
+            subagent_id_from_meta(&Some(valid)),
+            Some(SharedString::from("toolu_abc"))
+        );
+    }
+
+    #[gpui::test]
+    async fn test_assistant_chunk_with_subagent_meta_sets_subagent_id(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let connection = Rc::new(FakeAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
+            .await
+            .unwrap();
+
+        thread.update(cx, |thread, cx| {
+            thread
+                .handle_session_update(
+                    acp::SessionUpdate::AgentMessageChunk(chunk_with_subagent("hi", "T1")),
+                    cx,
+                )
+                .unwrap();
+        });
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.entries().len(), 1);
+            let AgentThreadEntry::AssistantMessage(msg) = &thread.entries()[0] else {
+                panic!("expected AssistantMessage");
+            };
+            assert_eq!(msg.subagent_id, Some(SharedString::from("T1")));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_assistant_chunk_without_meta_leaves_subagent_id_none(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let connection = Rc::new(FakeAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
+            .await
+            .unwrap();
+
+        thread.update(cx, |thread, cx| {
+            thread
+                .handle_session_update(
+                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new("plain".into())),
+                    cx,
+                )
+                .unwrap();
+        });
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.entries().len(), 1);
+            let AgentThreadEntry::AssistantMessage(msg) = &thread.entries()[0] else {
+                panic!("expected AssistantMessage");
+            };
+            assert_eq!(msg.subagent_id, None);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_assistant_chunks_with_same_subagent_id_coalesce(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let connection = Rc::new(FakeAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
+            .await
+            .unwrap();
+
+        thread.update(cx, |thread, cx| {
+            thread
+                .handle_session_update(
+                    acp::SessionUpdate::AgentMessageChunk(chunk_with_subagent("hello ", "T1")),
+                    cx,
+                )
+                .unwrap();
+            thread
+                .handle_session_update(
+                    acp::SessionUpdate::AgentMessageChunk(chunk_with_subagent("world", "T1")),
+                    cx,
+                )
+                .unwrap();
+        });
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(
+                thread.entries().len(),
+                1,
+                "same-subagent chunks must coalesce into one entry"
+            );
+            let AgentThreadEntry::AssistantMessage(msg) = &thread.entries()[0] else {
+                panic!("expected AssistantMessage");
+            };
+            assert_eq!(msg.subagent_id, Some(SharedString::from("T1")));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_assistant_chunks_with_different_subagent_ids_split(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let connection = Rc::new(FakeAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
+            .await
+            .unwrap();
+
+        thread.update(cx, |thread, cx| {
+            thread
+                .handle_session_update(
+                    acp::SessionUpdate::AgentMessageChunk(chunk_with_subagent("from A", "T1")),
+                    cx,
+                )
+                .unwrap();
+            thread
+                .handle_session_update(
+                    acp::SessionUpdate::AgentMessageChunk(chunk_with_subagent("from B", "T2")),
+                    cx,
+                )
+                .unwrap();
+        });
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(
+                thread.entries().len(),
+                2,
+                "subagent boundary must start a fresh AssistantMessage entry"
+            );
+            let AgentThreadEntry::AssistantMessage(a) = &thread.entries()[0] else {
+                panic!("expected AssistantMessage at index 0");
+            };
+            let AgentThreadEntry::AssistantMessage(b) = &thread.entries()[1] else {
+                panic!("expected AssistantMessage at index 1");
+            };
+            assert_eq!(a.subagent_id, Some(SharedString::from("T1")));
+            assert_eq!(b.subagent_id, Some(SharedString::from("T2")));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_tool_call_with_subagent_meta_sets_subagent_id(cx: &mut gpui::TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let connection = Rc::new(FakeAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
+            .await
+            .unwrap();
+
+        thread.update(cx, |thread, cx| {
+            let mut tool_call = acp::ToolCall::new(
+                acp::ToolCallId::new("call-sub-1".to_string()),
+                "Bash".to_string(),
+            )
+            .status(acp::ToolCallStatus::Pending);
+            tool_call.meta = Some(meta_with_subagent("T3"));
+            thread
+                .handle_session_update(acp::SessionUpdate::ToolCall(tool_call), cx)
+                .unwrap();
+        });
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.entries().len(), 1);
+            let AgentThreadEntry::ToolCall(call) = &thread.entries()[0] else {
+                panic!("expected ToolCall entry");
+            };
+            assert_eq!(call.subagent_id, Some(SharedString::from("T3")));
         });
     }
 }

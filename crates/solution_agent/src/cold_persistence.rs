@@ -216,6 +216,7 @@ pub fn from_persisted(persisted: PersistedEntryV2, cx: &mut App) -> AgentThreadE
                 chunks,
                 indented: false,
                 is_subagent_output: false,
+                subagent_id: None,
             })
         }
         PersistedEntryV2::Tool(p) => {
@@ -256,6 +257,7 @@ pub fn from_persisted(persisted: PersistedEntryV2, cx: &mut App) -> AgentThreadE
                 raw_output: p.raw_output,
                 tool_name: p.tool_name.map(SharedString::from),
                 subagent_session_info: None,
+                subagent_id: None,
                 // Cold blobs only persist terminal statuses (see
                 // `TerminalToolCallStatus`), so the rehydrated call is
                 // never InProgress and therefore never needs a
