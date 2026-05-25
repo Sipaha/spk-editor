@@ -759,11 +759,6 @@ impl SolutionSessionView {
         cx.notify();
     }
 
-    /// Recompute the cached "rewind target user message" for every
-    /// entry in a single backwards pass. Cheaper than the in-render
-    /// per-entry forward scan that previously made conversation render
-    /// O(N²): on a 500-entry session that was ~125k iterations per
-    /// frame; this version is O(N) once per thread mutation.
     /// Returns `true` when `entry` should be visible under the current
     /// `selected_subagent` tab. `None` selection ("Main") shows entries
     /// whose `subagent_id` is also `None`; `Some(id)` shows only entries
@@ -815,6 +810,11 @@ impl SolutionSessionView {
         cx.notify();
     }
 
+    /// Recompute the cached "rewind target user message" for every
+    /// entry in a single backwards pass. Cheaper than the in-render
+    /// per-entry forward scan that previously made conversation render
+    /// O(N²): on a 500-entry session that was ~125k iterations per
+    /// frame; this version is O(N) once per thread mutation.
     fn recompute_rewind_table(&mut self, cx: &App) {
         let session = self.session.read(cx);
         let Some(thread) = session.acp_thread() else {

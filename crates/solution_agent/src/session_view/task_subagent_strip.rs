@@ -1,4 +1,4 @@
-//! Subagent tabs strip — the horizontal pill row painted right above
+//! Subagent tabs strip — the horizontal pill row painted just below
 //! the status row when the current session has one or more claude
 //! `Task` / `Agent` subagents in flight. The strip lets the user
 //! switch the visible conversation between "Main" (parent-only
