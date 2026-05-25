@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -200,6 +200,30 @@ pub enum PersistedRole {
     Archived,
 }
 
+/// One in-flight subagent (`Task` / `Agent` claude tool call) tracked on a
+/// `SolutionSession`. Populated by the store's `handle_acp_event` lifecycle
+/// the moment the parent thread surfaces an `InProgress` Task/Agent ToolCall,
+/// and removed when that same call transitions to a terminal status. Lives
+/// only in memory — by design these are turn-scoped, so persisting them
+/// across editor restarts would risk rendering ghosts of subagents that
+/// already finished (and any restored session replays its parent turn's
+/// tool calls anyway, so a fresh tab can re-materialise from the replay).
+///
+/// Insertion order is preserved by a parallel `Vec<SharedString>` on
+/// `SolutionSession` (the map alone can't — `SharedString` hashes are
+/// random, so iteration order would be meaningless tab order in the UI).
+#[derive(Debug, Clone)]
+pub struct SubagentTab {
+    /// Human-readable label shown on the tab pill. Picked from the parent
+    /// tool call's `raw_input["description"]` when present (the agent author
+    /// wrote it), else `subagent_type#<short-id>`, else `Agent <short-id>`.
+    pub label: SharedString,
+    /// Wall-clock instant the subagent was first observed in-flight. Useful
+    /// for "running for Xs" decorations in the tab pill; not load-bearing
+    /// for tab lifecycle (which keys off ToolCall status transitions).
+    pub started_at: Instant,
+}
+
 /// Sentinel stored in `SolutionSession::entry_created_ms` (and the persisted
 /// mirror) for an entry whose creation time was never captured — e.g. a
 /// message that predates the timestamp feature, surfaced through a resumed
@@ -340,6 +364,24 @@ pub struct SolutionSession {
     /// safety-net fire onto a now-Idle session and trigger a
     /// no-op (harmless) but spammy warn-log.
     pub stopping_safety_net: Option<Task<()>>,
+    /// In-flight `Task` / `Agent` subagents the parent thread has spawned.
+    /// Keyed by the parent tool call's `acp::ToolCallId` (cast to
+    /// `SharedString` for cheap clone-as-key use across the store + view).
+    /// See [`SubagentTab`] for the value docs. Updated by
+    /// `SolutionAgentStore::handle_acp_event` on `NewEntry` (add) and
+    /// `EntryUpdated` (remove on terminal status). Ephemeral — not
+    /// persisted across editor restarts; a resumed session re-materialises
+    /// its in-flight subagents from the replayed tool-call stream.
+    pub active_subagents: HashMap<SharedString, SubagentTab>,
+    /// Insertion order of `active_subagents` keys. The map's own iteration
+    /// order is `SharedString`-hash-dependent and therefore meaningless as
+    /// UI tab order; this vector preserves spawn order so "(Sub 1)
+    /// (Sub 2)" pills render the way the user expects (oldest first).
+    /// Always kept in lockstep with the map: every insert appends here,
+    /// every remove also drops the corresponding entry. Reads can rely on
+    /// `active_subagent_order.iter()` returning exactly the keys the map
+    /// holds — no holes, no duplicates.
+    pub active_subagent_order: Vec<SharedString>,
 }
 
 impl SolutionSession {
@@ -383,6 +425,8 @@ impl SolutionSession {
             cached_max_tokens: None,
             parent_session_id: None,
             stopping_safety_net: None,
+            active_subagents: HashMap::new(),
+            active_subagent_order: Vec::new(),
         }
     }
 
@@ -493,6 +537,8 @@ mod tests {
             cached_max_tokens: None,
             parent_session_id: None,
             stopping_safety_net: None,
+            active_subagents: HashMap::new(),
+            active_subagent_order: Vec::new(),
         }
     }
 

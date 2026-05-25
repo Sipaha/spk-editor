@@ -89,6 +89,13 @@ pub fn install(cx: &mut App) {
                     let payload = build_queue_changed_payload(*id, cx);
                     editor_mcp::emit_notification(cx, "agent_session_queue_changed", payload);
                 }
+                SolutionAgentStoreEvent::SessionSubagentsChanged(_id) => {
+                    // Etap 5 wires the MCP `session_active_subagents_changed`
+                    // notification here. For Etap 3 (lifecycle only) the
+                    // event is fired but not forwarded to remote consumers;
+                    // the desktop session_view (Etap 4) subscribes
+                    // in-process via `cx.subscribe(&store, ...)`.
+                }
                 SolutionAgentStoreEvent::SessionNotified(id, kind) => {
                     let kind_str = match kind {
                         NotifyKind::Completed => "completed",

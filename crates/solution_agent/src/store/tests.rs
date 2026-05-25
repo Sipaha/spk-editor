@@ -2652,3 +2652,423 @@ async fn send_during_running_on_native_connection_routes_to_inject(
     drop(native);
     drop(server);
 }
+
+// ---------------------------------------------------------------------------
+// Etap 3: Subagent-tab lifecycle (`active_subagents` + insertion-order vec).
+// These exercise `SolutionAgentStore::apply_subagent_lifecycle` through the
+// real `AcpThreadEvent::NewEntry` / `EntryUpdated` plumbing — by upserting
+// `acp::ToolCall` shapes directly on a live `AcpThread` and asserting how
+// the per-session map and the `SessionSubagentsChanged` event stream react.
+// ---------------------------------------------------------------------------
+
+/// Build an `acp::ToolCall` for a Task/Agent subagent dispatch with the
+/// programmatic name carried in `_meta.tool_name` (the convention shared by
+/// `claude_native::translate_assistant` and consumed by
+/// `apply_subagent_lifecycle`). Optional `description` populates
+/// `raw_input["description"]` so the label-fallback chain can be exercised.
+fn make_task_tool_call(
+    id: &str,
+    tool_name: &str,
+    status: agent_client_protocol::schema::ToolCallStatus,
+    description: Option<&str>,
+    subagent_type: Option<&str>,
+) -> agent_client_protocol::schema::ToolCall {
+    use agent_client_protocol::schema as acp;
+    let mut raw_input = serde_json::Map::new();
+    if let Some(d) = description {
+        raw_input.insert("description".into(), serde_json::Value::String(d.into()));
+    }
+    if let Some(s) = subagent_type {
+        raw_input.insert("subagent_type".into(), serde_json::Value::String(s.into()));
+    }
+    let mut call = acp::ToolCall::new(acp::ToolCallId::new(id.to_string()), tool_name.to_string())
+        .kind(acp::ToolKind::Think)
+        .status(status)
+        .meta(Some(acp_thread::meta_with_tool_name(tool_name)));
+    if !raw_input.is_empty() {
+        call = call.raw_input(serde_json::Value::Object(raw_input));
+    }
+    call
+}
+
+/// Helper to count `SessionSubagentsChanged` events for a given session.
+/// Returns the counter handle plus the subscription (which must be held in
+/// scope for the lifetime of the test).
+fn subscribe_subagents_changed(
+    session_id: SolutionSessionId,
+    cx: &mut TestAppContext,
+) -> (Rc<std::cell::RefCell<usize>>, gpui::Subscription) {
+    let counter = Rc::new(std::cell::RefCell::new(0usize));
+    let subscription = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let counter = counter.clone();
+        cx.subscribe(&store, move |_store, event, _cx| {
+            if let SolutionAgentStoreEvent::SessionSubagentsChanged(id) = event
+                && *id == session_id
+            {
+                *counter.borrow_mut() += 1;
+            }
+        })
+    });
+    (counter, subscription)
+}
+
+#[gpui::test]
+async fn subagent_inprogress_task_registers_tab(cx: &mut TestAppContext) {
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+    let (changed_count, _sub) = subscribe_subagents_changed(session_id, cx);
+
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.upsert_tool_call(
+                make_task_tool_call(
+                    "toolu_task_1",
+                    "Task",
+                    agent_client_protocol::schema::ToolCallStatus::InProgress,
+                    Some("Loop agent 1"),
+                    Some("general-purpose"),
+                ),
+                cx,
+            )
+            .expect("upsert task");
+        });
+    });
+    cx.executor().run_until_parked();
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(session_id).expect("session exists");
+        let s = session.read(cx);
+        assert_eq!(s.active_subagents.len(), 1, "one subagent tracked");
+        assert_eq!(s.active_subagent_order.len(), 1, "order vec parallel to map");
+        let key = SharedString::from("toolu_task_1");
+        assert_eq!(s.active_subagent_order[0], key);
+        let tab = s.active_subagents.get(&key).expect("tab present");
+        assert_eq!(tab.label.as_ref(), "Loop agent 1");
+    });
+    assert_eq!(
+        *changed_count.borrow(),
+        1,
+        "SessionSubagentsChanged emitted exactly once on first registration"
+    );
+}
+
+#[gpui::test]
+async fn subagent_terminal_status_removes_tab(cx: &mut TestAppContext) {
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+    let (changed_count, _sub) = subscribe_subagents_changed(session_id, cx);
+
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.upsert_tool_call(
+                make_task_tool_call(
+                    "toolu_task_2",
+                    "Task",
+                    agent_client_protocol::schema::ToolCallStatus::InProgress,
+                    Some("Worker A"),
+                    None,
+                ),
+                cx,
+            )
+            .expect("upsert in progress");
+        });
+    });
+    cx.executor().run_until_parked();
+    assert_eq!(*changed_count.borrow(), 1, "one add emit");
+
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.upsert_tool_call(
+                make_task_tool_call(
+                    "toolu_task_2",
+                    "Task",
+                    agent_client_protocol::schema::ToolCallStatus::Completed,
+                    Some("Worker A"),
+                    None,
+                ),
+                cx,
+            )
+            .expect("upsert completed");
+        });
+    });
+    cx.executor().run_until_parked();
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(session_id).expect("session exists");
+        let s = session.read(cx);
+        assert!(s.active_subagents.is_empty(), "tab removed on Completed");
+        assert!(s.active_subagent_order.is_empty(), "order vec drained");
+    });
+    assert_eq!(
+        *changed_count.borrow(),
+        2,
+        "exactly two emits: add + remove"
+    );
+}
+
+#[gpui::test]
+async fn subagent_label_falls_back_to_subagent_type(cx: &mut TestAppContext) {
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.upsert_tool_call(
+                make_task_tool_call(
+                    "toolu_long_abcd",
+                    "Task",
+                    agent_client_protocol::schema::ToolCallStatus::InProgress,
+                    None,
+                    Some("general-purpose"),
+                ),
+                cx,
+            )
+            .expect("upsert");
+        });
+    });
+    cx.executor().run_until_parked();
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(session_id).expect("session exists");
+        let s = session.read(cx);
+        let key = SharedString::from("toolu_long_abcd");
+        let tab = s.active_subagents.get(&key).expect("tab present");
+        assert_eq!(
+            tab.label.as_ref(),
+            "general-purpose#abcd",
+            "fallback label is `subagent_type#<short-id>`"
+        );
+    });
+}
+
+#[gpui::test]
+async fn subagent_label_defaults_to_agent_short_id(cx: &mut TestAppContext) {
+    // No description, no subagent_type → final fallback: `Agent <short-id>`.
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.upsert_tool_call(
+                make_task_tool_call(
+                    "toolu_xy12",
+                    "Agent",
+                    agent_client_protocol::schema::ToolCallStatus::InProgress,
+                    None,
+                    None,
+                ),
+                cx,
+            )
+            .expect("upsert");
+        });
+    });
+    cx.executor().run_until_parked();
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(session_id).expect("session exists");
+        let s = session.read(cx);
+        let key = SharedString::from("toolu_xy12");
+        let tab = s.active_subagents.get(&key).expect("tab present");
+        assert_eq!(tab.label.as_ref(), "Agent xy12");
+    });
+}
+
+#[gpui::test]
+async fn non_task_tool_call_does_not_register_tab(cx: &mut TestAppContext) {
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+    let (changed_count, _sub) = subscribe_subagents_changed(session_id, cx);
+
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.upsert_tool_call(
+                make_task_tool_call(
+                    "toolu_bash_1",
+                    "Bash",
+                    agent_client_protocol::schema::ToolCallStatus::InProgress,
+                    Some("ignored"),
+                    None,
+                ),
+                cx,
+            )
+            .expect("upsert bash");
+        });
+    });
+    cx.executor().run_until_parked();
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(session_id).expect("session exists");
+        let s = session.read(cx);
+        assert!(s.active_subagents.is_empty(), "Bash is not a subagent");
+        assert!(s.active_subagent_order.is_empty(), "order vec untouched");
+    });
+    assert_eq!(
+        *changed_count.borrow(),
+        0,
+        "no SessionSubagentsChanged emission for non-subagent tools"
+    );
+}
+
+#[gpui::test]
+async fn subagent_insertion_order_preserved(cx: &mut TestAppContext) {
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+
+    for (id, label) in [
+        ("toolu_a", "First"),
+        ("toolu_b", "Second"),
+        ("toolu_c", "Third"),
+    ] {
+        cx.update(|cx| {
+            acp_thread.update(cx, |t, cx| {
+                t.upsert_tool_call(
+                    make_task_tool_call(
+                        id,
+                        "Task",
+                        agent_client_protocol::schema::ToolCallStatus::InProgress,
+                        Some(label),
+                        None,
+                    ),
+                    cx,
+                )
+                .expect("upsert");
+            });
+        });
+        cx.executor().run_until_parked();
+    }
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(session_id).expect("session exists");
+        let s = session.read(cx);
+        let order: Vec<&str> = s
+            .active_subagent_order
+            .iter()
+            .map(|s| s.as_ref())
+            .collect();
+        assert_eq!(
+            order,
+            vec!["toolu_a", "toolu_b", "toolu_c"],
+            "tabs render in spawn order, not hash order"
+        );
+        assert_eq!(s.active_subagents.len(), 3);
+    });
+}
+
+#[gpui::test]
+async fn duplicate_inprogress_does_not_re_register(cx: &mut TestAppContext) {
+    // A streaming Task's raw_input arrives over several EntryUpdated events
+    // before the status flips off InProgress; each one re-enters
+    // `apply_subagent_lifecycle`. The first must register the tab, every
+    // subsequent observation must be a no-op (no double-insert, no
+    // SessionSubagentsChanged spam).
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+    let (changed_count, _sub) = subscribe_subagents_changed(session_id, cx);
+
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.upsert_tool_call(
+                make_task_tool_call(
+                    "toolu_dup",
+                    "Task",
+                    agent_client_protocol::schema::ToolCallStatus::InProgress,
+                    Some("Original"),
+                    None,
+                ),
+                cx,
+            )
+            .expect("upsert initial");
+        });
+    });
+    cx.executor().run_until_parked();
+
+    // Simulate a second EntryUpdated for the same id, still InProgress
+    // (e.g. raw_input streamed in more keys). Even if the label would now
+    // be different, the tab is already there.
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.upsert_tool_call(
+                make_task_tool_call(
+                    "toolu_dup",
+                    "Task",
+                    agent_client_protocol::schema::ToolCallStatus::InProgress,
+                    Some("Renamed"),
+                    None,
+                ),
+                cx,
+            )
+            .expect("upsert again");
+        });
+    });
+    cx.executor().run_until_parked();
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(session_id).expect("session exists");
+        let s = session.read(cx);
+        assert_eq!(s.active_subagents.len(), 1, "single tab, not doubled");
+        assert_eq!(s.active_subagent_order.len(), 1, "order vec single entry");
+        let tab = s
+            .active_subagents
+            .get(&SharedString::from("toolu_dup"))
+            .expect("tab");
+        // Label is locked-in at first observation — the "Renamed" update is
+        // ignored to preserve a stable user-facing pill across the streaming
+        // raw_input chunks.
+        assert_eq!(tab.label.as_ref(), "Original");
+    });
+    assert_eq!(
+        *changed_count.borrow(),
+        1,
+        "duplicate InProgress must not re-emit SessionSubagentsChanged"
+    );
+}
+
+#[gpui::test]
+async fn subagent_failed_status_also_removes_tab(cx: &mut TestAppContext) {
+    // Terminal-status coverage: Failed is just as final as Completed/Canceled.
+    // A Task subagent that crashed mid-run still releases its tab.
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+    let (changed_count, _sub) = subscribe_subagents_changed(session_id, cx);
+
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.upsert_tool_call(
+                make_task_tool_call(
+                    "toolu_fail",
+                    "Task",
+                    agent_client_protocol::schema::ToolCallStatus::InProgress,
+                    Some("Doomed"),
+                    None,
+                ),
+                cx,
+            )
+            .expect("upsert");
+        });
+    });
+    cx.executor().run_until_parked();
+
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.upsert_tool_call(
+                make_task_tool_call(
+                    "toolu_fail",
+                    "Task",
+                    agent_client_protocol::schema::ToolCallStatus::Failed,
+                    Some("Doomed"),
+                    None,
+                ),
+                cx,
+            )
+            .expect("upsert failed");
+        });
+    });
+    cx.executor().run_until_parked();
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(session_id).expect("session exists");
+        assert!(session.read(cx).active_subagents.is_empty());
+    });
+    assert_eq!(*changed_count.borrow(), 2, "add + remove on Failed");
+}

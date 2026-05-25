@@ -17,6 +17,7 @@ use crate::adapter::AdapterRegistry;
 use crate::db::SolutionAgentDb;
 use crate::model::{
     AgentServerId, SessionState, SolutionSession, SolutionSessionId, SolutionSessionMetadata,
+    SubagentTab,
 };
 use crate::notifier;
 use crate::pool::SubprocessPool;
@@ -104,9 +105,48 @@ pub enum SolutionAgentStoreEvent {
     /// mobile until the eventual flush, and vice-versa.
     SessionQueueChanged(SolutionSessionId),
     SessionNotified(SolutionSessionId, notifier::NotifyKind),
+    /// The session's [`SolutionSession::active_subagents`] map (and its
+    /// parallel `active_subagent_order` vector) changed: a `Task` / `Agent`
+    /// subagent was either spawned (parent ToolCall flipped to `InProgress`)
+    /// or finished (parent ToolCall flipped to a terminal status). Emitted
+    /// only when the map *actually* changed — a duplicate spawn event for a
+    /// known id, or a terminal status on an unknown id, is silently
+    /// ignored to keep the event stream debounce-friendly.
+    ///
+    /// Subscribers: the session_view's subagent-tabs strip (Etap 4) and the
+    /// MCP wire's `session_active_subagents_changed` notification (Etap 5),
+    /// so both desktop and mobile redraw without polling the session entity.
+    SessionSubagentsChanged(SolutionSessionId),
 }
 
 impl EventEmitter<SolutionAgentStoreEvent> for SolutionAgentStore {}
+
+/// Last 4 chars of a `toolu_xxx` id, used as the short-id suffix in
+/// fallback subagent tab labels (`general-purpose#a1b2`, `Agent #a1b2`).
+/// Lower bound guarded: an id shorter than 4 chars (defensive — claude's
+/// real ids are 24+ chars) falls back to the whole id rather than
+/// panicking on the slice bound.
+fn short_id_suffix(id: &str) -> &str {
+    let len = id.len();
+    if len <= 4 { id } else { &id[len - 4..] }
+}
+
+/// Subagent-tab label fallback chain when the parent ToolCall's
+/// `raw_input["description"]` is missing.
+///
+///   1. `<subagent_type>#<short-id>` — e.g. `general-purpose#a1b2`. Used
+///      when claude's `Task` SDK populated `subagent_type` but the agent
+///      author didn't bother with a description.
+///   2. `Agent <short-id>` — last-resort label, should only hit in
+///      adversarial / malformed inputs since claude always ships at
+///      least `subagent_type` for a real `Task` call.
+fn label_fallback(id: &SharedString, subagent_type: Option<&str>) -> SharedString {
+    let short = short_id_suffix(id.as_ref());
+    match subagent_type {
+        Some(stype) if !stype.is_empty() => SharedString::from(format!("{stype}#{short}")),
+        _ => SharedString::from(format!("Agent {short}")),
+    }
+}
 
 struct GlobalSolutionAgentStore(Entity<SolutionAgentStore>);
 impl Global for GlobalSolutionAgentStore {}
@@ -1938,6 +1978,159 @@ impl SolutionAgentStore {
         })
     }
 
+    /// Subagent-tab lifecycle hook. Inspects the entry at `entry_index` in
+    /// the session's live `AcpThread` and:
+    ///   * if it's a brand-new `Task`/`Agent` ToolCall in `InProgress` and
+    ///     not already tracked → registers it on
+    ///     `SolutionSession::active_subagents` (+ insertion-order vec) and
+    ///     emits [`SolutionAgentStoreEvent::SessionSubagentsChanged`];
+    ///   * if it's a tracked id whose status just flipped to a terminal
+    ///     state (`Completed`/`Failed`/`Rejected`/`Canceled`) → removes it
+    ///     and emits the same event.
+    ///
+    /// Any other shape (non-tool entry, non-Task tool, status still
+    /// `InProgress`/`Pending` on an already-tracked id, terminal status on
+    /// an unknown id) is a no-op and emits nothing. Map mutations are gated
+    /// behind a structural check to keep `SessionSubagentsChanged` from
+    /// firing on every chunk of a streaming Task subagent's body.
+    ///
+    /// The cold-thread branch is excluded: an entry only exists in a live
+    /// `AcpThread`, so when the session is cold (`acp_thread()` is `None`)
+    /// there is nothing to track yet. The next live attach will replay the
+    /// in-flight tool calls through `NewEntry`, which re-enters this hook.
+    fn apply_subagent_lifecycle(
+        &mut self,
+        session_id: SolutionSessionId,
+        entry_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session_entity) = self.sessions.get(&session_id).cloned() else {
+            return;
+        };
+        // Capture the relevant ToolCall fields in a small read scope so we
+        // can mutate the session entity right after without overlapping
+        // borrows.
+        struct Snapshot {
+            id: SharedString,
+            is_task_like: bool,
+            is_in_progress: bool,
+            is_terminal: bool,
+            label_from_raw_input: Option<SharedString>,
+            subagent_type: Option<String>,
+        }
+        let snapshot = {
+            let session = session_entity.read(cx);
+            let Some(thread) = session.acp_thread() else {
+                return;
+            };
+            let thread_ref = thread.read(cx);
+            let Some(entry) = thread_ref.entries().get(entry_index) else {
+                return;
+            };
+            let acp_thread::AgentThreadEntry::ToolCall(call) = entry else {
+                return;
+            };
+            let tool_name = call
+                .tool_name
+                .as_ref()
+                .map(|s| s.as_ref())
+                .unwrap_or_default();
+            let is_task_like = matches!(tool_name, "Task" | "Agent");
+            let is_in_progress = matches!(call.status, acp_thread::ToolCallStatus::InProgress);
+            let is_terminal = matches!(
+                call.status,
+                acp_thread::ToolCallStatus::Completed
+                    | acp_thread::ToolCallStatus::Failed
+                    | acp_thread::ToolCallStatus::Rejected
+                    | acp_thread::ToolCallStatus::Canceled
+            );
+            let (label_from_raw_input, subagent_type) = match call.raw_input.as_ref() {
+                Some(raw) => {
+                    let desc = raw
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(|s| SharedString::from(s.to_owned()));
+                    let stype = raw
+                        .get("subagent_type")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_owned());
+                    (desc, stype)
+                }
+                None => (None, None),
+            };
+            Snapshot {
+                id: SharedString::from(call.id.0.to_string()),
+                is_task_like,
+                is_in_progress,
+                is_terminal,
+                label_from_raw_input,
+                subagent_type,
+            }
+        };
+
+        if !snapshot.is_task_like {
+            return;
+        }
+        let id = snapshot.id;
+
+        let changed = if snapshot.is_in_progress {
+            // Defensive: a duplicate NewEntry for the same id (or an
+            // InProgress→InProgress EntryUpdated as raw_input streams in) must
+            // not re-insert or re-emit. Only the first observation registers
+            // the tab.
+            let already_tracked = session_entity
+                .read(cx)
+                .active_subagents
+                .contains_key(&id);
+            if already_tracked {
+                false
+            } else {
+                let label = snapshot
+                    .label_from_raw_input
+                    .unwrap_or_else(|| label_fallback(&id, snapshot.subagent_type.as_deref()));
+                let id_for_closure = id.clone();
+                session_entity.update(cx, |s, _| {
+                    s.active_subagents.insert(
+                        id_for_closure.clone(),
+                        SubagentTab {
+                            label,
+                            started_at: std::time::Instant::now(),
+                        },
+                    );
+                    s.active_subagent_order.push(id_for_closure);
+                });
+                true
+            }
+        } else if snapshot.is_terminal {
+            // Symmetric defensive guard: a terminal-status EntryUpdated on an
+            // id we never registered (e.g. the InProgress event arrived after
+            // a status flip on a cold→live transition) is a no-op.
+            let tracked = session_entity
+                .read(cx)
+                .active_subagents
+                .contains_key(&id);
+            if tracked {
+                session_entity.update(cx, |s, _| {
+                    s.active_subagents.remove(&id);
+                    s.active_subagent_order.retain(|tracked_id| tracked_id != &id);
+                });
+                true
+            } else {
+                false
+            }
+        } else {
+            // Pending / WaitingForConfirmation transitions on a Task/Agent
+            // tool call are not lifecycle signals — claude almost never goes
+            // through these for subagents (they spawn directly into
+            // InProgress), but be defensive in case future SDK shapes do.
+            false
+        };
+
+        if changed {
+            cx.emit(SolutionAgentStoreEvent::SessionSubagentsChanged(session_id));
+        }
+    }
+
     fn handle_acp_event(
         &mut self,
         session_id: SolutionSessionId,
@@ -2014,6 +2207,17 @@ impl SolutionAgentStore {
                     session_id,
                     entry_index,
                 ));
+                // Subagent-tab lifecycle: a brand-new Task/Agent ToolCall in
+                // InProgress is a spawn signal. The `local_entry_index` here is
+                // the live thread's local index (entries.len() - 1), which is
+                // what `apply_subagent_lifecycle` needs to look up the entry.
+                let local_entry_index = session_entity
+                    .read(cx)
+                    .acp_thread()
+                    .map(|thread| thread.read(cx).entries().len().saturating_sub(1));
+                if let Some(idx) = local_entry_index {
+                    self.apply_subagent_lifecycle(session_id, idx, cx);
+                }
             }
             acp_thread::AcpThreadEvent::Stopped(_) => {
                 // Snapshot the Running turn's elapsed time BEFORE the
@@ -2244,6 +2448,14 @@ impl SolutionAgentStore {
                 }
             }
             acp_thread::AcpThreadEvent::EntryUpdated(idx) => {
+                // Subagent-tab lifecycle: a tracked Task/Agent ToolCall that
+                // just flipped to a terminal status is a finish signal. We
+                // run this BEFORE the EntryUpdated throttle plumbing so the
+                // `SessionSubagentsChanged` emit happens on the same tick
+                // the parent thread's `EntryUpdated` is observed, without
+                // waiting for the 500 ms debounce that gates
+                // `SessionMessageAppended`.
+                self.apply_subagent_lifecycle(session_id, *idx, cx);
                 // Tool-call arg deltas, assistant-text chunks, and tool-
                 // status transitions on an existing entry all surface
                 // here. The pre-fix behaviour fell through to the

@@ -129,9 +129,15 @@ fn translate_assistant(m: &ConversationMessage) -> Vec<acp::SessionUpdate> {
             // preview, Bash shows terminal output, etc.). Default Other
             // would render a bare "Tool: Name (done)" header with no body.
             let kind = tool_kind_for(name);
+            // Stamp the programmatic tool name into `_meta.tool_name` so
+            // downstream consumers (solution_agent's subagent-tabs lifecycle,
+            // session_view rendering) can discriminate by name without parsing
+            // the user-facing title. The ACP schema has no dedicated `name`
+            // field on `ToolCall`; the convention lives in `acp_thread::TOOL_NAME_META_KEY`.
             let mut call = acp::ToolCall::new(acp::ToolCallId::new(id), name.to_string())
                 .kind(kind)
-                .status(acp::ToolCallStatus::InProgress);
+                .status(acp::ToolCallStatus::InProgress)
+                .meta(Some(acp_thread::meta_with_tool_name(name)));
             if let Some(input) = block.get("input") {
                 // For file-based tools, also surface the path as a
                 // ToolCallLocation so the UI can render a clickable file
@@ -811,6 +817,16 @@ mod tests {
                 assert_eq!(call.tool_call_id.0.as_ref(), "toolu_1");
                 assert_eq!(call.title, "Bash");
                 assert_eq!(call.status, acp::ToolCallStatus::InProgress);
+                // tool_name meta is the only place the programmatic tool name
+                // survives — the title goes through Markdown rendering and is
+                // user-facing, so consumers must filter by meta. Pin this here
+                // so future refactors of translate_assistant can't silently
+                // strip the meta and break subagent-tab discrimination
+                // (Task/Agent ↔ everything else).
+                assert_eq!(
+                    acp_thread::tool_name_from_meta(&call.meta).as_deref(),
+                    Some("Bash"),
+                );
             }
             other => panic!("{other:?}"),
         }
