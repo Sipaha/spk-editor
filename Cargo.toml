@@ -38,6 +38,7 @@ members = [
     "crates/command_palette_hooks",
     "crates/component",
     "crates/component_preview",
+    "crates/console_panel",
     "crates/context_server",
     "crates/copilot",
     "crates/copilot_chat",
@@ -310,6 +311,7 @@ command_palette_hooks = { path = "crates/command_palette_hooks" }
 compliance = { path = "tooling/compliance" }
 component = { path = "crates/component" }
 component_preview = { path = "crates/component_preview" }
+console_panel = { path = "crates/console_panel" }
 console = "0.16"
 context_server = { path = "crates/context_server" }
 copilot = { path = "crates/copilot" }
