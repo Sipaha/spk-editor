@@ -50,36 +50,15 @@ makes the next resume bootstrap-free.
 
 ## Fork philosophy — read this before suggesting changes
 
-There is **no scheduled `git merge upstream/main`** for this fork. Bug fixes
-and features land here directly; we don't wait for upstream and we don't try
-to "upstream first then merge back." That said, we may occasionally
-**cherry-pick** specific upstream commits / crates for genuinely new core
-capabilities (LSP, language support, editor primitives, etc.) — and that's
-the only reason any "be careful with upstream-shaped code" rule still
-matters at all.
+SPK Editor is a standalone product. We do **not** merge or cherry-pick from
+upstream Zed. The codebase is fully ours — every crate is fair game for
+bug fixes, refactors, renames, cleanup, and feature work driven by product
+needs, not by upstream-diff hygiene. There is no "untouched core" zone:
+if `editor`, `language`, `lsp`, `multi_buffer`, `project`, `terminal`,
+`dap`, `vim`, `theme`, `gpui`, etc. need changes to make a feature work
+right, change them.
 
-The codebase splits into two zones with different rules:
-
-- **Fork-owned zones — refactor freely.** The fork crates
-  (`solution_agent`, `solutions`, `solutions_ui`, `editor_mcp`) and any
-  upstream files we've already modified (see `FORK.md` § *Touched upstream
-  files*). Bug fixes, refactors, renames, cleanup commits — all fair game.
-  We're not getting upstream patches into these files anyway, so
-  diff-minimality buys nothing.
-
-- **Untouched core crates — stay upstream-shaped.** `editor`, `language`,
-  `lsp`, `multi_buffer`, `project`, `terminal`, `dap`, `vim`, `theme`, the
-  bulk of `gpui`, etc. We don't touch these for refactors / renames /
-  cleanup, because that breaks future cherry-picks: a stylistic rename
-  upstream of a function we also renamed locally produces a textual
-  conflict on the cherry-pick that has to be resolved by hand each time. If
-  a bug or missing feature in one of these crates blocks us, fix it
-  in-tree (the rule is *"don't refactor for style"*, not *"never touch"*),
-  but keep the patch tight and additive. If there's an upstream PR that
-  fixes the same thing, prefer cherry-picking that PR over rolling our
-  own.
-
-Rules that apply across both zones:
+Rules that still apply:
 
 - **Disable, don't delete** for explicitly-disabled upstream subsystems
   (collab, auto_update, telemetry, Zeta, native cloud LLM, Sentry uploads,
@@ -137,7 +116,10 @@ Rules that apply across both zones:
 - Cargo target binary is `target/release/spk-editor`. The cargo crate name `zed` itself is unchanged: the rename would touch hundreds of files for ~zero functional gain, and any future cherry-pick from upstream into the editor crate would textually conflict on every renamed identifier. Only the `[[bin]] name` is overridden.
 - Codesign / notarize gated behind `SPK_EDITOR_SIGN` env var; default produces unsigned bundles.
 - Specs and plans for the rebrand work live in `docs/superpowers/{specs,plans}/`.
-- **Agent-driven builds: debug only.** When an agent needs to compile or launch the editor for verification, always use the dev profile (`script/run-mcp --debug`, `cargo build` without `--release`, `cargo test` without `--release` is fine if the test suite tolerates it — but never `cargo build --release` / `script/bundle-*` / `script/run-mcp` without `--debug`). Release / bundled builds are produced by the maintainer manually; an agent kicking off a 3-9 min release compile burns user time and machine resources for no benefit. If a verification *requires* release-profile behavior (e.g. reproducing a release-only optimisation bug), pause and ask the user to run the build instead of doing it yourself.
+- **Build profile depends on who tests next.**
+  - *Autonomous / agent-only verification* (cargo test, headless e2e, MCP-socket probes the agent drives itself) → **debug only**: `script/run-mcp --debug`, `cargo build` without `--release`, `cargo test` without `--release`. Don't burn a 3–9 min release compile for an agent's own checks.
+  - *Hand-off back to the user for hands-on testing* (they'll actually launch / use the editor and judge the change) → **build `release-fast` proactively**: `cargo build --bin spk-editor --profile release-fast` (~5 min, run in background). The user's running editor is the release-fast binary at `target/release-fast/spk-editor` talking to `~/.spk/spk-editor/config/mcp.sock` (NOT `-dev`); a debug bundle won't replace it, so without this step the "ready to test" hand-off is false. This is required, not optional — the constraint is "no surprise release compiles for agent-only work," not "never compile release."
+  - Full `cargo build --release` and `script/bundle-*` remain reserved for the maintainer.
 - **`script/run-mcp` only compiles the binary if it's _missing_** (`if [[ ! -x "$binary" ]]`). After editing any crate, run `cargo build --bin spk-editor` yourself first — otherwise `run-mcp` happily launches the stale binary and you'll silently test old code (a binary with a stale mtime / no expected `strings` match is the tell). No special feature flags are needed; `workspace.screenshot` works in plain debug builds (see "Screenshots" below).
 - **`cargo build … | tail` masks cargo's exit code** — the pipe reports `tail`'s status (always 0), so a failed build looks like it "succeeded" (and leaves the old binary in place). Use `set -o pipefail`, or don't pipe and grep the captured output for `^error` / `could not compile`.
 - **The rust-analyzer flycheck (`cargo check --workspace --all-targets`) holds `target/debug/.cargo-lock`.** If your `cargo build`/`cargo check` sits on "Blocking waiting for file lock on build directory" for minutes, `pkill -f "cargo check --workspace"` (it restarts harmlessly when RA next needs it).
