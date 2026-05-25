@@ -2083,6 +2083,10 @@ impl SolutionAgentStore {
                 .active_subagents
                 .contains_key(&id);
             if already_tracked {
+                // Label is intentionally locked at first observation. Later
+                // EntryUpdated events that finally fill in raw_input.description
+                // are discarded here on purpose — otherwise a streamed tool_use
+                // input would relabel the tab mid-flight and flicker the strip.
                 false
             } else {
                 let label = snapshot
@@ -2687,5 +2691,43 @@ impl SolutionAgentStore {
             }
         }
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod label_unit_tests {
+    use super::{label_fallback, short_id_suffix};
+    use gpui::SharedString;
+
+    #[test]
+    fn short_id_suffix_truncates_long_ids() {
+        assert_eq!(short_id_suffix("toolu_01abcdef"), "cdef");
+    }
+
+    #[test]
+    fn short_id_suffix_returns_full_id_when_short() {
+        assert_eq!(short_id_suffix("abc"), "abc");
+        assert_eq!(short_id_suffix(""), "");
+    }
+
+    #[test]
+    fn label_fallback_uses_subagent_type_when_present() {
+        let id = SharedString::from("toolu_xyzwabcd");
+        assert_eq!(
+            label_fallback(&id, Some("general-purpose")).as_ref(),
+            "general-purpose#abcd"
+        );
+    }
+
+    #[test]
+    fn label_fallback_falls_back_to_agent_short_when_subagent_type_missing() {
+        let id = SharedString::from("toolu_xyzwabcd");
+        assert_eq!(label_fallback(&id, None).as_ref(), "Agent abcd");
+    }
+
+    #[test]
+    fn label_fallback_treats_empty_subagent_type_as_missing() {
+        let id = SharedString::from("toolu_xyzwabcd");
+        assert_eq!(label_fallback(&id, Some("")).as_ref(), "Agent abcd");
     }
 }
