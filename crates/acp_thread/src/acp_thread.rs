@@ -291,6 +291,18 @@ impl AgentThreadEntry {
         }
     }
 
+    /// Returns the parent tool_use id (`toolu_xxx`) of the claude subagent
+    /// that produced this entry, or `None` for parent-level / user / plan
+    /// entries. Used by `solution_agent::session_view` to filter the
+    /// conversation by the selected subagent tab.
+    pub fn subagent_id(&self) -> Option<&SharedString> {
+        match self {
+            Self::AssistantMessage(message) => message.subagent_id.as_ref(),
+            Self::ToolCall(call) => call.subagent_id.as_ref(),
+            Self::UserMessage(_) | Self::CompletedPlan(_) => None,
+        }
+    }
+
     pub fn to_markdown(&self, cx: &App) -> String {
         match self {
             Self::UserMessage(message) => message.to_markdown(cx),

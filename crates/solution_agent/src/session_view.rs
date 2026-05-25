@@ -39,6 +39,7 @@ use crate::store::SolutionAgentStore;
 mod recall;
 mod render_queue;
 mod subagent_strip;
+mod task_subagent_strip;
 #[cfg(test)]
 mod tests;
 
@@ -272,6 +273,16 @@ pub struct SolutionSessionView {
     /// `sessions_for(&solution_id)` pass) and a false-positive notify
     /// just paints the same frame again.
     _store_subscription: Option<Subscription>,
+    /// Currently selected subagent tab for the claude `Task` / `Agent`
+    /// sub-agents panel: `None` means the parent ("Main") view is
+    /// active, `Some(id)` means the strip pill for that subagent's
+    /// parent `tool_use_id` is active and the conversation list is
+    /// filtered to entries whose `subagent_id` matches. View-state only,
+    /// not persisted across editor restarts (once the active set
+    /// becomes empty the selection is meaningless anyway). Auto-reset
+    /// to `None` (or the next still-active id) when the selected
+    /// subagent finishes — wired off `SessionSubagentsChanged`.
+    selected_subagent: Option<SharedString>,
     /// Background tick that wakes the view once a second while any
     /// visible tool call sits in `InProgress`, so the per-tool elapsed
     /// "Xs" badge in `render_tool_call` advances even when the agent
@@ -279,6 +290,22 @@ pub struct SolutionSessionView {
     /// Self-cleared when no InProgress tool remains so the next
     /// transition can start a fresh tick.
     tool_tick: Option<Task<()>>,
+}
+
+/// Predicate for the subagent-tab filter — extracted as a free
+/// function so the matching can be unit-tested without constructing
+/// the view's GPUI-shaped state. `selected = None` ("Main") matches
+/// only entries with no `subagent_id`; `selected = Some(id)` matches
+/// only entries stamped with exactly that id.
+pub(crate) fn subagent_matches(
+    selected: Option<&SharedString>,
+    entry_subagent: Option<&SharedString>,
+) -> bool {
+    match (selected, entry_subagent) {
+        (None, None) => true,
+        (Some(sel), Some(eid)) => sel == eid,
+        _ => false,
+    }
 }
 
 impl SolutionSessionView {
@@ -401,13 +428,18 @@ impl SolutionSessionView {
         // the callback only needs to `cx.notify()` — the actual
         // filtering happens in `compute_strip_rows`.
         let store_subscription = SolutionAgentStore::try_global(cx).map(|store| {
-            cx.subscribe(&store, |_this, _store, event, cx| match event {
+            cx.subscribe(&store, |this, _store, event, cx| match event {
                 crate::store::SolutionAgentStoreEvent::SessionCreated { .. }
                 | crate::store::SolutionAgentStoreEvent::SessionClosed(_)
                 | crate::store::SolutionAgentStoreEvent::SessionStateChanged(_)
                 | crate::store::SolutionAgentStoreEvent::SessionTitleChanged(_)
                 | crate::store::SolutionAgentStoreEvent::SessionMessageAppended(_, _) => {
                     cx.notify();
+                }
+                crate::store::SolutionAgentStoreEvent::SessionSubagentsChanged(sid) => {
+                    if *sid == this.session.read(cx).id {
+                        this.on_subagents_changed(cx);
+                    }
                 }
                 _ => {}
             })
@@ -468,6 +500,7 @@ impl SolutionSessionView {
             resuming_markdown: None,
             resuming_markdown_source: SharedString::default(),
             expanded_queue_markers: HashSet::new(),
+            selected_subagent: None,
             tool_tick: None,
         };
         // Detect any thread that is already attached at construction
@@ -731,6 +764,57 @@ impl SolutionSessionView {
     /// per-entry forward scan that previously made conversation render
     /// O(N²): on a 500-entry session that was ~125k iterations per
     /// frame; this version is O(N) once per thread mutation.
+    /// Returns `true` when `entry` should be visible under the current
+    /// `selected_subagent` tab. `None` selection ("Main") shows entries
+    /// whose `subagent_id` is also `None`; `Some(id)` shows only entries
+    /// stamped with that exact id. Plan-level entries and user messages
+    /// have no subagent affiliation, so they fall under "Main".
+    pub(crate) fn should_render_entry(&self, entry: &AgentThreadEntry) -> bool {
+        subagent_matches(self.selected_subagent.as_ref(), entry.subagent_id())
+    }
+
+    /// Snap-to-next helper extracted out of `on_subagents_changed` so
+    /// the lifecycle can be unit-tested without spinning up a full GPUI
+    /// view. Returns the new value for `selected_subagent` given the
+    /// current selection and the still-active subagent order. Pure —
+    /// no side effects.
+    pub(crate) fn next_selection_after_change(
+        current: Option<&SharedString>,
+        active_subagents: &HashMap<SharedString, crate::model::SubagentTab>,
+        active_subagent_order: &[SharedString],
+    ) -> Option<SharedString> {
+        match current {
+            None => None,
+            Some(id) => {
+                if active_subagents.contains_key(id) {
+                    Some(id.clone())
+                } else {
+                    active_subagent_order.first().cloned()
+                }
+            }
+        }
+    }
+
+    /// Reconcile `selected_subagent` with the session's current
+    /// `active_subagents` set. Called on every `SessionSubagentsChanged`
+    /// event for this session. If the current selection has disappeared,
+    /// snap to the next still-active id in `active_subagent_order` (else
+    /// fall back to `None` / Main). Always notifies — the tab strip
+    /// itself needs a repaint when the active set changes even if the
+    /// selection didn't move.
+    pub(crate) fn on_subagents_changed(&mut self, cx: &mut Context<Self>) {
+        let session = self.session.read(cx);
+        let next = Self::next_selection_after_change(
+            self.selected_subagent.as_ref(),
+            &session.active_subagents,
+            &session.active_subagent_order,
+        );
+        if next != self.selected_subagent {
+            self.selected_subagent = next;
+        }
+        cx.notify();
+    }
+
     fn recompute_rewind_table(&mut self, cx: &App) {
         let session = self.session.read(cx);
         let Some(thread) = session.acp_thread() else {
@@ -2006,6 +2090,17 @@ impl Render for SolutionSessionView {
                 subagent_strip::render_subagent_strip(&session, &store, window, cx)
             })
         };
+        // Subagent-tabs strip (claude `Task` / `Agent` per-turn fanout) —
+        // distinct from `subagent_strip` above, which is the bubble row
+        // for parent/child *Solution* sessions. Built here next to its
+        // sibling because the renderer needs `&mut cx` for click
+        // listeners; placed in the layout right after the status row
+        // (see `.children(...)` below) so the pills sit above the
+        // compose box and below the status indicators.
+        let task_subagent_strip = {
+            let session = self.session.clone();
+            task_subagent_strip::render_task_subagent_strip(self, &session, cx)
+        };
 
         // Pre-pass: build the list of (entry_idx, span_idx) → markdown
         // entity mappings. Done up-front so the borrow on `cx` released by
@@ -2252,6 +2347,18 @@ impl Render for SolutionSessionView {
                                 let Some(entry) = entry_ref else {
                                     return Empty.into_any_element();
                                 };
+                                // Subagent-tab filter: when a non-Main tab
+                                // is selected, hide entries from other
+                                // subagents (or the parent) by collapsing
+                                // them to an `Empty` element. Their slots
+                                // stay in `list_state` so index stability
+                                // (and scroll position) survives a tab
+                                // switch — preferable to a full
+                                // `list_state.reset()` that would jump the
+                                // viewport.
+                                if !this.should_render_entry(entry) {
+                                    return Empty.into_any_element();
+                                }
                                 let rewind_target = if supports_rewind
                                     && matches!(
                                         entry,
@@ -2469,6 +2576,7 @@ impl Render for SolutionSessionView {
                     })
                 })
             })
+            .when_some(task_subagent_strip, |this, strip| this.child(strip))
             .child({
                 // Compose row + resize handle in a single flex_col:
                 // top 6px is the drag handle (sticks out of the editor
