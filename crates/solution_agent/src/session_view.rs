@@ -549,7 +549,15 @@ impl SolutionSessionView {
                 self.list_state.scroll_to_end();
             }
             Some(thread) => {
-                let count = thread.read(cx).entries().len();
+                // Live mode count = cold + live, matching the render-
+                // path concatenation. Without including cold here the
+                // virtualized list would size to live-only and only
+                // render the rows added this session — silently
+                // wiping the visible history on the cold→live
+                // transition (the bug observed when the first send
+                // after editor restart cleared the conversation).
+                let cold_count = self.session.read(cx).cold_entries.len();
+                let count = cold_count + thread.read(cx).entries().len();
                 self.list_state.reset(count);
                 self.list_state.set_follow_mode(FollowMode::Tail);
                 // With `ListAlignment::Top`, the default post-reset
@@ -638,15 +646,24 @@ impl SolutionSessionView {
         cx: &mut Context<Self>,
     ) {
         use acp_thread::AcpThreadEvent::*;
+        // All `AcpThreadEvent` indices are local to the live thread, but
+        // the virtualized list is sized over the cold+live concatenation
+        // (see render path + `sync_thread_subscription`). Offset every
+        // index passed to `list_state` by the cold-entry count so an
+        // EntryUpdated for live[5] doesn't accidentally remeasure
+        // cold[5].
+        let cold_offset = self.session.read(cx).cold_entries.len();
         match event {
             NewEntry => {
-                let count = thread.read(cx).entries().len();
-                if count > 0 {
+                let live_count = thread.read(cx).entries().len();
+                if live_count > 0 {
                     // Insert one Unmeasured slot at the new entry's
-                    // index. The list will measure it on the next
-                    // layout pass; if `FollowMode::Tail` is active, the
-                    // viewport snaps down to include it automatically.
-                    self.list_state.splice((count - 1)..(count - 1), 1);
+                    // global index (cold + live - 1). The list will
+                    // measure it on the next layout pass; if
+                    // `FollowMode::Tail` is active, the viewport snaps
+                    // down to include it automatically.
+                    let global_idx = cold_offset + live_count - 1;
+                    self.list_state.splice(global_idx..global_idx, 1);
                 }
                 self.recompute_rewind_table(cx);
                 if self.find.is_some() {
@@ -654,24 +671,28 @@ impl SolutionSessionView {
                 }
             }
             EntryUpdated(idx) => {
-                // Streaming chunk arrived for `idx` (or a tool call
-                // finished updating its content). Force a remeasure so
-                // the list bumps the entry's row height to match the
-                // new rendered size; without this the list keeps the
-                // pre-stream height and the new text overflows.
-                self.list_state.remeasure_items(*idx..*idx + 1);
+                // Streaming chunk arrived for live[*idx]; remeasure the
+                // corresponding global row so the list bumps its height
+                // to match the new rendered size. Without this the list
+                // keeps the pre-stream height and the new text overflows.
+                let global_idx = cold_offset + *idx;
+                self.list_state
+                    .remeasure_items(global_idx..global_idx + 1);
                 if self.find.is_some() {
                     self.recompute_matches(cx);
                 }
             }
             EntriesRemoved(range) => {
-                self.list_state.splice(range.clone(), 0);
+                let global_range = (cold_offset + range.start)..(cold_offset + range.end);
+                self.list_state.splice(global_range.clone(), 0);
                 // Drop cached markdown entities for entries that no
                 // longer exist; rebuild the rewind table since
                 // truncation changes "which user message is next" for
-                // every surviving prior entry.
+                // every surviving prior entry. The cache is keyed by
+                // GLOBAL index, matching how the render path looks
+                // entries up.
                 self.markdown_cache
-                    .retain(|(idx, _), _| !range.contains(idx));
+                    .retain(|(idx, _), _| !global_range.contains(idx));
                 self.recompute_rewind_table(cx);
                 if self.find.is_some() {
                     self.recompute_matches(cx);
@@ -687,13 +708,17 @@ impl SolutionSessionView {
                 // `WaitingForConfirmation`; remeasure the affected row by
                 // id so the buttons are laid out at the correct height
                 // promptly.
-                if let Some(idx) = thread.read(cx).entries().iter().position(|entry| {
-                    matches!(
-                        entry,
-                        AgentThreadEntry::ToolCall(call) if &call.id == tool_call_id
-                    )
-                }) {
-                    self.list_state.remeasure_items(idx..idx + 1);
+                if let Some(local_idx) =
+                    thread.read(cx).entries().iter().position(|entry| {
+                        matches!(
+                            entry,
+                            AgentThreadEntry::ToolCall(call) if &call.id == tool_call_id
+                        )
+                    })
+                {
+                    let global_idx = cold_offset + local_idx;
+                    self.list_state
+                        .remeasure_items(global_idx..global_idx + 1);
                 }
             }
             _ => {}
@@ -1309,7 +1334,7 @@ impl SolutionSessionView {
             let session_id = self.session_id;
             let state_label = match self.session.read(cx).state {
                 SessionState::Running { .. } => "Running",
-                SessionState::Stopping => "Stopping",
+                SessionState::Stopping { .. } => "Stopping",
                 SessionState::Idle => "Idle",
                 SessionState::AwaitingInput => "AwaitingInput",
                 SessionState::Errored(_) => "Errored",
@@ -1889,24 +1914,31 @@ impl SolutionSessionView {
     /// cache). Empty if there's no thread yet.
     fn collect_entry_texts(&self, cx: &App) -> Vec<Vec<String>> {
         let session = self.session.read(cx);
-        // Cold tabs source from `cold_entries` (reconstructed via
-        // `cold_persistence::from_persisted` at restore time); live
-        // tabs from the live `AcpThread`. Both branches yield
-        // `&AgentThreadEntry` so the markdown-cache pre-pass and the
-        // virtualized list's processor closure stay symmetric.
-        match session.acp_thread() {
-            Some(thread) => thread
-                .read(cx)
-                .entries()
-                .iter()
-                .map(|entry| entry_text_spans(entry, cx))
-                .collect(),
-            None => session
-                .cold_entries
-                .iter()
-                .map(|entry| entry_text_spans(entry, cx))
-                .collect(),
-        }
+        // MUST mirror the render path's cold-then-live concatenation in
+        // `render_conversation_body`. The returned vector indexes the
+        // global entries list — `markdown_for_render` is keyed by
+        // global index, so missing cold entries here means
+        // `render_entry` falls back to a default `Markdown` widget for
+        // cold rows (the observed regression: tiny font + plain
+        // styling on the restored history because the proper
+        // `MarkdownStyle` is only applied via the cached entity that
+        // we never populated for cold indices).
+        let cold_iter = session
+            .cold_entries
+            .iter()
+            .map(|entry| entry_text_spans(entry, cx));
+        let live_iter = session
+            .acp_thread()
+            .map(|thread| {
+                thread
+                    .read(cx)
+                    .entries()
+                    .iter()
+                    .map(|entry| entry_text_spans(entry, cx))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        cold_iter.chain(live_iter).collect()
     }
 
     /// Walks every tool-call terminal currently in the conversation and
@@ -2142,18 +2174,25 @@ impl Render for SolutionSessionView {
                 // spinning up a `list(...)` widget when there's nothing
                 // to scroll through.
                 // `entries_count` covers BOTH live (thread.entries) and
-                // cold (cold_entries) modes — they feed the same
-                // virtualized list so the conversation paints
-                // identically before vs after a restart. Live thread is
-                // the source of truth when present; cold tabs (restored
-                // by `restore_open_tabs`) source from `cold_entries`,
-                // which `cold_persistence::from_persisted` has already
-                // reconstructed into `AgentThreadEntry` shape with
-                // fresh `Markdown` widgets.
-                let entries_count = session
+                // cold (cold_entries) modes. Cold tabs (no live thread)
+                // source from `cold_entries` only. Once the live thread
+                // attaches (first send wakes the agent), `claude
+                // --resume` does NOT re-emit the transcript through
+                // stream-json — so the live thread's `entries()` only
+                // contains messages from THIS session, not the prior
+                // history. To keep the conversation visible after the
+                // cold→live transition we render `cold_entries`
+                // (everything that was persisted at restart) followed
+                // by `thread.entries()` (everything new this session).
+                // The per-entry index passed to the list processor is
+                // global to this concatenation: indices `[0..cold_len)`
+                // are cold, `[cold_len..total)` are live.
+                let cold_count = session.cold_entries.len();
+                let live_count = session
                     .acp_thread()
                     .map(|t| t.read(cx).entries().len())
-                    .unwrap_or_else(|| session.cold_entries.len());
+                    .unwrap_or(0);
+                let entries_count = cold_count + live_count;
 
                 let conversation_body: AnyElement = if entries_count == 0 {
                     div()
@@ -2176,30 +2215,39 @@ impl Render for SolutionSessionView {
                                 // Render call before the list element gets
                                 // painted.
                                 let session = this.session.read(cx);
-                                // Cold mode: no live thread, so feed the
-                                // pre-reconstructed `cold_entries` into
-                                // the same `render_entry` path. Pass an
-                                // invalid `WeakEntity<AcpThread>` — the
-                                // rewind menu (which is the only thread-
-                                // dependent branch in `render_entry`) is
-                                // gated on `rewind_target.is_some()`,
+                                // Cold-then-live concatenation: indices
+                                // `[0..cold_count)` route to
+                                // `cold_entries`; `[cold_count..total)`
+                                // route to the live thread's entries
+                                // offset by `cold_count`. The cold
+                                // branch passes an invalid
+                                // `WeakEntity<AcpThread>` because the
+                                // rewind menu (the only thread-
+                                // dependent branch in `render_entry`)
+                                // is gated on `rewind_target.is_some()`
                                 // and we set that to `None` for cold.
+                                let cold_count_inner = session.cold_entries.len();
                                 let (entry_ref, thread_weak, supports_rewind): (
                                     Option<&AgentThreadEntry>,
                                     gpui::WeakEntity<acp_thread::AcpThread>,
                                     bool,
-                                ) = match session.acp_thread() {
-                                    Some(thread_entity) => {
-                                        let thread = thread_entity.read(cx);
-                                        let supports = thread.supports_truncate(cx);
-                                        let entry = thread.entries().get(idx);
-                                        (entry, thread_entity.downgrade(), supports)
-                                    }
-                                    None => (
+                                ) = if idx < cold_count_inner {
+                                    (
                                         session.cold_entries.get(idx),
                                         gpui::WeakEntity::<acp_thread::AcpThread>::new_invalid(),
                                         false,
-                                    ),
+                                    )
+                                } else if let Some(thread_entity) = session.acp_thread() {
+                                    let thread = thread_entity.read(cx);
+                                    let supports = thread.supports_truncate(cx);
+                                    let entry = thread.entries().get(idx - cold_count_inner);
+                                    (entry, thread_entity.downgrade(), supports)
+                                } else {
+                                    (
+                                        None,
+                                        gpui::WeakEntity::<acp_thread::AcpThread>::new_invalid(),
+                                        false,
+                                    )
                                 };
                                 let Some(entry) = entry_ref else {
                                     return Empty.into_any_element();
@@ -2224,10 +2272,11 @@ impl Render for SolutionSessionView {
                                 // computation. `entry_created_ms` is
                                 // index-aligned with the entries list;
                                 // only `ms > 0` is a real time.
-                                let entry_count = match session.acp_thread() {
-                                    Some(t) => t.read(cx).entries().len(),
-                                    None => session.cold_entries.len(),
-                                };
+                                let entry_count = session.cold_entries.len()
+                                    + session
+                                        .acp_thread()
+                                        .map(|t| t.read(cx).entries().len())
+                                        .unwrap_or(0);
                                 let is_last = idx + 1 == entry_count;
                                 let created_ms = session
                                     .entry_created_ms
@@ -2542,11 +2591,11 @@ impl Render for SolutionSessionView {
                                 }
                                 let is_working = matches!(
                                     self.session.read(cx).state,
-                                    SessionState::Running { .. } | SessionState::Stopping
+                                    SessionState::Running { .. } | SessionState::Stopping { .. }
                                 );
                                 let stopping = matches!(
                                     self.session.read(cx).state,
-                                    SessionState::Stopping
+                                    SessionState::Stopping { .. }
                                 );
                                 let pending_count = self.session.read(cx).pending_messages.len();
                                 let resuming = self.resuming;

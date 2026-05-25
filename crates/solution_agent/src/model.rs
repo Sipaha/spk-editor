@@ -5,7 +5,7 @@ use std::time::Instant;
 use acp_thread::AcpThread;
 use agent_client_protocol::schema as acp;
 use chrono::{DateTime, Utc};
-use gpui::{Context, Entity, EventEmitter, SharedString, Subscription};
+use gpui::{Context, Entity, EventEmitter, SharedString, Subscription, Task};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use solutions::SolutionId;
@@ -125,9 +125,14 @@ pub enum SessionState {
     Idle,
     Running { started_at: Instant, notified: bool },
     /// A cancel was requested; the turn has not yet ended. Bounded by the
-    /// backend's 30s interrupt→kill escalation. No fields — the UI shows an
-    /// indeterminate "Stopping…" indicator.
-    Stopping,
+    /// backend's 30s interrupt→kill escalation AND by the queue-level
+    /// safety net (~40s wall-clock) that force-flips Stopping→Idle if no
+    /// natural `Stopped` event arrives — covers the
+    /// `claude_native::connection::cancel` no-op race where `prompt_tx`
+    /// was already consumed at cancel time and the AcpThread chain never
+    /// emits `Stopped`. `started_at` is the monotonic anchor the safety
+    /// net uses to compute "Stopping… N seconds" for diagnostics.
+    Stopping { started_at: Instant },
     AwaitingInput,
     Errored(SharedString),
 }
@@ -145,7 +150,7 @@ impl SessionState {
         match self {
             Self::Idle => "Idle",
             Self::Running { .. } => "Running",
-            Self::Stopping => "Stopping",
+            Self::Stopping { .. } => "Stopping",
             Self::AwaitingInput => "Awaiting input",
             Self::Errored(_) => "Error",
         }
@@ -318,6 +323,23 @@ pub struct SolutionSession {
     /// sub-agents strip uses this to render a child under its parent
     /// (and to navigate up from a child to its parent).
     pub parent_session_id: Option<SolutionSessionId>,
+    /// Safety-net timer armed by `cancel_turn` whenever the session
+    /// flips to `Stopping`. If the natural `AcpThreadEvent::Stopped`
+    /// (or `Error`) chain fails to fire within
+    /// [`crate::store::queue::STOPPING_SAFETY_NET`], this task force-
+    /// transitions the session back to `Idle` and logs a warning.
+    /// Covers the `claude_native::connection::cancel` race where the
+    /// pump consumed `prompt_tx` between the queue's authoritative
+    /// flip-to-Stopping and the cancel forward, leaving nothing
+    /// downstream to ever emit `Stopped`.
+    ///
+    /// Dropped (and therefore cancelled) by every code path that
+    /// transitions the session out of Stopping naturally
+    /// (`Stopped`/`Error`/`close_session`/`restart_agent`/
+    /// `reset_context`) — leaving a stale task would let a delayed
+    /// safety-net fire onto a now-Idle session and trigger a
+    /// no-op (harmless) but spammy warn-log.
+    pub stopping_safety_net: Option<Task<()>>,
 }
 
 impl SolutionSession {
@@ -360,6 +382,7 @@ impl SolutionSession {
             cached_total_tokens: None,
             cached_max_tokens: None,
             parent_session_id: None,
+            stopping_safety_net: None,
         }
     }
 
@@ -469,6 +492,7 @@ mod tests {
             cached_total_tokens: None,
             cached_max_tokens: None,
             parent_session_id: None,
+            stopping_safety_net: None,
         }
     }
 

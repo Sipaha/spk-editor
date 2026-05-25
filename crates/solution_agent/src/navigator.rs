@@ -100,7 +100,7 @@ fn session_status_indicator(state: &SessionState) -> SessionStatusIndicator {
     match state {
         SessionState::Idle => SessionStatusIndicator::Idle,
         SessionState::Running { .. } => SessionStatusIndicator::Working,
-        SessionState::Stopping => SessionStatusIndicator::Working,
+        SessionState::Stopping { .. } => SessionStatusIndicator::Working,
         SessionState::AwaitingInput => SessionStatusIndicator::AwaitingUser,
         SessionState::Errored(_) => SessionStatusIndicator::Errored,
     }
@@ -196,6 +196,16 @@ pub struct SolutionSessionsNavigator {
     /// here and reuse it instead of downgrading the meter to the global
     /// fallback when a later update reports 0 (the 200k/1M flicker fix).
     pub(crate) cached_max_tokens: HashMap<crate::model::SolutionSessionId, u64>,
+    /// Per-session high-watermark of `used_tokens` observed for the meter.
+    /// claude-acp can report a turn's usage lower than the live context size
+    /// (the terminal `result` only reflects the last sub-call; on a cached
+    /// follow-up turn this collapses to a few k while the cache itself
+    /// still holds ~200k). The session's real context only shrinks on
+    /// `/clear` or `/compact`, so we ratchet `used` up and only ratchet
+    /// down on a step ≥ 50 % drop — large enough to detect a real reset,
+    /// small enough that per-call flicker can't trip it. Mirrors how
+    /// Claude Code's status meter stays put across cached turns.
+    pub(crate) peak_used_tokens: HashMap<crate::model::SolutionSessionId, u64>,
     /// Sessions for which a model fetch is in-flight, used to dedupe
     /// the spawn so the status row doesn't fire a fresh request every
     /// time the agent emits a token-update event.
@@ -277,6 +287,7 @@ impl SolutionSessionsNavigator {
             tab_context_menu: None,
             cached_models: HashMap::default(),
             cached_max_tokens: HashMap::default(),
+            peak_used_tokens: HashMap::default(),
             pending_model_fetches: HashSet::default(),
             thinking_tick: None,
             activity_tick: None,
@@ -1387,6 +1398,7 @@ impl SolutionSessionsNavigator {
             tab_context_menu: None,
             cached_models: HashMap::default(),
             cached_max_tokens: HashMap::default(),
+            peak_used_tokens: HashMap::default(),
             pending_model_fetches: HashSet::default(),
             thinking_tick: None,
             activity_tick: None,

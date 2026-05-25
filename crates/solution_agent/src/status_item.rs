@@ -39,7 +39,7 @@ impl Render for SolutionAgentStatusItem {
                 .filter(|session| {
                     matches!(
                         session.read(cx).state,
-                        SessionState::Running { .. } | SessionState::Stopping
+                        SessionState::Running { .. } | SessionState::Stopping { .. }
                     )
                 })
                 .count()

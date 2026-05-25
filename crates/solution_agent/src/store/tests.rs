@@ -411,7 +411,7 @@ async fn cancel_turn_sets_stopping_and_is_idempotent(cx: &mut TestAppContext) {
         store.update(cx, |store, cx| store.cancel_turn(session_id, cx))
     })
     .expect("cancel_turn");
-    assert!(matches!(read_state(cx), SessionState::Stopping));
+    assert!(matches!(read_state(cx), SessionState::Stopping { .. }));
     assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
 
     // Second cancel while Stopping: no-op, no extra forward.
@@ -420,8 +420,163 @@ async fn cancel_turn_sets_stopping_and_is_idempotent(cx: &mut TestAppContext) {
         store.update(cx, |store, cx| store.cancel_turn(session_id, cx))
     })
     .expect("cancel_turn idempotent");
-    assert!(matches!(read_state(cx), SessionState::Stopping));
+    assert!(matches!(read_state(cx), SessionState::Stopping { .. }));
     assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
+}
+
+/// Regression for the 2026-05-24 "Stopping forever" bug. The
+/// `MockConnection::cancel` is a counter-only no-op (it does NOT fire
+/// `AcpThreadEvent::Stopped`), so without the safety net the session
+/// would sit in `Stopping` for the rest of the process lifetime. With
+/// the net armed in `cancel_turn`, advancing the executor past
+/// `STOPPING_SAFETY_NET` must force-flip the state back to `Idle`.
+#[gpui::test]
+async fn stopping_safety_net_force_flips_to_idle(cx: &mut TestAppContext) {
+    let (session_id, cancel_calls, _tmp) = create_session_with_cancel_counter(cx).await;
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let session = store.session(session_id).expect("session exists");
+            session.update(cx, |s, _| {
+                s.state = SessionState::Running {
+                    started_at: std::time::Instant::now(),
+                    notified: false,
+                };
+            });
+        });
+    });
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| store.cancel_turn(session_id, cx))
+    })
+    .expect("cancel_turn");
+
+    // cancel forwarded once → Stopping → safety net armed.
+    assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
+    let state_after_cancel = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store
+            .read(cx)
+            .session(session_id)
+            .expect("session")
+            .read(cx)
+            .state
+            .clone()
+    });
+    assert!(
+        matches!(state_after_cancel, SessionState::Stopping { .. }),
+        "expected Stopping after cancel, got {state_after_cancel:?}"
+    );
+
+    // Net is 40s. Advance past it; the spawned timer fires and
+    // mutate_state flips the session back to Idle.
+    cx.executor()
+        .advance_clock(crate::store::queue::STOPPING_SAFETY_NET + std::time::Duration::from_secs(1));
+    cx.executor().run_until_parked();
+
+    let state_after_net = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store
+            .read(cx)
+            .session(session_id)
+            .expect("session")
+            .read(cx)
+            .state
+            .clone()
+    });
+    assert!(
+        matches!(state_after_net, SessionState::Idle),
+        "expected Idle after safety net, got {state_after_net:?}"
+    );
+}
+
+/// Sibling regression: when the natural `Stopped` chain DOES fire
+/// (the happy path), the safety net must NOT later overwrite a
+/// legitimate new state. The `mutate_state` cleanup hook drops the
+/// task on the `Stopping → Idle` transition; if that cleanup ever
+/// regresses, a delayed timer would force a healthy `Running` turn
+/// (started after the cancel) back to `Idle` spuriously.
+#[gpui::test]
+async fn stopping_safety_net_does_not_fire_after_natural_recovery(cx: &mut TestAppContext) {
+    let (session_id, _acp_thread, _tmp) = create_session_with_thread(cx).await;
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let session = store.session(session_id).expect("session exists");
+            session.update(cx, |s, _| {
+                s.state = SessionState::Running {
+                    started_at: std::time::Instant::now(),
+                    notified: false,
+                };
+            });
+        });
+    });
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| store.cancel_turn(session_id, cx))
+    })
+    .expect("cancel_turn");
+
+    // Natural recovery: Stopped event fires (the way claude_native does
+    // in the happy path). This must drop the safety-net task via
+    // `mutate_state` cleanup.
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(session_id).expect("session");
+        let thread = session
+            .read(cx)
+            .acp_thread()
+            .cloned()
+            .expect("live thread");
+        thread.update(cx, |_thread, cx| {
+            cx.emit(acp_thread::AcpThreadEvent::Stopped(
+                agent_client_protocol::schema::StopReason::Cancelled,
+            ));
+        });
+    });
+    cx.executor().run_until_parked();
+
+    // Now flip back to Running (a follow-up turn the user kicked off)
+    // and advance past the safety-net window. If the cleanup hook
+    // dropped the task properly, state stays Running. If not, the
+    // delayed timer would force it back to Idle.
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            store.mutate_state(
+                session_id,
+                |state| {
+                    *state = SessionState::Running {
+                        started_at: std::time::Instant::now(),
+                        notified: false,
+                    }
+                },
+                cx,
+            );
+        });
+    });
+    cx.executor()
+        .advance_clock(crate::store::queue::STOPPING_SAFETY_NET + std::time::Duration::from_secs(1));
+    cx.executor().run_until_parked();
+
+    let final_state = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store
+            .read(cx)
+            .session(session_id)
+            .expect("session")
+            .read(cx)
+            .state
+            .clone()
+    });
+    assert!(
+        matches!(final_state, SessionState::Running { .. }),
+        "safety-net must not fire after natural Stopped recovery; got {final_state:?}"
+    );
 }
 
 #[gpui::test]
@@ -1140,6 +1295,60 @@ async fn restore_open_tabs_hydrates_cold_sessions(cx: &mut TestAppContext) {
             assert_eq!(listed, vec![id_b, id_a]);
         });
     });
+}
+
+/// Regression for the close→reopen empty-history bug: the extracted
+/// blob→cold_entries helper must produce exactly the same shape from
+/// the same input regardless of which call site invokes it. Pre-fix,
+/// the v2 reconstruction was inlined in `restore_open_tabs` only; the
+/// `resume_session` ELSE branch silently created an empty
+/// `cold_entries` because `claude --resume` doesn't re-emit the
+/// transcript. This test pins the helper's contract: a structured v2
+/// blob round-trips into a same-length `AgentThreadEntry` vector
+/// (one entry per `PersistedEntryV2`) and a 1:1 `entry_created_ms`
+/// vector — so a future inline-it-back regression in either call
+/// site fails here, not silently in the UI.
+#[gpui::test]
+async fn cold_entries_from_persisted_v2_reconstructs_per_entry(cx: &mut TestAppContext) {
+    use crate::cold_persistence::{
+        PersistedAssistantChunk, PersistedAssistantMessage, PersistedEntryV2,
+        PersistedUserMessage,
+    };
+    let persisted = PersistedSession {
+        title: "demo".into(),
+        entries: vec![],
+        entry_summaries: vec![],
+        entries_v2: vec![
+            PersistedEntryV2::User(PersistedUserMessage {
+                id: None,
+                content_md: "first prompt".into(),
+                chunks: vec![],
+            }),
+            PersistedEntryV2::Assistant(PersistedAssistantMessage {
+                chunks: vec![PersistedAssistantChunk::Message("reply".into())],
+            }),
+        ],
+        entry_created_ms: vec![1_700_000_000_000, 1_700_000_001_000],
+    };
+    let (cold_entries, created_ms) = cx.update(|cx| {
+        crate::store::cold_entries_from_persisted(Some(persisted), cx)
+    });
+    assert_eq!(cold_entries.len(), 2, "v2 reconstruction must be 1:1");
+    assert_eq!(created_ms, vec![1_700_000_000_000, 1_700_000_001_000]);
+    assert!(matches!(
+        cold_entries[0],
+        acp_thread::AgentThreadEntry::UserMessage(_)
+    ));
+    assert!(matches!(
+        cold_entries[1],
+        acp_thread::AgentThreadEntry::AssistantMessage(_)
+    ));
+
+    // None-blob path returns empty vectors (no panic, no garbage).
+    let (cold_entries, created_ms) =
+        cx.update(|cx| crate::store::cold_entries_from_persisted(None, cx));
+    assert!(cold_entries.is_empty());
+    assert!(created_ms.is_empty());
 }
 
 #[test]

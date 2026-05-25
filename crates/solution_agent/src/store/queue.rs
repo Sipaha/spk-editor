@@ -28,6 +28,18 @@ use claude_native::ClaudeNativeConnection;
 use super::{SolutionAgentStore, SolutionAgentStoreEvent};
 use crate::model::{SessionState, SolutionSessionId, SolutionSessionMetadata};
 
+/// How long `Stopping` may persist before the safety net kicks in and
+/// force-flips the session back to `Idle`. Chosen larger than the
+/// `claude_native` 30s interrupt→kill escalation
+/// (`claude_native::connection::DEFAULT_ESCALATION_TIMEOUT`) so a
+/// well-behaved escalation path that *does* eventually emit `Stopped`
+/// (via `recover_session`'s force-resolve) wins the race and the
+/// safety net never trips on a healthy run. 40s leaves a 10s headroom
+/// for cross-process latency without making the user wait noticeably
+/// longer than they already are.
+pub(crate) const STOPPING_SAFETY_NET: std::time::Duration =
+    std::time::Duration::from_secs(40);
+
 /// Scan a thread's entries for a tool call sitting in
 /// `WaitingForConfirmation` and, if found, return its id together with a
 /// REJECT-flavoured `SelectedPermissionOutcome` to unblock it.
@@ -238,9 +250,77 @@ impl SolutionAgentStore {
         // Authoritative, backend-agnostic: flip to Stopping (broadcasts
         // SessionStateChanged) BEFORE forwarding. Stopping -> Idle still arrives
         // via the AcpThreadEvent::Stopped handler.
-        self.mutate_state(session_id, |state| *state = SessionState::Stopping, cx);
+        self.mutate_state(
+            session_id,
+            |state| {
+                *state = SessionState::Stopping {
+                    started_at: std::time::Instant::now(),
+                }
+            },
+            cx,
+        );
         connection.cancel(&acp_session_id, cx);
+        self.arm_stopping_safety_net(session_id, cx);
         Ok(())
+    }
+
+    /// Arm the safety-net timer that force-flips `Stopping → Idle` if no
+    /// `AcpThreadEvent::Stopped` (or `Error`) arrives within
+    /// [`STOPPING_SAFETY_NET`]. Defends against the
+    /// `claude_native::connection::cancel` no-op race: when the pump has
+    /// already consumed `prompt_tx` at the moment of the cancel forward,
+    /// neither `cancel` nor its escalation arms anything that ever fires
+    /// `Stopped`, and the queue state is left in `Stopping` forever (the
+    /// observed bug: 14h+ stuck `spk-editor` tab on 2026-05-24).
+    ///
+    /// Idempotent: if a safety net is already armed for the session, the
+    /// existing timer is reused. The task is stored on the session and
+    /// auto-cancelled by [`super::SolutionAgentStore::mutate_state`]
+    /// when the session leaves `Stopping` naturally.
+    fn arm_stopping_safety_net(
+        &mut self,
+        session_id: SolutionSessionId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session(session_id) else {
+            return;
+        };
+        if session.read(cx).stopping_safety_net.is_some() {
+            return;
+        }
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(STOPPING_SAFETY_NET)
+                .await;
+            let _ = this.update(cx, |store, cx| {
+                let Some(session) = store.session(session_id) else {
+                    return;
+                };
+                let still_stopping = matches!(
+                    session.read(cx).state,
+                    SessionState::Stopping { .. }
+                );
+                if !still_stopping {
+                    return;
+                }
+                let elapsed_secs = match &session.read(cx).state {
+                    SessionState::Stopping { started_at } => started_at.elapsed().as_secs(),
+                    _ => 0,
+                };
+                log::warn!(
+                    target: "solution_agent::queue",
+                    "session={session_id} safety-net force-flip Stopping→Idle after {elapsed_secs}s \
+                     (no AcpThreadEvent::Stopped from backend) — likely the \
+                     claude_native::connection::cancel no-prompt-tx race"
+                );
+                store.mutate_state(
+                    session_id,
+                    |state| *state = SessionState::Idle,
+                    cx,
+                );
+            });
+        });
+        session.update(cx, |s, _| s.stopping_safety_net = Some(task));
     }
 
     /// Cancel the in-flight turn AND, once the resulting `Stopped(Cancelled)`
