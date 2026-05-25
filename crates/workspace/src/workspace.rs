@@ -7803,6 +7803,13 @@ impl Workspace {
             .child(dock.clone())
             .children(leader_border);
 
+        // Horizontal docks (Left and Right) live inside a flex-row container that has h_full.
+        // The container must also declare h_full so that the dock's own h_full resolves
+        // to the full workspace-area height rather than collapsing to zero.
+        if position.axis() == Axis::Horizontal {
+            container = container.h_full();
+        }
+
         // Apply sizing only when the dock is open. When closed the dock is still
         // included in the element tree so its focus handle remains mounted — without
         // this, toggle_panel_focus cannot focus the panel when the dock is closed.
