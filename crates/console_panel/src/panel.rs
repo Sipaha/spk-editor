@@ -1,20 +1,23 @@
 use gpui::{
-    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    Pixels, Render, Subscription, WeakEntity, Window,
+    Action, Anchor, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    IntoElement, Pixels, Render, Subscription, WeakEntity, Window,
 };
 use settings::Settings as _;
+use solution_agent::claude_adapter::CLAUDE_ACP_AGENT_ID;
 use solution_agent::session_view::SolutionSessionView;
 use solution_agent::store::SolutionAgentStore;
 use solution_agent::SolutionSessionId;
+use solutions::{SolutionId, SolutionStore};
+use std::path::PathBuf;
 use terminal_view::TerminalView;
-use ui::prelude::*;
+use ui::{ContextMenu, PopoverMenu, Tooltip, prelude::*};
 use workspace::{
     Item,
     dock::{DockPosition, Panel, PanelEvent},
     Workspace,
 };
 
-use crate::actions::ToggleFocus;
+use crate::actions::{NewChat, NewTerminal, ToggleFocus};
 use crate::{ChatProvider, ConsolePanelSettings, TerminalProvider};
 
 const CONSOLE_PANEL_KEY: &str = "ConsolePanel";
@@ -157,7 +160,103 @@ impl ConsolePanel {
                 );
             strip = strip.child(tab_el);
         }
-        strip
+        strip.child(self.render_plus_popover(cx))
+    }
+
+    fn render_plus_popover(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let has_active_solution = self.active_solution_id(cx).is_some();
+        let plus_container = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .h_full()
+            .px_1p5()
+            .border_r_1()
+            .border_color(cx.theme().colors().border_variant);
+        plus_container.child(
+            PopoverMenu::new("console-panel-plus")
+                .trigger_with_tooltip(
+                    IconButton::new("console-plus", IconName::Plus).icon_size(IconSize::Small),
+                    Tooltip::text("New…"),
+                )
+                .anchor(Anchor::TopLeft)
+                .menu(move |window, cx| {
+                    Some(ContextMenu::build(window, cx, |menu, _, _| {
+                        menu.action("New Terminal", NewTerminal.boxed_clone())
+                            .action_disabled_when(
+                                !has_active_solution,
+                                if has_active_solution {
+                                    "New AI Chat"
+                                } else {
+                                    "New AI Chat (no active solution)"
+                                },
+                                NewChat.boxed_clone(),
+                            )
+                            .action("Spawn Task…", zed_actions::Spawn::modal().boxed_clone())
+                    }))
+                }),
+        )
+    }
+
+    fn active_solution_id(&self, cx: &App) -> Option<SolutionId> {
+        let workspace = self.workspace.upgrade()?;
+        let store = SolutionStore::try_global(cx)?;
+        let store = store.read(cx);
+        let workspace = workspace.read(cx);
+        let project = workspace.project().read(cx);
+        for worktree in project.worktrees(cx) {
+            let abs_path = worktree.read(cx).abs_path();
+            if let Some(sol) = store.solution_for_path(abs_path.as_ref()) {
+                return Some(sol.id.clone());
+            }
+        }
+        None
+    }
+
+    pub fn add_terminal_tab(
+        &mut self,
+        cwd: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let task = self
+            .terminal_provider
+            .update(cx, |provider, cx| provider.new_tab(cwd, window, cx));
+        cx.spawn(async move |this, cx| {
+            let view = task.await?;
+            this.update(cx, |this, cx| {
+                this.tabs.push(ConsoleTab::Terminal { view });
+                this.active_index = Some(this.tabs.len() - 1);
+                cx.notify();
+            })?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
+    }
+
+    pub fn add_chat_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(solution_id) = self.active_solution_id(cx) else {
+            return;
+        };
+        let task = self.chat_provider.update(cx, |provider, cx| {
+            provider.new_tab(
+                solution_id,
+                SharedString::from(CLAUDE_ACP_AGENT_ID),
+                None,
+                window,
+                cx,
+            )
+        });
+        cx.spawn(async move |this, cx| {
+            let (session_id, view) = task.await?;
+            this.update(cx, |this, cx| {
+                this.tabs.push(ConsoleTab::Chat { view, session_id });
+                this.active_index = Some(this.tabs.len() - 1);
+                cx.notify();
+            })?;
+            anyhow::Ok(())
+        })
+        .detach_and_log_err(cx);
     }
 
     fn render_active_tab(&self, _window: &mut Window, _cx: &mut Context<Self>) -> AnyElement {
