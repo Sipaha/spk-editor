@@ -5944,6 +5944,80 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_thought_chunk_with_subagent_meta_sets_subagent_id(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let connection = Rc::new(FakeAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
+            .await
+            .unwrap();
+
+        thread.update(cx, |thread, cx| {
+            thread
+                .handle_session_update(
+                    acp::SessionUpdate::AgentThoughtChunk(chunk_with_subagent("hmm", "T1")),
+                    cx,
+                )
+                .unwrap();
+        });
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.entries().len(), 1);
+            let AgentThreadEntry::AssistantMessage(msg) = &thread.entries()[0] else {
+                panic!("expected AssistantMessage");
+            };
+            assert_eq!(msg.subagent_id, Some(SharedString::from("T1")));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_parent_to_subagent_boundary_starts_new_entry(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let connection = Rc::new(FakeAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
+            .await
+            .unwrap();
+
+        thread.update(cx, |thread, cx| {
+            thread
+                .handle_session_update(
+                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new("parent".into())),
+                    cx,
+                )
+                .unwrap();
+            thread
+                .handle_session_update(
+                    acp::SessionUpdate::AgentMessageChunk(chunk_with_subagent("child", "T1")),
+                    cx,
+                )
+                .unwrap();
+        });
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(thread.entries().len(), 2);
+            let AgentThreadEntry::AssistantMessage(parent) = &thread.entries()[0] else {
+                panic!("expected parent AssistantMessage");
+            };
+            assert_eq!(parent.subagent_id, None);
+            let AgentThreadEntry::AssistantMessage(child) = &thread.entries()[1] else {
+                panic!("expected child AssistantMessage");
+            };
+            assert_eq!(child.subagent_id, Some(SharedString::from("T1")));
+        });
+    }
+
+    #[gpui::test]
     async fn test_assistant_chunks_with_same_subagent_id_coalesce(
         cx: &mut gpui::TestAppContext,
     ) {
