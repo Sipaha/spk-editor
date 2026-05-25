@@ -781,6 +781,66 @@ async fn hook_inject_round_trips_additional_context(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn subagent_tool_use_carries_parent_meta_through_pump(cx: &mut TestAppContext) {
+    // Drives a fake subagent (`parent_tool_use_id != null`) assistant message
+    // through the real update-pump and asserts the resulting ToolCall reaches
+    // the AcpThread. The wire-level `_meta.claudeCode.parentToolUseId` stamp
+    // itself is exercised by translate.rs unit tests — AcpThread's `ToolCall`
+    // entry currently discards `acp::ToolCall.meta` (Etap 2 will surface it
+    // as `subagent_id`), so observing the stamped value here would require
+    // a temporary probe; this end-to-end test instead proves the stamping
+    // path doesn't drop the subagent ToolCall.
+    let project = init_test(cx).await;
+    let connection = connect_mock(
+        &project,
+        vec![("MOCK_CLAUDE_SUBAGENT".to_string(), "1".to_string())],
+        cx,
+    )
+    .await;
+
+    let task = cx.update(|cx| {
+        Rc::clone(&connection).new_session(
+            project.clone(),
+            PathList::new(&[std::env::temp_dir().as_path()]),
+            cx,
+        )
+    });
+    let thread = await_thread(task, cx).await;
+    let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
+
+    let prompt = vec![acp::ContentBlock::Text(acp::TextContent::new(
+        "run a subagent".to_string(),
+    ))];
+    let request = acp::PromptRequest::new(session_id, prompt);
+    let prompt_task = cx.update(|cx| {
+        connection.prompt(acp_thread::UserMessageId::new(), request, cx)
+    });
+
+    let response = {
+        let timeout = cx.background_executor.timer(Duration::from_secs(10)).fuse();
+        let prompt_task = prompt_task.fuse();
+        futures::pin_mut!(timeout, prompt_task);
+        futures::select! {
+            response = prompt_task => response.expect("prompt resolved Ok"),
+            _ = timeout => panic!("prompt did not resolve on result message"),
+        }
+    };
+    assert_eq!(response.stop_reason, acp::StopReason::EndTurn);
+
+    let found_subagent_tool_call = thread.read_with(cx, |thread, _| {
+        thread.entries().iter().any(|entry| matches!(
+            entry,
+            AgentThreadEntry::ToolCall(ToolCall { id, .. })
+                if id.0.as_ref() == "toolu_child_abc"
+        ))
+    });
+    assert!(
+        found_subagent_tool_call,
+        "subagent tool_use must surface as a ToolCall entry on the thread"
+    );
+}
+
+#[gpui::test]
 async fn close_session_kills_process_and_removes_session(cx: &mut TestAppContext) {
     let project = init_test(cx).await;
     let connection = connect_mock(&project, Vec::new(), cx).await;

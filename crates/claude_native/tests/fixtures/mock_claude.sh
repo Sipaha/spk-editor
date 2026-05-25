@@ -76,6 +76,14 @@ while IFS= read -r line; do
 
       emit '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}},"uuid":"u1","session_id":"mock-session"}'
 
+      if [ -n "${MOCK_CLAUDE_SUBAGENT:-}" ]; then
+        # Emit a fake subagent assistant message that carries a tool_use, so
+        # the integration test can assert the pump stamps
+        # `_meta.claudeCode.parentToolUseId` onto the resulting ToolCall
+        # before forwarding it to AcpThread.
+        emit '{"type":"assistant","parent_tool_use_id":"toolu_parent_xyz","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_child_abc","name":"Bash","input":{"command":"ls"}}]},"uuid":"u-sub","session_id":"mock-session"}'
+      fi
+
       hook_echo="none"
       if [ -n "${MOCK_CLAUDE_HOOK_INJECT:-}" ]; then
         # Fire a single PostToolUse-style hook_callback and wait for the

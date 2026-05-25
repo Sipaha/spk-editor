@@ -15,6 +15,51 @@ pub enum TurnEnd {
     Error(String),
 }
 
+/// Top-level `_meta` key for Claude Code-specific extensions on ACP updates.
+/// Mirrors the `claudeCode.*` namespace claude itself stamps on its own
+/// stream-json output; downstream consumers read this object to recover info
+/// the ACP schema doesn't model (today: the parent tool_use id of a subagent
+/// emission).
+pub const CLAUDE_CODE_META_KEY: &str = "claudeCode";
+/// Nested key under [`CLAUDE_CODE_META_KEY`] that carries the parent
+/// `tool_use_id` for any SessionUpdate produced from a subagent
+/// (`OutputMessage::parent_tool_use_id.is_some()`) message. Etap 2 reads this
+/// to attach a `subagent_id` to AssistantMessage / ToolCall entries.
+pub const PARENT_TOOL_USE_ID_META_KEY: &str = "parentToolUseId";
+
+/// Stamp `_meta.claudeCode.parentToolUseId = <id>` onto the SessionUpdate
+/// variants the subagent emit path actually produces (chunks / tool call /
+/// tool-call update / plan). Other variants are left untouched: a subagent
+/// can't legitimately emit an `AvailableCommandsUpdate`,
+/// `CurrentModeUpdate`, `ConfigOptionUpdate`, `SessionInfoUpdate`, or
+/// `UsageUpdate` (`apply_stream_usage` short-circuits when
+/// `parent_tool_use_id.is_some()`).
+///
+/// Merges into any existing meta the variant might already carry rather than
+/// replacing — the helper is composable so a future stamp on the same update
+/// won't silently overwrite ours.
+pub fn stamp_subagent_meta(update: &mut acp::SessionUpdate, parent_tool_use_id: &str) {
+    let meta = match update {
+        acp::SessionUpdate::UserMessageChunk(c)
+        | acp::SessionUpdate::AgentMessageChunk(c)
+        | acp::SessionUpdate::AgentThoughtChunk(c) => &mut c.meta,
+        acp::SessionUpdate::ToolCall(t) => &mut t.meta,
+        acp::SessionUpdate::ToolCallUpdate(t) => &mut t.meta,
+        acp::SessionUpdate::Plan(p) => &mut p.meta,
+        _ => return,
+    };
+    let outer = meta.get_or_insert_with(serde_json::Map::new);
+    let nested = outer
+        .entry(CLAUDE_CODE_META_KEY.to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let serde_json::Value::Object(map) = nested {
+        map.insert(
+            PARENT_TOOL_USE_ID_META_KEY.to_string(),
+            serde_json::Value::String(parent_tool_use_id.to_string()),
+        );
+    }
+}
+
 /// Translate one output message into zero or more `SessionUpdate`s.
 ///
 /// Subagent output (`parent_tool_use_id.is_some()`) is collapsed in the
@@ -1320,6 +1365,70 @@ mod tests {
             ),
             "head\n\ntail"
         );
+    }
+
+    #[test]
+    fn stamp_subagent_meta_writes_nested_claude_code_key() {
+        let mut update = acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(acp::ToolCallId::new("toolu_child"), "Read"),
+        );
+        stamp_subagent_meta(&mut update, "toolu_parent");
+        let meta = match &update {
+            acp::SessionUpdate::ToolCall(t) => t.meta.as_ref().expect("meta set"),
+            other => panic!("{other:?}"),
+        };
+        let nested = meta
+            .get(CLAUDE_CODE_META_KEY)
+            .and_then(|v| v.as_object())
+            .expect("claudeCode object");
+        assert_eq!(
+            nested
+                .get(PARENT_TOOL_USE_ID_META_KEY)
+                .and_then(|v| v.as_str()),
+            Some("toolu_parent"),
+        );
+    }
+
+    #[test]
+    fn stamp_subagent_meta_preserves_existing_keys() {
+        // Sanity check the merge semantics — a future stamp on the same update
+        // must not nuke unrelated keys that another helper wrote first.
+        let mut existing = serde_json::Map::new();
+        existing.insert("otherKey".into(), serde_json::json!(42));
+        let mut update = acp::SessionUpdate::AgentMessageChunk(
+            acp::ContentChunk::new(text_block("hi")).meta(Some(existing)),
+        );
+        stamp_subagent_meta(&mut update, "toolu_parent");
+        let meta = match &update {
+            acp::SessionUpdate::AgentMessageChunk(c) => c.meta.as_ref().expect("meta set"),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(meta.get("otherKey"), Some(&serde_json::json!(42)));
+        let nested = meta
+            .get(CLAUDE_CODE_META_KEY)
+            .and_then(|v| v.as_object())
+            .expect("claudeCode object");
+        assert_eq!(
+            nested
+                .get(PARENT_TOOL_USE_ID_META_KEY)
+                .and_then(|v| v.as_str()),
+            Some("toolu_parent"),
+        );
+    }
+
+    #[test]
+    fn stamp_subagent_meta_ignores_non_subagent_variants() {
+        let mut update = acp::SessionUpdate::UsageUpdate(acp::UsageUpdate::new(10, 100));
+        stamp_subagent_meta(&mut update, "toolu_parent");
+        // UsageUpdate has no `meta` field today, and the subagent path never
+        // emits one — verify we silently no-op rather than panicking.
+        match update {
+            acp::SessionUpdate::UsageUpdate(u) => {
+                assert_eq!(u.used, 10);
+                assert_eq!(u.size, 100);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

@@ -40,7 +40,8 @@ use crate::protocol::{
 };
 use crate::translate::{
     DEFAULT_CONTEXT_WINDOW, TurnEnd, apply_stream_usage, apply_usage, assistant_usage_update,
-    classify_result, image_block_from_anthropic, infer_context_window_from_model, translate,
+    classify_result, image_block_from_anthropic, infer_context_window_from_model,
+    stamp_subagent_meta, translate,
 };
 use crate::watchdog::{AnalyzerContext, ClaudeAnalyzer, Watchdog};
 
@@ -1242,6 +1243,7 @@ async fn run_update_pump(
             if m.parent_tool_use_id.is_none() {
                 turn_stats.assistant_messages_received += 1;
             }
+            let parent_id = m.parent_tool_use_id.clone();
             let blocks = m
                 .message
                 .get("content")
@@ -1269,14 +1271,13 @@ async fn run_update_pump(
                             let chunk = acp::ContentChunk::new(acp::ContentBlock::Text(
                                 acp::TextContent::new(text.to_string()),
                             ));
+                            let mut update = acp::SessionUpdate::AgentMessageChunk(chunk);
+                            if let Some(parent) = parent_id.as_deref() {
+                                stamp_subagent_meta(&mut update, parent);
+                            }
                             thread
                                 .update(cx, |thread, cx| {
-                                    thread
-                                        .handle_session_update(
-                                            acp::SessionUpdate::AgentMessageChunk(chunk),
-                                            cx,
-                                        )
-                                        .log_err();
+                                    thread.handle_session_update(update, cx).log_err();
                                 })
                                 .ok();
                             text_blocks_recovered += 1;
@@ -1289,14 +1290,13 @@ async fn run_update_pump(
                             let chunk = acp::ContentChunk::new(acp::ContentBlock::Text(
                                 acp::TextContent::new(text.to_string()),
                             ));
+                            let mut update = acp::SessionUpdate::AgentThoughtChunk(chunk);
+                            if let Some(parent) = parent_id.as_deref() {
+                                stamp_subagent_meta(&mut update, parent);
+                            }
                             thread
                                 .update(cx, |thread, cx| {
-                                    thread
-                                        .handle_session_update(
-                                            acp::SessionUpdate::AgentThoughtChunk(chunk),
-                                            cx,
-                                        )
-                                        .log_err();
+                                    thread.handle_session_update(update, cx).log_err();
                                 })
                                 .ok();
                             thinking_blocks_recovered += 1;
@@ -1311,14 +1311,13 @@ async fn run_update_pump(
                         // images so the UI handles either side identically.
                         if let Some(image) = image_block_from_anthropic(block) {
                             let chunk = acp::ContentChunk::new(image);
+                            let mut update = acp::SessionUpdate::AgentMessageChunk(chunk);
+                            if let Some(parent) = parent_id.as_deref() {
+                                stamp_subagent_meta(&mut update, parent);
+                            }
                             thread
                                 .update(cx, |thread, cx| {
-                                    thread
-                                        .handle_session_update(
-                                            acp::SessionUpdate::AgentMessageChunk(chunk),
-                                            cx,
-                                        )
-                                        .log_err();
+                                    thread.handle_session_update(update, cx).log_err();
                                 })
                                 .ok();
                             image_blocks_recovered += 1;
@@ -1341,14 +1340,13 @@ async fn run_update_pump(
                                     .to_string(),
                             ),
                         ));
+                        let mut update = acp::SessionUpdate::AgentThoughtChunk(chunk);
+                        if let Some(parent) = parent_id.as_deref() {
+                            stamp_subagent_meta(&mut update, parent);
+                        }
                         thread
                             .update(cx, |thread, cx| {
-                                thread
-                                    .handle_session_update(
-                                        acp::SessionUpdate::AgentThoughtChunk(chunk),
-                                        cx,
-                                    )
-                                    .log_err();
+                                thread.handle_session_update(update, cx).log_err();
                             })
                             .ok();
                         redacted_blocks_recovered += 1;
@@ -1428,7 +1426,16 @@ async fn run_update_pump(
             );
         }
 
-        for update in translate(&message) {
+        let parent_tool_use_id = match &message {
+            OutputMessage::Assistant(m) => m.parent_tool_use_id.clone(),
+            OutputMessage::User(m) => m.parent_tool_use_id.clone(),
+            OutputMessage::StreamEvent(ev) => ev.parent_tool_use_id.clone(),
+            _ => None,
+        };
+        for mut update in translate(&message) {
+            if let Some(parent) = parent_tool_use_id.as_deref() {
+                stamp_subagent_meta(&mut update, parent);
+            }
             thread
                 .update(cx, |thread, cx| {
                     thread.handle_session_update(update, cx).log_err();
