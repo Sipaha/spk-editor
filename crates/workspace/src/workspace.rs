@@ -7800,6 +7800,14 @@ impl Workspace {
             .flex()
             .overflow_hidden()
             .flex_none()
+            .debug_selector(move || {
+                let label = match position {
+                    DockPosition::Left => "left",
+                    DockPosition::Bottom => "bottom",
+                    DockPosition::Right => "right",
+                };
+                format!("{label}-dock-container")
+            })
             .child(dock.clone())
             .children(leader_border);
 
@@ -8593,6 +8601,7 @@ impl Render for Workspace {
                                     .h_full()
                                     .w_full()
                                     .overflow_hidden()
+                                    .debug_selector(|| "dock-row".into())
                                     .child(self.render_left_dock_strip(cx))
                                     .children(self.render_dock(
                                         DockPosition::Left,
@@ -15696,6 +15705,63 @@ mod tests {
         assert!(
             still_kept,
             "/keep WorktreeId must be preserved across the swap so panels don't invalidate"
+        );
+    }
+
+    /// Guard against regressions in the dock layout introduced in A1–A3:
+    /// - Right Dock container spans the full workspace-area height.
+    /// - Bottom Dock container's right edge meets the Right Dock's left edge.
+    #[gpui::test]
+    async fn right_dock_spans_full_workspace_height(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+
+        // Register a panel in each of the two docks so they can be opened.
+        workspace.update_in(cx, |workspace, window, cx| {
+            let right_panel = cx.new(|cx| TestPanel::new(DockPosition::Right, 100, cx));
+            workspace.add_panel(right_panel, window, cx);
+
+            let bottom_panel = cx.new(|cx| TestPanel::new(DockPosition::Bottom, 100, cx));
+            workspace.add_panel(bottom_panel, window, cx);
+
+            workspace
+                .right_dock()
+                .update(cx, |dock, cx| dock.set_open(true, window, cx));
+            workspace
+                .bottom_dock()
+                .update(cx, |dock, cx| dock.set_open(true, window, cx));
+        });
+        cx.run_until_parked();
+
+        // dock-row is the h_flex that contains all three dock containers and the center
+        // pane column. Its bounds define the true content-area extents (inside the border).
+        let dock_row = cx
+            .debug_bounds("dock-row")
+            .expect("dock-row element should be rendered");
+        let right_dock = cx
+            .debug_bounds("right-dock-container")
+            .expect("right-dock-container should be rendered when right dock is open");
+        let bottom_dock = cx
+            .debug_bounds("bottom-dock-container")
+            .expect("bottom-dock-container should be rendered when bottom dock is open");
+
+        assert_eq!(
+            right_dock.origin.y, dock_row.origin.y,
+            "right dock top should equal dock-row top"
+        );
+        assert_eq!(
+            right_dock.origin.y + right_dock.size.height,
+            dock_row.origin.y + dock_row.size.height,
+            "right dock bottom should equal dock-row bottom"
+        );
+        assert_eq!(
+            bottom_dock.origin.x + bottom_dock.size.width,
+            right_dock.origin.x,
+            "bottom dock right edge should meet right dock left edge"
         );
     }
 }
