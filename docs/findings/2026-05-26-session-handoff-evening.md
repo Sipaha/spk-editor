@@ -1,9 +1,36 @@
 # Session handoff — 2026-05-26 (evening)
 
 **Supersedes:** `2026-05-26-session-handoff.md` (morning snapshot at B7/15).
-**Status:** session paused after Option A landed — Navigator refactor complete,
-`SolutionSessionsNavigator` deleted, `render_status_row` lifted to a free
-function in `solution_agent::status_row`. Resume on branch `hook-inject`.
+**Status:** session paused after **Phase B at 13.5/15** — ConsolePanel
+end-to-end live-verified (open editor → terminal + chat tabs → restart →
+both restored). Resume on branch `hook-inject`.
+
+**This session shipped (in chronological order):**
+- B8 `+` popover, B9 tab context menus, double-lease fix, verification
+  screenshot.
+- B11-A.1/2/3 navigator refactor (1493 LOC of `navigator.rs` deleted;
+  `render_status_row` lifted to a free function).
+- B11-factory ×3 (extracted `add_center_terminal` to a free function,
+  ported `add_terminal_task` / `spawn_task` / `new_terminal` onto
+  ConsolePanel, re-pointed all `panel::<TerminalPanel>` lookups).
+- B11-wireup (registered `ConsolePanel::load` in `zed.rs`, updated keymap
+  + app menu + vim commands).
+- B10 (new `console_panel_state` table + queries + DB round-trip test;
+  ConsolePanel save on every tab mutation; `restore_from_db` re-spawns
+  terminals at stored cwd; chat session hydration via
+  `SolutionAgentStore::hydrate_all_for_solution`).
+- B12-partial (dropped `terminal.dock` setting + 8 callsites; the
+  ConsolePanel-owns-its-own-dock-position story now ends at the panel).
+
+**Remaining Phase B work (~1.5 items):**
+- B12-rest: drop dead `width`/`height` fields on ConsolePanel, drop
+  `persist_tab_order` / `restore_open_tabs` from `solution_agent::store`,
+  shrink `TerminalPanel` to just its still-used helpers
+  (`new_terminal_pane`, `prepare_task_for_spawn`).
+- B13: update `CLAUDE.md` action references; add row to `FORK.md`
+  touched-files table + ConsolePanel architectural decision entry.
+- B14: MCP-driven e2e test in `crates/console_panel/tests/`.
+- B15: final screenshots into `docs/findings/...-shipped/`.
 
 Active arc: **ConsolePanel** — unified bottom-dock panel hosting both terminal
 and AI-chat tabs. Phase A (Right Dock full-height layout) shipped. Phase B
