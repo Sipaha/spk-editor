@@ -396,13 +396,11 @@ mod tests {
                 )
             });
 
-            let navigator = cx.new(|cx| crate::navigator::SolutionSessionsNavigator::for_test(cx));
             cx.new(|cx| {
                 crate::session_view::SolutionSessionView::for_test(
                     session_id,
                     session,
                     workspace_weak.clone(),
-                    navigator.downgrade(),
                     window,
                     cx,
                 )

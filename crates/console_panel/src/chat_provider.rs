@@ -1,6 +1,5 @@
 use anyhow::{Result, anyhow};
 use gpui::{App, AppContext as _, AsyncWindowContext, Context, Entity, EventEmitter, Subscription, Task, WeakEntity, Window};
-use solution_agent::navigator::SolutionSessionsNavigator;
 use solution_agent::session_view::SolutionSessionView;
 use solution_agent::store::{SolutionAgentStore, SolutionAgentStoreEvent};
 use solution_agent::{AgentServerId, SolutionSession, SolutionSessionId};
@@ -75,14 +74,8 @@ impl ChatProvider {
             })??;
 
             let view = workspace.update_in(cx, |_ws, window, cx| {
-                // Pass an invalid (permanently dead) navigator handle: the view
-                // gracefully skips rendering the status row when the navigator
-                // can't be upgraded (upgrade() → None). ConsolePanel provides
-                // its own chrome and does not use SolutionSessionsNavigator.
-                let navigator: WeakEntity<SolutionSessionsNavigator> =
-                    WeakEntity::new_invalid();
                 cx.new(|cx| {
-                    SolutionSessionView::new(session_id, session, workspace.clone(), navigator, window, cx)
+                    SolutionSessionView::new(session_id, session, workspace.clone(), window, cx)
                 })
             })?;
 
@@ -110,10 +103,8 @@ impl ChatProvider {
             })??;
 
             let view = workspace.update_in(cx, |_ws, window, cx| {
-                let navigator: WeakEntity<SolutionSessionsNavigator> =
-                    WeakEntity::new_invalid();
                 cx.new(|cx| {
-                    SolutionSessionView::new(session_id, session, workspace.clone(), navigator, window, cx)
+                    SolutionSessionView::new(session_id, session, workspace.clone(), window, cx)
                 })
             })?;
 

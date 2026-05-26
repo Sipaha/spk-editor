@@ -32,7 +32,6 @@ use crate::expanded_compose::{
     ExpandedComposeWindowView,
 };
 use crate::model::{SessionState, SolutionSession, SolutionSessionEvent, SolutionSessionId};
-use crate::navigator::SolutionSessionsNavigator;
 use crate::slash_commands::SlashCommandsProvider;
 use crate::store::SolutionAgentStore;
 
@@ -105,15 +104,34 @@ pub struct SolutionSessionView {
     session: Entity<SolutionSession>,
     focus_handle: FocusHandle,
     workspace: WeakEntity<Workspace>,
-    /// Weak handle back to the hosting navigator so the view can render
-    /// the status row inline (between conversation and compose) instead
-    /// of letting the navigator paint it as part of the panel chrome.
-    /// The status row's buttons (compact, history popover) need
-    /// `cx.listener` bindings against the navigator's `Self`, so the
-    /// element is built inside `navigator.update(...)` and embedded into
-    /// the view's element tree. Weak so closing the panel doesn't keep
-    /// the navigator alive through the active view.
-    navigator: WeakEntity<SolutionSessionsNavigator>,
+    /// Resolved model name for the status row. Filled lazily on the first
+    /// render that asks (claude-acp's `selected_model` is an async ACP
+    /// round-trip); subsequent renders read this synchronously.
+    pub(crate) status_cached_model: Option<SharedString>,
+    /// Last-known real (non-zero) context-window limit for the meter.
+    /// claude-acp can omit `max_tokens` on later updates; once a real
+    /// value is observed we hold it here so a follow-up `0`/missing
+    /// reading doesn't downgrade the meter to the global fallback (the
+    /// 200k/1M flicker fix).
+    pub(crate) status_cached_max_tokens: Option<u64>,
+    /// High-watermark of `used_tokens` for the meter. Real context only
+    /// shrinks on `/clear` or `/compact`, so we ratchet `used` up freely
+    /// and only ratchet down past a ≥ 90 % collapse (see
+    /// `status_row::smooth_used_tokens`).
+    pub(crate) status_peak_used_tokens: u64,
+    /// True while a model fetch for this session is in flight; deduped so
+    /// the row doesn't fire a fresh request every token-update.
+    pub(crate) status_pending_model_fetch: bool,
+    /// 1-second tick that re-renders the status row so the "Thinking…
+    /// Ns" elapsed counter advances even when no AcpThreadEvents fire
+    /// (long pauses between tool calls etc.). Set by the status row when
+    /// the session is observed in `Running`; dropped (and so cancelled)
+    /// the next render that observes a non-Running state.
+    pub(crate) status_thinking_tick: Option<Task<()>>,
+    /// Coarse ~15s tick that re-renders the status row so the "last
+    /// activity" relative label stays current. Self-cancels when the
+    /// view is dropped.
+    pub(crate) status_activity_tick: Option<Task<()>>,
     compose_editor: Entity<editor::Editor>,
     pending_images: Vec<PendingImage>,
     find: Option<FindState>,
@@ -313,7 +331,6 @@ impl SolutionSessionView {
         session_id: SolutionSessionId,
         session: Entity<SolutionSession>,
         workspace: WeakEntity<Workspace>,
-        navigator: WeakEntity<SolutionSessionsNavigator>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -449,7 +466,12 @@ impl SolutionSessionView {
             session,
             focus_handle: cx.focus_handle(),
             workspace,
-            navigator,
+            status_cached_model: None,
+            status_cached_max_tokens: None,
+            status_peak_used_tokens: 0,
+            status_pending_model_fetch: false,
+            status_thinking_tick: None,
+            status_activity_tick: None,
             compose_editor,
             pending_images: Vec::new(),
             find: None,
@@ -539,6 +561,10 @@ impl SolutionSessionView {
 
     pub(crate) fn workspace_handle(&self) -> &WeakEntity<Workspace> {
         &self.workspace
+    }
+
+    pub(crate) fn session_entity(&self) -> &Entity<SolutionSession> {
+        &self.session
     }
 
     /// Flip the expanded/collapsed state of the queued-prefix chip on
@@ -1980,11 +2006,10 @@ impl SolutionSessionView {
         session_id: crate::model::SolutionSessionId,
         session: gpui::Entity<crate::model::SolutionSession>,
         workspace: gpui::WeakEntity<workspace::Workspace>,
-        navigator: gpui::WeakEntity<crate::navigator::SolutionSessionsNavigator>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new(session_id, session, workspace, navigator, window, cx)
+        Self::new(session_id, session, workspace, window, cx)
     }
 
     pub(crate) fn pending_send_for_test(&self) -> Option<&Vec<acp::ContentBlock>> {
@@ -2578,23 +2603,13 @@ impl Render for SolutionSessionView {
             .children({
                 // Status row sits directly above the compose box: token
                 // meter / agent / model / "Thinking… 3m12s" / "Done in
-                // 2m15s" all read from the bottom-right cluster the
-                // user already looks at when sending. Built through the
-                // navigator's `render_status_row` because its buttons
-                // (compact, history popover) need `cx.listener`
-                // bindings against `SolutionSessionsNavigator::Self`.
-                let active_view = cx.entity();
-                // Precompute view-local flags BEFORE entering `nav.update`:
-                // inside that closure GPUI has the view entity leased (we're
-                // in our own `render`), so `active_view.read(cx)` would
-                // double-lease and panic. The navigator's status row only
-                // needs the resulting `bool`, not the live entity.
+                // 2m15s" all read from the bottom-right cluster the user
+                // already looks at when sending. Built as a free function
+                // in `status_row` that takes `&mut self` so its caches
+                // and timers live on the view; the row's compact/clear
+                // popover calls back into `SolutionSessionView` methods.
                 let is_resuming = self.is_resuming();
-                self.navigator.upgrade().and_then(|nav| {
-                    nav.update(cx, |nav, ncx| {
-                        nav.render_status_row(Some(&active_view), is_resuming, ncx)
-                    })
-                })
+                crate::status_row::render_status_row(self, is_resuming, cx)
             })
             .when_some(task_subagent_strip, |this, strip| this.child(strip))
             .child({

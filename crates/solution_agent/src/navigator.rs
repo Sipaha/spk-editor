@@ -500,13 +500,11 @@ impl SolutionSessionsNavigator {
             cx.notify();
             return;
         }
-        let navigator = cx.entity().downgrade();
         let view = cx.new(|cx| {
             SolutionSessionView::new(
                 session_id,
                 session,
                 self.workspace.clone(),
-                navigator,
                 window,
                 cx,
             )

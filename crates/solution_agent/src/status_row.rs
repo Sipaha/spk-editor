@@ -186,21 +186,18 @@ impl SolutionSessionsNavigator {
             )
     }
 
-    /// Resolves the agent's currently-selected model name asynchronously
-    /// and stores it in `cached_models`. The status row reads this cache
-    /// on subsequent renders. We dedupe in-flight fetches via
-    /// `pending_model_fetches` so the row doesn't fire a fresh request
-    /// every frame.
-    fn ensure_model_loaded(
-        &mut self,
-        session_id: crate::model::SolutionSessionId,
-        cx: &mut Context<Self>,
-    ) {
-        if self.cached_models.contains_key(&session_id)
-            || self.pending_model_fetches.contains(&session_id)
-        {
+}
+
+impl SolutionSessionView {
+    /// Resolve the agent's currently-selected model name asynchronously
+    /// and store it in `status_cached_model`. The status row reads this
+    /// cache on subsequent renders; `status_pending_model_fetch` dedupes
+    /// the spawn so the row doesn't fire a fresh request every frame.
+    fn ensure_status_model_loaded(&mut self, cx: &mut Context<Self>) {
+        if self.status_cached_model.is_some() || self.status_pending_model_fetch {
             return;
         }
+        let session_id = self.session_id();
         let store = SolutionAgentStore::global(cx);
         let Some(thread) = store
             .read(cx)
@@ -215,13 +212,13 @@ impl SolutionSessionsNavigator {
             return;
         };
         let task = selector.selected_model(cx);
-        self.pending_model_fetches.insert(session_id);
+        self.status_pending_model_fetch = true;
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |this, cx| {
-                this.pending_model_fetches.remove(&session_id);
+                this.status_pending_model_fetch = false;
                 if let Ok(info) = result {
-                    this.cached_models.insert(session_id, info.name);
+                    this.status_cached_model = Some(info.name);
                     cx.notify();
                 }
             })
@@ -230,33 +227,27 @@ impl SolutionSessionsNavigator {
         .detach();
     }
 
-    /// Spawn a background tick that wakes the navigator once a second
-    /// for as long as any open session sits in `Running`. Drives the
-    /// "Thinking… Ns" counter in the status row without depending on
-    /// AcpThreadEvent firing during quiet pauses. Idempotent: a second
-    /// call while `thinking_tick` is already `Some` is a no-op.
-    fn ensure_thinking_tick(&mut self, cx: &mut Context<Self>) {
-        if self.thinking_tick.is_some() {
+    /// Spawn a 1 Hz tick that re-renders this view for as long as the
+    /// session sits in `Running`. Drives the "Thinking… Ns" counter in
+    /// the status row even when no AcpThreadEvents fire (long pauses
+    /// between tool calls). Idempotent.
+    fn ensure_status_thinking_tick(&mut self, cx: &mut Context<Self>) {
+        if self.status_thinking_tick.is_some() {
             return;
         }
-        self.thinking_tick = Some(cx.spawn(async move |this, cx| {
+        self.status_thinking_tick = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(1))
                     .await;
                 let still_running = this
                     .update(cx, |this, cx| {
-                        let store = SolutionAgentStore::global(cx);
-                        let active_session_running = this
-                            .selected_index
-                            .and_then(|idx| this.open_sessions.get(idx).copied())
-                            .and_then(|sid| store.read(cx).session(sid))
-                            .map(|s| matches!(s.read(cx).state, SessionState::Running { .. }))
-                            .unwrap_or(false);
-                        if active_session_running {
+                        let session = this.session_entity().read(cx);
+                        let running = matches!(session.state, SessionState::Running { .. });
+                        if running {
                             cx.notify();
                         }
-                        active_session_running
+                        running
                     })
                     .ok()
                     .unwrap_or(false);
@@ -264,84 +255,80 @@ impl SolutionSessionsNavigator {
                     break;
                 }
             }
-            // Self-cleanup so the next Running flip starts a fresh
-            // tick instead of relying on the next render to reset the
-            // slot.
             let _ = this.update(cx, |this, _| {
-                this.thinking_tick = None;
+                this.status_thinking_tick = None;
             });
         }));
     }
 
-    /// Spawn a coarse background tick (~15s) that wakes the navigator so
-    /// the status row's "last activity" relative label ("· 8m ago") stays
-    /// current without depending on AcpThreadEvents. Unlike
-    /// `ensure_thinking_tick` (1 Hz, Running-only) this runs for as long as
-    /// any session tab is open — "ago" granularity doesn't need anything
-    /// tighter. Idempotent; self-cancels once no session is selected.
-    fn ensure_activity_tick(&mut self, cx: &mut Context<Self>) {
-        if self.activity_tick.is_some() {
+    /// Spawn a coarse ~15s tick so the status row's "last activity"
+    /// relative label stays current without AcpThreadEvents. Runs for
+    /// as long as this view is alive; the timer task is held in
+    /// `status_activity_tick` and gets dropped (cancelled) when the
+    /// view is dropped.
+    fn ensure_status_activity_tick(&mut self, cx: &mut Context<Self>) {
+        if self.status_activity_tick.is_some() {
             return;
         }
-        self.activity_tick = Some(cx.spawn(async move |this, cx| {
+        self.status_activity_tick = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(15))
                     .await;
-                let session_open = this
-                    .update(cx, |this, cx| {
-                        let open = this
-                            .selected_index
-                            .and_then(|idx| this.open_sessions.get(idx).copied())
-                            .is_some();
-                        if open {
-                            cx.notify();
-                        }
-                        open
+                if this
+                    .update(cx, |_, cx| {
+                        cx.notify();
                     })
-                    .ok()
-                    .unwrap_or(false);
-                if !session_open {
+                    .is_err()
+                {
                     break;
                 }
             }
             let _ = this.update(cx, |this, _| {
-                this.activity_tick = None;
+                this.status_activity_tick = None;
             });
         }));
     }
 
-    pub(crate) fn render_status_row(
-        &mut self,
-        active_view: Option<&Entity<SolutionSessionView>>,
-        is_resuming: bool,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        let session_id = self
-            .selected_index
-            .and_then(|i| self.open_sessions.get(i).copied())?;
-        let session = active_view.and_then(|v| {
-            let _ = v;
-            SolutionAgentStore::global(cx).read_with(cx, |s, _| s.session(session_id))
-        })?;
-        let s = session.read(cx);
-        let agent_id = s.agent_id.clone();
-        // Working-directory label: the project name the user picked when
-        // creating this session ("Solution root" → "ROOT", member project
-        // → catalog name). Lookup needs the live `Solution` so we can
-        // compare against `solution.root` and resolve member catalog ids.
-        let cwd_label: SharedString = solutions::SolutionStore::try_global(cx)
-            .and_then(|store| {
-                store.read_with(cx, |store, _| {
-                    store
-                        .solutions()
-                        .iter()
-                        .find(|sol| sol.id == s.solution_id)
-                        .cloned()
-                })
+}
+
+/// Free-function entry point used by `SolutionSessionView::render`. Lives in
+/// `status_row` rather than as a method on the view so the file boundary
+/// matches the visual one — everything below the conversation list +
+/// above the compose row is owned by this module. `is_resuming` is
+/// precomputed by the caller because reading it from the view inside
+/// this function would re-borrow while GPUI's renderer already holds the
+/// entity's lease.
+pub(crate) fn render_status_row(
+    view: &mut SolutionSessionView,
+    is_resuming: bool,
+    cx: &mut Context<SolutionSessionView>,
+) -> Option<gpui::AnyElement> {
+    let session_id = view.session_id();
+    let session = SolutionAgentStore::global(cx).read_with(cx, |s, _| s.session(session_id))?;
+    let weak_view = cx.entity().downgrade();
+    // Snapshot phase: read every value we need from the live session
+    // entity, drop the borrow, THEN mutate view caches and spawn timers.
+    // Without this split the mutating section would clash with the
+    // immutable borrow of `s` through `cx`.
+    let s = session.read(cx);
+    let agent_id = s.agent_id.clone();
+    // Working-directory label: the project name the user picked when
+    // creating this session ("Solution root" → "ROOT", member project
+    // → catalog name). Lookup needs the live `Solution` so we can
+    // compare against `solution.root` and resolve member catalog ids.
+    let cwd_label: SharedString = solutions::SolutionStore::try_global(cx)
+        .and_then(|store| {
+            store.read_with(cx, |store, _| {
+                store
+                    .solutions()
+                    .iter()
+                    .find(|sol| sol.id == s.solution_id)
+                    .cloned()
             })
-            .and_then(|solution| crate::store::project_name_for_cwd(&solution, &s.cwd, cx))
-            .unwrap_or_else(|| SharedString::from("ROOT"));
+        })
+        .and_then(|solution| crate::store::project_name_for_cwd(&solution, &s.cwd, cx))
+        .unwrap_or_else(|| SharedString::from("ROOT"));
         // For most states the short label ("Idle", "Running", …) is
         // the right thing to show. For `Errored(msg)` we surface the
         // full message inline so the user actually learns *what* went
@@ -449,24 +436,24 @@ impl SolutionSessionsNavigator {
         // only on the first render that observes Running, and the
         // task self-cancels by checking `still_running` each tick.
         if is_running {
-            self.ensure_thinking_tick(cx);
-        } else if self.thinking_tick.is_some() {
-            self.thinking_tick = None;
+            view.ensure_status_thinking_tick(cx);
+        } else if view.status_thinking_tick.is_some() {
+            view.status_thinking_tick = None;
         }
         // Keep the "last activity" relative label fresh with a coarse
         // ~15s tick for as long as this session tab is open.
-        self.ensure_activity_tick(cx);
+        view.ensure_status_activity_tick(cx);
         // Kick off a model lookup if we don't have one cached yet.
-        // Stored in `cached_models` for synchronous reads on later
-        // frames; the spawn de-dupes via `pending_model_fetches`.
-        self.ensure_model_loaded(session_id, cx);
-        let model_text = self.cached_models.get(&session_id).cloned();
+        // Stored in `status_cached_model` for synchronous reads on later
+        // frames; the spawn de-dupes via `status_pending_model_fetch`.
+        view.ensure_status_model_loaded(cx);
+        let model_text = view.status_cached_model.clone();
 
         let raw_used = usage.as_ref().map(|u| u.used_tokens).unwrap_or(0);
-        let peak = self.peak_used_tokens.get(&session_id).copied().unwrap_or(0);
+        let peak = view.status_peak_used_tokens;
         let used = smooth_used_tokens(raw_used, peak);
         if used != peak {
-            self.peak_used_tokens.insert(session_id, used);
+            view.status_peak_used_tokens = used;
         }
         // claude-acp doesn't always populate `max_tokens` (it's gated by an
         // upstream beta flag). Once a real limit has been seen for this session
@@ -475,9 +462,9 @@ impl SolutionSessionsNavigator {
         // Opus 4 window is the fallback only until a real value first arrives.
         let advertised_max = usage.as_ref().map(|u| u.max_tokens);
         let (max, new_cached_max) =
-            resolve_max_tokens(advertised_max, self.cached_max_tokens.get(&session_id).copied());
+            resolve_max_tokens(advertised_max, view.status_cached_max_tokens);
         if let Some(cached) = new_cached_max {
-            self.cached_max_tokens.insert(session_id, cached);
+            view.status_cached_max_tokens = Some(cached);
         }
         // Display clamp: tokens-in-context can never legitimately exceed the
         // window. A previously-poisoned reading (the pre-fix
@@ -574,7 +561,7 @@ impl SolutionSessionsNavigator {
                 .icon_size(IconSize::Small)
                 .icon_color(trigger_color)
                 .tooltip(ui::Tooltip::text(trigger_tooltip));
-            let weak_view = active_view.map(|v| v.downgrade());
+            let weak_view = Some(weak_view.clone());
             PopoverMenu::new("solution-status-cleanup-menu")
                 .trigger(trigger)
                 .menu(move |window, cx| {
@@ -821,7 +808,6 @@ impl SolutionSessionsNavigator {
                 })
                 .into_any_element(),
         )
-    }
 }
 
 /// Hardcoded fallback when claude-acp doesn't advertise the model's

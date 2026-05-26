@@ -445,8 +445,20 @@ fn switch_to_session(
         log::warn!("subagent strip click: session {target} no longer present in store");
         return;
     };
-    let Some(navigator) = view.navigator.upgrade() else {
-        log::warn!("subagent strip click: navigator dropped");
+    // Locate the hosting `SolutionSessionsNavigator` panel through the
+    // workspace so this routing keeps working without `SolutionSessionView`
+    // holding a back-reference to the navigator. TODO(B10): when
+    // ConsolePanel takes over hosting chat tabs, route the
+    // open-subagent-tab click into that panel's tab strip API.
+    let Some(workspace) = view.workspace_handle().upgrade() else {
+        log::warn!("subagent strip click: workspace dropped");
+        return;
+    };
+    let Some(navigator) = workspace
+        .read(cx)
+        .panel::<crate::navigator::SolutionSessionsNavigator>(cx)
+    else {
+        log::warn!("subagent strip click: navigator panel not registered");
         return;
     };
     navigator.update(cx, |nav, ncx| {
