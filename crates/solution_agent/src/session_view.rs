@@ -533,6 +533,14 @@ impl SolutionSessionView {
         self.resuming
     }
 
+    pub(crate) fn session_id(&self) -> SolutionSessionId {
+        self.session_id
+    }
+
+    pub(crate) fn workspace_handle(&self) -> &WeakEntity<Workspace> {
+        &self.workspace
+    }
+
     /// Flip the expanded/collapsed state of the queued-prefix chip on
     /// the user message at `entry_idx`. Caller is responsible for
     /// `cx.notify()` — kept out of here so the click-handler closure

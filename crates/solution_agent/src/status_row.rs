@@ -574,12 +574,10 @@ impl SolutionSessionsNavigator {
                 .icon_size(IconSize::Small)
                 .icon_color(trigger_color)
                 .tooltip(ui::Tooltip::text(trigger_tooltip));
-            let weak_nav = cx.entity().downgrade();
             let weak_view = active_view.map(|v| v.downgrade());
             PopoverMenu::new("solution-status-cleanup-menu")
                 .trigger(trigger)
                 .menu(move |window, cx| {
-                    let weak_nav = weak_nav.clone();
                     let weak_view = weak_view.clone();
                     let compact_tooltip = compact_tooltip.clone();
                     let clear_tooltip = clear_tooltip.clone();
@@ -594,24 +592,18 @@ impl SolutionSessionsNavigator {
                             .icon_color(Color::Muted)
                             .disabled(!compact_enabled)
                             .handler({
-                                let weak_nav = weak_nav.clone();
                                 let weak_view = weak_view.clone();
                                 move |window, cx| {
-                                    let Some(nav) = weak_nav.upgrade() else {
+                                    let Some(view) =
+                                        weak_view.as_ref().and_then(|w| w.upgrade())
+                                    else {
                                         return;
                                     };
-                                    nav.update(cx, |nav, cx| {
+                                    view.update(cx, |view, cx| {
                                         if is_cold {
-                                            let Some(view) =
-                                                weak_view.as_ref().and_then(|w| w.upgrade())
-                                            else {
-                                                return;
-                                            };
-                                            nav.start_compact_from_cold(
-                                                session_id, view, window, cx,
-                                            );
+                                            view.start_compact_from_cold(window, cx);
                                         } else {
-                                            nav.start_compact(session_id, cx);
+                                            view.start_compact(cx);
                                         }
                                     });
                                 }
@@ -628,7 +620,6 @@ impl SolutionSessionsNavigator {
                             .icon_color(Color::Muted)
                             .disabled(!clear_enabled)
                             .handler({
-                                let weak_nav = weak_nav.clone();
                                 move |window, cx| {
                                     let prompt = window.prompt(
                                         gpui::PromptLevel::Warning,
@@ -641,7 +632,6 @@ impl SolutionSessionsNavigator {
                                         &["Cancel", "Clear"],
                                         cx,
                                     );
-                                    let weak_nav = weak_nav.clone();
                                     window
                                         .spawn(cx, async move |cx| {
                                             // Button index 1 = Clear; 0 / Esc cancels.
@@ -649,18 +639,14 @@ impl SolutionSessionsNavigator {
                                                 return;
                                             }
                                             cx.update(|_, cx| {
-                                                if let Some(nav) = weak_nav.upgrade() {
-                                                    nav.update(cx, |_, cx| {
-                                                        SolutionAgentStore::global(cx).update(
-                                                            cx,
-                                                            |store, cx| {
-                                                                store
-                                                                    .reset_context(session_id, cx)
-                                                                    .detach_and_log_err(cx);
-                                                            },
-                                                        );
-                                                    });
-                                                }
+                                                SolutionAgentStore::global(cx).update(
+                                                    cx,
+                                                    |store, cx| {
+                                                        store
+                                                            .reset_context(session_id, cx)
+                                                            .detach_and_log_err(cx);
+                                                    },
+                                                );
                                             })
                                             .log_err();
                                         })

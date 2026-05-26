@@ -6,7 +6,7 @@ use solutions::SolutionStore;
 use workspace::notifications::{NotificationId, simple_message_notification::MessageNotification};
 
 use crate::model::{SessionState, SolutionSessionId};
-use crate::navigator::SolutionSessionsNavigator;
+use crate::session_view::SolutionSessionView;
 use crate::status_row::DEFAULT_CONTEXT_WINDOW;
 use crate::store::SolutionAgentStore;
 
@@ -215,17 +215,14 @@ pub(crate) fn render_compact_prompt_inner(
         .replace("{{tokens_max}}", &max.to_string()))
 }
 
-impl SolutionSessionsNavigator {
+impl SolutionSessionView {
     /// Renders the current compact-instruction template, creates the
     /// per-rotation handoff directory, and ships the rendered prompt as
     /// a regular user message. The agent then writes its summary files
     /// into that directory and (after we've handed it `compact_dir`)
     /// calls back via `solution_agent.compact_session`.
-    pub(crate) fn start_compact(
-        &self,
-        session_id: crate::model::SolutionSessionId,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn start_compact(&self, cx: &mut Context<Self>) {
+        let session_id = self.session_id();
         match start_compact_for_session(session_id, cx) {
             Ok(StartCompactOutcome { queued: true, .. }) => {}
             Ok(StartCompactOutcome {
@@ -239,56 +236,51 @@ impl SolutionSessionsNavigator {
                 reason: None,
             }) => {}
             Err(err) => {
-                self.toast_error(SharedString::from(format!("Compact failed: {err}")), cx);
+                self.toast_compact_error(
+                    SharedString::from(format!("Compact failed: {err}")),
+                    cx,
+                );
             }
         }
     }
 
-    /// Render the compact-instruction template for `session_id` and create
-    /// the `<root>/.agents/<sid>/c<NN>/` dump directory. Returns the rendered
-    /// prompt body. Surfaces a workspace toast and returns `None` on the
-    /// same failure modes the inline path used to handle (unknown solution,
-    /// mkdir failure).
-    pub(crate) fn render_compact_prompt(
-        &self,
-        session_id: crate::model::SolutionSessionId,
-        cx: &mut Context<Self>,
-    ) -> Option<String> {
+    /// Render the compact-instruction template for the active session and
+    /// create the `<root>/.agents/<sid>/c<NN>/` dump directory. Returns the
+    /// rendered prompt body. Surfaces a workspace toast and returns `None`
+    /// on the same failure modes the inline path used to handle (unknown
+    /// solution, mkdir failure).
+    pub(crate) fn render_compact_prompt(&self, cx: &mut Context<Self>) -> Option<String> {
+        let session_id = self.session_id();
         match render_compact_prompt_inner(session_id, cx) {
             Ok(rendered) => Some(rendered),
             Err(err) => {
-                self.toast_error(SharedString::from(err.to_string()), cx);
+                self.toast_compact_error(SharedString::from(err.to_string()), cx);
                 None
             }
         }
     }
 
-    /// Cold-state compact: render the prompt now, queue it on the
-    /// active `SolutionSessionView` as `pending_send`, and kick off
-    /// `start_resume`. The view's existing wake-flush hook
-    /// (`flush_pending_send_if_ready`) dispatches the queued prompt
-    /// the moment `acp_thread` becomes `Some`. Status badge sequence
-    /// the user sees: `Sleeping → Resuming… → Thinking… → Idle`.
+    /// Cold-state compact: render the prompt now, queue it as
+    /// `pending_send`, and kick off `start_resume`. The existing wake-flush
+    /// hook (`flush_pending_send_if_ready`) dispatches the queued prompt
+    /// the moment `acp_thread` becomes `Some`. Status badge sequence the
+    /// user sees: `Sleeping → Resuming… → Thinking… → Idle`.
     ///
-    /// No-ops if there's no rendered prompt (template render +
-    /// mkdir already toasted the failure) or if the view is gone.
+    /// No-ops if there's no rendered prompt (template render + mkdir
+    /// already toasted the failure).
     pub(crate) fn start_compact_from_cold(
-        &self,
-        session_id: crate::model::SolutionSessionId,
-        view: gpui::Entity<crate::session_view::SolutionSessionView>,
+        &mut self,
         window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(rendered) = self.render_compact_prompt(session_id, cx) else {
+        let Some(rendered) = self.render_compact_prompt(cx) else {
             return;
         };
-        view.update(cx, |view, cx| {
-            view.enqueue_text_pending_send_and_resume(rendered, window, cx);
-        });
+        self.enqueue_text_pending_send_and_resume(rendered, window, cx);
     }
 
-    fn toast_error(&self, message: SharedString, cx: &mut Context<Self>) {
-        let Some(workspace) = self.workspace.upgrade() else {
+    fn toast_compact_error(&self, message: SharedString, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace_handle().upgrade() else {
             log::warn!("solution_agent toast (no workspace): {message}");
             return;
         };
@@ -390,7 +382,7 @@ mod tests {
 
         let mut vcx = VisualTestContext::from_window(*workspace_window, cx);
 
-        let (navigator_entity, view_entity) = vcx.update(|window, cx| {
+        let view_entity = vcx.update(|window, cx| {
             let store = SolutionAgentStore::global(cx);
             let session = store.update(cx, |store, cx| {
                 crate::store::tests::insert_cold_session(
@@ -405,7 +397,7 @@ mod tests {
             });
 
             let navigator = cx.new(|cx| crate::navigator::SolutionSessionsNavigator::for_test(cx));
-            let view = cx.new(|cx| {
+            cx.new(|cx| {
                 crate::session_view::SolutionSessionView::for_test(
                     session_id,
                     session,
@@ -414,13 +406,12 @@ mod tests {
                     window,
                     cx,
                 )
-            });
-            (navigator, view)
+            })
         });
 
         vcx.update(|window, cx| {
-            navigator_entity.update(cx, |nav, cx| {
-                nav.start_compact_from_cold(session_id, view_entity.clone(), window, cx);
+            view_entity.update(cx, |view, cx| {
+                view.start_compact_from_cold(window, cx);
             });
         });
 
