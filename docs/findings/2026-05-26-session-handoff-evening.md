@@ -1,8 +1,9 @@
 # Session handoff — 2026-05-26 (evening)
 
 **Supersedes:** `2026-05-26-session-handoff.md` (morning snapshot at B7/15).
-**Status:** session paused pending a B11 design call. Resume on branch
-`hook-inject`.
+**Status:** session paused after Option A landed — Navigator refactor complete,
+`SolutionSessionsNavigator` deleted, `render_status_row` lifted to a free
+function in `solution_agent::status_row`. Resume on branch `hook-inject`.
 
 Active arc: **ConsolePanel** — unified bottom-dock panel hosting both terminal
 and AI-chat tabs. Phase A (Right Dock full-height layout) shipped. Phase B
@@ -15,14 +16,48 @@ Spec + plan still live at:
 - Spec: `docs/superpowers/specs/2026-05-25-console-panel-design.md` (gitignored)
 - Plan: `docs/superpowers/plans/2026-05-25-console-panel.md` (gitignored)
 
-## What shipped this evening (2 commits on top of morning handoff)
+## What shipped this evening (5 commits + handoff on top of morning handoff)
 
 | Phase | Commit | Summary |
 |---|---|---|
 | B8 | `e4ec749819` | `+` popover with `PopoverMenu` trigger at the right end of the tab strip. Menu: **New Terminal** / **New AI Chat** (disabled when no active solution) / **Spawn Task…**. Helpers added: `render_plus_popover`, `active_solution_id` (inlined via `SolutionStore::try_global` + worktree walk — avoids adding `solutions_ui` as a dep), `add_terminal_tab(cwd, window, cx)`, `add_chat_tab(window, cx)` (uses `CLAUDE_ACP_AGENT_ID` as the default agent). Actions wired through `console_panel::init` via `cx.observe_new(...)` registering `NewTerminal` / `NewChat` / `ToggleFocus` on `Workspace` — handlers no-op until B11 actually loads the panel. |
 | B9 | `3261c79e6d` | Right-click context menu on tabs. Terminal: Close / Rename Tab / Reveal CWD in Project Panel. Chat: Close / Rename Session / Restart Agent. New field `tab_context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>` + `deferred(anchored(...))` overlay in `render`. Wiring: `RenameTerminal` dispatched directly via `TerminalView::rename_terminal`; "Reveal CWD" emits `project::Event::RevealInProjectPanel(entry_id)` (does NOT dispatch `pane::RevealInProjectPanel` — the pane handler requires an active pane item, ConsolePanel isn't a pane); chat rename opens `RenameSessionModal` via `workspace.toggle_modal`; restart calls `SolutionAgentStore::restart_agent`. Side effect: `solution_agent::rename_session_modal` promoted to `pub mod`. |
+| handoff | `d5e70d85f6` | Wrote `2026-05-26-b11-blocker.md` + this handoff after the first B11 sub-agent stopped on the navigator coupling. Three options (A/B/C) surfaced for user decision. |
+| B11-A.1 | `8f6ff6fa58` | **Compact handler moved off Navigator** onto `SolutionSessionView`. Action definition stays in `solution_agent::actions`; only the handler relocated. |
+| B11-A.2 | `cecccaf33d` | **`render_status_row` lifted to a free function** at `solution_agent::status_row::render`. Per-view scalar fields (`status_thinking_tick`, `status_activity_tick`, `status_peak_used_tokens`, `status_cached_max_tokens`, `status_cached_model`, `ensure_status_model_loaded` async cache fill) replace Navigator's HashMaps — one cache per view rather than one per Navigator-singleton. **Status-row UX preserved exactly:** state badge, "Thinking… 3m12s" timer (1 Hz), "Xm ago" badge (15 s), token meter incl. cache_read, model-selector label, session-mode label, cwd label, compact + clear popover. |
+| B11-A.3 | `91cfe8c6c6` | **`crates/solution_agent/src/navigator.rs` deleted (1493 LOC)**. `pub mod navigator` removed; `console_panel::chat_provider` no longer imports `SolutionSessionsNavigator` or uses `WeakEntity::new_invalid()` workaround; `feature_flags/src/flags.rs:31` comment updated to reference the new free function. **`actions::FocusNavigator` registered as a no-op** in `solution_agent::init` so existing keybinds resolve cleanly (TODO(B10) marker → focus ConsolePanel's chat tab when ready). |
 
-## The B11 blocker
+## Known UX regressions introduced by Option A (TODO(B10))
+
+The Navigator carried more than just the status row; some affordances landed
+nowhere and need re-homing on `ConsolePanel`:
+
+1. **History popover (clock icon)** — was `render_history_button` on
+   Navigator's tab strip. Gone from the codebase. ConsolePanel needs to
+   surface History through its own chrome (right end of tab strip, or `+`
+   popover's third slot).
+2. **History-card empty-state body** — the "no sessions yet" empty body
+   panel that lived alongside the navigator tab list. Gone.
+3. **`subagent_strip::switch_to_session`** — "click a subagent bubble to
+   open its tab" router is now a logged no-op (TODO(B10)) at
+   `crates/solution_agent/src/session_view/subagent_strip.rs:443-462`.
+   Subagent sessions still reachable through History (which is itself
+   currently unrouted — see #1).
+4. **`actions::FocusNavigator` action** — registered as a no-op handler in
+   `solution_agent::init` (`TODO(B10)`) so the existing keybind doesn't
+   regress to "no handler" but doesn't focus anything yet.
+5. **6 `apply_reorder*` unit tests** — tab-strip integer-arithmetic tests
+   that lived inside `navigator.rs`. Deleted. ConsolePanel's eventual tab
+   reorder logic should port these as fresh tests in `console_panel`.
+6. **Store-level `persist_tab_order` / `restore_open_tabs`** — kept in
+   `solution_agent::store` untouched but **no longer called from anywhere
+   in-tree**. Schema column + helpers stand ready for ConsolePanel to take
+   over in B10 without a DB migration.
+
+None of these block the rest of Phase B technically — they're UX/feature
+gaps that need explicit re-implementation on ConsolePanel side.
+
+## The B11 blocker (resolved via Option A — kept here for history)
 
 The B11 sub-agent (worktree `agent-a859fc349634a47c2`) stopped before any
 edits and wrote `docs/findings/2026-05-26-b11-blocker.md` (committed
@@ -62,10 +97,10 @@ separately). Two hidden refactors hide behind "delete and fix compile errors":
 
 | Item | Track | Notes |
 |---|---|---|
-| **B11-design** | DECISION | Pick A / B / C above. Required before any further B-track work. |
-| **B11-nav-refactor** | HEAVY | Execute the chosen option's navigator refactor as its own commit. |
-| **B11-terminal-factory** | HEAVY | Port `TerminalPanel` factory APIs onto `ConsolePanel` (add `add_terminal_task(SpawnInTerminal, RevealStrategy, ...)` etc.) or stub callsites. |
-| **B11-wireup** | LIGHT (after the two above) | Register `ConsolePanel::load` in `crates/zed/src/zed.rs::initialize_panels`; remove old panel loads; `git rm` navigator.rs + terminal_panel.rs (or only their `impl Panel` blocks if Option B); call `console_panel::init` from main init. |
+| ~~**B11-design**~~ | ~~DECISION~~ | **DONE** — user picked Option A; navigator refactor landed in commits `8f6ff6fa58` / `cecccaf33d` / `91cfe8c6c6`. |
+| ~~**B11-nav-refactor**~~ | ~~HEAVY~~ | **DONE.** |
+| **B11-terminal-factory** | HEAVY | Port `TerminalPanel` factory APIs onto `ConsolePanel` (add `add_terminal_task(SpawnInTerminal, RevealStrategy, ...)` etc.) or stub callsites. ~32 callers across `agent_ui` (4 files), `debugger_ui` (2), `run_config_ui`, `vim`, `command_palette`, `workspace`, `zed`. Recommended next step. |
+| **B11-wireup** | LIGHT (after B11-terminal-factory) | Register `ConsolePanel::load` in `crates/zed/src/zed.rs::initialize_panels`; remove old `TerminalPanel::load`; `git rm crates/terminal_view/src/terminal_panel.rs`; call `console_panel::init` from main init. |
 | **B10** persistence | HEAVY | Adds `console_panel_state` table to workspace_db. Needs B11 done. |
 | **B12** | LIGHT-MEDIUM | Settings + actions + keymap cleanup. Drop `terminal.dock`. Re-route `solution_agent::{NewSession,CycleSession,...}` onto ConsolePanel chat tabs. Default keymap `ctrl-\`` → `console_panel::ToggleFocus`. |
 | **B13** | LIGHT | Docs — `CLAUDE.md` action references, `FORK.md` touched-files row + decision entry. |
@@ -112,10 +147,20 @@ separately). Two hidden refactors hide behind "delete and fix compile errors":
    `SolutionSessionView::new`.** Six `console_panel` unit tests are
    `#[ignore]`'d for this reason; B14's MCP e2e covers the real path.
 9. **Pre-existing `recent_projects` unreachable-pattern warnings** not new.
-10. **B11 sub-agent worktree** at `.claude/worktrees/agent-a859fc349634a47c2`
-    is still on disk (worktree branch `worktree-agent-a859fc349634a47c2`).
-    Safe to remove after the design call is made and the next agent
-    re-attempts B11 in a fresh worktree.
+10. **Two locked worktrees** at `.claude/worktrees/agent-a859fc349634a47c2`
+    (blocker scout) and `.claude/worktrees/agent-aeccbebae023503e1`
+    (navigator refactor — its 3 commits are now on `hook-inject` via
+    cherry-pick). Both are locked by the harness; safe to ignore. Will be
+    GC'd when the harness releases the locks.
+11. **`SolutionSessionView` no longer has `navigator` field.** Constructor
+    signature changed — callers must drop that argument. Affected: only
+    `console_panel::chat_provider` (already updated) and tests. If a future
+    PR re-adds a similar back-reference, prefer passing the workspace
+    `WeakEntity<Workspace>` or computing state inline rather than coupling
+    back to the panel.
+12. **`solution_agent::FocusNavigator` is a no-op until B10** — the keybind
+    still resolves but doesn't change focus. Don't claim it works in
+    user-facing docs until B10 wires it to ConsolePanel.
 
 ## Resume recipe for the next session
 
