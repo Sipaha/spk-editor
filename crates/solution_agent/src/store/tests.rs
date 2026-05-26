@@ -3072,3 +3072,35 @@ async fn subagent_failed_status_also_removes_tab(cx: &mut TestAppContext) {
     });
     assert_eq!(*changed_count.borrow(), 2, "add + remove on Failed");
 }
+
+/// Pin the error-string set that `resume_session` treats as "session gone,
+/// try the next cwd candidate (and ultimately mint a new ACP session)".
+///
+/// claude-code-acp returns `No conversation found with session ID: …` as the
+/// MESSAGE of a JSON-RPC `-32603` (Internal error). Before the fix, our
+/// predicate only matched `Resource not found` / `-32002` (the spec's
+/// "missing resource" code) — so the message-only error fell through, the
+/// `resume_session` for-loop broke after the first attempt, the
+/// `solution.root` fallback never fired, and the user saw a raw
+/// "No conversation found with session ID: …" snackbar on the next editor
+/// restart even though the jsonl was sitting under sanitize(solution.root)
+/// the whole time.
+///
+/// If you change the predicate, update both the match set and this test —
+/// dropping a marker silently reintroduces the snackbar.
+#[test]
+fn is_session_gone_error_matches_known_markers() {
+    use crate::store::is_session_gone_error;
+    assert!(is_session_gone_error(
+        "No conversation found with session ID: 877b9e1b-ae75-448e-bcef-906058b156df"
+    ));
+    assert!(is_session_gone_error("Resource not found"));
+    assert!(is_session_gone_error(
+        "RPC error -32002: session id no longer known"
+    ));
+    // Non-recoverable transport/auth/allow-list errors stay opaque so we
+    // don't pointlessly retry against another cwd.
+    assert!(!is_session_gone_error("connection refused"));
+    assert!(!is_session_gone_error("authentication required"));
+    assert!(!is_session_gone_error("permission denied: /home/spk/.spk"));
+}

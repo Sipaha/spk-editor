@@ -301,6 +301,29 @@ fn short_session_title(session_id: SolutionSessionId) -> SharedString {
     SharedString::from(session_id.to_string())
 }
 
+/// Returns `true` when the formatted error string from a `load_session` /
+/// `resume_session` attempt indicates "the ACP server doesn't know about
+/// this session id at this cwd" — as opposed to an auth/transport/allow-list
+/// failure where retrying with a different cwd is pointless.
+///
+/// Match list is empirical because the wire shape of these errors isn't
+/// part of the ACP contract:
+///   - `Resource not found` / `-32002`: the canonical JSON-RPC code the
+///     spec recommends for missing resources.
+///   - `No conversation found`: claude-code-acp throws a plain `Error(...)`,
+///     which marshals to `code: -32603 (Internal error)` with this text in
+///     the message. Pre-fix, this string fell through the predicate and
+///     `resume_session` broke out of the cwd-attempts loop on the first
+///     failure, hiding the existing `solution.root` fallback (and the
+///     `new_session` re-mint fallback below) and surfacing a raw
+///     "No conversation found with session ID: …" snackbar on the user's
+///     editor restart.
+fn is_session_gone_error(err_str: &str) -> bool {
+    err_str.contains("Resource not found")
+        || err_str.contains("-32002")
+        || err_str.contains("No conversation found")
+}
+
 /// Resolve the catalog project name for `cwd` if `cwd` matches one of
 /// `solution.members`'s `local_path`s. Returns `None` for `solution.root`
 /// (the "Solution root" choice in the New Session popover) and for any
@@ -820,18 +843,19 @@ impl SolutionAgentStore {
             // Resume cwd resolution + fallback. claude-acp keys session
             // jsonl files by the cwd that was active when the session
             // was *created* (`~/.claude/projects/<sanitized cwd>/<id>.jsonl`).
-            // Empirically that cwd doesn't always match the cwd we
-            // pass into `NewSessionRequest::work_dirs` — for a
-            // member-project session we may have asked for
-            // `<solution-root>/<member>` but claude wrote the jsonl
-            // under `<solution-root>` (its subprocess cwd at start).
-            // When the primary cwd lookup returns "Resource not
-            // found", retry once against `solution.root` before
-            // surfacing the error. On a successful fallback we also
-            // update `session.cwd` so the *next* resume hits straight
-            // away.
+            // Because the `(solution, agent)` connection pool spawns one
+            // subprocess per solution with `process.cwd = solution.root`,
+            // *all* jsonls for a solution land under `sanitize(solution.root)`
+            // — regardless of the member-dir cwd we asked for in
+            // `NewSessionRequest::work_dirs`. So we try `solution.root`
+            // FIRST when it differs from the persisted `primary_cwd`;
+            // the primary_cwd attempt stays as a fallback for sessions
+            // that legitimately stored a non-root path (older rows, or a
+            // future per-member pool model). On a successful attempt we
+            // also write the applied cwd back into `session.cwd` so the
+            // *next* resume hits straight away with no retries.
             let attempts: Vec<PathBuf> = if primary_cwd != solution.root {
-                vec![primary_cwd.clone(), solution.root.clone()]
+                vec![solution.root.clone(), primary_cwd.clone()]
             } else {
                 vec![primary_cwd.clone()]
             };
@@ -890,8 +914,7 @@ impl SolutionAgentStore {
                     }
                     Err(err) => {
                         let err_str = format!("{err:#}");
-                        let resource_gone = err_str.contains("Resource not found")
-                            || err_str.contains("-32002");
+                        let resource_gone = is_session_gone_error(&err_str);
                         if !resource_gone {
                             // Non-recoverable (auth, transport, …). Fall
                             // through with this error — fallback would
@@ -902,7 +925,7 @@ impl SolutionAgentStore {
                         }
                         log::warn!(
                             target: "solution_agent::resume",
-                            "session={} cwd={} returned Resource not found ({}); will try next candidate",
+                            "session={} cwd={} returned session-gone error ({}); will try next candidate",
                             meta.id,
                             attempt_cwd.to_string_lossy(),
                             err_str,
