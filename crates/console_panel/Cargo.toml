@@ -26,6 +26,7 @@ settings.workspace = true
 settings_content = { workspace = true }
 solution_agent.workspace = true
 solutions.workspace = true
+task.workspace = true
 terminal.workspace = true
 terminal_view.workspace = true
 theme.workspace = true

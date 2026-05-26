@@ -946,7 +946,7 @@ impl TerminalView {
         dispatch_context
     }
 
-    fn set_terminal(
+    pub fn set_terminal(
         &mut self,
         terminal: Entity<Terminal>,
         window: &mut Window,
@@ -2033,7 +2033,7 @@ pub fn add_center_terminal(
 /// For remote projects, local-only resolution (home dir fallback, shell expansion,
 /// local `is_dir` checks) is skipped -- returning `None` lets the remote shell
 /// open in the remote user's home directory by default.
-pub(crate) fn default_working_directory(workspace: &Workspace, cx: &App) -> Option<PathBuf> {
+pub fn default_working_directory(workspace: &Workspace, cx: &App) -> Option<PathBuf> {
     let is_remote = workspace.project().read(cx).is_remote();
     let directory = match &TerminalSettings::get_global(cx).working_directory {
         WorkingDirectory::CurrentFileDirectory => workspace

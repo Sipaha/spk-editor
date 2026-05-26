@@ -30,6 +30,7 @@ pub fn init(cx: &mut gpui::App) {
         workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
             workspace.toggle_panel_focus::<ConsolePanel>(window, cx);
         });
+        workspace.register_action(ConsolePanel::handle_new_terminal);
     })
     .detach();
 }

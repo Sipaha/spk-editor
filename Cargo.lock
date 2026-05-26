@@ -3540,6 +3540,7 @@ dependencies = [
  "settings_content",
  "solution_agent",
  "solutions",
+ "task",
  "tempfile",
  "terminal",
  "terminal_view",
