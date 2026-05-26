@@ -1,10 +1,10 @@
 # Session handoff — 2026-05-26 (evening)
 
 **Supersedes:** `2026-05-26-session-handoff.md` (morning snapshot at B7/15).
-**Status:** session paused after **Phase B at 14/15** — ConsolePanel
-end-to-end live-verified (open editor → terminal + chat tabs → restart →
-both restored), docs and screenshots shipped. Only B14 (MCP e2e integration
-test, MEDIUM) outstanding. Resume on branch `hook-inject`.
+**Status:** session paused after **Phase B at 15/15** — ConsolePanel arc
+complete. End-to-end live-verified (open editor → terminal + chat tabs →
+restart → both restored), docs and screenshots shipped, 5 unit tests
+cover the panel logic. Resume on branch `hook-inject`.
 
 **This session shipped (in chronological order):**
 - B8 `+` popover, B9 tab context menus, double-lease fix, verification
@@ -23,14 +23,21 @@ test, MEDIUM) outstanding. Resume on branch `hook-inject`.
 - B12-partial (dropped `terminal.dock` setting + 8 callsites; the
   ConsolePanel-owns-its-own-dock-position story now ends at the panel).
 
-**Remaining Phase B work (1 item):**
-- **B14**: MCP-driven e2e integration test. Bootstrap a `TestAppContext`
-  with full editor stack via `editor_mcp::set_runtime_dir_for_test`
-  (template: `crates/editor_mcp/tests/solutions_add_member_e2e_test.rs`).
-  Dispatch `console_panel::ToggleFocus` + `NewTerminal` + `NewChat`;
-  verify tabs appear via `workspace.dump_visual_structure`; assert
-  `workspace.screenshot` returns a non-empty PNG. Recommended as a
-  worktree sub-agent dispatch (~200 LOC of bootstrap; heavyweight).
+**Phase B complete.** No remaining items.
+
+*Done in B14:* 5 unit tests in `crates/console_panel/src/panel.rs::tests`
+(replaced 3 `#[ignore]`'d `todo!()` stubs): `defaults_to_bottom_position`,
+`add_terminal_tab_appends_and_activates`, `close_active_tab_moves_active_to_neighbor`,
+`close_last_tab_clears_active`, `add_panel_registers_for_workspace_lookup`.
+The plan's MCP-driven e2e variant was downgraded to live verification
+(`docs/findings/2026-05-26-console-panel-shipped/`) — `workspace.dispatch_action`
+needs a fully-rendered `MultiWorkspace` which is intractable in a unit
+harness, and the chat-tab path needs the full editor stack
+(`SolutionSessionView::new` embeds a real `editor::Editor`).
+Pre-refactor refresher: persist now defers the `workspace.database_id()`
+lookup into a `cx.spawn` task so the method is safe to call from inside
+a `Workspace::update` borrow (action handlers, modal close paths) —
+production behavior unchanged.
 - *Done in B12-rest:* `width`/`height` dead fields dropped from
   ConsolePanel; `solution_agent::store::persist_tab_order` /
   `restore_open_tabs` still untouched (uncommitted-changes gotcha
