@@ -31,6 +31,30 @@ use crate::{ChatProvider, ConsolePanelSettings, TerminalProvider};
 
 const CONSOLE_PANEL_KEY: &str = "ConsolePanel";
 
+/// Resolve the active solution for a workspace by walking its worktrees and
+/// matching against the global `SolutionStore`. Mirrors
+/// `solutions_ui::window_helpers::active_solution_in_workspace` (kept local
+/// here to avoid pulling `solutions_ui` as a dep for one helper). Callers
+/// must hold the Workspace as a plain reference, NOT through `cx.read(...)`
+/// on its `Entity<Workspace>` — re-reading the workspace while a
+/// `workspace.register_action` handler holds `&mut Workspace` triggers
+/// GPUI's double-lease panic.
+pub fn active_solution_id_for_workspace(
+    workspace: &Workspace,
+    cx: &App,
+) -> Option<SolutionId> {
+    let store = SolutionStore::try_global(cx)?;
+    let store = store.read(cx);
+    let project = workspace.project().read(cx);
+    for worktree in project.worktrees(cx) {
+        let abs_path = worktree.read(cx).abs_path();
+        if let Some(sol) = store.solution_for_path(abs_path.as_ref()) {
+            return Some(sol.id.clone());
+        }
+    }
+    None
+}
+
 pub enum ConsoleTab {
     Terminal {
         view: Entity<TerminalView>,
@@ -253,17 +277,8 @@ impl ConsolePanel {
 
     fn active_solution_id(&self, cx: &App) -> Option<SolutionId> {
         let workspace = self.workspace.upgrade()?;
-        let store = SolutionStore::try_global(cx)?;
-        let store = store.read(cx);
         let workspace = workspace.read(cx);
-        let project = workspace.project().read(cx);
-        for worktree in project.worktrees(cx) {
-            let abs_path = worktree.read(cx).abs_path();
-            if let Some(sol) = store.solution_for_path(abs_path.as_ref()) {
-                return Some(sol.id.clone());
-            }
-        }
-        None
+        active_solution_id_for_workspace(workspace, cx)
     }
 
     pub fn add_terminal_tab(
@@ -599,10 +614,12 @@ impl ConsolePanel {
         }
     }
 
-    pub fn add_chat_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(solution_id) = self.active_solution_id(cx) else {
-            return;
-        };
+    pub fn add_chat_tab(
+        &mut self,
+        solution_id: SolutionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let task = self.chat_provider.update(cx, |provider, cx| {
             provider.new_tab(
                 solution_id,

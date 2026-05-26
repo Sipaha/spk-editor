@@ -23,8 +23,15 @@ pub fn init(cx: &mut gpui::App) {
             }
         });
         workspace.register_action(|workspace, _: &NewChat, window, cx| {
+            let Some(solution_id) =
+                panel::active_solution_id_for_workspace(workspace, cx)
+            else {
+                return;
+            };
             if let Some(panel) = workspace.panel::<ConsolePanel>(cx) {
-                panel.update(cx, |panel, cx| panel.add_chat_tab(window, cx));
+                panel.update(cx, |panel, cx| {
+                    panel.add_chat_tab(solution_id, window, cx)
+                });
             }
         });
         workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
