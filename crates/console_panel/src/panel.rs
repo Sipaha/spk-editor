@@ -164,6 +164,29 @@ impl ConsolePanel {
             return Ok(());
         }
 
+        // If any persisted row is a chat tab, eagerly hydrate the active
+        // solution's sessions from disk so `ChatProvider::new_tab_from_existing`
+        // can find them. Without this the session lives in DB but not in the
+        // in-memory store, so chat-tab restore silently skips with a "session
+        // no longer exists" warning. The store filters out `closed_at != null`
+        // rows internally, so explicitly-closed sessions still don't come back.
+        let has_chat_rows = rows.iter().any(|(_, kind, _, _, _)| kind == "chat");
+        if has_chat_rows {
+            let solution_id = workspace
+                .read_with(cx, |ws, cx| active_solution_id_for_workspace(ws, cx))
+                .ok()
+                .flatten();
+            if let Some(solution_id) = solution_id {
+                let hydrate = cx.update(|_, cx| {
+                    SolutionAgentStore::global(cx)
+                        .update(cx, |store, cx| store.hydrate_all_for_solution(solution_id, cx))
+                });
+                if let Ok(task) = hydrate {
+                    task.await.log_err();
+                }
+            }
+        }
+
         let (terminal_provider, chat_provider): (Entity<TerminalProvider>, Entity<ChatProvider>) =
             panel.read_with(cx, |panel, _| {
                 (panel.terminal_provider.clone(), panel.chat_provider.clone())
