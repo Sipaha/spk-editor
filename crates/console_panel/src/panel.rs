@@ -21,6 +21,7 @@ use terminal_view::TerminalView;
 use terminal_view::terminal_panel::prepare_task_for_spawn;
 use ui::{ContextMenu, PopoverMenu, Tooltip, prelude::*};
 use workspace::{
+    Item,
     dock::{DockPosition, Panel, PanelEvent},
     Workspace,
 };
@@ -437,7 +438,7 @@ impl ConsolePanel {
             );
         }
 
-        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = oneshot::channel::<Result<WeakEntity<Terminal>>>();
 
         self.deferred_tasks.insert(
             task.id.clone(),
@@ -585,6 +586,10 @@ impl ConsolePanel {
 
     pub fn assistant_enabled(&self) -> bool {
         self.assistant_enabled
+    }
+
+    pub fn tab_count(&self) -> usize {
+        self.tabs.len()
     }
 
     pub fn set_assistant_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -923,7 +928,7 @@ mod tests {
             cx.add_window(|window, cx| Workspace::test_new(project, window, cx));
 
         let panel = window_handle
-            .update(cx, |workspace, window, cx| {
+            .update(cx, |workspace, _window, cx| {
                 cx.new(|cx| ConsolePanel::new(workspace.weak_handle(), store, cx))
             })
             .unwrap();

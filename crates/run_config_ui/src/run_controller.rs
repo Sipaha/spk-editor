@@ -13,7 +13,7 @@ use run_config::{
     RunResolveContext,
 };
 use terminal::Terminal;
-use terminal_view::terminal_panel::TerminalPanel;
+use console_panel::ConsolePanel;
 use workspace::Workspace;
 
 /// How long a debug run may sit in `active` with no started session before we
@@ -369,7 +369,7 @@ impl RunController {
                 };
 
                 let poller = if let Some(terminal_panel) =
-                    workspace.read(cx).panel::<TerminalPanel>(cx)
+                    workspace.read(cx).panel::<ConsolePanel>(cx)
                 {
                     // Real path: the terminal panel hands back the task
                     // terminal so Stop can kill it.

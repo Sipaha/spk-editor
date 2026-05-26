@@ -67,7 +67,8 @@ use rules_library::{RulesLibrary, open_rules_library};
 use settings::TerminalDockPosition;
 use settings::{Settings, update_settings_file};
 use terminal::terminal_settings::TerminalSettings;
-use terminal_view::{TerminalView, terminal_panel::TerminalPanel};
+use console_panel::ConsolePanel;
+use terminal_view::TerminalView;
 use theme_settings::ThemeSettings;
 use ui::{
     Button, ContextMenu, ContextMenuEntry, IconButton, PopoverMenu, PopoverMenuHandle, Tab,
@@ -434,7 +435,7 @@ pub fn init(cx: &mut App) {
                             });
 
                         let has_terminal_panel_selection =
-                            workspace.panel::<TerminalPanel>(cx).is_some_and(|panel| {
+                            workspace.panel::<ConsolePanel>(cx).is_some_and(|panel| {
                                 let position = match TerminalSettings::get_global(cx).dock {
                                     TerminalDockPosition::Left => DockPosition::Left,
                                     TerminalDockPosition::Bottom => DockPosition::Bottom,

@@ -1161,7 +1161,7 @@ fn register_actions(
              _: &terminal_panel::ToggleFocus,
              window: &mut Window,
              cx: &mut Context<Workspace>| {
-                workspace.toggle_panel_focus::<TerminalPanel>(window, cx);
+                workspace.toggle_panel_focus::<console_panel::ConsolePanel>(window, cx);
             },
         )
         .register_action({

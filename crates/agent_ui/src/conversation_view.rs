@@ -55,7 +55,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use std::{collections::BTreeMap, rc::Rc, time::Duration};
-use terminal_view::terminal_panel::TerminalPanel;
+use console_panel::ConsolePanel;
 use text::Anchor;
 use theme_settings::{AgentBufferFontSize, AgentUiFontSize};
 use ui::{
@@ -1881,7 +1881,7 @@ impl ConversationView {
         window: &mut Window,
         cx: &mut App,
     ) -> Task<Result<()>> {
-        let Some(terminal_panel) = workspace.read(cx).panel::<TerminalPanel>(cx) else {
+        let Some(terminal_panel) = workspace.read(cx).panel::<ConsolePanel>(cx) else {
             return Task::ready(Err(anyhow!("Terminal panel is unavailable")));
         };
 

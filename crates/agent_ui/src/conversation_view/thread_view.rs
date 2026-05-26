@@ -4088,7 +4088,7 @@ impl ThreadView {
 
         let has_terminal_selection = workspace
             .upgrade()
-            .and_then(|ws| ws.read(cx).panel::<TerminalPanel>(cx))
+            .and_then(|ws| ws.read(cx).panel::<ConsolePanel>(cx))
             .is_some_and(|panel| !panel.read(cx).terminal_selections(cx).is_empty());
 
         let has_selection = has_editor_selection || has_terminal_selection;
