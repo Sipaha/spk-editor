@@ -1,9 +1,11 @@
 use gpui::{
-    Action, Anchor, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    IntoElement, Pixels, Render, Subscription, WeakEntity, Window,
+    Action, Anchor, App, AppContext as _, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
+    Focusable, IntoElement, MouseButton, MouseDownEvent, Pixels, Point, Render, Subscription,
+    WeakEntity, Window, anchored, deferred,
 };
 use settings::Settings as _;
 use solution_agent::claude_adapter::CLAUDE_ACP_AGENT_ID;
+use solution_agent::rename_session_modal::RenameSessionModal;
 use solution_agent::session_view::SolutionSessionView;
 use solution_agent::store::SolutionAgentStore;
 use solution_agent::SolutionSessionId;
@@ -42,6 +44,7 @@ pub struct ConsolePanel {
     terminal_provider: Entity<TerminalProvider>,
     chat_provider: Entity<ChatProvider>,
     focus_handle: FocusHandle,
+    tab_context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -64,6 +67,7 @@ impl ConsolePanel {
             terminal_provider,
             chat_provider,
             focus_handle: cx.focus_handle(),
+            tab_context_menu: None,
             _subscriptions: Vec::new(),
         }
     }
@@ -79,12 +83,25 @@ impl Focusable for ConsolePanel {
 
 impl Render for ConsolePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let menu_overlay = self
+            .tab_context_menu
+            .as_ref()
+            .map(|(menu, position, _)| {
+                deferred(
+                    anchored()
+                        .position(*position)
+                        .anchor(Anchor::TopLeft)
+                        .child(menu.clone()),
+                )
+                .with_priority(1)
+            });
         v_flex()
             .size_full()
             .key_context("ConsolePanel")
             .track_focus(&self.focus_handle)
             .child(self.render_tab_strip(window, cx))
             .child(self.render_active_tab(window, cx))
+            .children(menu_overlay)
     }
 }
 
@@ -155,8 +172,15 @@ impl ConsolePanel {
                         .on_click(cx.listener(move |this, _, _, cx| this.close_tab(ix, cx))),
                 )
                 .on_mouse_down(
-                    gpui::MouseButton::Left,
+                    MouseButton::Left,
                     cx.listener(move |this, _, _, cx| this.activate_tab(ix, cx)),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                        let position = ev.position;
+                        this.show_tab_context_menu(ix, position, window, cx);
+                    }),
                 );
             strip = strip.child(tab_el);
         }
@@ -257,6 +281,137 @@ impl ConsolePanel {
             anyhow::Ok(())
         })
         .detach_and_log_err(cx);
+    }
+
+    fn show_tab_context_menu(
+        &mut self,
+        tab_index: usize,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get(tab_index) else {
+            return;
+        };
+        let weak = cx.weak_entity();
+        let menu = match tab {
+            ConsoleTab::Terminal { view } => {
+                let view = view.clone();
+                ContextMenu::build(window, cx, |menu, _, _| {
+                    let weak_close = weak.clone();
+                    let weak_rename = weak.clone();
+                    let weak_reveal = weak.clone();
+                    let view_rename = view.clone();
+                    let view_reveal = view;
+                    menu.entry("Close", None, move |_, cx| {
+                        if let Some(this) = weak_close.upgrade() {
+                            this.update(cx, |this, cx| this.close_tab(tab_index, cx));
+                        }
+                    })
+                    .entry("Rename Tab", None, move |window, cx| {
+                        if let Some(this) = weak_rename.upgrade() {
+                            this.update(cx, |_, cx| {
+                                view_rename.update(cx, |view, cx| {
+                                    view.rename_terminal(
+                                        &terminal_view::RenameTerminal,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            });
+                        }
+                    })
+                    .entry("Reveal CWD in Project Panel", None, move |window, cx| {
+                        if let Some(this) = weak_reveal.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.reveal_terminal_cwd(&view_reveal, window, cx);
+                            });
+                        }
+                    })
+                })
+            }
+            ConsoleTab::Chat { session_id, .. } => {
+                let session_id = *session_id;
+                ContextMenu::build(window, cx, |menu, _, _| {
+                    let weak_close = weak.clone();
+                    let weak_rename = weak.clone();
+                    let weak_restart = weak.clone();
+                    menu.entry("Close", None, move |_, cx| {
+                        if let Some(this) = weak_close.upgrade() {
+                            this.update(cx, |this, cx| this.close_tab(tab_index, cx));
+                        }
+                    })
+                    .entry("Rename Session", None, move |window, cx| {
+                        if let Some(this) = weak_rename.upgrade() {
+                            this.update(cx, |this, cx| {
+                                this.open_rename_session_modal(session_id, window, cx);
+                            });
+                        }
+                    })
+                    .entry("Restart Agent", None, move |_, cx| {
+                        if let Some(this) = weak_restart.upgrade() {
+                            this.update(cx, |_, cx| {
+                                let store = SolutionAgentStore::global(cx);
+                                store
+                                    .update(cx, |store, cx| store.restart_agent(session_id, cx))
+                                    .detach_and_log_err(cx);
+                            });
+                        }
+                    })
+                })
+            }
+        };
+        let subscription = cx.subscribe(&menu, |this, _, _: &DismissEvent, cx| {
+            this.tab_context_menu.take();
+            cx.notify();
+        });
+        window.focus(&menu.focus_handle(cx), cx);
+        self.tab_context_menu = Some((menu, position, subscription));
+        cx.notify();
+    }
+
+    fn reveal_terminal_cwd(
+        &self,
+        view: &Entity<TerminalView>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let Some(cwd) = view.read(cx).terminal().read(cx).working_directory() else {
+            return;
+        };
+        let project = workspace.read(cx).project().clone();
+        let Some((worktree, rel_path)) = project.read(cx).find_worktree(&cwd, cx) else {
+            return;
+        };
+        let Some(entry_id) = worktree.read(cx).entry_for_path(&rel_path).map(|e| e.id) else {
+            return;
+        };
+        project.update(cx, |_project, cx| {
+            cx.emit(project::Event::RevealInProjectPanel(entry_id));
+        });
+    }
+
+    fn open_rename_session_modal(
+        &self,
+        session_id: SolutionSessionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let current_title = SolutionAgentStore::global(cx)
+            .read_with(cx, |s, _| s.session(session_id))
+            .map(|entity| entity.read(cx).title.to_string())
+            .unwrap_or_default();
+        workspace.update(cx, |workspace, cx| {
+            workspace.toggle_modal(window, cx, move |window, cx| {
+                RenameSessionModal::new(session_id, current_title, window, cx)
+            });
+        });
     }
 
     fn render_active_tab(&self, _window: &mut Window, _cx: &mut Context<Self>) -> AnyElement {

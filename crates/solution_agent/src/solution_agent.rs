@@ -20,7 +20,7 @@ pub mod model;
 pub mod navigator;
 pub mod notifier;
 pub(crate) mod pool;
-pub(crate) mod rename_session_modal;
+pub mod rename_session_modal;
 pub mod session_view;
 pub(crate) mod slash_commands;
 pub mod status_item;
