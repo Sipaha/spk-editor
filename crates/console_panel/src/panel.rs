@@ -22,7 +22,7 @@ use terminal_view::terminal_panel::prepare_task_for_spawn;
 use ui::{ContextMenu, PopoverMenu, Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::{
-    Item, WorkspaceDb, WorkspaceId,
+    Item, WorkspaceDb,
     dock::{DockPosition, Panel, PanelEvent},
     Workspace,
 };
