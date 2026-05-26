@@ -20,8 +20,9 @@ use terminal::Terminal;
 use terminal_view::TerminalView;
 use terminal_view::terminal_panel::prepare_task_for_spawn;
 use ui::{ContextMenu, PopoverMenu, Tooltip, prelude::*};
+use util::ResultExt as _;
 use workspace::{
-    Item,
+    Item, WorkspaceDb, WorkspaceId,
     dock::{DockPosition, Panel, PanelEvent},
     Workspace,
 };
@@ -109,8 +110,12 @@ impl ConsolePanel {
         }
     }
 
-    /// Placeholder loader. Currently constructs a fresh `ConsolePanel`; B10
-    /// will load persisted tab state from the workspace DB.
+    /// Loader. Constructs a fresh `ConsolePanel` and then restores any
+    /// persisted tabs from the workspace DB. Terminal tabs are re-spawned at
+    /// their stored CWD with a fresh shell (clean-start policy: state inside
+    /// the shell is *not* restored). Chat tabs are reattached to existing
+    /// sessions in `SolutionAgentStore`; rows whose session is no longer in
+    /// the store are skipped with a warning.
     pub async fn load(
         workspace: WeakEntity<Workspace>,
         mut cx: AsyncWindowContext,
@@ -120,9 +125,222 @@ impl ConsolePanel {
         // boots. Tests that don't init the store can't load the panel either,
         // which matches TerminalPanel's old behaviour for solution_agent.
         let store = workspace.update(&mut cx, |_, cx| SolutionAgentStore::global(cx))?;
-        workspace.update_in(&mut cx, |workspace, _, cx| {
+        let panel = workspace.update_in(&mut cx, |workspace, _, cx| {
             cx.new(|cx| Self::new(workspace.weak_handle(), store, cx))
+        })?;
+
+        // Best-effort restore: a failure here must not block the workspace
+        // from opening, so swallow errors with `.log_err()`.
+        Self::restore_from_db(workspace.clone(), panel.clone(), &mut cx)
+            .await
+            .log_err();
+
+        Ok(panel)
+    }
+
+    /// Reads persisted rows from the DB and re-spawns each tab on the panel.
+    /// Split out from `load` so the error-propagation path stays linear and
+    /// the caller can `.log_err()` a single future.
+    async fn restore_from_db(
+        workspace: WeakEntity<Workspace>,
+        panel: Entity<Self>,
+        cx: &mut AsyncWindowContext,
+    ) -> Result<()> {
+        let workspace_id = workspace
+            .read_with(cx, |ws, _| ws.database_id())?
+            .ok_or_else(|| anyhow!("workspace has no database_id; nothing to restore"))?;
+
+        let rows = cx
+            .update(|_, cx| WorkspaceDb::global(cx).console_panel_tabs(workspace_id))?
+            .unwrap_or_else(|err| {
+                log::warn!(
+                    "ConsolePanel: failed to read console_panel_tabs(workspace_id={workspace_id:?}): {err:#}; \
+                     starting with no restored tabs"
+                );
+                Vec::new()
+            });
+
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let (terminal_provider, chat_provider): (Entity<TerminalProvider>, Entity<ChatProvider>) =
+            panel.read_with(cx, |panel, _| {
+                (panel.terminal_provider.clone(), panel.chat_provider.clone())
+            });
+
+        let mut active_index: Option<usize> = None;
+
+        for (tab_index, kind, item_id, cwd, active) in rows {
+            let spawned = match kind.as_str() {
+                "terminal" => {
+                    let cwd_path = cwd.as_ref().map(PathBuf::from);
+                    let provider = terminal_provider.clone();
+                    let task = cx.update(|window, cx| {
+                        // `update` gives the closure `&mut TerminalProvider`,
+                        // which sidesteps the `read(cx).method(cx)` borrow
+                        // conflict on the outer `cx`.
+                        provider.update(cx, |provider, cx| {
+                            provider.new_tab(cwd_path, window, cx)
+                        })
+                    });
+                    match task {
+                        Ok(task) => match task.await {
+                            Ok(view) => Some(ConsoleTab::Terminal { view }),
+                            Err(err) => {
+                                log::warn!(
+                                    "ConsolePanel restore: terminal tab #{tab_index} at cwd={cwd:?} \
+                                     failed to spawn: {err:#}; skipping row"
+                                );
+                                None
+                            }
+                        },
+                        Err(err) => {
+                            log::warn!(
+                                "ConsolePanel restore: terminal tab #{tab_index} could not be \
+                                 scheduled (window gone?): {err:#}; aborting restore"
+                            );
+                            break;
+                        }
+                    }
+                }
+                "chat" => {
+                    let session_id = match SolutionSessionId::parse(&item_id) {
+                        Ok(id) => id,
+                        Err(err) => {
+                            log::warn!(
+                                "ConsolePanel restore: chat tab #{tab_index} has invalid item_id \
+                                 {item_id:?}: {err:#}; skipping row"
+                            );
+                            continue;
+                        }
+                    };
+                    // Skip rows whose session is no longer in the store
+                    // before spending an entity construction on them.
+                    let session_exists = cx
+                        .update(|_, cx| {
+                            SolutionAgentStore::global(cx)
+                                .read(cx)
+                                .session(session_id)
+                                .is_some()
+                        })
+                        .unwrap_or(false);
+                    if !session_exists {
+                        log::warn!(
+                            "ConsolePanel restore: chat tab #{tab_index} references session \
+                             {session_id} that no longer exists; skipping row"
+                        );
+                        continue;
+                    }
+                    let provider = chat_provider.clone();
+                    let task = cx.update(|window, cx| {
+                        provider.update(cx, |provider, cx| {
+                            provider.new_tab_from_existing(session_id, window, cx)
+                        })
+                    });
+                    match task {
+                        Ok(task) => match task.await {
+                            Ok(view) => Some(ConsoleTab::Chat { view, session_id }),
+                            Err(err) => {
+                                log::warn!(
+                                    "ConsolePanel restore: chat tab #{tab_index} session={session_id} \
+                                     failed to reattach: {err:#}; skipping row"
+                                );
+                                None
+                            }
+                        },
+                        Err(err) => {
+                            log::warn!(
+                                "ConsolePanel restore: chat tab #{tab_index} could not be \
+                                 scheduled (window gone?): {err:#}; aborting restore"
+                            );
+                            break;
+                        }
+                    }
+                }
+                other => {
+                    log::warn!(
+                        "ConsolePanel restore: row #{tab_index} has unknown kind={other:?}; \
+                         skipping (table CHECK constraint should make this impossible)"
+                    );
+                    None
+                }
+            };
+
+            if let Some(tab) = spawned {
+                let new_index = panel.update(cx, |panel, cx| {
+                    panel.tabs.push(tab);
+                    let new_index = panel.tabs.len() - 1;
+                    cx.notify();
+                    new_index
+                });
+                if active {
+                    active_index = Some(new_index);
+                }
+            }
+        }
+
+        panel.update(cx, |panel, cx| {
+            if let Some(ix) = active_index {
+                panel.active_index = Some(ix);
+            } else if !panel.tabs.is_empty() {
+                // No row claimed active=1 (e.g. partial restore lost the
+                // active row). Default to the last tab so the panel isn't
+                // blank when the dock opens.
+                panel.active_index = Some(panel.tabs.len() - 1);
+            }
+            cx.notify();
+        });
+
+        Ok(())
+    }
+
+    /// Snapshot the current tab list into `console_panel_state`. Cheap and
+    /// idempotent: a DELETE-then-INSERT replacement keyed by `workspace_id`
+    /// happens off the main thread inside a single sqlite transaction.
+    fn persist(&self, cx: &mut Context<Self>) {
+        let Some(workspace_id) = self.workspace_id(cx) else {
+            return;
+        };
+        let active_index = self.active_index;
+        let rows: Vec<(i64, String, String, Option<String>, bool)> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(ix, tab)| {
+                let (kind, item_id, cwd) = match tab {
+                    ConsoleTab::Terminal { view } => {
+                        let cwd = view
+                            .read(cx)
+                            .terminal()
+                            .read(cx)
+                            .working_directory()
+                            .map(|p| p.to_string_lossy().into_owned());
+                        // For terminal rows the `item_id` is informational;
+                        // restore only consults `cwd`. We use the cwd string
+                        // (or an empty marker) so the column stays
+                        // human-readable in the DB.
+                        let item_id = cwd.clone().unwrap_or_default();
+                        ("terminal".to_string(), item_id, cwd)
+                    }
+                    ConsoleTab::Chat { session_id, .. } => {
+                        ("chat".to_string(), session_id.to_string(), None)
+                    }
+                };
+                (ix as i64, kind, item_id, cwd, active_index == Some(ix))
+            })
+            .collect();
+
+        let db = WorkspaceDb::global(cx);
+        cx.background_spawn(async move {
+            db.save_console_panel_tabs(workspace_id, rows).await.log_err();
         })
+        .detach();
+    }
+
+    fn workspace_id(&self, cx: &App) -> Option<WorkspaceId> {
+        let workspace = self.workspace.upgrade()?;
+        workspace.read(cx).database_id()
     }
 }
 
@@ -296,6 +514,7 @@ impl ConsolePanel {
                 this.tabs.push(ConsoleTab::Terminal { view });
                 this.active_index = Some(this.tabs.len() - 1);
                 cx.notify();
+                this.persist(cx);
             })?;
             anyhow::Ok(())
         })
@@ -394,6 +613,7 @@ impl ConsolePanel {
                 this.pending_terminals_to_add =
                     this.pending_terminals_to_add.saturating_sub(1);
                 cx.notify();
+                this.persist(cx);
             })?;
             Ok(terminal.downgrade())
         })
@@ -635,6 +855,7 @@ impl ConsolePanel {
                 this.tabs.push(ConsoleTab::Chat { view, session_id });
                 this.active_index = Some(this.tabs.len() - 1);
                 cx.notify();
+                this.persist(cx);
             })?;
             anyhow::Ok(())
         })
@@ -796,6 +1017,7 @@ impl ConsolePanel {
         if index < self.tabs.len() {
             self.active_index = Some(index);
             cx.notify();
+            self.persist(cx);
         }
     }
 
@@ -814,6 +1036,7 @@ impl ConsolePanel {
             }
         };
         cx.notify();
+        self.persist(cx);
     }
 }
 

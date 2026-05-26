@@ -3534,6 +3534,7 @@ dependencies = [
  "gpui",
  "icons",
  "language",
+ "log",
  "project",
  "schemars 1.0.4",
  "serde",

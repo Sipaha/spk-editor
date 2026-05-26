@@ -19,6 +19,7 @@ futures.workspace = true
 gpui.workspace = true
 icons.workspace = true
 language.workspace = true
+log.workspace = true
 project.workspace = true
 schemars.workspace = true
 serde.workspace = true
