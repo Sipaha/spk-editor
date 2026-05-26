@@ -322,9 +322,11 @@ impl ConsolePanel {
     /// idempotent: a DELETE-then-INSERT replacement keyed by `workspace_id`
     /// happens off the main thread inside a single sqlite transaction.
     fn persist(&self, cx: &mut Context<Self>) {
-        let Some(workspace_id) = self.workspace_id(cx) else {
-            return;
-        };
+        // Snapshot tab state synchronously — we only read TerminalView /
+        // SolutionSession entities here, never the Workspace. Workspace lookup
+        // for `database_id` is deferred into the spawned task below so this
+        // method is safe to call while a `Workspace::update` is in flight on
+        // the outer borrow stack (action handlers, modal close paths, …).
         let active_index = self.active_index;
         let rows: Vec<(i64, String, String, Option<String>, bool)> = self
             .tabs
@@ -354,16 +356,21 @@ impl ConsolePanel {
             })
             .collect();
 
-        let db = WorkspaceDb::global(cx);
-        cx.background_spawn(async move {
-            db.save_console_panel_tabs(workspace_id, rows).await.log_err();
+        let workspace = self.workspace.clone();
+        cx.spawn(async move |_, cx| {
+            let lookup = cx.update(|cx| {
+                let workspace = workspace.upgrade()?;
+                let workspace_id = workspace.read(cx).database_id()?;
+                Some((WorkspaceDb::global(cx), workspace_id))
+            });
+            let Some((db, workspace_id)) = lookup else {
+                return;
+            };
+            db.save_console_panel_tabs(workspace_id, rows)
+                .await
+                .log_err();
         })
         .detach();
-    }
-
-    fn workspace_id(&self, cx: &App) -> Option<WorkspaceId> {
-        let workspace = self.workspace.upgrade()?;
-        workspace.read(cx).database_id()
     }
 }
 
@@ -1148,20 +1155,22 @@ mod tests {
             let store = SettingsStore::test(cx);
             cx.set_global(store);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
+            terminal_view::init(cx);
+            crate::init(cx);
         });
     }
 
-    // Ignored: constructing a `ConsolePanel` inside a real `Workspace` requires
-    // `SolutionAgentStore::init_global` plus the full solution_agent stack. That
-    // bootstrap is equivalent to the one in `chat_provider.rs::tests::setup`,
-    // which itself requires an async test context and `allow_parking()`. The
-    // panel skeleton's correctness is verified at compile time; the runtime
-    // integration path will be exercised in B11 when the panel is wired into
-    // `Workspace`.
-    #[gpui::test]
-    #[ignore]
-    async fn defaults_to_bottom_position(cx: &mut TestAppContext) {
-        cx.executor().allow_parking();
+    /// Bootstrap a real `Workspace` + `SolutionAgentStore` + `ConsolePanel`
+    /// for terminal-tab tests. Chat-tab tests would additionally need the
+    /// editor / language / font stack (`SolutionSessionView::new` embeds a
+    /// real `editor::Editor`) — covered by the MCP e2e probe at runtime,
+    /// not by these unit tests.
+    async fn bootstrap_panel(
+        cx: &mut TestAppContext,
+    ) -> (
+        gpui::WindowHandle<Workspace>,
+        Entity<ConsolePanel>,
+    ) {
         init_test(cx);
 
         let fs = FakeFs::new(cx.executor());
@@ -1196,6 +1205,14 @@ mod tests {
             })
             .unwrap();
 
+        (window_handle, panel)
+    }
+
+    #[gpui::test]
+    async fn defaults_to_bottom_position(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (window_handle, panel) = bootstrap_panel(cx).await;
+
         window_handle
             .update(cx, |_workspace, window, cx| {
                 assert_eq!(
@@ -1207,24 +1224,111 @@ mod tests {
             .unwrap();
     }
 
-    // Ignored: same bootstrap constraint as `defaults_to_bottom_position` — constructing
-    // ConsolePanel requires SolutionAgentStore::init_global plus full solution_agent stack.
-    // The close_tab and activate_tab logic is verified at compile time; runtime integration
-    // will be exercised in B11 when the panel is wired into Workspace.
     #[gpui::test]
-    #[ignore]
-    async fn close_active_tab_moves_active_to_neighbor(_cx: &mut TestAppContext) {
-        // Bootstrap: same as defaults_to_bottom_position. Push 3 placeholder tabs
-        // (via Terminal-only spawn). Activate index 1. Close index 1.
-        // Assert active_index == Some(1) — which is the old #2 shifted down.
-        todo!("flesh out");
+    async fn add_terminal_tab_appends_and_activates(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (window_handle, panel) = bootstrap_panel(cx).await;
+
+        window_handle
+            .update(cx, |_workspace, window, cx| {
+                panel.update(cx, |p, cx| p.add_terminal_tab(None, window, cx));
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        panel
+            .read_with(cx, |p, _| {
+                assert_eq!(p.tabs.len(), 1, "one tab after one NewTerminal");
+                assert!(matches!(p.tabs[0], ConsoleTab::Terminal { .. }));
+                assert_eq!(p.active_index, Some(0));
+            });
     }
 
     #[gpui::test]
-    #[ignore]
-    async fn close_last_tab_clears_active(_cx: &mut TestAppContext) {
-        // Bootstrap: same as defaults_to_bottom_position. Push 1 tab, set active.
-        // Close it. Assert tabs.is_empty() and active_index is None.
-        todo!("flesh out");
+    async fn close_active_tab_moves_active_to_neighbor(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (window_handle, panel) = bootstrap_panel(cx).await;
+
+        // Spawn three terminal tabs.
+        for _ in 0..3 {
+            window_handle
+                .update(cx, |_workspace, window, cx| {
+                    panel.update(cx, |p, cx| p.add_terminal_tab(None, window, cx));
+                })
+                .unwrap();
+            cx.run_until_parked();
+        }
+
+        // Activate the middle tab and close it. The active index should land
+        // on the tab that shifted down from index 2 → 1.
+        window_handle
+            .update(cx, |_workspace, _window, cx| {
+                panel.update(cx, |p, cx| {
+                    p.activate_tab(1, cx);
+                    assert_eq!(p.tabs.len(), 3);
+                    assert_eq!(p.active_index, Some(1));
+                    p.close_tab(1, cx);
+                });
+            })
+            .unwrap();
+
+        panel.read_with(cx, |p, _| {
+            assert_eq!(p.tabs.len(), 2);
+            assert_eq!(
+                p.active_index,
+                Some(1),
+                "active_index should clamp to the new last tab (was 1 with 3 tabs; 1 with 2 tabs)"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn close_last_tab_clears_active(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (window_handle, panel) = bootstrap_panel(cx).await;
+
+        window_handle
+            .update(cx, |_workspace, window, cx| {
+                panel.update(cx, |p, cx| p.add_terminal_tab(None, window, cx));
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        window_handle
+            .update(cx, |_workspace, _window, cx| {
+                panel.update(cx, |p, cx| {
+                    assert_eq!(p.tabs.len(), 1);
+                    p.close_tab(0, cx);
+                });
+            })
+            .unwrap();
+
+        panel.read_with(cx, |p, _| {
+            assert!(p.tabs.is_empty(), "tabs should be empty after closing the last one");
+            assert_eq!(p.active_index, None);
+        });
+    }
+
+    #[gpui::test]
+    async fn add_panel_registers_for_workspace_lookup(cx: &mut TestAppContext) {
+        // `console_panel::NewTerminal` / `::NewChat` action handlers locate the
+        // panel via `workspace.panel::<ConsolePanel>(cx)`. Verify that the
+        // workspace can in fact retrieve the panel after `add_panel`, so the
+        // action wiring isn't sabotaged at this seam. End-to-end action
+        // dispatch needs a rendered workspace (GPUI attaches workspace
+        // `register_action` handlers via the render div) — exercised live in
+        // `docs/findings/2026-05-26-console-panel-shipped/`, not here.
+        cx.executor().allow_parking();
+        let (window_handle, panel) = bootstrap_panel(cx).await;
+
+        window_handle
+            .update(cx, |workspace, window, cx| {
+                workspace.add_panel(panel.clone(), window, cx);
+                assert!(
+                    workspace.panel::<ConsolePanel>(cx).is_some(),
+                    "ConsolePanel should be retrievable via workspace.panel::<ConsolePanel>(cx) after add_panel"
+                );
+            })
+            .unwrap();
     }
 }
