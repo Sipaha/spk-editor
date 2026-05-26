@@ -1,9 +1,10 @@
 # Session handoff — 2026-05-26 (evening)
 
 **Supersedes:** `2026-05-26-session-handoff.md` (morning snapshot at B7/15).
-**Status:** session paused after **Phase B at 13.5/15** — ConsolePanel
+**Status:** session paused after **Phase B at 14/15** — ConsolePanel
 end-to-end live-verified (open editor → terminal + chat tabs → restart →
-both restored). Resume on branch `hook-inject`.
+both restored), docs and screenshots shipped. Only B14 (MCP e2e integration
+test, MEDIUM) outstanding. Resume on branch `hook-inject`.
 
 **This session shipped (in chronological order):**
 - B8 `+` popover, B9 tab context menus, double-lease fix, verification
@@ -22,15 +23,26 @@ both restored). Resume on branch `hook-inject`.
 - B12-partial (dropped `terminal.dock` setting + 8 callsites; the
   ConsolePanel-owns-its-own-dock-position story now ends at the panel).
 
-**Remaining Phase B work (~1.5 items):**
-- B12-rest: drop dead `width`/`height` fields on ConsolePanel, drop
-  `persist_tab_order` / `restore_open_tabs` from `solution_agent::store`,
-  shrink `TerminalPanel` to just its still-used helpers
-  (`new_terminal_pane`, `prepare_task_for_spawn`).
-- B13: update `CLAUDE.md` action references; add row to `FORK.md`
-  touched-files table + ConsolePanel architectural decision entry.
-- B14: MCP-driven e2e test in `crates/console_panel/tests/`.
-- B15: final screenshots into `docs/findings/...-shipped/`.
+**Remaining Phase B work (1 item):**
+- **B14**: MCP-driven e2e integration test. Bootstrap a `TestAppContext`
+  with full editor stack via `editor_mcp::set_runtime_dir_for_test`
+  (template: `crates/editor_mcp/tests/solutions_add_member_e2e_test.rs`).
+  Dispatch `console_panel::ToggleFocus` + `NewTerminal` + `NewChat`;
+  verify tabs appear via `workspace.dump_visual_structure`; assert
+  `workspace.screenshot` returns a non-empty PNG. Recommended as a
+  worktree sub-agent dispatch (~200 LOC of bootstrap; heavyweight).
+- *Done in B12-rest:* `width`/`height` dead fields dropped from
+  ConsolePanel; `solution_agent::store::persist_tab_order` /
+  `restore_open_tabs` still untouched (uncommitted-changes gotcha
+  applies); `TerminalPanel` left intact since its helpers
+  (`new_terminal_pane`, `prepare_task_for_spawn`) are still depended on
+  by `terminal_view`'s own code paths.
+- *Done in B13:* `CLAUDE.md` MCP example uses `console_panel::ToggleFocus`;
+  `FORK.md` gains decision 22 + `crates/console_panel` row + the
+  `workspace::persistence.rs` touched-files row.
+- *Done in B15:* shipped folder at
+  `docs/findings/2026-05-26-console-panel-shipped/` with 3 screenshots +
+  README; INDEX row points there.
 
 Active arc: **ConsolePanel** — unified bottom-dock panel hosting both terminal
 and AI-chat tabs. Phase A (Right Dock full-height layout) shipped. Phase B
