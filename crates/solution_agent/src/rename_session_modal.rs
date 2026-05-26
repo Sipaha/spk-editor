@@ -1,4 +1,4 @@
-//! Modal that renames an open Solution session tab. Triggered from the tab right-click menu in the SolutionSessionsNavigator.
+//! Modal that renames an open Solution session tab. Triggered from the tab right-click menu in the chat panel.
 
 use gpui::{
     App, AppContext as _, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,

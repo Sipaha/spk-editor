@@ -441,29 +441,20 @@ fn switch_to_session(
     window: &mut Window,
     cx: &mut Context<SolutionSessionView>,
 ) {
-    let Some(target_entity) = store.read(cx).session(target) else {
+    if store.read(cx).session(target).is_none() {
         log::warn!("subagent strip click: session {target} no longer present in store");
         return;
-    };
-    // Locate the hosting `SolutionSessionsNavigator` panel through the
-    // workspace so this routing keeps working without `SolutionSessionView`
-    // holding a back-reference to the navigator. TODO(B10): when
-    // ConsolePanel takes over hosting chat tabs, route the
-    // open-subagent-tab click into that panel's tab strip API.
-    let Some(workspace) = view.workspace_handle().upgrade() else {
-        log::warn!("subagent strip click: workspace dropped");
-        return;
-    };
-    let Some(navigator) = workspace
-        .read(cx)
-        .panel::<crate::navigator::SolutionSessionsNavigator>(cx)
-    else {
-        log::warn!("subagent strip click: navigator panel not registered");
-        return;
-    };
-    navigator.update(cx, |nav, ncx| {
-        nav.open_session(target, target_entity, window, ncx);
-    });
+    }
+    // TODO(B10): once ConsolePanel owns the chat-tab strip, route the
+    // subagent click into ConsolePanel's open-or-focus API so the user
+    // jumps to the subagent's session as a sibling tab. Until then this
+    // click is a no-op (logged); the user can still open the subagent
+    // from the History popover.
+    let _ = view;
+    let _ = window;
+    log::info!(
+        "subagent-strip click → session {target}: tab routing parked until ConsolePanel owns it (B10)"
+    );
 }
 
 #[cfg(test)]

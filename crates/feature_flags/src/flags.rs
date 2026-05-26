@@ -27,8 +27,8 @@ impl FeatureFlag for AcpBetaFeatureFlag {
 
     // SPK fork: force-enable. The flag gates `SessionUpdate::UsageUpdate`
     // → `AcpThread::token_usage` plumbing in `acp_thread.rs`, which is
-    // what feeds the per-session token meter in
-    // `solution_agent::SolutionSessionsNavigator::render_status_row`.
+    // what feeds the per-session token meter in the chat status row
+    // (`solution_agent::status_row::render_status_row`).
     // Cloud feature flags are unwired in this fork (no telemetry, no
     // `client.zed.dev`), so without this override the meter would be
     // permanently stuck at `0 / 1.0M` even for active conversations.

@@ -17,7 +17,6 @@ pub(crate) mod expanded_compose;
 pub mod mcp;
 pub mod message_generator;
 pub mod model;
-pub mod navigator;
 pub mod notifier;
 pub(crate) mod pool;
 pub mod rename_session_modal;
@@ -105,56 +104,21 @@ pub fn init(cx: &mut App) {
         }
     }
 
-    // Workspace hook for navigator + status item registration. The navigator
-    // derives its active Solution from the workspace's project worktrees on
-    // construction; SolutionStore subscriptions inside the navigator itself
-    // refresh that derivation when Solutions change. We re-derive on every
-    // project event too, so adding/removing a worktree retargets the panel.
+    // Workspace hook for the status-bar item. The standalone
+    // `SolutionSessionsNavigator` dock was removed when ConsolePanel
+    // took over chat hosting — `FocusNavigator` is now a no-op until
+    // B10 rewires it to focus the ConsolePanel's chat tab. The action
+    // is kept registered so the keybind still resolves (instead of
+    // surfacing as "no handler").
     cx.observe_new::<workspace::Workspace>(|workspace, window, cx| {
         let Some(window) = window else {
             return;
         };
 
-        let weak = workspace.weak_handle();
-        let weak_project = workspace.project().downgrade();
-        let navigator =
-            cx.new(|cx| navigator::SolutionSessionsNavigator::new(weak, weak_project, window, cx));
-
-        // Initial active-solution derivation is deferred to the next App tick
-        // so it runs *after* the surrounding `observe_new<Workspace>` update
-        // closes — calling `workspace.read(cx)` synchronously here panics
-        // with "cannot read Workspace while it is already being updated".
-        // `Window::defer` so the deferred closure also receives the window
-        // refresh_active_solution needs for tab-strip reconciliation.
-        window.defer(cx, {
-            let nav = navigator.downgrade();
-            move |window, cx| {
-                nav.update(cx, |nav, cx| nav.refresh_active_solution(window, cx))
-                    .ok();
-            }
-        });
-
-        // Project worktrees can come and go after the workspace opens (think
-        // `solutions.add_member` mid-session). Drive `refresh_active_solution`
-        // from project events so the panel retargets without the user having
-        // to close and reopen the workspace.
-        let project = workspace.project().clone();
-        cx.subscribe_in(&project, window, {
-            let nav = navigator.downgrade();
-            move |_, _, _: &project::Event, window, cx| {
-                nav.update(cx, |nav, cx| nav.refresh_active_solution(window, cx))
-                    .ok();
-            }
-        })
-        .detach();
-
-        workspace.add_panel(navigator, window, cx);
-
-        // Without this handler the panel's `toggle_action` (returned from
-        // `Panel::toggle_action`) dispatches into a void: the sidebar icon
-        // click and the keybind both look wired but the dock never reveals.
-        workspace.register_action(|workspace, _: &actions::FocusNavigator, window, cx| {
-            workspace.toggle_panel_focus::<navigator::SolutionSessionsNavigator>(window, cx);
+        // TODO(B10): focus the active ConsolePanel chat tab here once
+        // ConsolePanel's focus API is settled.
+        workspace.register_action(|_workspace, _: &actions::FocusNavigator, _window, _cx| {
+            log::debug!("FocusNavigator dispatched: no-op until B10 wires ConsolePanel focus");
         });
 
         let status_item = cx.new(|cx| status_item::SolutionAgentStatusItem::new(cx));

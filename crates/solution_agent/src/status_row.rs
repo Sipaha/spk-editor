@@ -1,192 +1,21 @@
-//! Status footer rendered below the session tab strip: token meter, model name, mode, state badge, history popover.
+//! Status footer rendered between the conversation list and the compose box: state badge, token meter, model / mode / cwd labels, compact + clear popover.
 
 use chrono::TimeZone as _;
 use gpui::{Animation, AnimationExt, ElementId, pulsating_between};
 use gpui::{
-    AppContext as _, Context, Entity, IntoElement, MouseButton, ParentElement, SharedString,
+    Context, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, div, px,
 };
 use ui::prelude::*;
-use ui::{CommonAnimationExt, ContextMenu, Icon, IconName, Label, LabelSize, PopoverMenu};
+use ui::{CommonAnimationExt, ContextMenu, IconName, Label, LabelSize, PopoverMenu};
 use util::ResultExt as _;
 
 use crate::compact::{
     COMPACT_BUTTON_MIN_PCT, COMPACT_BUTTON_WARN_PCT, COMPACT_HEADROOM_MIN_TOKENS,
 };
-use crate::model::{SessionState, SolutionSessionMetadata};
-use crate::navigator::SolutionSessionsNavigator;
+use crate::model::SessionState;
 use crate::session_view::SolutionSessionView;
 use crate::store::SolutionAgentStore;
-
-impl SolutionSessionsNavigator {
-    /// History popover trigger (clock icon). Lists the last 12 persisted
-    /// sessions for the active solution; clicking a row resumes that
-    /// session through `SolutionAgentStore::resume_session`.
-    ///
-    /// Hidden when there's nothing in the DB yet — no point rendering an
-    /// always-empty popover.
-    pub(crate) fn render_history_button(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        if self.active_solution.is_none() || self.historic_sessions.is_empty() {
-            return None;
-        }
-        let metas: Vec<SolutionSessionMetadata> =
-            self.historic_sessions.iter().take(12).cloned().collect();
-        // Match the `+` new-session trigger's sizing.
-        let trigger = ui::IconButton::new("solution-sessions-history", IconName::HistoryRerun)
-            .shape(ui::IconButtonShape::Wide)
-            .size(ButtonSize::Large)
-            .icon_size(IconSize::Custom(rems_from_px(20.)))
-            .icon_color(Color::Muted)
-            .tooltip(ui::Tooltip::text("Recent sessions"));
-        let weak = cx.entity().downgrade();
-        Some(
-            PopoverMenu::new("solution-sessions-history-popover")
-                .trigger(trigger)
-                .menu(move |window, cx| {
-                    let metas = metas.clone();
-                    let weak = weak.clone();
-                    Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
-                        for meta in metas {
-                            let weak = weak.clone();
-                            let meta_for_action = meta.clone();
-                            // Compose: "<preview-or-title>  ·  <time>  ·  <Ntok>"
-                            // Preview takes precedence over the placeholder
-                            // "Session <uuid>" title because identical titles
-                            // are exactly the case the user wanted to fix.
-                            // Truncate the primary at ~60 chars so a long
-                            // first-prompt doesn't push the popover wide
-                            // enough to overflow the navigator into the
-                            // project panel — ContextMenu doesn't expose a
-                            // width API, the only knob is the label string.
-                            let primary_full = meta
-                                .preview
-                                .as_deref()
-                                .filter(|s| !s.is_empty())
-                                .unwrap_or(meta.title.as_ref());
-                            let primary = truncate_history_label(primary_full, 60);
-                            let mut label = format!(
-                                "{}  ·  {}",
-                                primary,
-                                relative_time_short(meta.last_activity_at, chrono::Utc::now()),
-                            );
-                            if let Some(tokens) = meta.total_tokens {
-                                label.push_str(&format!("  ·  {}", format_tokens(tokens)));
-                            }
-                            menu =
-                                menu.entry(SharedString::from(label), None, move |window, cx| {
-                                    if let Some(this) = weak.upgrade() {
-                                        let meta = meta_for_action.clone();
-                                        this.update(cx, |this, cx| {
-                                            this.resume_and_open(meta, window, cx);
-                                        });
-                                    }
-                                });
-                        }
-                        menu
-                    }))
-                })
-                .anchor(gpui::Anchor::TopRight)
-                .into_any_element(),
-        )
-    }
-
-    /// Clickable card for the empty-state "Recent sessions" list. Two-line
-    /// layout: preview as the visual anchor (Default size, truncated), then
-    /// "<time ago>  ·  <Ntok>" as a muted Small subline. Each card resumes
-    /// its session on left-click via `resume_and_open`.
-    pub(crate) fn render_history_card(
-        &self,
-        meta: SolutionSessionMetadata,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let primary = meta
-            .preview
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or(meta.title.as_ref())
-            .to_string();
-        let activity = relative_time_short(meta.last_activity_at, chrono::Utc::now());
-        let mut subline = activity;
-        if let Some(tokens) = meta.total_tokens {
-            subline.push_str(&format!("  ·  {}", format_tokens(tokens)));
-        }
-        let id = SharedString::from(format!("history-card-{}", meta.id));
-        let meta_for_action = meta.clone();
-        let session_id_for_delete = meta.id;
-        let title_for_delete = meta.title;
-        div()
-            .id(id)
-            .flex()
-            .items_center()
-            .gap_3()
-            .px_3()
-            .py_2()
-            .w_full()
-            .rounded_md()
-            .border_1()
-            .border_color(cx.theme().colors().border_variant)
-            .bg(cx.theme().colors().elevated_surface_background)
-            .hover(|s| s.bg(cx.theme().colors().element_hover))
-            .cursor_pointer()
-            .child(
-                Icon::new(IconName::HistoryRerun)
-                    .size(IconSize::Small)
-                    .color(Color::Muted),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_0p5()
-                    .child(Label::new(primary).size(LabelSize::Default).truncate())
-                    .child(
-                        Label::new(subline)
-                            .color(Color::Muted)
-                            .size(LabelSize::Small),
-                    ),
-            )
-            .child(
-                // Trash button — removes the persisted metadata + blob
-                // for this session. Used as the escape hatch when a
-                // session can't be resumed (agent storage was wiped,
-                // or the session was never flushed past its first
-                // turn) and the user wants to clean it out of History.
-                // Stops propagation so clicking the icon doesn't also
-                // fire the row's "resume" mouse-down.
-                ui::IconButton::new(
-                    SharedString::from(format!("history-card-delete-{}", session_id_for_delete)),
-                    IconName::Trash,
-                )
-                .icon_size(IconSize::Small)
-                .icon_color(Color::Muted)
-                .tooltip(ui::Tooltip::text("Delete from history"))
-                .on_click(cx.listener(move |this, _, _window, cx| {
-                    let title = title_for_delete.clone();
-                    let store = SolutionAgentStore::global(cx);
-                    let Some(db) = store.read_with(cx, |s, _| s.db()) else {
-                        return;
-                    };
-                    cx.background_spawn(async move {
-                        if let Err(err) = db.delete(session_id_for_delete).await {
-                            log::error!("history delete failed for {title:?}: {err:?}");
-                        }
-                    })
-                    .detach();
-                    this.refresh_historic_sessions(cx);
-                })),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    let meta = meta_for_action.clone();
-                    this.resume_and_open(meta, window, cx);
-                }),
-            )
-    }
-
-}
 
 impl SolutionSessionView {
     /// Resolve the agent's currently-selected model name asynchronously
@@ -852,19 +681,6 @@ pub(crate) fn smooth_used_tokens(raw_used: u64, peak: u64) -> u64 {
         raw_used
     } else {
         peak
-    }
-}
-
-/// Char-count truncation with ellipsis for History-popover entry labels.
-/// Operates on `chars()` (not bytes) so it never splits a multibyte
-/// codepoint. Returns the input unchanged when shorter than `max_chars`.
-fn truncate_history_label(text: &str, max_chars: usize) -> String {
-    let mut iter = text.chars();
-    let head: String = iter.by_ref().take(max_chars).collect();
-    if iter.next().is_none() {
-        head
-    } else {
-        format!("{head}…")
     }
 }
 
