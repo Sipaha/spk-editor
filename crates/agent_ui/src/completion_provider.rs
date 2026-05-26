@@ -24,8 +24,7 @@ use project::{
 };
 use prompt_store::{PromptStore, UserPromptId};
 use rope::Point;
-use settings::{Settings, TerminalDockPosition};
-use terminal::terminal_settings::TerminalSettings;
+use settings::Settings;
 use console_panel::ConsolePanel;
 use terminal_view::TerminalView;
 use text::{Anchor, ToOffset as _, ToPoint as _};
@@ -2192,11 +2191,7 @@ fn terminal_selections(workspace: &Entity<Workspace>, cx: &App) -> Vec<String> {
     }
 
     if let Some(panel) = workspace.read(cx).panel::<ConsolePanel>(cx) {
-        let position = match TerminalSettings::get_global(cx).dock {
-            TerminalDockPosition::Left => DockPosition::Left,
-            TerminalDockPosition::Bottom => DockPosition::Bottom,
-            TerminalDockPosition::Right => DockPosition::Right,
-        };
+        let position = panel.read(cx).dock_position();
         let dock_is_open = workspace
             .read(cx)
             .dock_at_position(position)

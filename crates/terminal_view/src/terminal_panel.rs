@@ -1501,13 +1501,16 @@ impl Focusable for TerminalPanel {
     }
 }
 
+// TerminalPanel is no longer registered as a workspace Panel — ConsolePanel
+// took over (see `console_panel` crate). The trait impl below is kept so
+// `terminal_view` still exports the type for internal helpers
+// (`new_terminal_pane`, `prepare_task_for_spawn`) without a separate
+// refactor. The dock-position methods are dead code paths; hardcoded to
+// Bottom because the panel never reaches a render path. B12 cleanup will
+// shrink TerminalPanel down to just its still-used helpers.
 impl Panel for TerminalPanel {
-    fn position(&self, _window: &Window, cx: &App) -> DockPosition {
-        match TerminalSettings::get_global(cx).dock {
-            TerminalDockPosition::Left => DockPosition::Left,
-            TerminalDockPosition::Bottom => DockPosition::Bottom,
-            TerminalDockPosition::Right => DockPosition::Right,
-        }
+    fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
+        DockPosition::Bottom
     }
 
     fn position_is_valid(&self, _: DockPosition) -> bool {
@@ -1516,18 +1519,10 @@ impl Panel for TerminalPanel {
 
     fn set_position(
         &mut self,
-        position: DockPosition,
+        _position: DockPosition,
         _window: &mut Window,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) {
-        settings::update_settings_file(self.fs.clone(), cx, move |settings, _| {
-            let dock = match position {
-                DockPosition::Left => TerminalDockPosition::Left,
-                DockPosition::Bottom => TerminalDockPosition::Bottom,
-                DockPosition::Right => TerminalDockPosition::Right,
-            };
-            settings.terminal.get_or_insert_default().dock = Some(dock);
-        });
     }
 
     fn default_size(&self, window: &Window, cx: &App) -> Pixels {

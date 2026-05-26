@@ -64,9 +64,7 @@ use language_model::LanguageModelRegistry;
 use project::{Project, ProjectPath, Worktree};
 use prompt_store::{PromptStore, UserPromptId};
 use rules_library::{RulesLibrary, open_rules_library};
-use settings::TerminalDockPosition;
 use settings::{Settings, update_settings_file};
-use terminal::terminal_settings::TerminalSettings;
 use console_panel::ConsolePanel;
 use terminal_view::TerminalView;
 use theme_settings::ThemeSettings;
@@ -436,11 +434,7 @@ pub fn init(cx: &mut App) {
 
                         let has_terminal_panel_selection =
                             workspace.panel::<ConsolePanel>(cx).is_some_and(|panel| {
-                                let position = match TerminalSettings::get_global(cx).dock {
-                                    TerminalDockPosition::Left => DockPosition::Left,
-                                    TerminalDockPosition::Bottom => DockPosition::Bottom,
-                                    TerminalDockPosition::Right => DockPosition::Right,
-                                };
+                                let position = panel.read(cx).dock_position();
                                 let dock_is_open =
                                     workspace.dock_at_position(position).read(cx).is_open();
                                 dock_is_open && !panel.read(cx).terminal_selections(cx).is_empty()

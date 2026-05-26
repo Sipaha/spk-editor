@@ -5173,22 +5173,9 @@ fn panels_page() -> SettingsPage {
         ]
     }
 
-    fn terminal_panel_section() -> [SettingsPageItem; 4] {
+    fn terminal_panel_section() -> [SettingsPageItem; 3] {
         [
             SettingsPageItem::SectionHeader("Terminal Panel"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Terminal Dock",
-                description: "Where to dock the terminal panel.",
-                field: Box::new(SettingField {
-                    json_path: Some("terminal.dock"),
-                    pick: |settings_content| settings_content.terminal.as_ref()?.dock.as_ref(),
-                    write: |settings_content, value, _| {
-                        settings_content.terminal.get_or_insert_default().dock = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Terminal Panel Flexible Sizing",
                 description: "Whether the terminal panel should use flexible (proportional) sizing when docked to the left or right.",

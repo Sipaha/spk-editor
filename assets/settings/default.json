@@ -1879,8 +1879,6 @@
     //         }
     //     }
     "shell": "system",
-    // Where to dock terminals panel. Can be `left`, `right`, `bottom`.
-    "dock": "bottom",
     // Whether the terminal panel should use flexible (proportional) sizing.
     //
     // Default: true

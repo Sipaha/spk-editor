@@ -116,6 +116,10 @@ impl ConsolePanel {
     /// the shell is *not* restored). Chat tabs are reattached to existing
     /// sessions in `SolutionAgentStore`; rows whose session is no longer in
     /// the store are skipped with a warning.
+    pub fn dock_position(&self) -> DockPosition {
+        self.dock_position
+    }
+
     pub async fn load(
         workspace: WeakEntity<Workspace>,
         mut cx: AsyncWindowContext,
