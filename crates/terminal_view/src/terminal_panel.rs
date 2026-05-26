@@ -637,7 +637,7 @@ impl TerminalPanel {
             RevealTarget::Center => self
                 .workspace
                 .update(cx, |workspace, cx| {
-                    Self::add_center_terminal(workspace, window, cx, |project, cx| {
+                    crate::add_center_terminal(workspace, window, cx, |project, cx| {
                         project.create_terminal_task(spawn_task, cx)
                     })
                 })
@@ -663,7 +663,7 @@ impl TerminalPanel {
         if center_pane_has_focus && active_center_item_is_terminal {
             let working_directory = default_working_directory(workspace, cx);
             let local = action.local;
-            Self::add_center_terminal(workspace, window, cx, move |project, cx| {
+            crate::add_center_terminal(workspace, window, cx, move |project, cx| {
                 if local {
                     project.create_local_terminal(cx)
                 } else {
@@ -746,42 +746,6 @@ impl TerminalPanel {
     ) {
         pane.update(cx, |pane, cx| {
             pane.activate_item(item_index, true, focus, window, cx)
-        })
-    }
-
-    pub fn add_center_terminal(
-        workspace: &mut Workspace,
-        window: &mut Window,
-        cx: &mut Context<Workspace>,
-        create_terminal: impl FnOnce(
-            &mut Project,
-            &mut Context<Project>,
-        ) -> Task<Result<Entity<Terminal>>>
-        + 'static,
-    ) -> Task<Result<WeakEntity<Terminal>>> {
-        if !is_enabled_in_workspace(workspace, cx) {
-            return Task::ready(Err(anyhow!(
-                "terminal not yet supported for remote projects"
-            )));
-        }
-        let project = workspace.project().downgrade();
-        cx.spawn_in(window, async move |workspace, cx| {
-            let terminal = project.update(cx, create_terminal)?.await?;
-
-            workspace.update_in(cx, |workspace, window, cx| {
-                let terminal_view = cx.new(|cx| {
-                    TerminalView::new(
-                        terminal.clone(),
-                        workspace.weak_handle(),
-                        workspace.database_id(),
-                        workspace.project().downgrade(),
-                        window,
-                        cx,
-                    )
-                });
-                workspace.add_item_to_active_pane(Box::new(terminal_view), None, true, window, cx);
-            })?;
-            Ok(terminal.downgrade())
         })
     }
 
@@ -2010,7 +1974,7 @@ mod tests {
         window_handle
             .update(cx, |multi_workspace, window, cx| {
                 multi_workspace.workspace().update(cx, |workspace, cx| {
-                    TerminalPanel::add_center_terminal(workspace, window, cx, |project, cx| {
+                    crate::add_center_terminal(workspace, window, cx, |project, cx| {
                         project.create_terminal_shell(None, cx)
                     })
                 })
@@ -2179,7 +2143,7 @@ mod tests {
         window_handle
             .update(cx, |multi_workspace, window, cx| {
                 multi_workspace.workspace().update(cx, |workspace, cx| {
-                    TerminalPanel::add_center_terminal(workspace, window, cx, |project, cx| {
+                    crate::add_center_terminal(workspace, window, cx, |project, cx| {
                         project.create_terminal_shell(None, cx)
                     })
                 })
@@ -2269,7 +2233,7 @@ mod tests {
         window_handle
             .update(cx, |multi_workspace, window, cx| {
                 multi_workspace.workspace().update(cx, |workspace, cx| {
-                    TerminalPanel::add_center_terminal(workspace, window, cx, |project, cx| {
+                    crate::add_center_terminal(workspace, window, cx, |project, cx| {
                         project.create_terminal_shell(None, cx)
                     })
                 })
