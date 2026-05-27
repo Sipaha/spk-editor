@@ -427,6 +427,85 @@ async fn close_solution_for_already_closed_is_noop(cx: &mut TestAppContext) {
     assert_eq!(ack.seq, pre_seq, "close on already-closed must be no-op");
 }
 
+// ── Phase I/J: full lifecycle round-trip ─────────────────────────────────────
+
+/// End-to-end round-trip: s0 (empty) → open_solution → s1 (1 sol, 0 sess)
+/// → open_session → s2 (1 sol, 1 sess) → close_session → s3 (1 sol, 0 sess)
+/// → close_solution → s4 (empty). Each snapshot must have a strictly
+/// increasing `seq`. Bypasses the MCP socket; drives the logic layer directly.
+#[gpui::test]
+async fn full_lifecycle_round_trip(cx: &mut TestAppContext) {
+    let work_dir = tempdir().expect("work tempdir");
+
+    let (sol_id, sess_id) = cx.update(|cx| {
+        let store = setup_lifecycle_test(work_dir.path(), cx);
+
+        let sol_id = store.update(cx, |s, cx| s.create_for_test_minimal("project-alpha", cx));
+
+        let agent = solution_agent::store::SolutionAgentStore::global(cx);
+        let sess_id = agent.update(cx, |a, cx| {
+            a.create_for_test_minimal(&sol_id, "session-1", cx)
+        });
+        (sol_id, sess_id)
+    });
+
+    // s0: workspace is empty (solution exists but not marked open)
+    let s0 = cx.update(|cx| workspace_events::build_snapshot_for_test(cx));
+    assert!(
+        s0.solutions.is_empty(),
+        "s0 must be empty before open_solution; got {:?}",
+        s0.solutions.iter().map(|s| &s.solution.name).collect::<Vec<_>>()
+    );
+    let seq0 = s0.seq;
+
+    // open the solution → s1 should include it with 0 sessions
+    let ack1 = cx.update(|cx| workspace_events::open_solution_for_test(cx, &sol_id));
+    assert!(ack1.seq > seq0, "open_solution must advance seq");
+    let s1 = cx.update(|cx| workspace_events::build_snapshot_for_test(cx));
+    assert_eq!(s1.solutions.len(), 1, "s1 must contain the opened solution");
+    assert_eq!(
+        s1.solutions[0].sessions.len(),
+        0,
+        "s1 must have 0 sessions before open_session"
+    );
+    assert!(s1.seq > seq0, "s1.seq must exceed s0.seq");
+
+    // open the session → s2 should include it
+    let ack2 = cx.update(|cx| workspace_events::open_session_for_test(cx, &sess_id));
+    assert!(ack2.seq > s1.seq, "open_session must advance seq");
+    let s2 = cx.update(|cx| workspace_events::build_snapshot_for_test(cx));
+    assert_eq!(s2.solutions.len(), 1, "s2 must still contain the solution");
+    assert_eq!(
+        s2.solutions[0].sessions.len(),
+        1,
+        "s2 must contain the opened session"
+    );
+    assert!(s2.seq > s1.seq, "s2.seq must exceed s1.seq");
+
+    // close the session → s3 should drop it
+    let ack3 = cx.update(|cx| workspace_events::close_session_for_test(cx, &sess_id));
+    assert!(ack3.seq > s2.seq, "close_session must advance seq");
+    let s3 = cx.update(|cx| workspace_events::build_snapshot_for_test(cx));
+    assert_eq!(s3.solutions.len(), 1, "s3 must still contain the solution");
+    assert_eq!(
+        s3.solutions[0].sessions.len(),
+        0,
+        "s3 must have 0 sessions after close_session"
+    );
+    assert!(s3.seq > s2.seq, "s3.seq must exceed s2.seq");
+
+    // close the solution → s4 should be empty again
+    let ack4 = cx.update(|cx| workspace_events::close_solution_for_test(cx, &sol_id));
+    assert!(ack4.seq > s3.seq, "close_solution must advance seq");
+    let s4 = cx.update(|cx| workspace_events::build_snapshot_for_test(cx));
+    assert!(
+        s4.solutions.is_empty(),
+        "s4 must be empty after close_solution; got {:?}",
+        s4.solutions.iter().map(|s| &s.solution.name).collect::<Vec<_>>()
+    );
+    assert!(s4.seq > s3.seq, "s4.seq must exceed s3.seq");
+}
+
 // ── Phase H: agent-thread cancellation on close_solution ─────────────────────
 
 /// Closing a solution must call `cancel()` on any live `AcpThread` attached
