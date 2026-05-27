@@ -56,6 +56,33 @@ pub fn active_solution_id_for_workspace(
     None
 }
 
+/// Working-directory choice offered when creating a new AI chat. Mirrors
+/// the option model used by the mobile `NewSessionDialog` so the two
+/// surfaces stay consistent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CwdOption {
+    label: SharedString,
+    path: PathBuf,
+}
+
+/// Build the list of `cwd` choices for a new AI chat under `solution`.
+/// The solution root always comes first, followed by each member project
+/// labelled by its catalog id.
+fn chat_cwd_options(solution: &solutions::Solution) -> Vec<CwdOption> {
+    let mut out = Vec::with_capacity(1 + solution.members.len());
+    out.push(CwdOption {
+        label: SharedString::new_static("Solution root"),
+        path: solution.root.clone(),
+    });
+    for member in &solution.members {
+        out.push(CwdOption {
+            label: SharedString::from(member.catalog_id.0.clone()),
+            path: member.local_path.clone(),
+        });
+    }
+    out
+}
+
 pub enum ConsoleTab {
     Terminal {
         view: Entity<TerminalView>,
@@ -1330,5 +1357,51 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    mod cwd_options_tests {
+        use super::*;
+        use solutions::{CatalogId, Solution, SolutionId, SolutionMember};
+        use std::path::PathBuf;
+
+        fn solution(root: &str, members: &[(&str, &str)]) -> Solution {
+            Solution {
+                id: SolutionId("test-sol".into()),
+                name: "test".into(),
+                root: PathBuf::from(root),
+                members: members
+                    .iter()
+                    .map(|(cat, path)| SolutionMember {
+                        catalog_id: CatalogId((*cat).into()),
+                        local_path: PathBuf::from(path),
+                    })
+                    .collect(),
+                last_opened_at: None,
+            }
+        }
+
+        #[test]
+        fn chat_cwd_options_lists_root_then_each_member() {
+            let sol = solution("/sol", &[("m1", "/sol/m1"), ("m2", "/sol/m2")]);
+            let opts = chat_cwd_options(&sol);
+
+            assert_eq!(opts.len(), 3);
+            assert_eq!(opts[0].label.as_ref(), "Solution root");
+            assert_eq!(opts[0].path, PathBuf::from("/sol"));
+            assert_eq!(opts[1].label.as_ref(), "m1");
+            assert_eq!(opts[1].path, PathBuf::from("/sol/m1"));
+            assert_eq!(opts[2].label.as_ref(), "m2");
+            assert_eq!(opts[2].path, PathBuf::from("/sol/m2"));
+        }
+
+        #[test]
+        fn chat_cwd_options_returns_root_only_when_no_members() {
+            let sol = solution("/sol", &[]);
+            let opts = chat_cwd_options(&sol);
+
+            assert_eq!(opts.len(), 1);
+            assert_eq!(opts[0].label.as_ref(), "Solution root");
+            assert_eq!(opts[0].path, PathBuf::from("/sol"));
+        }
     }
 }
