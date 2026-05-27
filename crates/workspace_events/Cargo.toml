@@ -13,14 +13,22 @@ path = "src/workspace_events.rs"
 doctest = false
 
 [dependencies]
-anyhow.workspace = true
-chrono.workspace = true
-context_server.workspace = true
-editor_mcp.workspace = true
 gpui.workspace = true
-schemars.workspace = true
+
+# Added in Task A2 — required by emit_sequenced payload helpers
+anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+# Added in Task A3 — required by emit_sequenced calling into editor_mcp
+editor_mcp.workspace = true
+
+# Added in Task C — required by wire DTOs and tool input/output types
+chrono.workspace = true
+context_server.workspace = true
+schemars.workspace = true
+
+# Added in Task C/E — required by snapshot builder reading other stores
 solutions.workspace = true
 solution_agent.workspace = true
 

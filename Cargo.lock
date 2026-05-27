@@ -22396,6 +22396,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "workspace_events"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "context_server",
+ "editor_mcp",
+ "gpui",
+ "schemars 1.0.4",
+ "serde",
+ "serde_json",
+ "settings",
+ "solution_agent",
+ "solutions",
+ "tempfile",
+]
+
+[[package]]
 name = "worktree"
 version = "0.1.0"
 dependencies = [

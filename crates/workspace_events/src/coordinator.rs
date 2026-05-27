@@ -7,14 +7,14 @@ pub struct WorkspaceEventCoordinator {
 }
 
 #[allow(dead_code)] // removed in Task A2
-struct Global_(WorkspaceEventCoordinator);
-impl Global for Global_ {}
+struct GlobalWorkspaceEventCoordinator(WorkspaceEventCoordinator);
+impl Global for GlobalWorkspaceEventCoordinator {}
 
 pub fn install(cx: &mut App) {
-    if cx.try_global::<Global_>().is_some() {
+    if cx.try_global::<GlobalWorkspaceEventCoordinator>().is_some() {
         return;
     }
-    cx.set_global(Global_(WorkspaceEventCoordinator {
+    cx.set_global(GlobalWorkspaceEventCoordinator(WorkspaceEventCoordinator {
         seq: AtomicU64::new(0),
     }));
 }
