@@ -897,11 +897,21 @@ impl ConsolePanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.add_chat_tab_with_cwd(solution_id, None, window, cx);
+    }
+
+    pub fn add_chat_tab_with_cwd(
+        &mut self,
+        solution_id: SolutionId,
+        cwd: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let task = self.chat_provider.update(cx, |provider, cx| {
             provider.new_tab(
                 solution_id,
                 SharedString::from(CLAUDE_ACP_AGENT_ID),
-                None,
+                cwd,
                 window,
                 cx,
             )
