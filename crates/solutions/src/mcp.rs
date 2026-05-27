@@ -148,7 +148,7 @@ pub struct SolutionSummary {
     pub member_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_opened_at: Option<String>,
-    pub window_open: bool,
+    pub open: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub main_window_id: Option<String>,
 }
@@ -198,7 +198,7 @@ fn build_summary(sol: &Solution, cx: &App) -> SolutionSummary {
         root: sol.root.to_string_lossy().into_owned(),
         member_count: sol.members.len(),
         last_opened_at: sol.last_opened_at.map(|t| t.to_rfc3339()),
-        window_open: main_window_id.is_some(),
+        open: main_window_id.is_some(),
         main_window_id,
     }
 }
@@ -4837,7 +4837,7 @@ mod tests {
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0].name, "Test Sol");
         assert_eq!(arr[0].member_count, 0);
-        assert!(!arr[0].window_open);
+        assert!(!arr[0].open);
     }
 
     #[test]
