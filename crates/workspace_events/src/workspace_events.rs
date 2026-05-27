@@ -13,9 +13,11 @@
 use gpui::App;
 
 mod coordinator;
+mod dto;
 mod mcp;
 
 pub use coordinator::{WorkspaceEvent, WorkspaceEventCoordinator};
+pub use dto::*;
 
 /// Install the coordinator + register MCP tools. Idempotent.
 pub fn init(cx: &mut App) {
