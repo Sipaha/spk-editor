@@ -14,11 +14,13 @@ use gpui::App;
 
 mod coordinator;
 mod dto;
+mod list;
 mod mcp;
 mod snapshot;
 
 pub use coordinator::{WorkspaceEvent, WorkspaceEventCoordinator};
 pub use dto::*;
+pub use list::ListSolutionsTool;
 
 /// Install the coordinator + register MCP tools. Idempotent.
 pub fn init(cx: &mut App) {
@@ -34,4 +36,10 @@ pub fn init(cx: &mut App) {
 /// `WorkspaceEventCoordinator` and `SolutionStore` globals are installed.
 pub fn build_snapshot_for_test(cx: &App) -> WorkspaceSnapshot {
     snapshot::build_snapshot(cx)
+}
+
+/// Test-only direct invocation of the workspace.list_solutions logic,
+/// bypassing the MCP socket. Used by integration tests.
+pub fn list_solutions_for_test(cx: &App, open: Option<bool>) -> dto::ListSolutionsResult {
+    list::build_list(cx, open)
 }

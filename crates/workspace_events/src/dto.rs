@@ -36,6 +36,9 @@ pub struct SnapshotParams {
     pub _placeholder: Option<()>,
 }
 
+/// List solutions, optionally filtered by open state.
+/// Pass `open: true` to get only open solutions, `open: false` for closed only,
+/// or omit for all solutions. No sessions, no `seq` — refetched on every picker open.
 #[allow(dead_code)] // consumed by C2 onward
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
 pub struct ListSolutionsParams {

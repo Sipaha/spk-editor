@@ -162,3 +162,90 @@ async fn snapshot_includes_solution_marked_open(cx: &mut TestAppContext) {
     );
     assert_eq!(snap.solutions[0].solution.name, "visible");
 }
+
+// ── list_solutions tests ──────────────────────────────────────────────────
+
+#[gpui::test]
+async fn list_solutions_with_open_true_returns_only_open(cx: &mut TestAppContext) {
+    let work_dir = tempfile::tempdir().expect("work tempdir");
+
+    let open_id = cx.update(|cx| {
+        editor_mcp::init(cx);
+        let settings_store = SettingsStore::test(cx);
+        cx.set_global(settings_store);
+        <solutions::SolutionsSettings as settings::Settings>::register(cx);
+        let store = solutions::SolutionStore::for_test(work_dir.path().join("s.json"), cx);
+        solutions::install_global_for_test(store.clone(), cx);
+
+        let registry = Arc::new(solution_agent::adapter::AdapterRegistry::new());
+        solution_agent::store::SolutionAgentStore::init_global(cx, registry);
+
+        workspace_events::init(cx);
+
+        let open_id = store.update(cx, |s, cx| s.create_for_test_minimal("open-one", cx));
+        store.update(cx, |s, cx| s.create_for_test_minimal("closed-one", cx));
+        store.update(cx, |s, cx| s.mark_open(open_id.clone(), cx));
+        open_id
+    });
+    cx.run_until_parked();
+
+    let result = cx.update(|cx| workspace_events::list_solutions_for_test(cx, Some(true)));
+    assert_eq!(result.solutions.len(), 1, "expected 1 open solution");
+    assert_eq!(result.solutions[0].id, open_id.as_str());
+}
+
+#[gpui::test]
+async fn list_solutions_with_open_false_returns_only_closed(cx: &mut TestAppContext) {
+    let work_dir = tempfile::tempdir().expect("work tempdir");
+
+    let closed_id = cx.update(|cx| {
+        editor_mcp::init(cx);
+        let settings_store = SettingsStore::test(cx);
+        cx.set_global(settings_store);
+        <solutions::SolutionsSettings as settings::Settings>::register(cx);
+        let store = solutions::SolutionStore::for_test(work_dir.path().join("s.json"), cx);
+        solutions::install_global_for_test(store.clone(), cx);
+
+        let registry = Arc::new(solution_agent::adapter::AdapterRegistry::new());
+        solution_agent::store::SolutionAgentStore::init_global(cx, registry);
+
+        workspace_events::init(cx);
+
+        let open_id = store.update(cx, |s, cx| s.create_for_test_minimal("open-one", cx));
+        let closed_id = store.update(cx, |s, cx| s.create_for_test_minimal("closed-one", cx));
+        store.update(cx, |s, cx| s.mark_open(open_id, cx));
+        closed_id
+    });
+    cx.run_until_parked();
+
+    let result = cx.update(|cx| workspace_events::list_solutions_for_test(cx, Some(false)));
+    assert_eq!(result.solutions.len(), 1, "expected 1 closed solution");
+    assert_eq!(result.solutions[0].id, closed_id.as_str());
+}
+
+#[gpui::test]
+async fn list_solutions_with_none_returns_both(cx: &mut TestAppContext) {
+    let work_dir = tempfile::tempdir().expect("work tempdir");
+
+    cx.update(|cx| {
+        editor_mcp::init(cx);
+        let settings_store = SettingsStore::test(cx);
+        cx.set_global(settings_store);
+        <solutions::SolutionsSettings as settings::Settings>::register(cx);
+        let store = solutions::SolutionStore::for_test(work_dir.path().join("s.json"), cx);
+        solutions::install_global_for_test(store.clone(), cx);
+
+        let registry = Arc::new(solution_agent::adapter::AdapterRegistry::new());
+        solution_agent::store::SolutionAgentStore::init_global(cx, registry);
+
+        workspace_events::init(cx);
+
+        let open_id = store.update(cx, |s, cx| s.create_for_test_minimal("a", cx));
+        store.update(cx, |s, cx| s.create_for_test_minimal("b", cx));
+        store.update(cx, |s, cx| s.mark_open(open_id, cx));
+    });
+    cx.run_until_parked();
+
+    let result = cx.update(|cx| workspace_events::list_solutions_for_test(cx, None));
+    assert_eq!(result.solutions.len(), 2, "expected both solutions");
+}
