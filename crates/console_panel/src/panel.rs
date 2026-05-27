@@ -564,10 +564,7 @@ impl ConsolePanel {
                                 },
                                 NewChat.boxed_clone(),
                             )
-                        } else {
-                            let solution_id = active_solution_id
-                                .clone()
-                                .expect("cwd_options non-empty implies active solution");
+                        } else if let Some(solution_id) = active_solution_id.clone() {
                             let weak_self = weak_self.clone();
                             let cwd_options = cwd_options.clone();
                             menu.submenu("New AI Chat", move |sub, _, _| {
@@ -590,6 +587,8 @@ impl ConsolePanel {
                                 }
                                 sub
                             })
+                        } else {
+                            menu.action_disabled_when(true, "New AI Chat", NewChat.boxed_clone())
                         };
                         menu.action("Spawn Task…", zed_actions::Spawn::modal().boxed_clone())
                     }))
