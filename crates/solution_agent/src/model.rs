@@ -385,6 +385,15 @@ pub struct SolutionSession {
     /// `active_subagent_order.iter()` returning exactly the keys the map
     /// holds — no holes, no duplicates.
     pub active_subagent_order: Vec<SharedString>,
+    /// Position in the desktop session-tab strip. `None` means the session is
+    /// not currently in the strip (either never opened, or its tab was closed
+    /// via `persist_tab_order(.., None)`). Populated on `restore_open_tabs`
+    /// from `solution_sessions.tab_order` and maintained by every code path
+    /// that mutates that DB column.
+    ///
+    /// The mobile `workspace.snapshot` filter uses `tab_order.is_some()` to
+    /// decide whether a session is visible to the unified open-workspace screen.
+    pub tab_order: Option<i64>,
 }
 
 impl SolutionSession {
@@ -430,6 +439,7 @@ impl SolutionSession {
             stopping_safety_net: None,
             active_subagents: HashMap::new(),
             active_subagent_order: Vec::new(),
+            tab_order: None,
         }
     }
 
@@ -542,6 +552,7 @@ mod tests {
             stopping_safety_net: None,
             active_subagents: HashMap::new(),
             active_subagent_order: Vec::new(),
+            tab_order: None,
         }
     }
 

@@ -20,6 +20,14 @@ pub(crate) fn build_snapshot(cx: &App) -> WorkspaceSnapshot {
     let solutions: Vec<WorkspaceSolution> = solution_store.read_with(cx, |store, cx| {
         let mut result = Vec::new();
         for sol in store.solutions() {
+            // Filter 1: only include solutions that currently have an open
+            // desktop window (`SolutionSummary.open == true`). Build the
+            // summary first so we can reuse it in the push below without
+            // a second call.
+            let summary = solutions::mcp::build_summary(sol, cx);
+            if !summary.open {
+                continue;
+            }
             let sol_id = sol.id.clone();
             let sessions = if let Some(agent_store_ref) = agent_store.as_ref() {
                 agent_store_ref.read_with(cx, |agent, cx| {
@@ -27,7 +35,10 @@ pub(crate) fn build_snapshot(cx: &App) -> WorkspaceSnapshot {
                         .all_sessions()
                         .filter_map(|entity| {
                             let session = entity.read(cx);
-                            if session.solution_id == sol_id {
+                            // Filter 2: only include sessions that are
+                            // currently visible in the desktop session-tab
+                            // strip (`tab_order IS NOT NULL`).
+                            if session.solution_id == sol_id && session.tab_order.is_some() {
                                 Some(solution_agent::mcp::session_summary(session, cx))
                             } else {
                                 None
@@ -39,7 +50,7 @@ pub(crate) fn build_snapshot(cx: &App) -> WorkspaceSnapshot {
                 Vec::new()
             };
             result.push(WorkspaceSolution {
-                solution: solutions::mcp::build_summary(sol, cx),
+                solution: summary,
                 sessions,
             });
         }

@@ -1312,8 +1312,12 @@ impl SolutionAgentStore {
             // that are now backed by a live `Entity<SolutionSession>`.
             let result_ids: Vec<SolutionSessionId> = this.update(cx, |this, cx| {
                 let mut hydrated: Vec<SolutionSessionId> = Vec::with_capacity(ordered_ids.len());
-                for id in &ordered_ids {
-                    if this.sessions.contains_key(id) {
+                for (tab_idx, id) in ordered_ids.iter().enumerate() {
+                    let tab_order = Some(tab_idx as i64);
+                    if let Some(entity) = this.sessions.get(id) {
+                        // Session already live — just stamp the tab_order so the
+                        // in-memory view stays consistent with the DB column.
+                        entity.update(cx, |s, _| s.tab_order = tab_order);
                         hydrated.push(*id);
                         continue;
                     }
@@ -1361,6 +1365,7 @@ impl SolutionAgentStore {
                         // on every `TokenUsageUpdated` event.
                         s.cached_total_tokens = meta.total_tokens;
                         s.parent_session_id = meta.parent_session_id;
+                        s.tab_order = tab_order;
                         s
                     });
                     this.sessions.insert(meta.id, entity);
@@ -1415,6 +1420,16 @@ impl SolutionAgentStore {
                 .list_open_session_ids(solution_id.clone())
                 .await?
                 .into_iter()
+                .collect();
+            // Fetch the ordered tab-strip list so we can stamp
+            // `tab_order` on freshly-hydrated sessions. Sessions not
+            // in this list get `tab_order = None` (closed/hidden tab).
+            let tabbed_ids: Vec<SolutionSessionId> =
+                db.list_open_tabs(solution_id.clone()).await.unwrap_or_default();
+            let tab_order_map: std::collections::HashMap<SolutionSessionId, i64> = tabbed_ids
+                .iter()
+                .enumerate()
+                .map(|(i, id)| (*id, i as i64))
                 .collect();
             if open_ids.is_empty() {
                 return Ok(Vec::new());
@@ -1493,6 +1508,7 @@ impl SolutionAgentStore {
                             }
                         })
                         .unwrap_or_default();
+                    let session_tab_order = tab_order_map.get(&meta.id).copied();
                     let entity = cx.new(|_| {
                         let mut s = SolutionSession::new_idle(
                             meta.id,
@@ -1509,6 +1525,7 @@ impl SolutionAgentStore {
                         s.entry_created_ms = restored_created_ms;
                         s.cached_total_tokens = meta.total_tokens;
                         s.parent_session_id = meta.parent_session_id;
+                        s.tab_order = session_tab_order;
                         s
                     });
                     // Insert into `self.sessions` so the phone's
@@ -1950,6 +1967,11 @@ impl SolutionAgentStore {
         ordered_ids: Vec<SolutionSessionId>,
         cx: &mut Context<Self>,
     ) {
+        // Update the in-memory field first (synchronous, on the foreground
+        // thread) so that `workspace.snapshot` sees the new strip state
+        // immediately — before the async DB write completes.
+        self.apply_tab_order_to_memory(&solution_id, &ordered_ids, cx);
+
         let Some(db) = self.persistence.clone() else {
             return;
         };
@@ -1959,6 +1981,29 @@ impl SolutionAgentStore {
                 .log_err();
         })
         .detach();
+    }
+
+    /// Update the in-memory `tab_order` field on every session that belongs to
+    /// `solution_id`. Sessions whose id appears in `ordered_ids` receive their
+    /// 0-based index; all others are cleared to `None` (tab closed / hidden).
+    ///
+    /// Must be called from the foreground thread (takes `cx` for entity access).
+    fn apply_tab_order_to_memory(
+        &self,
+        solution_id: &SolutionId,
+        ordered_ids: &[SolutionSessionId],
+        cx: &mut Context<Self>,
+    ) {
+        for entity in self.sessions.values() {
+            let entity = entity.clone();
+            let belongs = entity.read(cx).solution_id == *solution_id;
+            if !belongs {
+                continue;
+            }
+            let id = entity.read(cx).id;
+            let new_order = ordered_ids.iter().position(|oid| *oid == id).map(|i| i as i64);
+            entity.update(cx, |s, _| s.tab_order = new_order);
+        }
     }
 
     /// Schedule a debounce-friendly write of the session's serialised snapshot
