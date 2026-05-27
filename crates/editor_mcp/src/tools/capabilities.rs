@@ -84,7 +84,9 @@ impl McpServerTool for CapabilitiesTool {
             experiments: vec![],
             binary_path,
             binary_built_at,
-            wire_schema_version: 1,
+            // v2: added `workspace.*` MCP namespace; renamed `SolutionSummary.window_open`
+            // to `open` and `solution_agent.close_session` to `solution_agent.delete_session`.
+            wire_schema_version: 2,
         };
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text {

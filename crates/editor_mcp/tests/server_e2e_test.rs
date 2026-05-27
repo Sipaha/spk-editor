@@ -116,8 +116,8 @@ async fn end_to_end_capabilities_via_socket(cx: &mut TestAppContext) {
         .and_then(|v| v.as_u64())
         .expect("wire_schema_version field");
     assert!(
-        wire_schema_version >= 1,
-        "wire_schema_version should be >= 1; got {}",
+        wire_schema_version >= 2,
+        "wire_schema_version should be >= 2 after workspace.* namespace + window_open/close_session renames; got {}",
         wire_schema_version
     );
 }
