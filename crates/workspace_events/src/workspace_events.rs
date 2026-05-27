@@ -25,3 +25,13 @@ pub fn init(cx: &mut App) {
     coordinator::install(cx);
     mcp::register(cx);
 }
+
+/// Expose `build_snapshot` for integration tests that need to check the
+/// snapshot filter logic without going through a live MCP socket.
+///
+/// This re-exports the internal `snapshot::build_snapshot` — it has no
+/// side-effects and is safe to call in any context where the
+/// `WorkspaceEventCoordinator` and `SolutionStore` globals are installed.
+pub fn build_snapshot_for_test(cx: &App) -> WorkspaceSnapshot {
+    snapshot::build_snapshot(cx)
+}

@@ -8,8 +8,8 @@ use crate::dock_snapshot::{DockSnapshots, SolutionDockSnapshot};
 use crate::tabs_snapshot::{SolutionTabsSnapshot, TabSnapshots};
 use anyhow::{Context as _, Result, bail};
 use chrono::Utc;
-use collections::HashMap;
-use gpui::{App, AppContext as _, Entity, EventEmitter, Global};
+use collections::{HashMap, HashSet};
+use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global};
 use std::path::PathBuf;
 use std::sync::Arc;
 use util::ResultExt as _;
@@ -46,6 +46,13 @@ pub struct SolutionStore {
     /// don't have to round-trip through SQL on every render.
     pub(crate) panel_member_selections:
         HashMap<(SolutionId, crate::db::PanelKind), CatalogId>,
+    /// Runtime-only set of solutions whose desktop window is currently open.
+    /// Populated by `event_sources::install` from MultiWorkspace lifecycle
+    /// (observe_new fires on window creation; observe_release fires on close).
+    /// Tests use `mark_open` directly to fake an open window.
+    /// Not persisted — every process restart starts empty and reconciles via
+    /// the `observe_new::<MultiWorkspace>` hook.
+    pub(crate) open_solutions: HashSet<SolutionId>,
 }
 
 #[derive(Clone, Debug)]
@@ -150,6 +157,7 @@ impl SolutionStore {
             tab_snapshots: TabSnapshots::default(),
             dock_snapshots: DockSnapshots::default(),
             panel_member_selections,
+            open_solutions: HashSet::default(),
         });
         cx.set_global(GlobalSolutionStore(store));
     }
@@ -223,6 +231,7 @@ impl SolutionStore {
             tab_snapshots: TabSnapshots::default(),
             dock_snapshots: DockSnapshots::default(),
             panel_member_selections: HashMap::default(),
+            open_solutions: HashSet::default(),
         })
     }
 
@@ -688,6 +697,29 @@ impl SolutionStore {
         Ok(())
     }
 
+    /// Returns `true` if the solution's desktop window is currently tracked as open.
+    pub fn is_open(&self, id: &SolutionId) -> bool {
+        self.open_solutions.contains(id)
+    }
+
+    /// Mark a solution's window as open. Idempotent — repeat calls are no-ops.
+    /// Emits `Changed` so existing MCP observers react automatically.
+    pub fn mark_open(&mut self, id: SolutionId, cx: &mut Context<Self>) {
+        if self.open_solutions.insert(id) {
+            cx.emit(SolutionStoreEvent::Changed);
+            cx.notify();
+        }
+    }
+
+    /// Mark a solution's window as closed. Idempotent — repeat calls are no-ops.
+    /// Emits `Changed` so existing MCP observers react automatically.
+    pub fn mark_closed(&mut self, id: &SolutionId, cx: &mut Context<Self>) {
+        if self.open_solutions.remove(id) {
+            cx.emit(SolutionStoreEvent::Changed);
+            cx.notify();
+        }
+    }
+
     pub fn paths_for_open(&self, id: &SolutionId) -> Result<Vec<PathBuf>> {
         let sol = self
             .config
@@ -774,6 +806,31 @@ impl SolutionStore {
             .iter_mut()
             .find(|s| s.id == *id)
             .with_context(|| format!("solution not found: {}", id.0))
+    }
+
+    /// Insert a minimal Solution (name + temp root, no members, no DB write)
+    /// for use in unit tests. Returns the generated `SolutionId`.
+    /// Only available in test builds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn create_for_test_minimal(
+        &mut self,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) -> SolutionId {
+        let taken: Vec<String> = self.config.solutions.iter().map(|s| s.id.0.clone()).collect();
+        let slug = crate::slug::unique_slug(name, &taken);
+        let id = SolutionId(slug.clone());
+        let root = std::env::temp_dir().join("spke-test-solutions").join(&slug);
+        self.config.solutions.push(Solution {
+            id: id.clone(),
+            name: name.into(),
+            root,
+            members: vec![],
+            last_opened_at: None,
+        });
+        cx.emit(SolutionStoreEvent::Changed);
+        cx.notify();
+        id
     }
 
     #[cfg(test)]

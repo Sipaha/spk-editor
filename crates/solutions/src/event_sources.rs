@@ -158,6 +158,43 @@ pub fn install(cx: &mut App) {
 
             let workspaces: Vec<_> = multi.workspaces().cloned().collect();
 
+            // Determine which solutions are owned by this MultiWorkspace:
+            // for each workspace, walk its visible worktrees and compare
+            // roots against every solution in the store. Matching solutions
+            // are marked open. When the MultiWorkspace entity is released
+            // (window closed), the same solutions are marked closed.
+            //
+            // Implementation note: we observe release from the coordinator's
+            // context (not MultiWorkspace's own context) so the weak→strong
+            // upgrade succeeds even as MultiWorkspace is being torn down.
+            let open_ids: Vec<crate::model::SolutionId> =
+                if let Some(store) = SolutionStore::try_global(cx) {
+                    store.read_with(cx, |s, _cx| {
+                        let mut ids = Vec::new();
+                        for sol in s.solutions() {
+                            'ws: for ws in &workspaces {
+                                let ws_ref = ws.read(_cx);
+                                let project_entity = ws_ref.project().clone();
+                                let has_match = project_entity
+                                    .read(_cx)
+                                    .visible_worktrees(_cx)
+                                    .any(|tree| {
+                                        tree.read(_cx).abs_path().starts_with(&sol.root)
+                                    });
+                                if has_match {
+                                    ids.push(sol.id.clone());
+                                    break 'ws;
+                                }
+                            }
+                        }
+                        ids
+                    })
+                } else {
+                    Vec::new()
+                };
+
+            let multi_entity = cx.entity();
+
             if let Some(coord) = coordinator_weak.upgrade() {
                 coord.update(cx, |this, cx| {
                     if let Some(sub) = activation_sub {
@@ -166,6 +203,34 @@ pub fn install(cx: &mut App) {
                     for workspace in workspaces {
                         let project = workspace.read(cx).project().clone();
                         wire_project(this, &project, cx);
+                    }
+                    // Mark the newly-opened solutions as open.
+                    if !open_ids.is_empty() {
+                        if let Some(store) = SolutionStore::try_global(cx) {
+                            store.update(cx, |s, cx| {
+                                for id in &open_ids {
+                                    s.mark_open(id.clone(), cx);
+                                }
+                            });
+                        }
+                        // Register a release observer on the coordinator's entity
+                        // so when the MultiWorkspace is dropped (window closed) we
+                        // mark the same solutions closed. Using the coordinator's
+                        // Context<EventSourceCoordinator> avoids the self-release
+                        // issue that would occur if we registered from MultiWorkspace's
+                        // own context.
+                        let close_ids = open_ids.clone();
+                        let release_sub =
+                            cx.observe_release(&multi_entity, move |_coord, _multi, cx| {
+                                if let Some(store) = SolutionStore::try_global(cx) {
+                                    store.update(cx, |s, cx| {
+                                        for id in &close_ids {
+                                            s.mark_closed(id, cx);
+                                        }
+                                    });
+                                }
+                            });
+                        this.subscriptions.push(release_sub);
                     }
                 });
             }
