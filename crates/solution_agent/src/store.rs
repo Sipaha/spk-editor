@@ -1753,7 +1753,7 @@ impl SolutionAgentStore {
         let Some(session_entity) = self.sessions.get(&session_id).cloned() else {
             return Task::ready(Err(anyhow!("unknown session {session_id}")));
         };
-        let (solution_id, agent_id, project, current_count) = {
+        let (solution_id, agent_id, project, current_count, session_cwd) = {
             let s = session_entity.read(cx);
             let project = match s.project.clone() {
                 Some(project) => project,
@@ -1769,6 +1769,7 @@ impl SolutionAgentStore {
                 s.agent_id.clone(),
                 project,
                 s.context_count,
+                s.cwd.clone(),
             )
         };
         let pair = (solution_id.clone(), agent_id);
@@ -1796,8 +1797,21 @@ impl SolutionAgentStore {
                 (task, meta)
             })?;
             let connection = connection_task.await?;
+            // Preserve the session's per-tab working directory across
+            // /compact. Without this the rotated thread would be created
+            // with cwd=solution.root, so the agent's bash tool — which
+            // inherits NewSessionRequest.cwd as its "Primary working
+            // directory" — would silently switch from the member subdir
+            // (e.g. `voxelcraft`) to the solution root after compaction
+            // and then fail commands that depend on `Cargo.toml` /
+            // `.git` being present.
+            let work_dir = if session_cwd.as_os_str().is_empty() {
+                solution.root.clone()
+            } else {
+                session_cwd.clone()
+            };
             let work_dirs =
-                util::path_list::PathList::new(&[solution.root.to_string_lossy().into_owned()]);
+                util::path_list::PathList::new(&[work_dir.to_string_lossy().into_owned()]);
             let new_thread_task = cx.update(|cx| {
                 connection
                     .clone()
@@ -1884,9 +1898,14 @@ impl SolutionAgentStore {
         // solution below (same fallback the cold→live auto-wake path uses
         // in `queue::send_message_blocks_with_wake`), so reset works on
         // cold sessions too.
-        let (solution_id, agent_id, cached_project) = {
+        let (solution_id, agent_id, cached_project, session_cwd) = {
             let s = session_entity.read(cx);
-            (s.solution_id.clone(), s.agent_id.clone(), s.project.clone())
+            (
+                s.solution_id.clone(),
+                s.agent_id.clone(),
+                s.project.clone(),
+                s.cwd.clone(),
+            )
         };
         let pair = (solution_id.clone(), agent_id);
 
@@ -1920,8 +1939,18 @@ impl SolutionAgentStore {
                 (task, meta)
             })?;
             let connection = connection_task.await?;
+            // Preserve the session's per-tab working directory across
+            // /clear. Same reason as `rotate_context` above: the rotated
+            // thread otherwise inherits cwd=solution.root and the agent's
+            // bash tool silently switches away from the member subdir
+            // the tab was bound to.
+            let work_dir = if session_cwd.as_os_str().is_empty() {
+                solution.root.clone()
+            } else {
+                session_cwd.clone()
+            };
             let work_dirs =
-                util::path_list::PathList::new(&[solution.root.to_string_lossy().into_owned()]);
+                util::path_list::PathList::new(&[work_dir.to_string_lossy().into_owned()]);
             let new_thread_task = cx.update(|cx| {
                 connection
                     .clone()
