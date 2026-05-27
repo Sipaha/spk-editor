@@ -42,4 +42,10 @@ pub fn register(cx: &mut App) {
     editor_mcp::register_tool(cx, |server| {
         server.add_tool(crate::lifecycle::CloseSolutionTool);
     });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(crate::lifecycle::OpenSessionTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(crate::lifecycle::CloseSessionTool);
+    });
 }

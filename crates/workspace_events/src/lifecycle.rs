@@ -11,7 +11,7 @@ use serde_json::json;
 use solutions::{SolutionId, SolutionStore};
 
 use crate::coordinator::WorkspaceEventCoordinator;
-use crate::dto::{SeqAck, SolutionIdParam};
+use crate::dto::{SeqAck, SessionIdParam, SolutionIdParam};
 
 pub(crate) fn open_solution_impl(cx: &mut App, id: &SolutionId) -> Result<u64> {
     let store = SolutionStore::try_global(cx)
@@ -140,6 +140,165 @@ impl McpServerTool for CloseSolutionTool {
     ) -> Result<ToolResponse<Self::Output>> {
         let id = SolutionId(input.solution_id.into());
         let seq = cx.update(|cx| close_solution_impl(cx, &id))?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("seq={seq}"),
+            }],
+            structured_content: SeqAck { seq },
+        })
+    }
+}
+
+// ── Session lifecycle ─────────────────────────────────────────────────────────
+
+pub(crate) fn open_session_impl(cx: &mut App, session_id_str: &str) -> Result<u64> {
+    let agent = solution_agent::store::SolutionAgentStore::try_global(cx)
+        .ok_or_else(|| anyhow!("SolutionAgentStore not initialised"))?;
+    let session_id = solution_agent::SolutionSessionId::parse(session_id_str)
+        .map_err(|e| anyhow!("bad session_id: {e}"))?;
+
+    // Read current state of the session.
+    let (solution_id, already_in_strip) = agent.read_with(cx, |a, cx| {
+        let entity = a
+            .session(session_id)
+            .ok_or_else(|| anyhow!("session not found"))?;
+        let s = entity.read(cx);
+        Ok::<_, anyhow::Error>((s.solution_id.clone(), s.tab_order.is_some()))
+    })?;
+    if already_in_strip {
+        // No-op: return current seq without storing a borrow.
+        return Ok(WorkspaceEventCoordinator::global(cx).current_seq());
+    }
+
+    // Build new ordered list = current tab-strip ids + this one (appended at end).
+    let new_order: Vec<solution_agent::SolutionSessionId> = agent.read_with(cx, |a, cx| {
+        let mut current: Vec<_> = a
+            .all_sessions()
+            .filter_map(|entity| {
+                let s = entity.read(cx);
+                if s.solution_id == solution_id && s.tab_order.is_some() {
+                    Some((s.id, s.tab_order.unwrap()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        current.sort_by_key(|(_, ord)| *ord);
+        let mut ids: Vec<_> = current.into_iter().map(|(id, _)| id).collect();
+        ids.push(session_id);
+        ids
+    });
+
+    // Persist (updates in-memory + DB).
+    agent.update(cx, |a, cx| {
+        a.persist_tab_order(solution_id.clone(), new_order, cx)
+    });
+
+    // Build payload.
+    let summary = agent.read_with(cx, |a, cx| {
+        let entity = a.session(session_id).expect("just added");
+        let s = entity.read(cx);
+        solution_agent::mcp::session_summary(s, cx)
+    });
+    // Reserve seq after all mutations so snapshot is consistent.
+    let seq = WorkspaceEventCoordinator::global(cx).next_seq();
+    let payload = json!({
+        "seq": seq,
+        "solution_id": solution_id.as_str(),
+        "session": summary,
+    });
+    editor_mcp::emit_notification(cx, "workspace.session_opened", payload);
+    Ok(seq)
+}
+
+pub(crate) fn close_session_impl(cx: &mut App, session_id_str: &str) -> Result<u64> {
+    let agent = solution_agent::store::SolutionAgentStore::try_global(cx)
+        .ok_or_else(|| anyhow!("SolutionAgentStore not initialised"))?;
+    let session_id = solution_agent::SolutionSessionId::parse(session_id_str)
+        .map_err(|e| anyhow!("bad session_id: {e}"))?;
+
+    let (solution_id, was_in_strip) = agent.read_with(cx, |a, cx| {
+        let entity = a
+            .session(session_id)
+            .ok_or_else(|| anyhow!("session not found"))?;
+        let s = entity.read(cx);
+        Ok::<_, anyhow::Error>((s.solution_id.clone(), s.tab_order.is_some()))
+    })?;
+    if !was_in_strip {
+        return Ok(WorkspaceEventCoordinator::global(cx).current_seq());
+    }
+
+    // Build new ordered list = current minus this session.
+    let new_order: Vec<solution_agent::SolutionSessionId> = agent.read_with(cx, |a, cx| {
+        let mut current: Vec<_> = a
+            .all_sessions()
+            .filter_map(|entity| {
+                let s = entity.read(cx);
+                if s.solution_id == solution_id
+                    && s.tab_order.is_some()
+                    && s.id != session_id
+                {
+                    Some((s.id, s.tab_order.unwrap()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        current.sort_by_key(|(_, ord)| *ord);
+        current.into_iter().map(|(id, _)| id).collect()
+    });
+
+    agent.update(cx, |a, cx| {
+        a.persist_tab_order(solution_id.clone(), new_order, cx)
+    });
+
+    let seq = WorkspaceEventCoordinator::global(cx).next_seq();
+    let payload = json!({
+        "seq": seq,
+        "solution_id": solution_id.as_str(),
+        "session_id": session_id.to_string(),
+    });
+    editor_mcp::emit_notification(cx, "workspace.session_closed", payload);
+    Ok(seq)
+}
+
+#[derive(Clone)]
+pub struct OpenSessionTool;
+
+impl McpServerTool for OpenSessionTool {
+    type Input = SessionIdParam;
+    type Output = SeqAck;
+    const NAME: &'static str = "workspace.open_session";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        let seq = cx.update(|cx| open_session_impl(cx, &input.session_id))?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("seq={seq}"),
+            }],
+            structured_content: SeqAck { seq },
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct CloseSessionTool;
+
+impl McpServerTool for CloseSessionTool {
+    type Input = SessionIdParam;
+    type Output = SeqAck;
+    const NAME: &'static str = "workspace.close_session";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        let seq = cx.update(|cx| close_session_impl(cx, &input.session_id))?;
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text {
                 text: format!("seq={seq}"),

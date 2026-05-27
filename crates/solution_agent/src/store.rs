@@ -1251,6 +1251,28 @@ impl SolutionAgentStore {
         id
     }
 
+    /// Test-only helper: insert a minimal `SolutionSession` (idle, no acp
+    /// thread) into the store for the given solution. Returns the new session
+    /// id. Used by integration tests that need a session without going through
+    /// the full `create_session` flow.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn create_for_test_minimal(
+        &mut self,
+        solution_id: &SolutionId,
+        title: &str,
+        cx: &mut Context<Self>,
+    ) -> SolutionSessionId {
+        let id = SolutionSessionId::new();
+        let mut session = SolutionSession::new_idle(
+            id,
+            solution_id.clone(),
+            SharedString::from("mock-agent"),
+            acp::SessionId::new(format!("acp-{}", id.as_str())),
+        );
+        session.title = SharedString::from(title);
+        self.register_prebuilt_session(session, cx)
+    }
+
     /// Restore tabs the user had open the last time they closed this
     /// Solution, **without spawning the agent subprocess**. For each
     /// session id where `tab_order IS NOT NULL`, hydrate a

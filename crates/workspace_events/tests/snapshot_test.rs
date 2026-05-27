@@ -251,6 +251,93 @@ async fn list_solutions_with_none_returns_both(cx: &mut TestAppContext) {
     assert_eq!(result.solutions.len(), 2, "expected both solutions");
 }
 
+// ── lifecycle: open_session / close_session tests ─────────────────────────────
+
+fn setup_with_open_solution_and_one_session(
+    cx: &mut TestAppContext,
+    runtime_dir: &tempfile::TempDir,
+) -> (solutions::SolutionId, solution_agent::SolutionSessionId) {
+    cx.update(|cx| {
+        let settings_store = SettingsStore::test(cx);
+        cx.set_global(settings_store);
+        <solutions::SolutionsSettings as settings::Settings>::register(cx);
+        editor_mcp::init(cx);
+
+        let store = solutions::SolutionStore::for_test(runtime_dir.path().join("s.json"), cx);
+        solutions::install_global_for_test(store.clone(), cx);
+
+        let registry = Arc::new(solution_agent::adapter::AdapterRegistry::new());
+        solution_agent::store::SolutionAgentStore::init_global(cx, registry);
+        solution_agent::mcp::register(cx);
+        workspace_events::init(cx);
+
+        let sol_id = store.update(cx, |s, cx| s.create_for_test_minimal("a", cx));
+        store.update(cx, |s, cx| s.mark_open(sol_id.clone(), cx));
+
+        let agent = solution_agent::store::SolutionAgentStore::global(cx);
+        let sess_id = agent.update(cx, |a, cx| {
+            a.create_for_test_minimal(&sol_id, "session-a", cx)
+        });
+        (sol_id, sess_id)
+    })
+}
+
+#[gpui::test]
+async fn open_session_adds_to_tab_strip(cx: &mut TestAppContext) {
+    let runtime_dir = tempdir().expect("tempdir");
+    let (_sol_id, sess_id) = setup_with_open_solution_and_one_session(cx, &runtime_dir);
+
+    let pre_seq = cx.update(|cx| workspace_events::current_seq_for_test(cx));
+    let ack = cx.update(|cx| workspace_events::open_session_for_test(cx, &sess_id));
+    assert!(ack.seq > pre_seq);
+
+    // Snapshot should now include this session.
+    let snap = cx.update(|cx| workspace_events::build_snapshot_for_test(cx));
+    assert_eq!(snap.solutions.len(), 1);
+    assert_eq!(snap.solutions[0].sessions.len(), 1);
+}
+
+#[gpui::test]
+async fn open_session_for_already_open_is_noop(cx: &mut TestAppContext) {
+    let runtime_dir = tempdir().expect("tempdir");
+    let (_sol_id, sess_id) = setup_with_open_solution_and_one_session(cx, &runtime_dir);
+
+    // First open: real mutation.
+    cx.update(|cx| workspace_events::open_session_for_test(cx, &sess_id));
+    let mid_seq = cx.update(|cx| workspace_events::current_seq_for_test(cx));
+
+    // Second open: no-op.
+    let ack = cx.update(|cx| workspace_events::open_session_for_test(cx, &sess_id));
+    assert_eq!(ack.seq, mid_seq);
+}
+
+#[gpui::test]
+async fn close_session_removes_from_tab_strip(cx: &mut TestAppContext) {
+    let runtime_dir = tempdir().expect("tempdir");
+    let (_sol_id, sess_id) = setup_with_open_solution_and_one_session(cx, &runtime_dir);
+
+    cx.update(|cx| workspace_events::open_session_for_test(cx, &sess_id));
+    let mid_seq = cx.update(|cx| workspace_events::current_seq_for_test(cx));
+
+    let ack = cx.update(|cx| workspace_events::close_session_for_test(cx, &sess_id));
+    assert!(ack.seq > mid_seq);
+
+    // Snapshot should NOT include this session anymore.
+    let snap = cx.update(|cx| workspace_events::build_snapshot_for_test(cx));
+    assert_eq!(snap.solutions[0].sessions.len(), 0);
+}
+
+#[gpui::test]
+async fn close_session_for_already_closed_is_noop(cx: &mut TestAppContext) {
+    let runtime_dir = tempdir().expect("tempdir");
+    let (_sol_id, sess_id) = setup_with_open_solution_and_one_session(cx, &runtime_dir);
+
+    // Never opened — close is no-op.
+    let pre_seq = cx.update(|cx| workspace_events::current_seq_for_test(cx));
+    let ack = cx.update(|cx| workspace_events::close_session_for_test(cx, &sess_id));
+    assert_eq!(ack.seq, pre_seq);
+}
+
 // ── lifecycle: open_solution / close_solution tests ──────────────────────────
 
 fn setup_lifecycle_test(
