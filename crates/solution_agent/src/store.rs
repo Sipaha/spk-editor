@@ -1619,6 +1619,18 @@ impl SolutionAgentStore {
             db.mark_closed(id, Some(Utc::now())).detach_and_log_err(cx);
         }
         cx.emit(SolutionAgentStoreEvent::SessionClosed(id));
+        // Emit sequenced workspace notification so remote clients can
+        // drop the session from their in-memory maps immediately.
+        // `solution_id` was captured above while `session_read` was live
+        // (before the entity was removed from `self.sessions`).
+        // Guard with `try_global` so test contexts that don't install the
+        // MCP layer don't panic.
+        if let Some(coord) = editor_mcp::workspace_seq::WorkspaceEventCoordinator::try_global(cx) {
+            coord.emit_sequenced(cx, "workspace.session_deleted", serde_json::json!({
+                "solution_id": solution_id.as_str(),
+                "session_id": id.to_string(),
+            }));
+        }
         cx.notify();
         Ok(())
     }
@@ -1699,6 +1711,7 @@ impl SolutionAgentStore {
             s.state = SessionState::Errored(SharedString::from("restarting…"));
         });
         cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+        self.emit_session_state_changed_workspace(&session_id, cx);
         // Best-effort close of the old session; we still spawn the new
         // one even if removal fails so the user isn't stranded.
         if let Err(err) = self.close_session(session_id, cx) {
@@ -1824,6 +1837,7 @@ impl SolutionAgentStore {
                 session_entity.update(cx, |s, _| s._acp_subscription = Some(new_sub));
                 store.persist_session_row(session_id, cx);
                 cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+                store.emit_session_state_changed_workspace(&session_id, cx);
                 cx.notify();
                 new_count
             })?;
@@ -1960,6 +1974,7 @@ impl SolutionAgentStore {
                 session_entity.update(cx, |s, _| s._acp_subscription = Some(new_sub));
                 store.persist_session_row(session_id, cx);
                 cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+                store.emit_session_state_changed_workspace(&session_id, cx);
                 if had_pending {
                     cx.emit(SolutionAgentStoreEvent::SessionQueueChanged(session_id));
                 }
@@ -1989,10 +2004,54 @@ impl SolutionAgentStore {
         ordered_ids: Vec<SolutionSessionId>,
         cx: &mut Context<Self>,
     ) {
+        // Capture the OLD set of in-strip session ids (tab_order.is_some())
+        // BEFORE the apply mutates in-memory state.
+        let old_set: std::collections::HashSet<SolutionSessionId> = self
+            .sessions
+            .values()
+            .filter_map(|entity| {
+                let s = entity.read(cx);
+                if s.solution_id == solution_id && s.tab_order.is_some() {
+                    Some(s.id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         // Update the in-memory field first (synchronous, on the foreground
         // thread) so that `workspace.snapshot` sees the new strip state
         // immediately — before the async DB write completes.
         self.apply_tab_order_to_memory(&solution_id, &ordered_ids, cx);
+
+        // Compute NEW set from the ordered_ids that were just applied.
+        let new_set: std::collections::HashSet<SolutionSessionId> =
+            ordered_ids.iter().cloned().collect();
+
+        // Diff and emit one workspace.session_opened / workspace.session_closed
+        // per actual transition so downstream clients stay in sync without a
+        // full snapshot refresh. Guard with `try_global` so test contexts that
+        // don't install the MCP layer don't panic.
+        if let Some(coord) =
+            editor_mcp::workspace_seq::WorkspaceEventCoordinator::try_global(cx)
+        {
+            for opened_id in new_set.difference(&old_set) {
+                if let Some(entity) = self.sessions.get(opened_id) {
+                    let summary =
+                        entity.read_with(cx, |s, cx| crate::mcp::session_summary(s, cx));
+                    coord.emit_sequenced(cx, "workspace.session_opened", serde_json::json!({
+                        "solution_id": solution_id.as_str(),
+                        "session": summary,
+                    }));
+                }
+            }
+            for closed_id in old_set.difference(&new_set) {
+                coord.emit_sequenced(cx, "workspace.session_closed", serde_json::json!({
+                    "solution_id": solution_id.as_str(),
+                    "session_id": closed_id.to_string(),
+                }));
+            }
+        }
 
         let Some(db) = self.persistence.clone() else {
             return;
@@ -2619,6 +2678,35 @@ impl SolutionAgentStore {
         cx.notify();
     }
 
+    /// Emit a sequenced `workspace.session_state_changed` notification for
+    /// `session_id`. Reads the current session state from `self.sessions`
+    /// and builds the wire payload using the same `session_summary` helper
+    /// that the MCP `list_sessions` / `get_session` tools use, so remote
+    /// clients receive a fully consistent state object.
+    ///
+    /// No-ops gracefully when the session is not found (already removed) or
+    /// when `WorkspaceEventCoordinator` is not installed (test contexts that
+    /// don't initialise the MCP layer).
+    fn emit_session_state_changed_workspace(
+        &self,
+        session_id: &SolutionSessionId,
+        cx: &App,
+    ) {
+        let Some(coord) = editor_mcp::workspace_seq::WorkspaceEventCoordinator::try_global(cx)
+        else {
+            return;
+        };
+        let Some(entity) = self.sessions.get(session_id) else {
+            return;
+        };
+        let summary = entity.read_with(cx, |s, cx| crate::mcp::session_summary(s, cx));
+        coord.emit_sequenced(cx, "workspace.session_state_changed", serde_json::json!({
+            "solution_id": summary.solution_id,
+            "session_id": summary.id,
+            "state": summary.state,
+        }));
+    }
+
     /// Wraps a `SessionState` mutation so notifier hooks fire uniformly:
     ///   1. Snapshot previous state.
     ///   2. Apply `f` to mutate state.
@@ -2643,6 +2731,7 @@ impl SolutionAgentStore {
         let next = session.read(cx).state.clone();
         if std::mem::discriminant(&previous) != std::mem::discriminant(&next) {
             cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+            self.emit_session_state_changed_workspace(&session_id, cx);
         }
         // Drop the Stopping safety-net task whenever the session leaves
         // Stopping by any path (Stopped event handler, Error handler,

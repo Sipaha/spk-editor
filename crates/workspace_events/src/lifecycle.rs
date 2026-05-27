@@ -7,7 +7,6 @@ use anyhow::{Result, anyhow};
 use context_server::listener::{McpServerTool, ToolResponse};
 use context_server::types::ToolResponseContent;
 use gpui::{App, AsyncApp};
-use serde_json::json;
 use solutions::{SolutionId, SolutionStore};
 
 use crate::coordinator::WorkspaceEventCoordinator;
@@ -145,26 +144,15 @@ pub(crate) fn open_session_impl(cx: &mut App, session_id_str: &str) -> Result<u6
         ids
     });
 
-    // Persist (updates in-memory + DB).
+    // persist_tab_order now emits workspace.session_opened internally
+    // via WorkspaceEventCoordinator::emit_sequenced (F5). No manual
+    // emit here — doing so would double-fire the notification.
     agent.update(cx, |a, cx| {
         a.persist_tab_order(solution_id.clone(), new_order, cx)
     });
 
-    // Build payload.
-    let summary = agent.read_with(cx, |a, cx| {
-        let entity = a.session(session_id).expect("just added");
-        let s = entity.read(cx);
-        solution_agent::mcp::session_summary(s, cx)
-    });
-    // Reserve seq after all mutations so snapshot is consistent.
-    let seq = WorkspaceEventCoordinator::global(cx).next_seq();
-    let payload = json!({
-        "seq": seq,
-        "solution_id": solution_id.as_str(),
-        "session": summary,
-    });
-    editor_mcp::emit_notification(cx, "workspace.session_opened", payload);
-    Ok(seq)
+    // Return the seq that persist_tab_order just reserved.
+    Ok(WorkspaceEventCoordinator::global(cx).current_seq())
 }
 
 pub(crate) fn close_session_impl(cx: &mut App, session_id_str: &str) -> Result<u64> {
@@ -204,18 +192,15 @@ pub(crate) fn close_session_impl(cx: &mut App, session_id_str: &str) -> Result<u
         current.into_iter().map(|(id, _)| id).collect()
     });
 
+    // persist_tab_order now emits workspace.session_closed internally
+    // via WorkspaceEventCoordinator::emit_sequenced (F5). No manual
+    // emit here — doing so would double-fire the notification.
     agent.update(cx, |a, cx| {
         a.persist_tab_order(solution_id.clone(), new_order, cx)
     });
 
-    let seq = WorkspaceEventCoordinator::global(cx).next_seq();
-    let payload = json!({
-        "seq": seq,
-        "solution_id": solution_id.as_str(),
-        "session_id": session_id.to_string(),
-    });
-    editor_mcp::emit_notification(cx, "workspace.session_closed", payload);
-    Ok(seq)
+    // Return the seq that persist_tab_order just reserved.
+    Ok(WorkspaceEventCoordinator::global(cx).current_seq())
 }
 
 #[derive(Clone)]
