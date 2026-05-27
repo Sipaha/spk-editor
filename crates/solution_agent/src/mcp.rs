@@ -363,7 +363,7 @@ impl McpServerTool for ListSessionsTool {
     }
 }
 
-fn session_summary(session: &SolutionSession, cx: &App) -> SessionSummary {
+pub fn session_summary(session: &SolutionSession, cx: &App) -> SessionSummary {
     // Prefer the live thread's `TokenUsage.used_tokens` so an active
     // session reports the current count (R-5/R-6 token tracking already
     // writes through to `cached_total_tokens` on every

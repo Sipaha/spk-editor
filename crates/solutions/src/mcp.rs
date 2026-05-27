@@ -190,7 +190,7 @@ impl McpServerTool for ListSolutionsTool {
     }
 }
 
-fn build_summary(sol: &Solution, cx: &App) -> SolutionSummary {
+pub fn build_summary(sol: &Solution, cx: &App) -> SolutionSummary {
     let main_window_id = find_window_id_for_solution(&sol.root, cx);
     SolutionSummary {
         id: sol.id.as_str().to_string(),

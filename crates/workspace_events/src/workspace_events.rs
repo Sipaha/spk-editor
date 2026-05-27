@@ -15,6 +15,7 @@ use gpui::App;
 mod coordinator;
 mod dto;
 mod mcp;
+mod snapshot;
 
 pub use coordinator::{WorkspaceEvent, WorkspaceEventCoordinator};
 pub use dto::*;

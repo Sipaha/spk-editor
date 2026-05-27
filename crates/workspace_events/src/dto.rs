@@ -23,6 +23,11 @@ pub struct WorkspaceSnapshot {
     pub solutions: Vec<WorkspaceSolution>,
 }
 
+/// Return a point-in-time snapshot of the open workspace: the current event
+/// sequence number and all configured Solutions with their open sessions.
+/// Use this as the starting point for a streaming session — record `seq`,
+/// then subscribe to `workspace.*` notifications and apply deltas from any
+/// event whose `seq` is greater than the value returned here.
 #[allow(dead_code)] // consumed by C2 onward
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Default, Clone)]
 pub struct SnapshotParams {

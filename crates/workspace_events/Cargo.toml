@@ -33,6 +33,12 @@ solutions.workspace = true
 solution_agent.workspace = true
 
 [dev-dependencies]
+db = { workspace = true, features = ["test-support"] }
+editor_mcp.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
-settings.workspace = true
+settings = { workspace = true, features = ["test-support"] }
+smol.workspace = true
+solution_agent = { workspace = true, features = ["test-support"] }
+solutions = { workspace = true, features = ["test-support"] }
+serde_json.workspace = true
 tempfile.workspace = true
