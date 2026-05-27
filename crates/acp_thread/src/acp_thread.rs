@@ -2428,10 +2428,18 @@ impl AcpThread {
             cx,
         );
         let request = acp::PromptRequest::new(self.session_id.clone(), message.clone());
-        let git_store = self.project.read(cx).git_store().clone();
 
         let message_id = UserMessageId::new();
 
+        // Fork-local: skip the per-turn git checkpoint. Upstream Zed writes a
+        // commit-tree on every send so the user can later revert agent edits,
+        // but this fork doesn't surface that UI — `agent_ui::AgentPanel` is
+        // hidden and `solution_agent::session_view` has no restore-checkpoint
+        // affordance. Capturing the checkpoint anyway just spends CPU/IO,
+        // litters `.git/objects/` with dangling commits, and noisily logs
+        // ENOENT when one of the project's repositories is in a state that
+        // `git add --all` can't traverse cleanly. `message.checkpoint` stays
+        // `None` and `update_last_checkpoint` early-returns on that.
         self.run_turn(cx, async move |this, cx| {
             this.update(cx, |this, cx| {
                 this.push_entry(
@@ -2444,21 +2452,6 @@ impl AcpThread {
                     }),
                     cx,
                 );
-            })
-            .ok();
-
-            let old_checkpoint = git_store
-                .update(cx, |git, cx| git.checkpoint(cx))
-                .await
-                .context("failed to get old checkpoint")
-                .log_err();
-            this.update(cx, |this, cx| {
-                if let Some((_ix, message)) = this.last_user_message() {
-                    message.checkpoint = old_checkpoint.map(|git_checkpoint| Checkpoint {
-                        git_checkpoint,
-                        show: false,
-                    });
-                }
                 this.connection.prompt(message_id, request, cx)
             })?
             .await
@@ -4279,7 +4272,10 @@ mod tests {
         assert!(cx.read(|cx| !thread.read(cx).has_pending_edit_tool_calls()));
     }
 
+    // Disabled: fork removes the per-turn git checkpoint capture
+    // (see `AcpThread::send`); this test asserts that capture happened.
     #[gpui::test(iterations = 10)]
+    #[ignore]
     async fn test_checkpoints(cx: &mut TestAppContext) {
         init_test(cx);
         let fs = FakeFs::new(cx.background_executor.clone());
