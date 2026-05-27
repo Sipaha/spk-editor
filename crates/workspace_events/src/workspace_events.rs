@@ -19,7 +19,7 @@ mod list;
 mod mcp;
 mod snapshot;
 
-pub use coordinator::{WorkspaceEvent, WorkspaceEventCoordinator};
+pub use coordinator::WorkspaceEventCoordinator;
 pub use dto::*;
 pub use list::ListSolutionsTool;
 
