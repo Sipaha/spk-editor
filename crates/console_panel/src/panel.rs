@@ -516,7 +516,22 @@ impl ConsolePanel {
     }
 
     fn render_plus_popover(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let has_active_solution = self.active_solution_id(cx).is_some();
+        let active_solution_id = self.active_solution_id(cx);
+        let has_active_solution = active_solution_id.is_some();
+        let cwd_options: Vec<CwdOption> = active_solution_id
+            .as_ref()
+            .and_then(|id| {
+                let store = SolutionStore::try_global(cx)?;
+                store
+                    .read(cx)
+                    .solutions()
+                    .iter()
+                    .find(|s| &s.id == id)
+                    .map(chat_cwd_options)
+            })
+            .unwrap_or_default();
+        let weak_self = cx.weak_entity();
+
         let plus_container = div()
             .flex()
             .flex_none()
@@ -525,6 +540,7 @@ impl ConsolePanel {
             .px_1p5()
             .border_r_1()
             .border_color(cx.theme().colors().border_variant);
+
         plus_container.child(
             PopoverMenu::new("console-panel-plus")
                 .trigger_with_tooltip(
@@ -533,9 +549,13 @@ impl ConsolePanel {
                 )
                 .anchor(Anchor::TopLeft)
                 .menu(move |window, cx| {
-                    Some(ContextMenu::build(window, cx, |menu, _, _| {
-                        menu.action("New Terminal", NewTerminal.boxed_clone())
-                            .action_disabled_when(
+                    let cwd_options = cwd_options.clone();
+                    let active_solution_id = active_solution_id.clone();
+                    let weak_self = weak_self.clone();
+                    Some(ContextMenu::build(window, cx, move |menu, _, _| {
+                        let menu = menu.action("New Terminal", NewTerminal.boxed_clone());
+                        let menu = if cwd_options.len() <= 1 {
+                            menu.action_disabled_when(
                                 !has_active_solution,
                                 if has_active_solution {
                                     "New AI Chat"
@@ -544,7 +564,34 @@ impl ConsolePanel {
                                 },
                                 NewChat.boxed_clone(),
                             )
-                            .action("Spawn Task…", zed_actions::Spawn::modal().boxed_clone())
+                        } else {
+                            let solution_id = active_solution_id
+                                .clone()
+                                .expect("cwd_options non-empty implies active solution");
+                            let weak_self = weak_self.clone();
+                            let cwd_options = cwd_options.clone();
+                            menu.submenu("New AI Chat", move |sub, _, _| {
+                                let mut sub = sub;
+                                for opt in cwd_options.iter().cloned() {
+                                    let weak_self = weak_self.clone();
+                                    let solution_id = solution_id.clone();
+                                    sub = sub.entry(opt.label.clone(), None, move |window, cx| {
+                                        if let Some(panel) = weak_self.upgrade() {
+                                            panel.update(cx, |panel, cx| {
+                                                panel.add_chat_tab_with_cwd(
+                                                    solution_id.clone(),
+                                                    Some(opt.path.clone()),
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        }
+                                    });
+                                }
+                                sub
+                            })
+                        };
+                        menu.action("Spawn Task…", zed_actions::Spawn::modal().boxed_clone())
                     }))
                 }),
         )
