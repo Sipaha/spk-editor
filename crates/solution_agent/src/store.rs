@@ -17,8 +17,8 @@ use crate::adapter::AdapterRegistry;
 use crate::db::SolutionAgentDb;
 use crate::metrics_emitter::MetricsEmitter;
 use crate::model::{
-    AgentServerId, SessionState, SolutionSession, SolutionSessionId, SolutionSessionMetadata,
-    SubagentTab,
+    AgentServerId, SessionContextCount, SessionState, SolutionSession, SolutionSessionId,
+    SolutionSessionMetadata, SubagentTab,
 };
 use crate::notifier;
 use crate::pool::SubprocessPool;
@@ -124,6 +124,17 @@ pub enum SolutionAgentStoreEvent {
     /// MCP wire's `session_active_subagents_changed` notification (Etap 5),
     /// so both desktop and mobile redraw without polling the session entity.
     SessionSubagentsChanged(SolutionSessionId),
+    /// Emitted when a session's conversation context has just been wiped
+    /// in-place by `/clear` (`reset_context`) or `/compact`
+    /// (`rotate_context`). Remote clients use this to drop their cached
+    /// entry list for the session and re-fetch from scratch (the
+    /// `session_id` is stable across the swap — only the transcript is
+    /// gone). `context_count` is the post-operation value (incremented
+    /// by `rotate_context`, left as-is by `reset_context`).
+    SessionContextReset {
+        id: SolutionSessionId,
+        context_count: SessionContextCount,
+    },
 }
 
 impl EventEmitter<SolutionAgentStoreEvent> for SolutionAgentStore {}
@@ -1860,6 +1871,10 @@ impl SolutionAgentStore {
                 store.persist_session_row(session_id, cx);
                 cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
                 store.emit_session_state_changed_workspace(&session_id, cx);
+                cx.emit(SolutionAgentStoreEvent::SessionContextReset {
+                    id: session_id,
+                    context_count: new_count,
+                });
                 cx.notify();
                 new_count
             })?;
@@ -2010,8 +2025,16 @@ impl SolutionAgentStore {
                 let new_sub = store.subscribe_to_session(session_id, new_thread, cx);
                 session_entity.update(cx, |s, _| s._acp_subscription = Some(new_sub));
                 store.persist_session_row(session_id, cx);
+                // `reset_context` does not bump `context_count` (only
+                // `rotate_context` does), so read the current value to
+                // forward as-is on the wire.
+                let context_count = session_entity.read(cx).context_count;
                 cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
                 store.emit_session_state_changed_workspace(&session_id, cx);
+                cx.emit(SolutionAgentStoreEvent::SessionContextReset {
+                    id: session_id,
+                    context_count,
+                });
                 if had_pending {
                     cx.emit(SolutionAgentStoreEvent::SessionQueueChanged(session_id));
                 }

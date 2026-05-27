@@ -1652,6 +1652,107 @@ async fn rotate_context_resets_token_meter(cx: &mut TestAppContext) {
     });
 }
 
+/// `/clear` (reset_context) must emit `SessionContextReset` so remote
+/// clients (mobile, WS proxy) learn the transcript was wiped — they
+/// only get `SessionStateChanged` otherwise, which doesn't carry
+/// "context gone" semantics, so their cached entry list goes stale
+/// until a foreground/cold refresh.
+#[gpui::test]
+async fn reset_context_emits_session_context_reset(cx: &mut TestAppContext) {
+    let (session_id, _old_thread, _tmp) = create_session_with_thread(cx).await;
+
+    // Stamp a known context_count so the assertion below can verify it
+    // is forwarded as-is (reset does NOT bump the counter).
+    let stamped_count: crate::model::SessionContextCount = 4;
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let session = store.session(session_id).expect("session exists");
+            session.update(cx, |s, _| s.context_count = stamped_count);
+            cx.notify();
+        });
+    });
+
+    let observed = Rc::new(std::cell::RefCell::new(
+        Vec::<crate::model::SessionContextCount>::new(),
+    ));
+    let _subscription = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let observed = observed.clone();
+        cx.subscribe(&store, move |_store, event, _cx| {
+            if let SolutionAgentStoreEvent::SessionContextReset { id, context_count } = event
+                && *id == session_id
+            {
+                observed.borrow_mut().push(*context_count);
+            }
+        })
+    });
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| store.reset_context(session_id, cx))
+    })
+    .await
+    .expect("reset_context");
+    cx.executor().run_until_parked();
+
+    let collected = observed.borrow().clone();
+    assert_eq!(
+        collected,
+        vec![stamped_count],
+        "/clear must fire exactly one SessionContextReset with the unchanged context_count",
+    );
+}
+
+/// `/compact` (rotate_context) must emit `SessionContextReset` and the
+/// `context_count` carried on the event must be the POST-rotation
+/// value (previous + 1) — clients use it to render the "now on
+/// rotation #N" badge without a follow-up `get_session` round-trip.
+#[gpui::test]
+async fn rotate_context_emits_session_context_reset_with_incremented_count(
+    cx: &mut TestAppContext,
+) {
+    let (session_id, _old_thread, _tmp) = create_session_with_thread(cx).await;
+
+    let initial_count = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let session = store.session(session_id).expect("session exists");
+            session.read(cx).context_count
+        })
+    });
+
+    let observed = Rc::new(std::cell::RefCell::new(
+        Vec::<crate::model::SessionContextCount>::new(),
+    ));
+    let _subscription = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let observed = observed.clone();
+        cx.subscribe(&store, move |_store, event, _cx| {
+            if let SolutionAgentStoreEvent::SessionContextReset { id, context_count } = event
+                && *id == session_id
+            {
+                observed.borrow_mut().push(*context_count);
+            }
+        })
+    });
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| store.rotate_context(session_id, cx))
+    })
+    .await
+    .expect("rotate_context");
+    cx.executor().run_until_parked();
+
+    let collected = observed.borrow().clone();
+    assert_eq!(
+        collected,
+        vec![initial_count.saturating_add(1)],
+        "/compact must fire exactly one SessionContextReset with the incremented context_count",
+    );
+}
+
 /// Regression: `/compact` (rotate_context) must preserve the session's
 /// `cwd`. Earlier the new ACP thread was always spawned with
 /// `work_dirs = solution.root` regardless of which member sub-dir the

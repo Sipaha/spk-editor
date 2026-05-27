@@ -119,6 +119,7 @@ pub(crate) const SUPPORTED_EVENT_KINDS: &[&str] = &[
     "server_shutting_down",
     "agent_session_created",
     "agent_session_closed",
+    "agent_session_context_reset",
     "agent_session_state_changed",
     "agent_session_title_changed",
     "agent_session_message_appended",

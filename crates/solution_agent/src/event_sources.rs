@@ -97,6 +97,16 @@ pub fn install(cx: &mut App) {
                         payload,
                     );
                 }
+                SolutionAgentStoreEvent::SessionContextReset { id, context_count } => {
+                    editor_mcp::emit_notification(
+                        cx,
+                        "agent_session_context_reset",
+                        json!({
+                            "session_id": id.to_string(),
+                            "context_count": context_count,
+                        }),
+                    );
+                }
                 SolutionAgentStoreEvent::SessionNotified(id, kind) => {
                     let kind_str = match kind {
                         NotifyKind::Completed => "completed",
