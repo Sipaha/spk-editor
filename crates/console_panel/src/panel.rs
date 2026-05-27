@@ -565,28 +565,31 @@ impl ConsolePanel {
                                 NewChat.boxed_clone(),
                             )
                         } else if let Some(solution_id) = active_solution_id.clone() {
-                            let weak_self = weak_self.clone();
-                            let cwd_options = cwd_options.clone();
-                            menu.submenu("New AI Chat", move |sub, _, _| {
-                                let mut sub = sub;
-                                for opt in cwd_options.iter().cloned() {
-                                    let weak_self = weak_self.clone();
-                                    let solution_id = solution_id.clone();
-                                    sub = sub.entry(opt.label.clone(), None, move |window, cx| {
-                                        if let Some(panel) = weak_self.upgrade() {
-                                            panel.update(cx, |panel, cx| {
-                                                panel.add_chat_tab_with_cwd(
-                                                    solution_id.clone(),
-                                                    Some(opt.path.clone()),
-                                                    window,
-                                                    cx,
-                                                );
-                                            });
-                                        }
-                                    });
-                                }
-                                sub
-                            })
+                            // Flatten cwd options into the parent menu under a
+                            // "New AI Chat in:" header. GPUI's ContextMenu
+                            // submenu trigger requires hover to expand (its
+                            // on_click handler isn't reachable through the
+                            // ListItem layering we see in practice), so a
+                            // single click on "New AI Chat ▸" looked like a
+                            // no-op. A flat list keeps every entry one click.
+                            let mut menu = menu.separator().header("New AI Chat in:");
+                            for opt in cwd_options.iter().cloned() {
+                                let weak_self = weak_self.clone();
+                                let solution_id = solution_id.clone();
+                                menu = menu.entry(opt.label.clone(), None, move |window, cx| {
+                                    if let Some(panel) = weak_self.upgrade() {
+                                        panel.update(cx, |panel, cx| {
+                                            panel.add_chat_tab_with_cwd(
+                                                solution_id.clone(),
+                                                Some(opt.path.clone()),
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                    }
+                                });
+                            }
+                            menu.separator()
                         } else {
                             menu.action_disabled_when(true, "New AI Chat", NewChat.boxed_clone())
                         };
