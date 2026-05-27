@@ -36,4 +36,10 @@ pub fn register(cx: &mut App) {
     editor_mcp::register_tool(cx, |server| {
         server.add_tool(crate::list::ListSolutionsTool);
     });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(crate::lifecycle::OpenSolutionTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(crate::lifecycle::CloseSolutionTool);
+    });
 }

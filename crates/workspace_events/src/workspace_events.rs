@@ -14,6 +14,7 @@ use gpui::App;
 
 mod coordinator;
 mod dto;
+pub(crate) mod lifecycle;
 mod list;
 mod mcp;
 mod snapshot;
@@ -42,4 +43,23 @@ pub fn build_snapshot_for_test(cx: &App) -> WorkspaceSnapshot {
 /// bypassing the MCP socket. Used by integration tests.
 pub fn list_solutions_for_test(cx: &App, open: Option<bool>) -> dto::ListSolutionsResult {
     list::build_list(cx, open)
+}
+
+/// Test-only direct invocation of `workspace.open_solution`.
+/// Call from tests as: `cx.update(|cx| workspace_events::open_solution_for_test(cx, &id))`.
+pub fn open_solution_for_test(cx: &mut App, id: &solutions::SolutionId) -> dto::SeqAck {
+    let seq = lifecycle::open_solution_impl(cx, id).expect("open_solution");
+    dto::SeqAck { seq }
+}
+
+/// Test-only direct invocation of `workspace.close_solution`.
+/// Call from tests as: `cx.update(|cx| workspace_events::close_solution_for_test(cx, &id))`.
+pub fn close_solution_for_test(cx: &mut App, id: &solutions::SolutionId) -> dto::SeqAck {
+    let seq = lifecycle::close_solution_impl(cx, id).expect("close_solution");
+    dto::SeqAck { seq }
+}
+
+/// Test-only accessor for the current event sequence number.
+pub fn current_seq_for_test(cx: &App) -> u64 {
+    coordinator::WorkspaceEventCoordinator::global(cx).current_seq()
 }

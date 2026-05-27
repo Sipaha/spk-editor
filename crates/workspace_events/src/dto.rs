@@ -54,15 +54,25 @@ pub struct ListSolutionsResult {
     pub solutions: Vec<SolutionSummary>,
 }
 
+/// Identifies a single solution by its opaque ID string.
+/// Used as input to workspace lifecycle tools such as
+/// `workspace.open_solution` and `workspace.close_solution`.
 #[allow(dead_code)] // consumed by C2 onward
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
 pub struct SolutionIdParam {
+    /// The opaque solution ID returned by `workspace.list_solutions` or
+    /// `workspace.snapshot`.
     pub solution_id: String,
 }
 
+/// Identifies a single session by its opaque ID string.
+/// Used as input to workspace lifecycle tools such as
+/// `workspace.open_session` and `workspace.close_session`.
 #[allow(dead_code)] // consumed by C2 onward
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone)]
 pub struct SessionIdParam {
+    /// The opaque session ID returned by `workspace.snapshot` or
+    /// session-listing tools.
     pub session_id: String,
 }
 

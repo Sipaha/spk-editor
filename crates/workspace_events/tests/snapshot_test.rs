@@ -13,10 +13,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::TestAppContext;
+use gpui::{Entity, TestAppContext};
 use serde_json::json;
 use settings::SettingsStore;
 use smol::net::unix::UnixStream;
+use tempfile::tempdir;
 
 mod support;
 
@@ -248,4 +249,93 @@ async fn list_solutions_with_none_returns_both(cx: &mut TestAppContext) {
 
     let result = cx.update(|cx| workspace_events::list_solutions_for_test(cx, None));
     assert_eq!(result.solutions.len(), 2, "expected both solutions");
+}
+
+// ── lifecycle: open_solution / close_solution tests ──────────────────────────
+
+fn setup_lifecycle_test(
+    work_dir: &std::path::Path,
+    cx: &mut gpui::App,
+) -> Entity<solutions::SolutionStore> {
+    editor_mcp::init(cx);
+    let settings_store = SettingsStore::test(cx);
+    cx.set_global(settings_store);
+    <solutions::SolutionsSettings as settings::Settings>::register(cx);
+    let store = solutions::SolutionStore::for_test(work_dir.join("s.json"), cx);
+    solutions::install_global_for_test(store.clone(), cx);
+    let registry = Arc::new(solution_agent::adapter::AdapterRegistry::new());
+    solution_agent::store::SolutionAgentStore::init_global(cx, registry);
+    solution_agent::mcp::register(cx);
+    workspace_events::init(cx);
+    store
+}
+
+#[gpui::test]
+async fn open_solution_for_already_open_is_noop(cx: &mut TestAppContext) {
+    let work_dir = tempdir().expect("work tempdir");
+
+    let sol_id = cx.update(|cx| {
+        let store = setup_lifecycle_test(work_dir.path(), cx);
+        let id = store.update(cx, |s, cx| s.create_for_test_minimal("a", cx));
+        store.update(cx, |s, cx| s.mark_open(id.clone(), cx));
+        id
+    });
+
+    let pre_seq = cx.update(|cx| workspace_events::current_seq_for_test(cx));
+    let ack = cx.update(|cx| workspace_events::open_solution_for_test(cx, &sol_id));
+    assert_eq!(ack.seq, pre_seq, "no-op must not advance seq");
+}
+
+#[gpui::test]
+async fn open_solution_for_closed_marks_open_and_advances_seq(cx: &mut TestAppContext) {
+    let work_dir = tempdir().expect("work tempdir");
+
+    let sol_id = cx.update(|cx| {
+        let store = setup_lifecycle_test(work_dir.path(), cx);
+        store.update(cx, |s, cx| s.create_for_test_minimal("a", cx))
+    });
+
+    let pre_seq = cx.update(|cx| workspace_events::current_seq_for_test(cx));
+    let ack = cx.update(|cx| workspace_events::open_solution_for_test(cx, &sol_id));
+    assert!(ack.seq > pre_seq, "open must advance seq");
+
+    let is_open = cx.update(|cx| {
+        solutions::SolutionStore::global(cx).read(cx).is_open(&sol_id)
+    });
+    assert!(is_open, "solution must be marked open after open_solution");
+}
+
+#[gpui::test]
+async fn close_solution_marks_closed_and_advances_seq(cx: &mut TestAppContext) {
+    let work_dir = tempdir().expect("work tempdir");
+
+    let sol_id = cx.update(|cx| {
+        let store = setup_lifecycle_test(work_dir.path(), cx);
+        let id = store.update(cx, |s, cx| s.create_for_test_minimal("a", cx));
+        store.update(cx, |s, cx| s.mark_open(id.clone(), cx));
+        id
+    });
+
+    let pre_seq = cx.update(|cx| workspace_events::current_seq_for_test(cx));
+    let ack = cx.update(|cx| workspace_events::close_solution_for_test(cx, &sol_id));
+    assert!(ack.seq > pre_seq, "close must advance seq");
+
+    let is_open = cx.update(|cx| {
+        solutions::SolutionStore::global(cx).read(cx).is_open(&sol_id)
+    });
+    assert!(!is_open, "solution must be marked closed after close_solution");
+}
+
+#[gpui::test]
+async fn close_solution_for_already_closed_is_noop(cx: &mut TestAppContext) {
+    let work_dir = tempdir().expect("work tempdir");
+
+    let sol_id = cx.update(|cx| {
+        let store = setup_lifecycle_test(work_dir.path(), cx);
+        store.update(cx, |s, cx| s.create_for_test_minimal("a", cx))
+    });
+
+    let pre_seq = cx.update(|cx| workspace_events::current_seq_for_test(cx));
+    let ack = cx.update(|cx| workspace_events::close_solution_for_test(cx, &sol_id));
+    assert_eq!(ack.seq, pre_seq, "close on already-closed must be no-op");
 }
