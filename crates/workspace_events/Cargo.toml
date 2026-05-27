@@ -32,6 +32,10 @@ schemars.workspace = true
 solutions.workspace = true
 solution_agent.workspace = true
 
+# Added in Phase H — required by shutdown_agent_threads walking AcpThread entities
+acp_thread.workspace = true
+log.workspace = true
+
 [dev-dependencies]
 db = { workspace = true, features = ["test-support"] }
 editor_mcp.workspace = true

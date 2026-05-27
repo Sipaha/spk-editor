@@ -48,7 +48,10 @@ pub(crate) fn close_solution_impl(cx: &mut App, id: &SolutionId) -> Result<u64> 
         return Ok(coord.current_seq());
     }
 
-    // Phase H will add agent + terminal termination here.
+    // Terminate the solution's agent threads + terminals first. Sessions stay
+    // on disk (tab_order, transcripts preserved). Only running runtime state
+    // is killed.
+    crate::shutdown::shutdown_solution_runtime(id, cx);
 
     // mark_closed itself emits the sequenced workspace.solution_closed event.
     store.update(cx, |s, cx| s.mark_closed(id, cx));

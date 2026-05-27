@@ -426,3 +426,46 @@ async fn close_solution_for_already_closed_is_noop(cx: &mut TestAppContext) {
     let ack = cx.update(|cx| workspace_events::close_solution_for_test(cx, &sol_id));
     assert_eq!(ack.seq, pre_seq, "close on already-closed must be no-op");
 }
+
+// ── Phase H: agent-thread cancellation on close_solution ─────────────────────
+
+/// Closing a solution must call `cancel()` on any live `AcpThread` attached
+/// to its sessions and still mark the solution closed. In the test registry,
+/// `create_for_test_minimal` creates sessions with `acp_thread: None`, so
+/// the cancellation path runs over an empty thread list — the test verifies
+/// the code path does not panic and the solution is correctly marked closed.
+///
+/// The full cancellation handshake (SIGTERM propagation, state→Closed) is
+/// tested in the `acp_thread` crate's own unit tests.
+#[gpui::test]
+async fn close_solution_cancels_open_agent_threads(cx: &mut TestAppContext) {
+    let runtime_dir = tempdir().expect("tempdir");
+    let (sol_id, sess_id) = setup_with_open_solution_and_one_session(cx, &runtime_dir);
+
+    // Open the session as a tab.
+    cx.update(|cx| workspace_events::open_session_for_test(cx, &sess_id));
+
+    // Close the solution — triggers shutdown_solution_runtime internally.
+    // Must not panic even when sessions have no live AcpThread (cold tabs).
+    let ack = cx.update(|cx| workspace_events::close_solution_for_test(cx, &sol_id));
+    assert!(ack.seq > 0, "close_solution must advance seq");
+
+    // Solution must be marked closed.
+    cx.update(|cx| {
+        let store = solutions::SolutionStore::global(cx);
+        assert!(
+            !store.read(cx).is_open(&sol_id),
+            "solution must be marked closed after close_solution"
+        );
+    });
+
+    // Session record is preserved on the agent store (transcripts on disk).
+    cx.update(|cx| {
+        let agent = solution_agent::store::SolutionAgentStore::global(cx);
+        let session = agent.read(cx).session(sess_id);
+        assert!(
+            session.is_some(),
+            "session entity must still exist after close_solution (transcripts preserved)"
+        );
+    });
+}

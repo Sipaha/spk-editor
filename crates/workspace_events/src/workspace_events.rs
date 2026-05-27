@@ -17,6 +17,7 @@ mod dto;
 pub(crate) mod lifecycle;
 mod list;
 mod mcp;
+pub(crate) mod shutdown;
 mod snapshot;
 
 pub use coordinator::WorkspaceEventCoordinator;
