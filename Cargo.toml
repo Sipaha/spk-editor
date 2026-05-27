@@ -233,6 +233,7 @@ members = [
     "crates/web_search_providers",
     "crates/which_key",
     "crates/workspace",
+    "crates/workspace_events",
     "crates/worktree",
     "crates/worktree_benchmarks",
     "crates/x_ai",
