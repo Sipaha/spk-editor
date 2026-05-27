@@ -16,23 +16,15 @@ use crate::dto::{SeqAck, SessionIdParam, SolutionIdParam};
 pub(crate) fn open_solution_impl(cx: &mut App, id: &SolutionId) -> Result<u64> {
     let store = SolutionStore::try_global(cx)
         .ok_or_else(|| anyhow!("SolutionStore not initialised"))?;
+    let coord = WorkspaceEventCoordinator::global(cx);
 
     let was_open = store.read(cx).is_open(id);
     if was_open {
-        // No-op: read seq as a plain u64 (borrow ends immediately).
-        let seq = WorkspaceEventCoordinator::global(cx).current_seq();
-        return Ok(seq);
+        return Ok(coord.current_seq());
     }
 
-    // Reserve the next sequence number before any mutation so that consumers
-    // can never observe a snapshot with a seq newer than the delta they just
-    // received.
-    let seq = WorkspaceEventCoordinator::global(cx).next_seq();
-
-    // Mark open (emits Changed via SolutionStoreEvent::Changed).
-    store.update(cx, |s, cx| s.mark_open(id.clone(), cx));
-
     // Hydrate restored sessions for this solution (idempotent if already hydrated).
+    // Done before mark_open so any sessions in memory are captured by the snapshot.
     if let Some(agent) = solution_agent::store::SolutionAgentStore::try_global(cx) {
         let _ = agent.update(cx, |a, cx| a.hydrate_all_for_solution(id.clone(), cx));
         // The hydration is a Task<_> — we don't await here; the notification
@@ -40,65 +32,29 @@ pub(crate) fn open_solution_impl(cx: &mut App, id: &SolutionId) -> Result<u64> {
         // reconnect via workspace.snapshot anyway.
     }
 
-    // Build payload: solution summary + restored sessions array.
-    let solution = store.read_with(cx, |store, cx| {
-        store
-            .solutions()
-            .iter()
-            .find(|s| &s.id == id)
-            .map(|sol| solutions::mcp::build_summary(sol, cx))
-    });
-    let sessions = solution_agent::store::SolutionAgentStore::try_global(cx)
-        .map(|agent| {
-            agent.read_with(cx, |a, cx| {
-                a.all_sessions()
-                    .filter_map(|entity| {
-                        let session = entity.read(cx);
-                        if &session.solution_id == id && session.tab_order.is_some() {
-                            Some(solution_agent::mcp::session_summary(session, cx))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-            })
-        })
-        .unwrap_or_default();
+    // mark_open itself emits the sequenced workspace.solution_opened event.
+    store.update(cx, |s, cx| s.mark_open(id.clone(), cx));
 
-    let payload = json!({
-        "seq": seq,
-        "solution": solution,
-        "sessions": sessions,
-    });
-    // emit_notification is public from editor_mcp; bypasses the re-borrow
-    // issue from holding &WorkspaceEventCoordinator while also needing &mut cx.
-    editor_mcp::emit_notification(cx, "workspace.solution_opened", payload);
-    Ok(seq)
+    // Return the seq just reserved by mark_open's emit_sequenced call.
+    Ok(WorkspaceEventCoordinator::global(cx).current_seq())
 }
 
 pub(crate) fn close_solution_impl(cx: &mut App, id: &SolutionId) -> Result<u64> {
     let store = SolutionStore::try_global(cx)
         .ok_or_else(|| anyhow!("SolutionStore not initialised"))?;
+    let coord = WorkspaceEventCoordinator::global(cx);
 
     let was_open = store.read(cx).is_open(id);
     if !was_open {
-        let seq = WorkspaceEventCoordinator::global(cx).current_seq();
-        return Ok(seq);
+        return Ok(coord.current_seq());
     }
-
-    // Reserve next seq before mutation.
-    let seq = WorkspaceEventCoordinator::global(cx).next_seq();
 
     // Phase H will add agent + terminal termination here.
 
+    // mark_closed itself emits the sequenced workspace.solution_closed event.
     store.update(cx, |s, cx| s.mark_closed(id, cx));
 
-    let payload = json!({
-        "seq": seq,
-        "solution_id": id.as_str(),
-    });
-    editor_mcp::emit_notification(cx, "workspace.solution_closed", payload);
-    Ok(seq)
+    Ok(WorkspaceEventCoordinator::global(cx).current_seq())
 }
 
 #[derive(Clone)]
