@@ -6,6 +6,11 @@ use gpui::App;
 
 pub(crate) fn build_snapshot(cx: &App) -> WorkspaceSnapshot {
     let coord = WorkspaceEventCoordinator::global(cx);
+    // Hold the read guard for the entire snapshot body so that no
+    // `emit_sequenced` write (seq increment + notification) can interleave
+    // between our `current_seq` read and our state read. Multiple concurrent
+    // snapshots don't block each other; only writes block reads.
+    let _read = coord.snapshot_lock();
     let seq = coord.current_seq();
 
     // If either store is uninitialised (very early during boot or in tests

@@ -15,6 +15,7 @@ pub(crate) mod db;
 pub mod event_sources;
 pub(crate) mod expanded_compose;
 pub mod mcp;
+pub(crate) mod metrics_emitter;
 pub mod message_generator;
 pub mod model;
 pub mod notifier;
@@ -26,6 +27,8 @@ pub mod status_item;
 pub(crate) mod status_row;
 pub mod store;
 pub mod upload;
+
+pub use metrics_emitter::MetricsEmitter;
 
 #[cfg(any(feature = "test-support", test))]
 pub mod test_support;

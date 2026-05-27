@@ -1,9 +1,18 @@
 use crate::notifications::emit as emit_notification;
 use gpui::{App, Global};
+use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct WorkspaceEventCoordinator {
     pub(crate) seq: AtomicU64,
+    /// Guards snapshot-seq atomicity. `emit_sequenced` takes the write
+    /// side (briefly, across seq increment + emit) so that a concurrent
+    /// `build_snapshot` read cannot interleave between the seq advance and
+    /// the notification, causing the snapshot's seq to diverge from the
+    /// state it describes. `build_snapshot` takes the read side around its
+    /// entire body. Multiple concurrent snapshot reads don't block each
+    /// other; a write blocks all readers until the notification is fired.
+    replication: RwLock<()>,
 }
 
 impl WorkspaceEventCoordinator {
@@ -26,6 +35,12 @@ impl WorkspaceEventCoordinator {
         self.seq.fetch_add(1, Ordering::SeqCst) + 1
     }
 
+    /// Hold the read side around a state read that needs to be consistent
+    /// with the returned seq value. Released when the guard drops.
+    pub fn snapshot_lock(&self) -> parking_lot::RwLockReadGuard<'_, ()> {
+        self.replication.read()
+    }
+
     /// Reserve the next seq AND emit a sequenced notification atomically.
     ///
     /// `payload_without_seq` is mutated to inject the assigned seq under the
@@ -33,12 +48,19 @@ impl WorkspaceEventCoordinator {
     /// state-write lock guards the mutation they're announcing — the seq is
     /// reserved BEFORE the notification fires so consumers cannot observe a
     /// newer seq from a snapshot than from any preceding delta.
+    ///
+    /// Takes the `replication` write guard across seq increment + emit so
+    /// that a `build_snapshot` read in flight cannot interleave between them
+    /// and observe a seq that is ahead of the state it will read.
     pub fn emit_sequenced(
         &self,
         cx: &App,
         kind: &str,
         mut payload_without_seq: serde_json::Value,
     ) -> u64 {
+        // Hold the write side across seq increment + emit so that a
+        // snapshot read in flight cannot interleave between them.
+        let _w = self.replication.write();
         let seq = self.next_seq();
         if let serde_json::Value::Object(ref mut map) = payload_without_seq {
             map.insert("seq".to_string(), serde_json::json!(seq));
@@ -64,6 +86,7 @@ pub fn install(cx: &mut App) {
     }
     cx.set_global(GlobalWorkspaceEventCoordinator(WorkspaceEventCoordinator {
         seq: AtomicU64::new(0),
+        replication: RwLock::new(()),
     }));
 }
 

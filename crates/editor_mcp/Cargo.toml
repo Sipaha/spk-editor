@@ -16,6 +16,7 @@ doctest = false
 anyhow.workspace = true
 chrono.workspace = true
 collections.workspace = true
+parking_lot.workspace = true
 context_server.workspace = true
 fs2.workspace = true
 gpui.workspace = true

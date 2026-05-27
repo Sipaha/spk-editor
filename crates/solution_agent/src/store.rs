@@ -15,6 +15,7 @@ use util::ResultExt;
 
 use crate::adapter::AdapterRegistry;
 use crate::db::SolutionAgentDb;
+use crate::metrics_emitter::MetricsEmitter;
 use crate::model::{
     AgentServerId, SessionState, SolutionSession, SolutionSessionId, SolutionSessionMetadata,
     SubagentTab,
@@ -64,6 +65,12 @@ pub struct SolutionAgentStore {
     /// breach — a continuously-streaming entry mustn't be able to starve
     /// the trailing-edge emit indefinitely.
     entry_update_throttles: HashMap<(SolutionSessionId, usize), EntryUpdateThrottle>,
+    /// Throttler for `workspace.session_metrics_changed` notifications.
+    /// Caps emit rate at ~1 per 2 seconds per session so chatty fields
+    /// (`last_activity_at`, `total_tokens`, `max_tokens`) don't flood
+    /// the wire on every token-usage update. Non-sequenced: missed metric
+    /// notifications do NOT trigger resync on the client.
+    metrics_emitter: MetricsEmitter,
     _solution_subscription: Option<Subscription>,
 }
 
@@ -484,6 +491,7 @@ impl SolutionAgentStore {
             server_registry: HashMap::new(),
             focus_resolver: None,
             entry_update_throttles: HashMap::new(),
+            metrics_emitter: MetricsEmitter::new(),
             _solution_subscription: solution_subscription,
         }
     }
@@ -2393,6 +2401,24 @@ impl SolutionAgentStore {
                             s.last_turn_duration = Some(d);
                         }
                     });
+                    // Emit a metrics notification on turn completion so the
+                    // mobile client sees an updated last_activity_at without
+                    // waiting for the next TokenUsageUpdated. Throttled
+                    // (2 s window) and non-sequenced per spec.
+                    let (last_activity_at, total_tokens, max_tokens) = {
+                        let r = s.read(cx);
+                        (r.last_activity_at, r.cached_total_tokens, r.cached_max_tokens)
+                    };
+                    self.metrics_emitter.emit_if_ready(
+                        cx,
+                        &session_id,
+                        serde_json::json!({
+                            "session_id": session_id.to_string(),
+                            "last_activity_at": last_activity_at,
+                            "total_tokens": total_tokens,
+                            "max_tokens": max_tokens,
+                        }),
+                    );
                 }
                 // Token usage is finalised on turn completion — refresh DB
                 // so the History popover token column reflects the latest.
@@ -2523,6 +2549,24 @@ impl SolutionAgentStore {
                         s.cached_total_tokens = total;
                         s.cached_max_tokens = max;
                     });
+                    // Throttled non-sequenced notification — at most one
+                    // emit per 2 s per session. The client treats a
+                    // missed metric notify as "check on next snapshot
+                    // resync"; no gap-detection or seq field needed.
+                    let (last_activity_at, total_tokens, max_tokens) = {
+                        let r = s.read(cx);
+                        (r.last_activity_at, r.cached_total_tokens, r.cached_max_tokens)
+                    };
+                    self.metrics_emitter.emit_if_ready(
+                        cx,
+                        &session_id,
+                        serde_json::json!({
+                            "session_id": session_id.to_string(),
+                            "last_activity_at": last_activity_at,
+                            "total_tokens": total_tokens,
+                            "max_tokens": max_tokens,
+                        }),
+                    );
                 }
                 self.persist_session_row(session_id, cx);
             }
