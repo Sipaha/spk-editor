@@ -224,6 +224,17 @@ pub struct SessionSummary {
     /// 'claude .* --resume <uuid>'`) without having to guess from
     /// process start times.
     pub acp_session_id: String,
+    /// Working directory the agent subprocess was launched with — either
+    /// `solution.root` (default) or a member project's `local_path` when
+    /// the chat was opened via the "+" popover's "New AI Chat" submenu.
+    /// Drives `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl` bucketing
+    /// so the field is the only authoritative way to locate the on-disk
+    /// transcript without poking at the DB. `None` for legacy DB rows
+    /// that predate the `session_cwd` column (empty `PathBuf` in
+    /// `SolutionSession::cwd`); those sessions implicitly run at
+    /// `solution.root`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     /// In-flight `Task` / `Agent` subagents the parent thread has spawned,
     /// in spawn order. Mirrors `SolutionSession::active_subagent_order` +
     /// `active_subagents` — the desktop session_view renders these as the
@@ -406,6 +417,8 @@ fn session_summary(session: &SolutionSession, cx: &App) -> SessionSummary {
         max_tokens,
         parent_session_id: session.parent_session_id.map(|id| id.to_string()),
         acp_session_id: session.acp_session_id.0.to_string(),
+        cwd: (!session.cwd.as_os_str().is_empty())
+            .then(|| session.cwd.to_string_lossy().into_owned()),
         active_subagents: build_active_subagents_vec(session),
     }
 }
@@ -868,6 +881,11 @@ pub struct GetSessionResult {
     /// top-level sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
+    /// Mirrors [`SessionSummary::cwd`] — exposing the same field on
+    /// `get_session` so a single fetch reveals both the transcript and
+    /// the working directory the agent was launched with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     pub entries: Vec<EntrySummary>,
     /// R-6e: total entry count of the underlying thread, regardless of
     /// pagination filters applied to `entries`. Lets the client render a
@@ -1024,6 +1042,7 @@ impl McpServerTool for GetSessionTool {
                 total_tokens: summary.total_tokens,
                 max_tokens: summary.max_tokens,
                 parent_session_id: summary.parent_session_id,
+                cwd: summary.cwd,
                 entries,
                 total_count,
                 pending_bundles,
@@ -5111,6 +5130,57 @@ mod tests {
         assert!(
             result.structured_content.active_subagents.is_empty(),
             "no seeded tabs → empty active_subagents"
+        );
+    }
+
+    #[gpui::test]
+    async fn session_summary_exposes_session_cwd(cx: &mut gpui::TestAppContext) {
+        let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+
+        let expected_cwd = cx.read(|cx| {
+            SolutionAgentStore::global(cx)
+                .read(cx)
+                .session(session_id)
+                .expect("session exists")
+                .read(cx)
+                .cwd
+                .to_string_lossy()
+                .into_owned()
+        });
+
+        let get_result = GetSessionTool
+            .run(
+                GetSessionParams {
+                    session_id: session_id.to_string(),
+                    ..Default::default()
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session");
+        assert_eq!(
+            get_result.structured_content.cwd.as_deref(),
+            Some(expected_cwd.as_str()),
+            "get_session must surface session.cwd"
+        );
+
+        let list_result = ListSessionsTool
+            .run(
+                ListSessionsParams::default(),
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("list_sessions");
+        let summary = list_result
+            .structured_content
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id.to_string())
+            .expect("session present in list_sessions");
+        assert_eq!(
+            summary.cwd.as_deref(),
+            Some(expected_cwd.as_str()),
+            "list_sessions must surface session.cwd on every entry"
         );
     }
 
