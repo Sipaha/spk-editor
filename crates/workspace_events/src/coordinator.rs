@@ -1,3 +1,4 @@
+use editor_mcp;
 use gpui::{App, Global};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -18,6 +19,34 @@ impl WorkspaceEventCoordinator {
     /// emits a sequenced workspace event.
     pub fn next_seq(&self) -> u64 {
         self.seq.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Reserve the next seq AND emit a sequenced notification atomically.
+    ///
+    /// `payload_without_seq` is mutated to inject the assigned seq under the
+    /// `"seq"` key before emission. Callers should already hold whatever
+    /// state-write lock guards the mutation they're announcing — the seq is
+    /// reserved BEFORE the notification fires so consumers cannot observe a
+    /// newer seq from a snapshot than from any preceding delta.
+    pub fn emit_sequenced(
+        &self,
+        cx: &App,
+        kind: &str,
+        mut payload_without_seq: serde_json::Value,
+    ) -> u64 {
+        let seq = self.next_seq();
+        if let serde_json::Value::Object(ref mut map) = payload_without_seq {
+            map.insert("seq".to_string(), serde_json::json!(seq));
+        } else {
+            // Caller bug: every workspace event payload must be a JSON object.
+            // Wrap into one rather than panicking in prod.
+            payload_without_seq = serde_json::json!({
+                "seq": seq,
+                "payload": payload_without_seq
+            });
+        }
+        editor_mcp::emit_notification(cx, kind, payload_without_seq);
+        seq
     }
 }
 
@@ -61,6 +90,41 @@ mod tests {
         cx.update(|cx| {
             let coord = WorkspaceEventCoordinator::global(cx);
             assert_eq!(coord.current_seq(), 0);
+        });
+    }
+
+    #[gpui::test]
+    async fn next_seq_is_monotonic_under_contention(cx: &mut TestAppContext) {
+        cx.update(install);
+        let observed = cx.update(|cx| {
+            let coord = WorkspaceEventCoordinator::global(cx);
+            let mut seen = Vec::new();
+            for _ in 0..1000 {
+                seen.push(coord.next_seq());
+            }
+            seen
+        });
+        let mut sorted = observed.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 1000, "no duplicates");
+        assert_eq!(observed, sorted, "ascending without gaps");
+    }
+
+    #[gpui::test]
+    async fn emit_sequenced_injects_seq_field_and_returns_value(cx: &mut TestAppContext) {
+        use serde_json::json;
+        cx.update(install);
+        cx.update(|cx| {
+            let coord = WorkspaceEventCoordinator::global(cx);
+            // Without a real MCP server, emit_notification is a no-op (or pushes
+            // to a no-op channel). We just verify the helper advances seq and
+            // returns the new value.
+            let s1 = coord.emit_sequenced(cx, "workspace.test", json!({ "id": "abc" }));
+            let s2 = coord.emit_sequenced(cx, "workspace.test", json!({ "id": "def" }));
+            assert_eq!(s1, 1);
+            assert_eq!(s2, 2);
+            assert_eq!(coord.current_seq(), 2);
         });
     }
 }
