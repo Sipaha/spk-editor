@@ -38,7 +38,7 @@ pub fn register(cx: &mut App) {
         server.add_tool(SendMessageBlocksTool);
     });
     editor_mcp::register_tool(cx, |server| {
-        server.add_tool(CloseSessionTool);
+        server.add_tool(DeleteSessionTool);
     });
     editor_mcp::register_tool(cx, |server| {
         server.add_tool(CancelTurnTool);
@@ -1912,22 +1912,25 @@ impl McpServerTool for SendMessageBlocksTool {
 }
 
 // =====================================================================
-// solution_agent.close_session
+// solution_agent.delete_session
 // =====================================================================
 
-/// Close a session, dropping its `AcpThread` and removing it from the
+/// Delete a session, dropping its `AcpThread` and removing it from the
 /// store. Mirrors `SolutionAgentStore::close_session` directly — the
 /// pool's per-pair `live_session_count` is not decremented here because
 /// the store's own `close_session` doesn't either (the only production
 /// `pool_release_session` call site is the failed-spawn rollback in
 /// `create_session`). Pool leakage on close is a pre-existing store
 /// concern, not MCP-specific.
+///
+/// Note: the internal Rust method on `SolutionAgentStore` remains
+/// `close_session`; only the wire name is renamed here (B2 scope).
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
-pub struct CloseSessionParams {
+pub struct DeleteSessionParams {
     pub session_id: String,
 }
 
-impl<'de> Deserialize<'de> for CloseSessionParams {
+impl<'de> Deserialize<'de> for DeleteSessionParams {
     fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         #[derive(Deserialize, Default)]
         #[serde(default, deny_unknown_fields)]
@@ -1943,15 +1946,15 @@ impl<'de> Deserialize<'de> for CloseSessionParams {
 }
 
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
-pub struct CloseSessionResult {}
+pub struct DeleteSessionResult {}
 
 #[derive(Clone)]
-pub struct CloseSessionTool;
+pub struct DeleteSessionTool;
 
-impl McpServerTool for CloseSessionTool {
-    type Input = CloseSessionParams;
-    type Output = CloseSessionResult;
-    const NAME: &'static str = "solution_agent.close_session";
+impl McpServerTool for DeleteSessionTool {
+    type Input = DeleteSessionParams;
+    type Output = DeleteSessionResult;
+    const NAME: &'static str = "solution_agent.delete_session";
 
     async fn run(
         &self,
@@ -1975,7 +1978,7 @@ impl McpServerTool for CloseSessionTool {
             content: vec![ToolResponseContent::Text {
                 text: "closed".to_string(),
             }],
-            structured_content: CloseSessionResult {},
+            structured_content: DeleteSessionResult {},
         })
     }
 }
