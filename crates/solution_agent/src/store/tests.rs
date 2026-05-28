@@ -3551,3 +3551,118 @@ fn is_session_gone_error_matches_known_markers() {
     assert!(!is_session_gone_error("authentication required"));
     assert!(!is_session_gone_error("permission denied: /home/spk/.spk"));
 }
+
+/// Task 13: hydrate-side reconcile drops SQLite rows whose JSONL file
+/// no longer exists on disk — without this the strip would render dead
+/// pills for runs whose worker dirs were wiped while the editor was
+/// closed.
+#[gpui::test]
+async fn reconciliation_drops_rows_with_missing_jsonl(cx: &mut TestAppContext) {
+    let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+    let rows = vec![crate::db::BackgroundAgentRow {
+        solution_session_id: session_id.to_string(),
+        agent_id: "missing000000000000".into(),
+        jsonl_path: "/nonexistent/path/missing.jsonl".into(),
+        registered_at_ms: 0,
+        last_seen_label: None,
+        last_mtime_ms: None,
+        stop_reason: None,
+    }];
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        s.update(cx, |s, cx| {
+            s.reconcile_background_agents_for(session_id, rows, cx)
+        });
+    });
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        let session = s.read(cx).session(session_id).unwrap();
+        assert!(
+            session.read(cx).background_agents.is_empty(),
+            "row with missing JSONL file must not be registered"
+        );
+    });
+}
+
+/// Task 13: rows whose tail JSONL line carries a terminal `stop_reason`
+/// are NOT re-registered — the worker already wrapped up while the
+/// editor was closed, so re-adding it would resurrect a finished pill.
+#[gpui::test]
+async fn reconciliation_drops_done_rows(cx: &mut TestAppContext) {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("done.jsonl");
+    let mut f = std::fs::File::create(&path).unwrap();
+    writeln!(
+        f,
+        r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"bye"}}],"stop_reason":"end_turn"}}}}"#
+    )
+    .unwrap();
+    drop(f);
+
+    let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+    let rows = vec![crate::db::BackgroundAgentRow {
+        solution_session_id: session_id.to_string(),
+        agent_id: "done00000000000000".into(),
+        jsonl_path: path.to_string_lossy().into_owned(),
+        registered_at_ms: 0,
+        last_seen_label: None,
+        last_mtime_ms: None,
+        stop_reason: None,
+    }];
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        s.update(cx, |s, cx| {
+            s.reconcile_background_agents_for(session_id, rows, cx)
+        });
+    });
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        let session = s.read(cx).session(session_id).unwrap();
+        assert!(
+            session.read(cx).background_agents.is_empty(),
+            "row with terminal stop_reason must not be registered"
+        );
+    });
+}
+
+/// Task 13: an alive row (file present, no terminal stop_reason on the
+/// tail) is re-registered with a snapshot — the render-side classifier
+/// then decides Running vs Dead based on mtime.
+#[gpui::test]
+async fn reconciliation_registers_alive_row(cx: &mut TestAppContext) {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alive.jsonl");
+    let mut f = std::fs::File::create(&path).unwrap();
+    writeln!(
+        f,
+        r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"hi"}}]}}}}"#
+    )
+    .unwrap();
+    drop(f);
+
+    let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+    let rows = vec![crate::db::BackgroundAgentRow {
+        solution_session_id: session_id.to_string(),
+        agent_id: "alive0000000000000".into(),
+        jsonl_path: path.to_string_lossy().into_owned(),
+        registered_at_ms: 0,
+        last_seen_label: None,
+        last_mtime_ms: None,
+        stop_reason: None,
+    }];
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        s.update(cx, |s, cx| {
+            s.reconcile_background_agents_for(session_id, rows, cx)
+        });
+    });
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        let session = s.read(cx).session(session_id).unwrap();
+        let s = session.read(cx);
+        assert_eq!(s.background_agents.len(), 1);
+        assert!(s.background_agents.values().next().unwrap().latest.is_some());
+    });
+}

@@ -1626,6 +1626,21 @@ impl SolutionAgentStore {
                     blobs.insert(meta.id, bytes);
                 }
             }
+            // Pre-load background_agent rows for every session about to
+            // hydrate. Mirrors the blob pre-load above — keeps the
+            // foreground update block free of awaits. `unwrap_or_default`
+            // so one bad row doesn't abort all hydration.
+            let mut bg_rows_per_session: std::collections::HashMap<
+                SolutionSessionId,
+                Vec<crate::db::BackgroundAgentRow>,
+            > = std::collections::HashMap::new();
+            for meta in &to_hydrate {
+                let rows = db
+                    .load_background_agents(meta.id.to_string())
+                    .await
+                    .unwrap_or_default();
+                bg_rows_per_session.insert(meta.id, rows);
+            }
             let result_ids: Vec<SolutionSessionId> = this.update(cx, |this, cx| {
                 let mut hydrated: Vec<SolutionSessionId> = Vec::with_capacity(to_hydrate.len());
                 for meta in &to_hydrate {
@@ -1716,6 +1731,18 @@ impl SolutionAgentStore {
                     // it to by_solution at that point.
                     this.sessions.insert(meta.id, entity);
                     hydrated.push(meta.id);
+                }
+                // Task 13: restore persisted background_agents per session.
+                // Done after the session entities exist so
+                // `reconcile_background_agents_for` can look them up via
+                // `self.session(...)`. Iterates `hydrated` rather than
+                // `to_hydrate` so we never touch a session that the
+                // `contains_key` guard above skipped.
+                for sid in &hydrated {
+                    let rows = bg_rows_per_session.remove(sid).unwrap_or_default();
+                    if !rows.is_empty() {
+                        this.reconcile_background_agents_for(*sid, rows, cx);
+                    }
                 }
                 // Fan out `workspace.session_opened` for every freshly-hydrated
                 // session that ended up tab-pinned. The store path that drives
@@ -2818,6 +2845,107 @@ impl SolutionAgentStore {
                     }
                 }
             }
+        }
+    }
+
+    /// Restore persisted background_agents for a freshly-hydrated session.
+    /// Per row, stats the JSONL file:
+    ///   * file missing → drop the SQLite row (best-effort).
+    ///   * file present, latest line carries `stop_reason` → drop the row
+    ///     (the agent finished while we were closed).
+    ///   * else → register with the live snapshot. The render-side
+    ///     classifier decides Dead vs Running based on mtime and
+    ///     [`MANAGED_AGENT_STALE_TIMEOUT`], so we don't need to flag dead
+    ///     here.
+    /// Always called inside the foreground hydrate path with the DB rows
+    /// already loaded (caller pre-fetches off the foreground thread).
+    pub(crate) fn reconcile_background_agents_for(
+        &mut self,
+        session_id: SolutionSessionId,
+        rows: Vec<crate::db::BackgroundAgentRow>,
+        cx: &mut Context<Self>,
+    ) {
+        if rows.is_empty() {
+            return;
+        }
+        let Some(session) = self.session(session_id) else {
+            return;
+        };
+
+        let mut to_drop_from_db: Vec<(String, String)> = Vec::new();
+        let mut to_register: Vec<(
+            crate::background_agent::BackgroundAgentId,
+            std::path::PathBuf,
+            Option<crate::background_agent::BackgroundAgentSnapshot>,
+        )> = Vec::new();
+
+        for row in rows {
+            let path = std::path::PathBuf::from(&row.jsonl_path);
+            let agent_id =
+                crate::background_agent::BackgroundAgentId::new(row.agent_id.clone());
+            if !path.exists() {
+                to_drop_from_db.push((row.solution_session_id.clone(), row.agent_id));
+                continue;
+            }
+            let snap: Option<crate::background_agent::BackgroundAgentSnapshot> =
+                crate::background_agent::tail_jsonl(&path, 0)
+                    .ok()
+                    .and_then(|t| {
+                        let mtime = t.mtime;
+                        t.last_line.map(|line| {
+                            let mut s = crate::background_agent::parse_jsonl_snapshot(&line);
+                            s.mtime = mtime;
+                            s
+                        })
+                    });
+            if let Some(ref s) = snap
+                && s.stop_reason.is_some()
+            {
+                to_drop_from_db.push((row.solution_session_id.clone(), row.agent_id));
+                continue;
+            }
+            to_register.push((agent_id, path, snap));
+        }
+
+        if !to_register.is_empty() {
+            session.update(cx, |s, _| {
+                for (agent_id, path, snap) in &to_register {
+                    s.background_agents.insert(
+                        agent_id.clone(),
+                        crate::background_agent::BackgroundAgent {
+                            id: agent_id.clone(),
+                            jsonl_path: path.clone(),
+                            registered_at: chrono::Utc::now(),
+                            latest: snap.clone(),
+                        },
+                    );
+                    s.background_agent_order.push(agent_id.clone());
+                }
+            });
+            cx.emit(SolutionAgentStoreEvent::SessionBackgroundAgentsChanged(
+                session_id,
+            ));
+        }
+
+        if !to_drop_from_db.is_empty()
+            && let Some(db) = self.persistence.clone()
+        {
+            cx.background_spawn(async move {
+                for (sid, aid) in to_drop_from_db {
+                    db.delete_background_agent(sid, aid).await.log_err();
+                }
+            })
+            .detach();
+        }
+
+        if !session.read(cx).background_agents.is_empty()
+            && let Some(fs) = session
+                .read(cx)
+                .project
+                .as_ref()
+                .map(|p| p.read(cx).fs().clone())
+        {
+            self.ensure_background_agent_watcher(session_id, fs, cx);
         }
     }
 
