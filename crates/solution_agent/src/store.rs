@@ -156,6 +156,41 @@ pub enum SolutionAgentStoreEvent {
 
 impl EventEmitter<SolutionAgentStoreEvent> for SolutionAgentStore {}
 
+/// Which "view" of a session the user has selected — Main = parent
+/// thread only, Task(id) = an in-flight inline Task subagent's
+/// filtered slice, Background(id) = a Managed Agent's standalone
+/// JSONL transcript. Replaces the older `Option<SharedString>` shape
+/// where `None`=Main and `Some(id)` was ambiguously a Task id;
+/// adding Background made an explicit sum-type necessary.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum SubagentView {
+    #[default]
+    Main,
+    Task(SharedString),
+    Background(crate::background_agent::BackgroundAgentId),
+}
+
+impl SubagentView {
+    /// True when the view sources its entries from the parent
+    /// `AcpThread.entries` (Main + Task filter both do); false when
+    /// the view sources from JSONL on disk (Background).
+    pub fn is_parent_thread_view(&self) -> bool {
+        matches!(self, Self::Main | Self::Task(_))
+    }
+
+    /// Predicate for parent-thread entry filtering. `Main` matches
+    /// only entries with no `subagent_id`; `Task(id)` matches only
+    /// entries stamped with exactly that id; `Background` matches
+    /// nothing (it doesn't draw from parent entries).
+    pub fn matches_parent_entry(&self, entry_subagent: Option<&SharedString>) -> bool {
+        match (self, entry_subagent) {
+            (Self::Main, None) => true,
+            (Self::Task(sel), Some(eid)) => sel == eid,
+            _ => false,
+        }
+    }
+}
+
 /// Last 4 chars of a `toolu_xxx` id, used as the short-id suffix in
 /// fallback subagent tab labels (`general-purpose#a1b2`, `Agent #a1b2`).
 /// Lower bound guarded: an id shorter than 4 chars (defensive — claude's
@@ -3077,5 +3112,42 @@ mod label_unit_tests {
     fn label_fallback_treats_empty_subagent_type_as_missing() {
         let id = SharedString::from("toolu_xyzwabcd");
         assert_eq!(label_fallback(&id, Some("")).as_ref(), "Agent abcd");
+    }
+}
+
+#[cfg(test)]
+mod subagent_view_tests {
+    use super::*;
+
+    #[test]
+    fn subagent_view_main_matches_only_parentless_entries() {
+        let v = SubagentView::Main;
+        assert!(v.matches_parent_entry(None));
+        assert!(!v.matches_parent_entry(Some(&"toolu_xyz".into())));
+    }
+
+    #[test]
+    fn subagent_view_task_matches_exact_id() {
+        let v = SubagentView::Task("toolu_a".into());
+        assert!(v.matches_parent_entry(Some(&"toolu_a".into())));
+        assert!(!v.matches_parent_entry(Some(&"toolu_b".into())));
+        assert!(!v.matches_parent_entry(None));
+    }
+
+    #[test]
+    fn subagent_view_background_matches_no_parent_entry() {
+        let v = SubagentView::Background(crate::background_agent::BackgroundAgentId::new("a30f"));
+        assert!(!v.matches_parent_entry(None));
+        assert!(!v.matches_parent_entry(Some(&"toolu_x".into())));
+    }
+
+    #[test]
+    fn subagent_view_is_parent_thread_view() {
+        assert!(SubagentView::Main.is_parent_thread_view());
+        assert!(SubagentView::Task("x".into()).is_parent_thread_view());
+        assert!(
+            !SubagentView::Background(crate::background_agent::BackgroundAgentId::new("a30f"))
+                .is_parent_thread_view()
+        );
     }
 }

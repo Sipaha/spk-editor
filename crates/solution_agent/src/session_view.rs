@@ -300,7 +300,7 @@ pub struct SolutionSessionView {
     /// becomes empty the selection is meaningless anyway). Auto-reset
     /// to `None` (or the next still-active id) when the selected
     /// subagent finishes — wired off `SessionSubagentsChanged`.
-    selected_subagent: Option<SharedString>,
+    selected_subagent: crate::store::SubagentView,
     /// Background tick that wakes the view once a second while any
     /// visible tool call sits in `InProgress`, so the per-tool elapsed
     /// "Xs" badge in `render_tool_call` advances even when the agent
@@ -308,22 +308,6 @@ pub struct SolutionSessionView {
     /// Self-cleared when no InProgress tool remains so the next
     /// transition can start a fresh tick.
     tool_tick: Option<Task<()>>,
-}
-
-/// Predicate for the subagent-tab filter — extracted as a free
-/// function so the matching can be unit-tested without constructing
-/// the view's GPUI-shaped state. `selected = None` ("Main") matches
-/// only entries with no `subagent_id`; `selected = Some(id)` matches
-/// only entries stamped with exactly that id.
-pub(crate) fn subagent_matches(
-    selected: Option<&SharedString>,
-    entry_subagent: Option<&SharedString>,
-) -> bool {
-    match (selected, entry_subagent) {
-        (None, None) => true,
-        (Some(sel), Some(eid)) => sel == eid,
-        _ => false,
-    }
 }
 
 impl SolutionSessionView {
@@ -522,7 +506,7 @@ impl SolutionSessionView {
             resuming_markdown: None,
             resuming_markdown_source: SharedString::default(),
             expanded_queue_markers: HashSet::new(),
-            selected_subagent: None,
+            selected_subagent: crate::store::SubagentView::default(),
             tool_tick: None,
         };
         // Detect any thread that is already attached at construction
@@ -811,26 +795,33 @@ impl SolutionSessionView {
         if self.session.read(cx).active_subagents.is_empty() {
             return true;
         }
-        subagent_matches(self.selected_subagent.as_ref(), entry.subagent_id())
+        self.selected_subagent.matches_parent_entry(entry.subagent_id())
     }
 
     /// Snap-to-next helper extracted out of `on_subagents_changed` so
     /// the lifecycle can be unit-tested without spinning up a full GPUI
     /// view. Returns the new value for `selected_subagent` given the
     /// current selection and the still-active subagent order. Pure —
-    /// no side effects.
+    /// no side effects. `Background` views are pass-through here — they
+    /// live in their own JSONL transcript and don't participate in the
+    /// parent thread's `active_subagents` lifecycle.
     pub(crate) fn next_selection_after_change(
-        current: Option<&SharedString>,
+        current: &crate::store::SubagentView,
         active_subagents: &HashMap<SharedString, crate::model::SubagentTab>,
         active_subagent_order: &[SharedString],
-    ) -> Option<SharedString> {
+    ) -> crate::store::SubagentView {
+        use crate::store::SubagentView;
         match current {
-            None => None,
-            Some(id) => {
+            SubagentView::Main => SubagentView::Main,
+            SubagentView::Background(_) => current.clone(),
+            SubagentView::Task(id) => {
                 if active_subagents.contains_key(id) {
-                    Some(id.clone())
+                    SubagentView::Task(id.clone())
                 } else {
-                    active_subagent_order.first().cloned()
+                    match active_subagent_order.first() {
+                        Some(next_id) => SubagentView::Task(next_id.clone()),
+                        None => SubagentView::Main,
+                    }
                 }
             }
         }
@@ -840,13 +831,13 @@ impl SolutionSessionView {
     /// `active_subagents` set. Called on every `SessionSubagentsChanged`
     /// event for this session. If the current selection has disappeared,
     /// snap to the next still-active id in `active_subagent_order` (else
-    /// fall back to `None` / Main). Always notifies — the tab strip
-    /// itself needs a repaint when the active set changes even if the
-    /// selection didn't move.
+    /// fall back to `Main`). Always notifies — the tab strip itself
+    /// needs a repaint when the active set changes even if the selection
+    /// didn't move.
     pub(crate) fn on_subagents_changed(&mut self, cx: &mut Context<Self>) {
         let session = self.session.read(cx);
         let next = Self::next_selection_after_change(
-            self.selected_subagent.as_ref(),
+            &self.selected_subagent,
             &session.active_subagents,
             &session.active_subagent_order,
         );

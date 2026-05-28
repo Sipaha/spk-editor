@@ -38,6 +38,7 @@ pub use model::{
     AgentServerId, SessionState, SolutionSession, SolutionSessionId, SolutionSessionMetadata,
 };
 pub use background_agent::{BackgroundAgent, BackgroundAgentId, BackgroundAgentSnapshot};
+pub use store::SubagentView;
 
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};

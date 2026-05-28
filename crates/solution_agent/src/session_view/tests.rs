@@ -4,8 +4,9 @@ use agent_client_protocol::schema as acp;
 use gpui::SharedString;
 
 use super::recall::unpack_recalled_bundle;
-use super::{SolutionSessionView, subagent_matches};
+use super::SolutionSessionView;
 use crate::model::SubagentTab;
+use crate::store::SubagentView;
 
 fn text_block(s: &str) -> acp::ContentBlock {
     acp::ContentBlock::Text(acp::TextContent::new(s.to_string()))
@@ -59,25 +60,6 @@ fn unpack_recalled_bundle_recovers_images_with_labels_from_text() {
     assert_eq!(images[1].label.as_ref(), "image #7");
 }
 
-#[test]
-fn subagent_matches_main_only_shows_unstamped_entries() {
-    let id_a = SharedString::from("toolu_a");
-    // Main tab (selected = None): shows unstamped entries, hides stamped ones.
-    assert!(subagent_matches(None, None));
-    assert!(!subagent_matches(None, Some(&id_a)));
-}
-
-#[test]
-fn subagent_matches_picked_tab_filters_by_id() {
-    let id_a = SharedString::from("toolu_a");
-    let id_b = SharedString::from("toolu_b");
-    // Selected subagent A: only entries stamped with A are visible.
-    assert!(subagent_matches(Some(&id_a), Some(&id_a)));
-    assert!(!subagent_matches(Some(&id_a), Some(&id_b)));
-    // Parent (unstamped) entries are hidden while a subagent tab is active.
-    assert!(!subagent_matches(Some(&id_a), None));
-}
-
 fn make_tab(label: &str) -> SubagentTab {
     SubagentTab {
         label: SharedString::from(label.to_string()),
@@ -93,8 +75,16 @@ fn next_selection_after_change_keeps_still_active_selection() {
     active.insert(id_a.clone(), make_tab("A"));
     active.insert(id_b.clone(), make_tab("B"));
     let order = vec![id_a.clone(), id_b.clone()];
-    let next = SolutionSessionView::next_selection_after_change(Some(&id_a), &active, &order);
-    assert_eq!(next, Some(id_a), "still-active selection must be preserved");
+    let next = SolutionSessionView::next_selection_after_change(
+        &SubagentView::Task(id_a.clone()),
+        &active,
+        &order,
+    );
+    assert_eq!(
+        next,
+        SubagentView::Task(id_a),
+        "still-active selection must be preserved"
+    );
 }
 
 #[test]
@@ -105,8 +95,12 @@ fn next_selection_after_change_snaps_to_next_when_current_removed() {
     active.insert(id_b.clone(), make_tab("B"));
     // `id_a` is gone but still asked-for; `id_b` remains, first in order.
     let order = vec![id_b.clone()];
-    let next = SolutionSessionView::next_selection_after_change(Some(&id_a), &active, &order);
-    assert_eq!(next, Some(id_b));
+    let next = SolutionSessionView::next_selection_after_change(
+        &SubagentView::Task(id_a),
+        &active,
+        &order,
+    );
+    assert_eq!(next, SubagentView::Task(id_b));
 }
 
 #[test]
@@ -114,8 +108,16 @@ fn next_selection_after_change_falls_back_to_main_when_all_gone() {
     let id_a = SharedString::from("toolu_a");
     let active: HashMap<SharedString, SubagentTab> = HashMap::new();
     let order: Vec<SharedString> = Vec::new();
-    let next = SolutionSessionView::next_selection_after_change(Some(&id_a), &active, &order);
-    assert_eq!(next, None, "empty active set must collapse to Main");
+    let next = SolutionSessionView::next_selection_after_change(
+        &SubagentView::Task(id_a),
+        &active,
+        &order,
+    );
+    assert_eq!(
+        next,
+        SubagentView::Main,
+        "empty active set must collapse to Main"
+    );
 }
 
 #[test]
@@ -125,8 +127,8 @@ fn next_selection_after_change_main_stays_main() {
     active.insert(id_a.clone(), make_tab("A"));
     let order = vec![id_a];
     // Main was already selected — a strip change should not yank us into a tab.
-    let next = SolutionSessionView::next_selection_after_change(None, &active, &order);
-    assert_eq!(next, None);
+    let next = SolutionSessionView::next_selection_after_change(&SubagentView::Main, &active, &order);
+    assert_eq!(next, SubagentView::Main);
 }
 
 #[test]

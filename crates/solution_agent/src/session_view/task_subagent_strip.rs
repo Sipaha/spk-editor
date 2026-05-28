@@ -24,6 +24,7 @@ use ui::{Label, LabelSize, Tooltip};
 
 use super::SolutionSessionView;
 use crate::model::SolutionSession;
+use crate::store::SubagentView;
 
 /// Build the subagent-tabs strip. Returns `None` when the session
 /// has no in-flight subagents so the caller can `when_some(...)` the
@@ -52,15 +53,15 @@ pub(super) fn render_task_subagent_strip(
         .collect();
     let selected = view.selected_subagent.clone();
 
-    let main_active = selected.is_none();
+    let main_active = matches!(selected, SubagentView::Main);
     let main_pill = pill(
         SharedString::from("task-subagent-strip-main"),
         SharedString::from("Main"),
         main_active,
         cx,
         move |this, _, _, cx| {
-            if this.selected_subagent.is_some() {
-                this.selected_subagent = None;
+            if !matches!(this.selected_subagent, SubagentView::Main) {
+                this.selected_subagent = SubagentView::Main;
                 cx.notify();
             }
         },
@@ -80,7 +81,7 @@ pub(super) fn render_task_subagent_strip(
         .child(main_pill);
 
     for (id, label) in tabs {
-        let is_active = selected.as_ref() == Some(&id);
+        let is_active = matches!(&selected, SubagentView::Task(sel) if sel == &id);
         let id_for_listener = id.clone();
         let pill_id = SharedString::from(format!("task-subagent-strip-{}", id));
         row = row.child(pill(
@@ -89,7 +90,7 @@ pub(super) fn render_task_subagent_strip(
             is_active,
             cx,
             move |this, _, _, cx| {
-                let next = Some(id_for_listener.clone());
+                let next = SubagentView::Task(id_for_listener.clone());
                 if this.selected_subagent != next {
                     this.selected_subagent = next;
                     cx.notify();
