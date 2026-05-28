@@ -291,15 +291,18 @@ pub struct SolutionSessionView {
     /// `sessions_for(&solution_id)` pass) and a false-positive notify
     /// just paints the same frame again.
     _store_subscription: Option<Subscription>,
-    /// Currently selected subagent tab for the claude `Task` / `Agent`
-    /// sub-agents panel: `None` means the parent ("Main") view is
-    /// active, `Some(id)` means the strip pill for that subagent's
-    /// parent `tool_use_id` is active and the conversation list is
-    /// filtered to entries whose `subagent_id` matches. View-state only,
-    /// not persisted across editor restarts (once the active set
-    /// becomes empty the selection is meaningless anyway). Auto-reset
-    /// to `None` (or the next still-active id) when the selected
-    /// subagent finishes — wired off `SessionSubagentsChanged`.
+    /// Currently selected subagent tab for the strip:
+    /// `SubagentView::Main` = the parent thread view, `Task(toolu_id)` =
+    /// an in-flight inline `Task`/`Agent` subagent filtered to entries
+    /// whose `subagent_id` matches, `Background(agent_id)` = a Managed
+    /// Agent's standalone JSONL transcript (Task 11+). View-state only,
+    /// not persisted across editor restarts (the selection is
+    /// meaningless once the active set becomes empty). Auto-reset to
+    /// `Main` (or the next still-active `Task` id) when the selected
+    /// `Task` subagent finishes — see `next_selection_after_change`,
+    /// wired off `SessionSubagentsChanged`. `Background` selections
+    /// pass through unchanged since their lifecycle is bound to the
+    /// JSONL file on disk, not the parent thread.
     selected_subagent: crate::store::SubagentView,
     /// Background tick that wakes the view once a second while any
     /// visible tool call sits in `InProgress`, so the per-tool elapsed

@@ -132,6 +132,23 @@ fn next_selection_after_change_main_stays_main() {
 }
 
 #[test]
+fn next_selection_after_change_preserves_background_view() {
+    // Background views render a Managed Agent's standalone JSONL transcript,
+    // so a change in the Task subagent set must not perturb them.
+    let bg_id = crate::background_agent::BackgroundAgentId::new("a30f92");
+    let id_a = SharedString::from("toolu_a");
+    let mut active: HashMap<SharedString, SubagentTab> = HashMap::new();
+    active.insert(id_a.clone(), make_tab("A"));
+    let order = vec![id_a];
+    let next = SolutionSessionView::next_selection_after_change(
+        &SubagentView::Background(bg_id.clone()),
+        &active,
+        &order,
+    );
+    assert_eq!(next, SubagentView::Background(bg_id));
+}
+
+#[test]
 fn unpack_recalled_bundle_handles_more_images_than_placeholders() {
     // Defensive: if the text somehow lost its `[image #N]` placeholders
     // (e.g. user manually edited them out before submission), images
