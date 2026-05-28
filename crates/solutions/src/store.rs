@@ -99,6 +99,14 @@ pub enum SolutionStoreEvent {
         id: SolutionId,
         root: std::path::PathBuf,
     },
+    /// Emitted by `mark_closed`. Distinct from `Changed` so UI subscribers
+    /// can drive workspace-tab close-out from a single seam regardless of
+    /// who triggered the close (desktop UI button vs. wire-side
+    /// `workspace.close_solution` from the mobile client). Without this
+    /// the wire path only flipped the `open` flag + emitted the mobile
+    /// notification, leaving the corresponding desktop workspace tabs
+    /// open until the user closed them manually.
+    Closed { id: SolutionId },
 }
 
 impl EventEmitter<SolutionStoreEvent> for SolutionStore {}
@@ -774,6 +782,7 @@ impl SolutionStore {
                 "solution_id": id.as_str(),
             }));
         }
+        cx.emit(SolutionStoreEvent::Closed { id: id.clone() });
         cx.emit(SolutionStoreEvent::Changed);
         cx.notify();
     }

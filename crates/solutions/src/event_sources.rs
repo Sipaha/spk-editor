@@ -132,6 +132,10 @@ pub fn install(cx: &mut App) {
                     // alongside) already drives the `solution_changed`
                     // notification that refreshes remote clients' lists.
                     SolutionStoreEvent::Deleted { .. } => {}
+                    // `Closed` drives desktop-tab teardown via the
+                    // per-Workspace subscriber in `solutions_ui`; this
+                    // coordinator-level handler doesn't need to react.
+                    SolutionStoreEvent::Closed { .. } => {}
                 }),
             );
         }
