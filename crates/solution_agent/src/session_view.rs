@@ -954,8 +954,14 @@ impl SolutionSessionView {
         let trimmed: &str = if content.len() > SOFT_CAP {
             // Drop the head; the visible scrollback is at the tail. A
             // partial line at the cut point is fine — `jsonl_to_entries`
-            // silently skips malformed JSON rows.
-            &content[content.len() - SOFT_CAP..]
+            // silently skips malformed JSON rows. Walk forward to the
+            // next char boundary so a multi-byte UTF-8 in tool output
+            // can't panic the slice.
+            let mut start = content.len() - SOFT_CAP;
+            while start < content.len() && !content.is_char_boundary(start) {
+                start += 1;
+            }
+            &content[start..]
         } else {
             content.as_str()
         };
