@@ -2593,6 +2593,15 @@ impl SolutionAgentStore {
                     {
                         self.ensure_background_agent_watcher(session_id, fs, cx);
                     }
+
+                    // Close the registration→watcher-subscribe race window:
+                    // claude writes the first JSONL line nearly instantly
+                    // after `Agent` returns, but `fs.watch` resolves on a
+                    // background task — so without an inline refresh the
+                    // first snapshot can be missed entirely and the pill
+                    // would sit at the default `Generating…` until the
+                    // sub-agent's next write.
+                    self.refresh_background_agent_snapshot(session_id, id, cx);
                 }
             }
         }
