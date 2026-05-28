@@ -16912,6 +16912,7 @@ dependencies = [
  "chrono",
  "claude_native",
  "context_server",
+ "dirs",
  "editor",
  "editor_mcp",
  "fs",

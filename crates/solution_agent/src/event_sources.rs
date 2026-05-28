@@ -128,6 +128,12 @@ pub fn install(cx: &mut App) {
                 // (sequenced `workspace.session_{opened,closed}` already
                 // ride out from `persist_tab_order` itself).
                 SolutionAgentStoreEvent::TabsChanged { .. } => {}
+                // Background-agent updates are surfaced through a
+                // dedicated wire notification by a later task in the
+                // Background Agents Strip plan; until that lands the
+                // event is consumed locally (session_view subscribes
+                // directly to the store).
+                SolutionAgentStoreEvent::SessionBackgroundAgentsChanged(_) => {}
             }),
         );
     });

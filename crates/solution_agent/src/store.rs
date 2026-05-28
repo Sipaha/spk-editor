@@ -65,6 +65,13 @@ pub struct SolutionAgentStore {
     /// breach — a continuously-streaming entry mustn't be able to starve
     /// the trailing-edge emit indefinitely.
     entry_update_throttles: HashMap<(SolutionSessionId, usize), EntryUpdateThrottle>,
+    /// One per-session background-agent watcher task — alive as long as
+    /// the session has >=1 registered `background_agents`. Stored as
+    /// `Task<()>` so dropping kills the watcher cleanly. Populated by
+    /// `ensure_background_agent_watcher` (called from the tool-call
+    /// handler in a later task of the Background Agents Strip plan).
+    #[allow(dead_code, reason = "wired up by a follow-up task; see plan")]
+    background_agent_watchers: HashMap<SolutionSessionId, gpui::Task<()>>,
     /// Throttler for `workspace.session_metrics_changed` notifications.
     /// Caps emit rate at ~1 per 2 seconds per session so chatty fields
     /// (`last_activity_at`, `total_tokens`, `max_tokens`) don't flood
@@ -141,6 +148,10 @@ pub enum SolutionAgentStoreEvent {
     /// MCP wire's `session_active_subagents_changed` notification (Etap 5),
     /// so both desktop and mobile redraw without polling the session entity.
     SessionSubagentsChanged(SolutionSessionId),
+    /// `SolutionSession::background_agents` changed — registration, snapshot
+    /// update, dead-detection, or removal. Same debounce semantics as
+    /// `SessionSubagentsChanged`: emitted only when the map actually changed.
+    SessionBackgroundAgentsChanged(SolutionSessionId),
     /// Emitted when a session's conversation context has just been wiped
     /// in-place by `/clear` (`reset_context`) or `/compact`
     /// (`rotate_context`). Remote clients use this to drop their cached
@@ -189,6 +200,34 @@ impl SubagentView {
             _ => false,
         }
     }
+}
+
+/// Compute the canonical subagents-dir path for a session. Mirrors
+/// Anthropic's `~/.claude/projects/<encoded-cwd>/<session-id>/subagents/`
+/// layout. `encoded-cwd` is "every char in `cwd.to_string_lossy()`
+/// with `/` and `.` replaced by `-`". Returns `None` when `cwd` is
+/// empty (legacy session) — those can't host managed agents anyway.
+#[allow(dead_code, reason = "called by ensure_background_agent_watcher; wired in a follow-up task")]
+fn background_agent_dir_for(cwd: &std::path::Path, acp_session_id: &str) -> Option<PathBuf> {
+    if cwd.as_os_str().is_empty() {
+        return None;
+    }
+    let raw = cwd.to_string_lossy();
+    let mut encoded = String::with_capacity(raw.len() + 1);
+    for c in raw.chars() {
+        match c {
+            '/' | '.' => encoded.push('-'),
+            other => encoded.push(other),
+        }
+    }
+    Some(
+        dirs::home_dir()?
+            .join(".claude")
+            .join("projects")
+            .join(encoded)
+            .join(acp_session_id)
+            .join("subagents"),
+    )
 }
 
 /// Last 4 chars of a `toolu_xxx` id, used as the short-id suffix in
@@ -554,6 +593,7 @@ impl SolutionAgentStore {
             server_registry: HashMap::new(),
             focus_resolver: None,
             entry_update_throttles: HashMap::new(),
+            background_agent_watchers: HashMap::new(),
             metrics_emitter: MetricsEmitter::new(),
             _solution_subscription: solution_subscription,
         }
@@ -2452,6 +2492,121 @@ impl SolutionAgentStore {
         }
     }
 
+    /// Spawn (idempotently) a per-session watcher on the
+    /// `~/.claude/projects/<encoded-cwd>/<session-id>/subagents/`
+    /// directory. Each `PathEvent` on an `agent-<id>.jsonl` filename
+    /// triggers a `refresh_background_agent_snapshot` for the matching
+    /// tracked `BackgroundAgent`. The watcher task lives in
+    /// `background_agent_watchers` keyed by `session_id` — drop the
+    /// entry (or drop the store) to cancel.
+    ///
+    /// Called from the tool-call handler (Task 8) when claude announces
+    /// a managed agent. Safe to call repeatedly: a second call for the
+    /// same session is a no-op.
+    #[allow(dead_code, reason = "wired in a follow-up task; see plan")]
+    pub(crate) fn ensure_background_agent_watcher(
+        &mut self,
+        session_id: SolutionSessionId,
+        fs: Arc<dyn fs::Fs>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.background_agent_watchers.contains_key(&session_id) {
+            return;
+        }
+        let Some(session) = self.session(session_id) else {
+            return;
+        };
+        let acp_session_id = session.read(cx).acp_session_id.clone();
+        let cwd = session.read(cx).cwd.clone();
+        let subagents_dir = match background_agent_dir_for(&cwd, acp_session_id.0.as_ref()) {
+            Some(p) => p,
+            None => {
+                log::warn!(
+                    "background_agents: cannot resolve subagents dir for session {}",
+                    session_id
+                );
+                return;
+            }
+        };
+        let task = cx.spawn(async move |this, cx| {
+            let (mut stream, _watcher) = fs
+                .watch(&subagents_dir, std::time::Duration::from_millis(200))
+                .await;
+            use futures::StreamExt;
+            while let Some(events) = stream.next().await {
+                for event in events {
+                    let Some(name) = event.path.file_name().and_then(|n| n.to_str()) else {
+                        continue;
+                    };
+                    if !name.starts_with("agent-") || !name.ends_with(".jsonl") {
+                        continue;
+                    }
+                    let agent_id_str = name
+                        .trim_start_matches("agent-")
+                        .trim_end_matches(".jsonl")
+                        .to_string();
+                    // Dropping the Result is the established cancellation
+                    // signal: if the store entity is gone, the watcher
+                    // task is about to be dropped anyway.
+                    let _ = this.update(cx, |this, cx| {
+                        this.refresh_background_agent_snapshot(
+                            session_id,
+                            crate::background_agent::BackgroundAgentId::new(agent_id_str),
+                            cx,
+                        );
+                    });
+                }
+            }
+        });
+        self.background_agent_watchers.insert(session_id, task);
+    }
+
+    /// Tail the JSONL file for `agent_id` on `session_id`, parse the
+    /// last line into a [`BackgroundAgentSnapshot`], write it to
+    /// `BackgroundAgent::latest`, and emit
+    /// [`SolutionAgentStoreEvent::SessionBackgroundAgentsChanged`] iff
+    /// the snapshot was actually stored. No-op when the session has
+    /// gone away, the agent isn't tracked anymore, the file can't be
+    /// read, or it has no usable last line.
+    #[allow(dead_code, reason = "called by ensure_background_agent_watcher; wired in a follow-up task")]
+    pub(crate) fn refresh_background_agent_snapshot(
+        &mut self,
+        session_id: SolutionSessionId,
+        agent_id: crate::background_agent::BackgroundAgentId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session(session_id) else {
+            return;
+        };
+        let Some(jsonl_path) = session
+            .read(cx)
+            .background_agents
+            .get(&agent_id)
+            .map(|ba| ba.jsonl_path.clone())
+        else {
+            return;
+        };
+        let tail = match crate::background_agent::tail_jsonl(&jsonl_path, 0) {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+        let Some(line) = tail.last_line else { return };
+        let mut snapshot = crate::background_agent::parse_jsonl_snapshot(&line);
+        snapshot.mtime = tail.mtime;
+        let mut changed = false;
+        session.update(cx, |s, _| {
+            if let Some(ba) = s.background_agents.get_mut(&agent_id) {
+                ba.latest = Some(snapshot);
+                changed = true;
+            }
+        });
+        if changed {
+            cx.emit(SolutionAgentStoreEvent::SessionBackgroundAgentsChanged(
+                session_id,
+            ));
+        }
+    }
+
     fn handle_acp_event(
         &mut self,
         session_id: SolutionSessionId,
@@ -3112,6 +3267,32 @@ mod label_unit_tests {
     fn label_fallback_treats_empty_subagent_type_as_missing() {
         let id = SharedString::from("toolu_xyzwabcd");
         assert_eq!(label_fallback(&id, Some("")).as_ref(), "Agent abcd");
+    }
+}
+
+#[cfg(test)]
+mod background_agent_dir_tests {
+    #[test]
+    fn background_agent_dir_for_encodes_cwd() {
+        let dir = super::background_agent_dir_for(
+            std::path::Path::new("/home/spk/projects/foo.bar"),
+            "ses-xyz",
+        );
+        let dir = dir.expect("home_dir must resolve in test env");
+        assert!(
+            dir.to_string_lossy()
+                .contains("-home-spk-projects-foo-bar"),
+            "expected encoded cwd in path, got {:?}",
+            dir
+        );
+        assert!(dir.ends_with("subagents"));
+    }
+
+    #[test]
+    fn background_agent_dir_for_empty_cwd_returns_none() {
+        assert!(
+            super::background_agent_dir_for(std::path::Path::new(""), "ses-x").is_none()
+        );
     }
 }
 
