@@ -131,6 +131,62 @@ fn next_selection_after_change_main_stays_main() {
     assert_eq!(next, SubagentView::Main);
 }
 
+fn make_background_agent(id: &str) -> crate::background_agent::BackgroundAgent {
+    crate::background_agent::BackgroundAgent {
+        id: crate::background_agent::BackgroundAgentId::new(id),
+        jsonl_path: std::path::PathBuf::from("/dev/null"),
+        registered_at: chrono::Utc::now(),
+        latest: None,
+    }
+}
+
+#[test]
+fn next_selection_after_background_change_snaps_stale_background_to_main() {
+    // Stale Background id: the user × closed the pill (or healthcheck
+    // reaped it), the agent is no longer in the session map. Renderer
+    // would paint empty; this snap fires off the
+    // `SessionBackgroundAgentsChanged` handler and restores Main.
+    let stale = crate::background_agent::BackgroundAgentId::new("a30f92");
+    let agents = HashMap::new();
+    let next = SolutionSessionView::next_selection_after_background_change(
+        &SubagentView::Background(stale),
+        &agents,
+    );
+    assert_eq!(next, SubagentView::Main);
+}
+
+#[test]
+fn next_selection_after_background_change_keeps_live_background() {
+    let id = crate::background_agent::BackgroundAgentId::new("a30f92");
+    let mut agents = HashMap::new();
+    agents.insert(id.clone(), make_background_agent("a30f92"));
+    let next = SolutionSessionView::next_selection_after_background_change(
+        &SubagentView::Background(id.clone()),
+        &agents,
+    );
+    assert_eq!(next, SubagentView::Background(id));
+}
+
+#[test]
+fn next_selection_after_background_change_passes_through_main_and_task() {
+    let agents = HashMap::new();
+    assert_eq!(
+        SolutionSessionView::next_selection_after_background_change(
+            &SubagentView::Main,
+            &agents,
+        ),
+        SubagentView::Main,
+    );
+    let task_id = SharedString::from("toolu_a");
+    assert_eq!(
+        SolutionSessionView::next_selection_after_background_change(
+            &SubagentView::Task(task_id.clone()),
+            &agents,
+        ),
+        SubagentView::Task(task_id),
+    );
+}
+
 #[test]
 fn next_selection_after_change_preserves_background_view() {
     // Background views render a Managed Agent's standalone JSONL transcript,

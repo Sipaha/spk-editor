@@ -311,6 +311,24 @@ pub struct SolutionSessionView {
     /// Self-cleared when no InProgress tool remains so the next
     /// transition can start a fresh tick.
     tool_tick: Option<Task<()>>,
+    /// Owned `AgentThreadEntry`s built from a Background view's JSONL
+    /// transcript. Populated by `build_background_entries_for_render`
+    /// at the top of `Render::render` whenever `selected_subagent ==
+    /// Background(id)`, cleared otherwise. The list processor reads
+    /// entries from here instead of `acp_thread.entries()` for the
+    /// duration of the frame. Owned (not borrowed) because
+    /// `jsonl_to_entries` builds fresh `Markdown` widgets and the
+    /// `AgentThreadEntry` enum is `!Clone`, so we can't materialise
+    /// the slice every closure invocation.
+    background_entries_for_render: Vec<AgentThreadEntry>,
+    /// `true` on the previous render frame if `selected_subagent` was a
+    /// `Background` view. Tracked so a tab switch (Main↔Background or
+    /// Task↔Background) can reset `list_state` to the new entry count
+    /// at the next render — without this, swapping into a Background
+    /// view that has a different entry count than the parent thread
+    /// would either over- or under-size the virtualized list and
+    /// silently truncate / overflow the rendered rows.
+    prev_render_background: Option<crate::background_agent::BackgroundAgentId>,
 }
 
 impl SolutionSessionView {
@@ -445,6 +463,11 @@ impl SolutionSessionView {
                         this.on_subagents_changed(cx);
                     }
                 }
+                crate::store::SolutionAgentStoreEvent::SessionBackgroundAgentsChanged(sid) => {
+                    if *sid == this.session.read(cx).id {
+                        this.on_background_agents_changed(cx);
+                    }
+                }
                 _ => {}
             })
         });
@@ -511,6 +534,8 @@ impl SolutionSessionView {
             expanded_queue_markers: HashSet::new(),
             selected_subagent: crate::store::SubagentView::default(),
             tool_tick: None,
+            background_entries_for_render: Vec::new(),
+            prev_render_background: None,
         };
         // Detect any thread that is already attached at construction
         // (e.g. after `resume_session`) and wire its lifecycle hooks.
@@ -848,6 +873,95 @@ impl SolutionSessionView {
             self.selected_subagent = next;
         }
         cx.notify();
+    }
+
+    /// Pure carry-over fallback extracted out of
+    /// `on_background_agents_changed` so the snap-to-`Main`-when-stale
+    /// behaviour can be unit-tested without spinning up a full GPUI
+    /// view. Returns the new value for `selected_subagent`: identity
+    /// for non-`Background` selections; identity for `Background(id)`
+    /// when the id is still present; `Main` when it isn't. Pure — no
+    /// side effects.
+    pub(crate) fn next_selection_after_background_change(
+        current: &crate::store::SubagentView,
+        background_agents: &HashMap<
+            crate::background_agent::BackgroundAgentId,
+            crate::background_agent::BackgroundAgent,
+        >,
+    ) -> crate::store::SubagentView {
+        use crate::store::SubagentView;
+        match current {
+            SubagentView::Background(id) if !background_agents.contains_key(id) => {
+                SubagentView::Main
+            }
+            other => other.clone(),
+        }
+    }
+
+    /// React to `SessionBackgroundAgentsChanged`. If the currently
+    /// selected `Background(id)` view's agent has been removed from
+    /// `session.background_agents` (× close, healthcheck reaper, or a
+    /// startup-reconciliation drop), snap `selected_subagent` back to
+    /// `Main`. Without this the view would render an empty body and
+    /// the pill click handler couldn't recover until the user
+    /// happened to click another pill — see Task 11 notes.
+    pub(crate) fn on_background_agents_changed(&mut self, cx: &mut Context<Self>) {
+        let next = Self::next_selection_after_background_change(
+            &self.selected_subagent,
+            &self.session.read(cx).background_agents,
+        );
+        if next != self.selected_subagent {
+            self.selected_subagent = next;
+        }
+        cx.notify();
+    }
+
+    /// Populate `self.background_entries_for_render` from the selected
+    /// Background view's JSONL transcript and return `true`, so the
+    /// renderer knows to source list rows from that vec instead of the
+    /// parent thread. Returns `false` when the current view is Main /
+    /// Task (and clears any stale background entries to release the
+    /// owned `Markdown` widgets they carry).
+    ///
+    /// V1 reads the whole file synchronously on every render that lands
+    /// on a Background view; capped at the last 5 MiB so a runaway
+    /// transcript can't unbounded-allocate. V2 should cache + invalidate
+    /// on the `SessionBackgroundAgentsChanged` event.
+    pub(crate) fn build_background_entries_for_render(&mut self, cx: &mut App) -> bool {
+        use crate::store::SubagentView;
+        let path = match &self.selected_subagent {
+            SubagentView::Main | SubagentView::Task(_) => {
+                if !self.background_entries_for_render.is_empty() {
+                    self.background_entries_for_render.clear();
+                }
+                return false;
+            }
+            SubagentView::Background(id) => {
+                match self.session.read(cx).background_agents.get(id) {
+                    Some(agent) => agent.jsonl_path.clone(),
+                    None => {
+                        // Stale selection. `on_background_agents_changed`
+                        // will snap us back to Main on the next store
+                        // event tick; for this frame, paint empty.
+                        self.background_entries_for_render.clear();
+                        return true;
+                    }
+                }
+            }
+        };
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        const SOFT_CAP: usize = 5 * 1024 * 1024;
+        let trimmed: &str = if content.len() > SOFT_CAP {
+            // Drop the head; the visible scrollback is at the tail. A
+            // partial line at the cut point is fine — `jsonl_to_entries`
+            // silently skips malformed JSON rows.
+            &content[content.len() - SOFT_CAP..]
+        } else {
+            content.as_str()
+        };
+        let lines: Vec<&str> = trimmed.lines().collect();
+        self.background_entries_for_render = crate::background_agent::jsonl_to_entries(&lines, cx);
+        true
     }
 
     /// Recompute the cached "rewind target user message" for every
@@ -2036,6 +2150,17 @@ impl SolutionSessionView {
     /// `cx` before doing any mutating work (like ensuring the markdown
     /// cache). Empty if there's no thread yet.
     fn collect_entry_texts(&self, cx: &App) -> Vec<Vec<String>> {
+        use crate::store::SubagentView;
+        // Background views source from `build_background_entries_for_render`
+        // (already populated this frame by the render entry point); the
+        // owned entries shadow the parent thread completely.
+        if matches!(self.selected_subagent, SubagentView::Background(_)) {
+            return self
+                .background_entries_for_render
+                .iter()
+                .map(|entry| entry_text_spans(entry, cx))
+                .collect();
+        }
         let session = self.session.read(cx);
         // MUST mirror the render path's cold-then-live concatenation in
         // `render_conversation_body`. The returned vector indexes the
@@ -2141,6 +2266,42 @@ impl Render for SolutionSessionView {
             task_subagent_strip::render_task_subagent_strip(self, &session, cx)
         };
 
+        // Background view source-switch. When `selected_subagent ==
+        // Background(id)`, this populates `background_entries_for_render`
+        // from the agent's JSONL transcript on disk so the rest of the
+        // render pass (text collection, markdown cache, processor
+        // closure) sources from there instead of the parent thread.
+        // `is_background` drives the list-state reset + processor
+        // dispatch below; the entries vec on `self` lives for the
+        // duration of this render frame.
+        let is_background = self.build_background_entries_for_render(cx);
+        // List-state sizing key changes when we transition Main/Task ↔
+        // Background, because the row counts almost never match. Reset
+        // here (before the processor + sizing pass) so the virtualized
+        // list doesn't draw stale rows from the old source. Tracked as
+        // `Option<id>` rather than `bool` so flipping between two
+        // distinct Background pills also resets.
+        let cur_background_key = match &self.selected_subagent {
+            crate::store::SubagentView::Background(id) => Some(id.clone()),
+            _ => None,
+        };
+        if cur_background_key != self.prev_render_background {
+            let new_count = if is_background {
+                self.background_entries_for_render.len()
+            } else {
+                let session = self.session.read(cx);
+                let cold = session.cold_entries.len();
+                let live = session
+                    .acp_thread()
+                    .map(|t| t.read(cx).entries().len())
+                    .unwrap_or(0);
+                cold + live
+            };
+            self.list_state.reset(new_count);
+            self.list_state.set_follow_mode(FollowMode::Tail);
+            self.list_state.scroll_to_end();
+            self.prev_render_background = cur_background_key;
+        }
         // Pre-pass: build the list of (entry_idx, span_idx) → markdown
         // entity mappings. Done up-front so the borrow on `cx` released by
         // `collect_entry_texts` lets us mutate the markdown cache before
@@ -2326,7 +2487,22 @@ impl Render for SolutionSessionView {
                     .acp_thread()
                     .map(|t| t.read(cx).entries().len())
                     .unwrap_or(0);
-                let entries_count = cold_count + live_count;
+                let entries_count = if is_background {
+                    self.background_entries_for_render.len()
+                } else {
+                    cold_count + live_count
+                };
+                // Background views grow their entry count between
+                // renders as new JSONL rows land on disk; the parent-
+                // thread path syncs `list_state` size via
+                // `on_thread_event` (NewEntry/EntriesRemoved). Without
+                // this catch-up, the virtualized list would clamp to
+                // its previous size and silently drop the tail of a
+                // streaming Background transcript.
+                if is_background && self.list_state.item_count() != entries_count {
+                    self.list_state.reset(entries_count);
+                    self.list_state.set_follow_mode(FollowMode::Tail);
+                }
 
                 let conversation_body: AnyElement = if entries_count == 0 {
                     div()
@@ -2348,6 +2524,10 @@ impl Render for SolutionSessionView {
                                 // populated up-front by the surrounding
                                 // Render call before the list element gets
                                 // painted.
+                                let is_bg = matches!(
+                                    this.selected_subagent,
+                                    crate::store::SubagentView::Background(_)
+                                );
                                 let session = this.session.read(cx);
                                 // Cold-then-live concatenation: indices
                                 // `[0..cold_count)` route to
@@ -2360,12 +2540,27 @@ impl Render for SolutionSessionView {
                                 // dependent branch in `render_entry`)
                                 // is gated on `rewind_target.is_some()`
                                 // and we set that to `None` for cold.
+                                //
+                                // Background branch reads from
+                                // `this.background_entries_for_render`
+                                // (populated for this frame by
+                                // `build_background_entries_for_render`)
+                                // and never supports rewind — the JSONL
+                                // transcript belongs to a Managed Agent
+                                // process whose lifecycle is independent
+                                // of this view.
                                 let cold_count_inner = session.cold_entries.len();
                                 let (entry_ref, thread_weak, supports_rewind): (
                                     Option<&AgentThreadEntry>,
                                     gpui::WeakEntity<acp_thread::AcpThread>,
                                     bool,
-                                ) = if idx < cold_count_inner {
+                                ) = if is_bg {
+                                    (
+                                        this.background_entries_for_render.get(idx),
+                                        gpui::WeakEntity::<acp_thread::AcpThread>::new_invalid(),
+                                        false,
+                                    )
+                                } else if idx < cold_count_inner {
                                     (
                                         session.cold_entries.get(idx),
                                         gpui::WeakEntity::<acp_thread::AcpThread>::new_invalid(),
@@ -2386,16 +2581,16 @@ impl Render for SolutionSessionView {
                                 let Some(entry) = entry_ref else {
                                     return Empty.into_any_element();
                                 };
-                                // Subagent-tab filter: when a non-Main tab
-                                // is selected, hide entries from other
-                                // subagents (or the parent) by collapsing
-                                // them to an `Empty` element. Their slots
-                                // stay in `list_state` so index stability
-                                // (and scroll position) survives a tab
-                                // switch — preferable to a full
-                                // `list_state.reset()` that would jump the
-                                // viewport.
-                                if !this.should_render_entry(entry, cx) {
+                                // Subagent-tab filter for parent-thread
+                                // sources only — Background entries are
+                                // already pre-filtered (they're a
+                                // standalone JSONL, not the parent thread
+                                // slice). Without this skip, every
+                                // Background entry would fail
+                                // `should_render_entry`'s Main-only
+                                // predicate and the entire transcript
+                                // would render blank.
+                                if !is_bg && !this.should_render_entry(entry, cx) {
                                     return Empty.into_any_element();
                                 }
                                 let rewind_target = if supports_rewind
@@ -2416,23 +2611,41 @@ impl Render for SolutionSessionView {
 
                                 // Per-entry timestamp + date-separator
                                 // computation. `entry_created_ms` is
-                                // index-aligned with the entries list;
-                                // only `ms > 0` is a real time.
-                                let entry_count = session.cold_entries.len()
-                                    + session
-                                        .acp_thread()
-                                        .map(|t| t.read(cx).entries().len())
-                                        .unwrap_or(0);
+                                // index-aligned with the parent-thread
+                                // entries list; only `ms > 0` is a real
+                                // time. Background views don't have
+                                // per-entry timestamps in the parent
+                                // session's vec (the JSONL has its own
+                                // timestamps that we don't surface to
+                                // the renderer yet), so suppress the
+                                // separator and use the background
+                                // entries length for `is_last`.
+                                let entry_count = if is_bg {
+                                    this.background_entries_for_render.len()
+                                } else {
+                                    session.cold_entries.len()
+                                        + session
+                                            .acp_thread()
+                                            .map(|t| t.read(cx).entries().len())
+                                            .unwrap_or(0)
+                                };
                                 let is_last = idx + 1 == entry_count;
-                                let created_ms = session
-                                    .entry_created_ms
-                                    .get(idx)
-                                    .copied()
-                                    .filter(|&ms| ms > 0);
-                                let prev_ms = idx
-                                    .checked_sub(1)
-                                    .and_then(|p| session.entry_created_ms.get(p).copied())
-                                    .filter(|&ms| ms > 0);
+                                let created_ms = if is_bg {
+                                    None
+                                } else {
+                                    session
+                                        .entry_created_ms
+                                        .get(idx)
+                                        .copied()
+                                        .filter(|&ms| ms > 0)
+                                };
+                                let prev_ms = if is_bg {
+                                    None
+                                } else {
+                                    idx.checked_sub(1)
+                                        .and_then(|p| session.entry_created_ms.get(p).copied())
+                                        .filter(|&ms| ms > 0)
+                                };
                                 let date_separator = created_ms.and_then(|ms| {
                                     let this_local = chrono::Utc
                                         .timestamp_millis_opt(ms)
