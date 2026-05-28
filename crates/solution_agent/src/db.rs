@@ -12,6 +12,17 @@ use sqlez::connection::Connection;
 
 use crate::model::{SolutionSessionId, SolutionSessionMetadata};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackgroundAgentRow {
+    pub solution_session_id: String,
+    pub agent_id: String,
+    pub jsonl_path: String,
+    pub registered_at_ms: i64,
+    pub last_seen_label: Option<String>,
+    pub last_mtime_ms: Option<i64>,
+    pub stop_reason: Option<String>,
+}
+
 pub struct SolutionAgentDb {
     executor: BackgroundExecutor,
     connection: Arc<Mutex<Connection>>,
@@ -118,6 +129,31 @@ impl SolutionAgentDb {
         apply_idempotent_add_column(&connection, "parent_session_id TEXT");
 
         connection.exec(indoc! {"
+            CREATE TABLE IF NOT EXISTS solution_session_background_agent (
+                solution_session_id TEXT NOT NULL,
+                agent_id            TEXT NOT NULL,
+                jsonl_path          TEXT NOT NULL,
+                registered_at_ms    INTEGER NOT NULL,
+                last_seen_label     TEXT,
+                last_mtime_ms       INTEGER,
+                stop_reason         TEXT,
+                PRIMARY KEY (solution_session_id, agent_id)
+            )
+        "})?()
+        .map_err(|e| {
+            anyhow!(
+                "Failed to create solution_session_background_agent table: {}",
+                e
+            )
+        })?;
+
+        connection.exec(indoc! {"
+            CREATE INDEX IF NOT EXISTS idx_bg_agent_by_session
+                ON solution_session_background_agent (solution_session_id)
+        "})?()
+        .map_err(|e| anyhow!("Failed to create idx_bg_agent_by_session: {}", e))?;
+
+        connection.exec(indoc! {"
             CREATE INDEX IF NOT EXISTS idx_session_by_solution
                 ON solution_sessions (solution_id, last_activity_at DESC)
         "})?()
@@ -169,6 +205,37 @@ impl SolutionAgentDb {
         self.executor.spawn(async move {
             let connection = connection.lock();
             delete_by_id(&connection, id)
+        })
+    }
+
+    pub fn save_background_agent(&self, row: BackgroundAgentRow) -> Task<Result<()>> {
+        let connection = self.connection.clone();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            insert_or_update_background_agent(&connection, &row)
+        })
+    }
+
+    pub fn load_background_agents(
+        &self,
+        solution_session_id: String,
+    ) -> Task<Result<Vec<BackgroundAgentRow>>> {
+        let connection = self.connection.clone();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            select_background_agents_for_session(&connection, &solution_session_id)
+        })
+    }
+
+    pub fn delete_background_agent(
+        &self,
+        solution_session_id: String,
+        agent_id: String,
+    ) -> Task<Result<()>> {
+        let connection = self.connection.clone();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            delete_background_agent_by_id(&connection, &solution_session_id, &agent_id)
         })
     }
 
@@ -459,6 +526,88 @@ fn delete_by_id(connection: &Connection, id: SolutionSessionId) -> Result<()> {
         DELETE FROM solution_sessions WHERE id = ?
     "})?;
     delete(id.to_string())?;
+    Ok(())
+}
+
+fn insert_or_update_background_agent(
+    connection: &Connection,
+    row: &BackgroundAgentRow,
+) -> Result<()> {
+    let mut stmt = connection.exec_bound::<(
+        String,
+        String,
+        String,
+        i64,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+    )>(indoc! {"
+        INSERT INTO solution_session_background_agent
+            (solution_session_id, agent_id, jsonl_path, registered_at_ms,
+             last_seen_label, last_mtime_ms, stop_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(solution_session_id, agent_id) DO UPDATE SET
+            jsonl_path       = excluded.jsonl_path,
+            last_seen_label  = excluded.last_seen_label,
+            last_mtime_ms    = excluded.last_mtime_ms,
+            stop_reason      = excluded.stop_reason
+    "})?;
+    stmt((
+        row.solution_session_id.clone(),
+        row.agent_id.clone(),
+        row.jsonl_path.clone(),
+        row.registered_at_ms,
+        row.last_seen_label.clone(),
+        row.last_mtime_ms,
+        row.stop_reason.clone(),
+    ))?;
+    Ok(())
+}
+
+fn select_background_agents_for_session(
+    connection: &Connection,
+    solution_session_id: &str,
+) -> Result<Vec<BackgroundAgentRow>> {
+    let mut stmt = connection.select_bound::<String, (
+        String,
+        String,
+        String,
+        i64,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+    )>(indoc! {"
+        SELECT solution_session_id, agent_id, jsonl_path,
+               registered_at_ms, last_seen_label,
+               last_mtime_ms, stop_reason
+        FROM   solution_session_background_agent
+        WHERE  solution_session_id = ?
+    "})?;
+    let rows = stmt(solution_session_id.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|(sid, aid, p, r, l, m, sr)| BackgroundAgentRow {
+            solution_session_id: sid,
+            agent_id: aid,
+            jsonl_path: p,
+            registered_at_ms: r,
+            last_seen_label: l,
+            last_mtime_ms: m,
+            stop_reason: sr,
+        })
+        .collect())
+}
+
+fn delete_background_agent_by_id(
+    connection: &Connection,
+    solution_session_id: &str,
+    agent_id: &str,
+) -> Result<()> {
+    let mut stmt = connection.exec_bound::<(String, String)>(indoc! {"
+        DELETE FROM solution_session_background_agent
+        WHERE solution_session_id = ? AND agent_id = ?
+    "})?;
+    stmt((solution_session_id.to_string(), agent_id.to_string()))?;
     Ok(())
 }
 
@@ -775,6 +924,46 @@ mod tests {
             db.list_open_tabs(SolutionId("sol-a".into())).await.unwrap(),
             vec![m2.id]
         );
+    }
+
+    #[gpui::test]
+    async fn background_agent_round_trip(cx: &mut gpui::TestAppContext) {
+        let executor = cx.executor();
+        let db = SolutionAgentDb::open(executor).unwrap();
+        let row = BackgroundAgentRow {
+            solution_session_id: "ses-1".into(),
+            agent_id: "a30f92a688e431edc".into(),
+            jsonl_path: "/tmp/x.jsonl".into(),
+            registered_at_ms: 1_700_000_000_000,
+            last_seen_label: Some("Bash: ls".into()),
+            last_mtime_ms: Some(1_700_000_001_000),
+            stop_reason: None,
+        };
+        db.save_background_agent(row.clone()).await.unwrap();
+        let loaded = db.load_background_agents("ses-1".into()).await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0], row);
+    }
+
+    #[gpui::test]
+    async fn background_agent_delete(cx: &mut gpui::TestAppContext) {
+        let executor = cx.executor();
+        let db = SolutionAgentDb::open(executor).unwrap();
+        let row = BackgroundAgentRow {
+            solution_session_id: "ses-1".into(),
+            agent_id: "a30f92a688e431edc".into(),
+            jsonl_path: "/tmp/x.jsonl".into(),
+            registered_at_ms: 1_700_000_000_000,
+            last_seen_label: None,
+            last_mtime_ms: None,
+            stop_reason: None,
+        };
+        db.save_background_agent(row).await.unwrap();
+        db.delete_background_agent("ses-1".into(), "a30f92a688e431edc".into())
+            .await
+            .unwrap();
+        let loaded = db.load_background_agents("ses-1".into()).await.unwrap();
+        assert!(loaded.is_empty());
     }
 
     #[gpui::test]
