@@ -17,10 +17,48 @@
 //! - JSONL tail / convert helpers (added in later tasks).
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use gpui::SharedString;
+use regex::Regex;
+
+static AGENT_ID_RE: OnceLock<Regex> = OnceLock::new();
+static OUTPUT_FILE_RE: OnceLock<Regex> = OnceLock::new();
+
+fn agent_id_re() -> &'static Regex {
+    AGENT_ID_RE.get_or_init(|| {
+        Regex::new(r"agentId:\s+([0-9a-f]{16,32})\b").expect("static regex compiles")
+    })
+}
+
+fn output_file_re() -> &'static Regex {
+    OUTPUT_FILE_RE.get_or_init(|| {
+        Regex::new(r"output_file:\s+(\S+\.output)\b").expect("static regex compiles")
+    })
+}
+
+/// Best-effort parse of an `Agent`-tool_call's `raw_output`. Returns
+/// `Some((agent_id, output_file_path))` when both markers are present
+/// AND the id is 16–32 hex chars AND the path ends `.output`.
+/// `None` otherwise — caller silently skips registration so a future
+/// claude version that reshapes the output doesn't spam the log.
+///
+/// Path is returned as-is (often a symlink under `/tmp/claude-<uid>/`);
+/// caller resolves via `read_link` to the canonical JSONL location.
+pub fn parse_managed_agent_announcement(raw_output: &str) -> Option<(String, PathBuf)> {
+    let id = agent_id_re()
+        .captures(raw_output)?
+        .get(1)?
+        .as_str()
+        .to_string();
+    let path = output_file_re()
+        .captures(raw_output)?
+        .get(1)?
+        .as_str();
+    Some((id, PathBuf::from(path)))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BackgroundAgentId(SharedString);
@@ -77,5 +115,67 @@ mod tests {
     fn background_agent_id_short_handles_id_shorter_than_six() {
         let id = BackgroundAgentId::new("abc");
         assert_eq!(id.short(), "abc");
+    }
+
+    #[test]
+    fn parse_managed_agent_announcement_happy_path() {
+        let raw = "Async agent launched successfully.\n\
+                   agentId: a30f92a688e431edc (internal ID)\n\
+                   output_file: /tmp/claude-1000/x/abc/tasks/a30f92a688e431edc.output";
+        let parsed = parse_managed_agent_announcement(raw);
+        assert!(parsed.is_some());
+        let (id, path) = parsed.unwrap();
+        assert_eq!(id, "a30f92a688e431edc");
+        assert_eq!(
+            path,
+            PathBuf::from(
+                "/tmp/claude-1000/x/abc/tasks/a30f92a688e431edc.output"
+            )
+        );
+    }
+
+    #[test]
+    fn parse_managed_agent_announcement_missing_agent_id_returns_none() {
+        let raw = "output_file: /tmp/x/y.output";
+        assert!(parse_managed_agent_announcement(raw).is_none());
+    }
+
+    #[test]
+    fn parse_managed_agent_announcement_missing_output_file_returns_none() {
+        let raw = "agentId: a30f92a688e431edc";
+        assert!(parse_managed_agent_announcement(raw).is_none());
+    }
+
+    #[test]
+    fn parse_managed_agent_announcement_ignores_surrounding_text() {
+        let raw = "Random words.\n\
+                   Do not duplicate this agent's work.\n\
+                   agentId:    a30f92a688e431edc\n\
+                   More noise. \n\
+                   output_file:    /tmp/x/foo.output\n\
+                   Trailing line.";
+        let parsed = parse_managed_agent_announcement(raw);
+        assert!(parsed.is_some());
+        let (id, path) = parsed.unwrap();
+        assert_eq!(id, "a30f92a688e431edc");
+        assert_eq!(path, PathBuf::from("/tmp/x/foo.output"));
+    }
+
+    #[test]
+    fn parse_managed_agent_announcement_rejects_non_hex_id() {
+        let raw = "agentId: NOT-HEX-ID\noutput_file: /tmp/x.output";
+        assert!(parse_managed_agent_announcement(raw).is_none());
+    }
+
+    #[test]
+    fn parse_managed_agent_announcement_rejects_short_id() {
+        let raw = "agentId: abcd\noutput_file: /tmp/x.output";
+        assert!(parse_managed_agent_announcement(raw).is_none());
+    }
+
+    #[test]
+    fn parse_managed_agent_announcement_requires_dot_output_suffix() {
+        let raw = "agentId: a30f92a688e431edc\noutput_file: /tmp/x.jsonl";
+        assert!(parse_managed_agent_announcement(raw).is_none());
     }
 }
