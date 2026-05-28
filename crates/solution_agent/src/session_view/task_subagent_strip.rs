@@ -1,30 +1,39 @@
 //! Subagent tabs strip — the horizontal pill row painted just below
 //! the status row when the current session has one or more claude
-//! `Task` / `Agent` subagents in flight. The strip lets the user
-//! switch the visible conversation between "Main" (parent-only
-//! entries) and each subagent's own log, mirroring the Claude Code
-//! TUI behaviour.
+//! `Task` / `Agent` subagents in flight (inline Task subagents and/or
+//! background Managed Agents). The strip lets the user switch the
+//! visible conversation between "Main" (parent-only entries), each
+//! inline Task subagent's filtered slice, and each background agent's
+//! standalone JSONL transcript, mirroring the Claude Code TUI
+//! behaviour.
 //!
-//! Hidden entirely when `SolutionSession::active_subagents.is_empty()`
-//! — a degenerate strip with only the "Main" pill would just waste a
-//! row of vertical space. Iteration over `active_subagent_order`
-//! (NOT `active_subagents` directly) so tab order matches spawn order
-//! and stays stable across renders; the HashMap on its own has
-//! random hash-seed iteration order.
+//! Hidden entirely when there are no active Task subagents AND no
+//! tracked background agents — a degenerate strip with only the
+//! "Main" pill would just waste a row of vertical space. Iteration
+//! over `active_subagent_order` / `background_agent_order` (NOT the
+//! HashMaps directly) so tab order matches spawn order and stays
+//! stable across renders; the HashMaps on their own have random
+//! hash-seed iteration order.
 //!
-//! V1 deliberately omits the per-tab close button: per the plan, tabs
-//! disappear naturally when the parent `Task` ToolCall completes /
-//! fails / is cancelled, so there is no manual-close affordance to
-//! expose. The store-level lifecycle is already in place (Etap 3) and
-//! the view auto-switches on `SessionSubagentsChanged` (Etap 4).
+//! Inline Task pills deliberately omit a per-tab close button: per the
+//! plan, tabs disappear naturally when the parent `Task` ToolCall
+//! completes / fails / is cancelled. Background-agent pills carry a ×
+//! close button ONLY when they are in the `Dead` rendering state
+//! (their JSONL hasn't been written to for `MANAGED_AGENT_STALE_TIMEOUT`
+//! and no terminal `stop_reason` was ever observed); a Dead pill can
+//! be dismissed manually because the healthcheck tick only prunes it
+//! after a much longer linger window. `Done` pills (terminal
+//! stop_reason observed) auto-disappear and never render at all.
 
 use gpui::{AnyElement, Entity, IntoElement, ParentElement, SharedString, Styled};
+use std::time::{Duration, SystemTime};
 use ui::prelude::*;
 use ui::{Label, LabelSize, Tooltip};
 
 use super::SolutionSessionView;
+use crate::background_agent::{BackgroundAgentId, BackgroundAgentSnapshot};
 use crate::model::SolutionSession;
-use crate::store::SubagentView;
+use crate::store::{MANAGED_AGENT_STALE_TIMEOUT, SubagentView};
 
 /// Build the subagent-tabs strip. Returns `None` when the session
 /// has no in-flight subagents so the caller can `when_some(...)` the
@@ -35,9 +44,6 @@ pub(super) fn render_task_subagent_strip(
     cx: &mut Context<SolutionSessionView>,
 ) -> Option<AnyElement> {
     let session_ref = session.read(cx);
-    if session_ref.active_subagents.is_empty() {
-        return None;
-    }
     // Snapshot label / id pairs so the click listeners (which need
     // `'static` data) don't have to borrow back through the session
     // entity inside their closures.
@@ -51,6 +57,41 @@ pub(super) fn render_task_subagent_strip(
                 .map(|tab| (id.clone(), tab.label.clone()))
         })
         .collect();
+    // Background-agent pill snapshot. Computed up front (vs in the
+    // render loop) for the same reason as `tabs`: the classifier needs
+    // a borrow of `session_ref`, but each closure later wants to take
+    // owned data into a `'static` listener. `Done`-state pills drop
+    // out here — they auto-hide on terminal `stop_reason`, no UI
+    // surface required.
+    let now = SystemTime::now();
+    let bg_agents: Vec<(SharedString, SharedString, BackgroundAgentDisplayState)> = session_ref
+        .background_agent_order
+        .iter()
+        .filter_map(|id| {
+            session_ref.background_agents.get(id).map(|ba| {
+                let snap = ba.latest.as_ref();
+                let label_body = snap
+                    .map(|s| s.activity_label.clone())
+                    .unwrap_or_else(|| SharedString::new_static("Starting…"));
+                let display_label =
+                    SharedString::from(format!("{}·{}", id.short(), label_body));
+                let display_state = classify_background_agent_display(
+                    snap,
+                    now,
+                    MANAGED_AGENT_STALE_TIMEOUT,
+                );
+                (
+                    SharedString::from(id.as_str().to_string()),
+                    display_label,
+                    display_state,
+                )
+            })
+        })
+        .filter(|(_, _, state)| *state != BackgroundAgentDisplayState::Done)
+        .collect();
+    if tabs.is_empty() && bg_agents.is_empty() {
+        return None;
+    }
     let selected = view.selected_subagent.clone();
 
     let main_active = matches!(selected, SubagentView::Main);
@@ -95,6 +136,39 @@ pub(super) fn render_task_subagent_strip(
                     this.selected_subagent = next;
                     cx.notify();
                 }
+            },
+        ));
+    }
+    for (id_str, label, state) in bg_agents {
+        let is_active = matches!(
+            &selected,
+            SubagentView::Background(b) if b.as_str() == id_str.as_ref()
+        );
+        let id_for_listener = id_str.clone();
+        let id_for_close = id_str.clone();
+        let pill_id = SharedString::from(format!("task-subagent-strip-bg-{}", id_str));
+        row = row.child(background_pill(
+            pill_id,
+            label,
+            is_active,
+            state,
+            cx,
+            move |this, _, _, cx| {
+                let next = SubagentView::Background(BackgroundAgentId::new(
+                    id_for_listener.clone(),
+                ));
+                if this.selected_subagent != next {
+                    this.selected_subagent = next;
+                    cx.notify();
+                }
+            },
+            move |this, _, _, cx| {
+                let id = BackgroundAgentId::new(id_for_close.clone());
+                let session_id = this.session_id();
+                let store = crate::store::SolutionAgentStore::global(cx);
+                store.update(cx, |store, cx| {
+                    store.remove_background_agent(session_id, id, cx);
+                });
             },
         ));
     }
@@ -149,4 +223,195 @@ where
         )
         .on_click(cx.listener(on_click))
         .into_any_element()
+}
+
+/// Three-state visual classification for a background-agent pill.
+///
+///   - `Running`: JSONL was touched within `MANAGED_AGENT_STALE_TIMEOUT`
+///     and no terminal `stop_reason` was observed. Normal pill colours.
+///   - `Dead`: no terminal stop_reason, but the JSONL mtime is older
+///     than the stale timeout — the agent process has likely crashed
+///     or wedged. Error-tinted label + manual × dismiss affordance.
+///   - `Done`: a terminal `stop_reason` was observed on the last
+///     snapshot. Filtered out of the render path entirely (we don't
+///     surface "done" agents in the strip — the user is expected to
+///     have read whatever they wanted before the agent finished).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackgroundAgentDisplayState {
+    Running,
+    Dead,
+    Done,
+}
+
+/// Pure classifier extracted from the render path so it's unit-testable
+/// without booting a GPUI context. `snap == None` is treated as
+/// "Starting…" → `Running`: a registered agent with no JSONL line yet
+/// is the normal initial state, not a dead pill.
+pub(crate) fn classify_background_agent_display(
+    snap: Option<&BackgroundAgentSnapshot>,
+    now: SystemTime,
+    stale: Duration,
+) -> BackgroundAgentDisplayState {
+    let Some(snap) = snap else {
+        return BackgroundAgentDisplayState::Running;
+    };
+    if snap.stop_reason.is_some() {
+        return BackgroundAgentDisplayState::Done;
+    }
+    let elapsed = now.duration_since(snap.mtime).unwrap_or_default();
+    if elapsed > stale {
+        BackgroundAgentDisplayState::Dead
+    } else {
+        BackgroundAgentDisplayState::Running
+    }
+}
+
+/// One background-agent pill. Visually distinct from the inline-Task
+/// `pill` builder: bordered (not solid bg) to mark "this is a different
+/// log source", plus a × close affordance in the `Dead` state. `Done`
+/// state is not handled here — the caller filters it out before
+/// invocation, and the match arm is `unreachable!` rather than a
+/// silent default so a future refactor that lets Done through can't
+/// regress to "Done pills render as Running".
+#[allow(clippy::too_many_arguments)]
+fn background_pill<F, G>(
+    id: SharedString,
+    label: SharedString,
+    is_active: bool,
+    state: BackgroundAgentDisplayState,
+    cx: &mut Context<SolutionSessionView>,
+    on_click: F,
+    on_close: G,
+) -> AnyElement
+where
+    F: Fn(&mut SolutionSessionView, &gpui::ClickEvent, &mut Window, &mut Context<SolutionSessionView>)
+        + 'static,
+    G: Fn(&mut SolutionSessionView, &gpui::ClickEvent, &mut Window, &mut Context<SolutionSessionView>)
+        + 'static,
+{
+    let colors = cx.theme().colors();
+    let (label_color, border_color) = match (state, is_active) {
+        (BackgroundAgentDisplayState::Running, true) => (Color::Default, colors.element_selected),
+        (BackgroundAgentDisplayState::Running, false) => (Color::Muted, colors.border),
+        (BackgroundAgentDisplayState::Dead, _) => (Color::Error, colors.border),
+        (BackgroundAgentDisplayState::Done, _) => unreachable!("done pills are filtered out"),
+    };
+    let tooltip_text = SharedString::from(format!("Show {}", label));
+    let mut pill_row = h_flex()
+        .id(id)
+        .flex_none()
+        .h(px(24.0))
+        .px_2()
+        .gap_1()
+        .items_center()
+        .rounded_md()
+        .border_1()
+        .border_color(border_color)
+        .bg(colors.element_background)
+        .cursor_pointer()
+        .hover(|s| s.bg(colors.element_hover))
+        .tooltip(Tooltip::text(tooltip_text))
+        .on_click(cx.listener(on_click))
+        .child(
+            Label::new(label)
+                .size(LabelSize::Small)
+                .color(label_color)
+                .truncate(),
+        );
+    if matches!(state, BackgroundAgentDisplayState::Dead) {
+        pill_row = pill_row.child(
+            h_flex()
+                .id("bg-pill-close")
+                .flex_none()
+                .px_1()
+                .child(Label::new("×").size(LabelSize::Small).color(Color::Muted))
+                .on_click(cx.listener(on_close)),
+        );
+    }
+    pill_row.into_any_element()
+}
+
+#[cfg(test)]
+mod classifier_tests {
+    use super::*;
+    use gpui::SharedString;
+
+    #[test]
+    fn classifier_returns_running_when_snap_is_none() {
+        assert_eq!(
+            classify_background_agent_display(None, SystemTime::now(), Duration::from_secs(120)),
+            BackgroundAgentDisplayState::Running,
+        );
+    }
+
+    #[test]
+    fn classifier_returns_done_for_terminal_stop_reason() {
+        let snap = BackgroundAgentSnapshot {
+            mtime: SystemTime::now(),
+            activity_label: SharedString::from("Done."),
+            stop_reason: Some(SharedString::from("end_turn")),
+        };
+        assert_eq!(
+            classify_background_agent_display(
+                Some(&snap),
+                SystemTime::now(),
+                Duration::from_secs(120),
+            ),
+            BackgroundAgentDisplayState::Done,
+        );
+    }
+
+    #[test]
+    fn classifier_returns_dead_for_stale_mtime() {
+        let snap = BackgroundAgentSnapshot {
+            mtime: SystemTime::now() - Duration::from_secs(200),
+            activity_label: SharedString::from("Bash: x"),
+            stop_reason: None,
+        };
+        assert_eq!(
+            classify_background_agent_display(
+                Some(&snap),
+                SystemTime::now(),
+                Duration::from_secs(120),
+            ),
+            BackgroundAgentDisplayState::Dead,
+        );
+    }
+
+    #[test]
+    fn classifier_returns_running_for_fresh_mtime() {
+        let snap = BackgroundAgentSnapshot {
+            mtime: SystemTime::now(),
+            activity_label: SharedString::from("Bash: x"),
+            stop_reason: None,
+        };
+        assert_eq!(
+            classify_background_agent_display(
+                Some(&snap),
+                SystemTime::now(),
+                Duration::from_secs(120),
+            ),
+            BackgroundAgentDisplayState::Running,
+        );
+    }
+
+    #[test]
+    fn classifier_prefers_done_over_dead_when_stop_reason_present_on_stale_snap() {
+        // A stop_reason promotes the pill to Done even if mtime is
+        // ancient — the agent ended cleanly long ago and we want it to
+        // auto-hide, not turn into a Dead pill the user has to dismiss.
+        let snap = BackgroundAgentSnapshot {
+            mtime: SystemTime::now() - Duration::from_secs(9999),
+            activity_label: SharedString::from("Done."),
+            stop_reason: Some(SharedString::from("end_turn")),
+        };
+        assert_eq!(
+            classify_background_agent_display(
+                Some(&snap),
+                SystemTime::now(),
+                Duration::from_secs(120),
+            ),
+            BackgroundAgentDisplayState::Done,
+        );
+    }
 }

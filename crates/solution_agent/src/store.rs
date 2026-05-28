@@ -219,7 +219,7 @@ fn tool_name_is_agent(name: Option<&str>) -> bool {
 /// Seconds of file inactivity before a managed (background) agent
 /// is considered dead. V1 hardcoded; a settings key can be added in
 /// V2 once we have a real need for per-installation tuning.
-const MANAGED_AGENT_STALE_TIMEOUT: std::time::Duration =
+pub(crate) const MANAGED_AGENT_STALE_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(120);
 /// Seconds a dead managed-agent pill lingers in the strip before
 /// auto-disappearing. Same V1 hardcoded rationale as above.
@@ -2818,6 +2818,52 @@ impl SolutionAgentStore {
                     }
                 }
             }
+        }
+    }
+
+    /// User-initiated removal of a background-agent pill from the strip
+    /// (the × close affordance, only shown in the Dead state). Drops the
+    /// agent from the session's in-memory tracking, deletes the persisted
+    /// row, emits the change event so the UI re-renders, and — if this
+    /// was the session's last tracked agent — cancels the per-session
+    /// JSONL watcher task. No-op when the session or agent is already
+    /// gone (defensive against races with `tick_background_agents`).
+    pub fn remove_background_agent(
+        &mut self,
+        session_id: SolutionSessionId,
+        id: crate::background_agent::BackgroundAgentId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session(session_id) else {
+            return;
+        };
+        let mut removed = false;
+        session.update(cx, |s, _| {
+            if s.background_agents.remove(&id).is_some() {
+                s.background_agent_order.retain(|x| x != &id);
+                removed = true;
+            }
+        });
+        if !removed {
+            return;
+        }
+        if let Some(db) = self.persistence.clone() {
+            let sid = session_id.to_string();
+            let aid = id.as_str().to_string();
+            cx.background_spawn(async move {
+                db.delete_background_agent(sid, aid).await.log_err();
+            })
+            .detach();
+        }
+        cx.emit(SolutionAgentStoreEvent::SessionBackgroundAgentsChanged(
+            session_id,
+        ));
+        // Drop the watcher when the session no longer tracks any agents
+        // — keeping a dangling notify-loop alive after the last pill is
+        // gone is wasted work and would also delay re-arming on a future
+        // re-registration (the watcher is `idempotent only when absent`).
+        if session.read(cx).background_agents.is_empty() {
+            self.background_agent_watchers.remove(&session_id);
         }
     }
 
