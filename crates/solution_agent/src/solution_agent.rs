@@ -7,6 +7,7 @@
 pub mod actions;
 pub mod adapter;
 pub mod agent_settings;
+pub mod background_agent;
 pub mod claude_adapter;
 pub(crate) mod cold_persistence;
 pub(crate) mod compact;
@@ -36,6 +37,7 @@ pub mod test_support;
 pub use model::{
     AgentServerId, SessionState, SolutionSession, SolutionSessionId, SolutionSessionMetadata,
 };
+pub use background_agent::{BackgroundAgent, BackgroundAgentId, BackgroundAgentSnapshot};
 
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};

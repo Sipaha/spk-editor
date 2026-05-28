@@ -10,6 +10,8 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use solutions::SolutionId;
 
+use crate::background_agent;
+
 /// Length of a `SolutionSessionId` in ASCII characters. 8 chars over a
 /// 36-char alphabet ≈ 36⁸ ≈ 2.8 × 10¹² combinations — comfortably
 /// collision-free for the realistic upper bound of a few thousand
@@ -385,6 +387,19 @@ pub struct SolutionSession {
     /// `active_subagent_order.iter()` returning exactly the keys the map
     /// holds — no holes, no duplicates.
     pub active_subagent_order: Vec<SharedString>,
+    /// Managed Agents (Claude Code's built-in async `Agent` tool dispatch)
+    /// the parent has launched in this session. Unlike `active_subagents`
+    /// which is keyed by parent tool_use id and clears on Task tool_call
+    /// terminal status, this map tracks Anthropic's standalone background
+    /// processes whose lifecycle is bound to a separate JSONL file on disk.
+    /// Persisted in `solution_session_background_agent`.
+    pub background_agents: HashMap<
+        background_agent::BackgroundAgentId,
+        background_agent::BackgroundAgent,
+    >,
+    /// Insertion order of `background_agents`. Used to render pills in
+    /// spawn order (HashMap iteration is hash-seeded and unstable).
+    pub background_agent_order: Vec<background_agent::BackgroundAgentId>,
     /// Position in the desktop session-tab strip. `None` means the session is
     /// not currently in the strip (either never opened, or its tab was closed
     /// via `persist_tab_order(.., None)`). Populated on `restore_open_tabs`
@@ -439,6 +454,8 @@ impl SolutionSession {
             stopping_safety_net: None,
             active_subagents: HashMap::new(),
             active_subagent_order: Vec::new(),
+            background_agents: HashMap::new(),
+            background_agent_order: Vec::new(),
             tab_order: None,
         }
     }
@@ -552,6 +569,8 @@ mod tests {
             stopping_safety_net: None,
             active_subagents: HashMap::new(),
             active_subagent_order: Vec::new(),
+            background_agents: HashMap::new(),
+            background_agent_order: Vec::new(),
             tab_order: None,
         }
     }
