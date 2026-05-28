@@ -3282,6 +3282,116 @@ async fn subagent_failed_status_also_removes_tab(cx: &mut TestAppContext) {
     assert_eq!(*changed_count.borrow(), 2, "add + remove on Failed");
 }
 
+/// Background-Agents-Strip Task 8: when an `Agent`-named ToolCall enters a
+/// terminal status with a parseable `raw_output`, `apply_subagent_lifecycle`
+/// registers a `BackgroundAgent` and emits `SessionBackgroundAgentsChanged`.
+#[gpui::test]
+async fn agent_terminal_with_parseable_raw_output_registers_background_agent(
+    cx: &mut TestAppContext,
+) {
+    use agent_client_protocol::schema as acp;
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+
+    let bg_counter = Rc::new(std::cell::RefCell::new(0usize));
+    let _bg_sub = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let counter = bg_counter.clone();
+        cx.subscribe(&store, move |_store, event, _cx| {
+            if let SolutionAgentStoreEvent::SessionBackgroundAgentsChanged(id) = event
+                && *id == session_id
+            {
+                *counter.borrow_mut() += 1;
+            }
+        })
+    });
+
+    // InProgress → Completed with raw_output carrying the managed-agent
+    // announcement. Mirrors how claude_code emits the Agent tool call.
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            let call = acp::ToolCall::new(
+                acp::ToolCallId::new("toolu_agent_1".to_string()),
+                "Agent".to_string(),
+            )
+            .kind(acp::ToolKind::Think)
+            .status(acp::ToolCallStatus::InProgress)
+            .meta(Some(acp_thread::meta_with_tool_name("Agent")));
+            t.upsert_tool_call(call, cx).expect("upsert in-progress");
+        });
+    });
+    cx.executor().run_until_parked();
+
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            let raw = serde_json::Value::String(
+                "agentId: a30f92a688e431edc\noutput_file: /tmp/agent-a30f92a688e431edc.output"
+                    .to_string(),
+            );
+            let call = acp::ToolCall::new(
+                acp::ToolCallId::new("toolu_agent_1".to_string()),
+                "Agent".to_string(),
+            )
+            .kind(acp::ToolKind::Think)
+            .status(acp::ToolCallStatus::Completed)
+            .raw_output(raw)
+            .meta(Some(acp_thread::meta_with_tool_name("Agent")));
+            t.upsert_tool_call(call, cx).expect("upsert completed");
+        });
+    });
+    cx.executor().run_until_parked();
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(session_id).expect("session exists");
+        let s = session.read(cx);
+        assert_eq!(
+            s.background_agents.len(),
+            1,
+            "one background-agent registered on Agent-tool terminal"
+        );
+        assert_eq!(s.background_agent_order.len(), 1, "order vec parallel");
+        let id =
+            crate::background_agent::BackgroundAgentId::new("a30f92a688e431edc");
+        assert!(
+            s.background_agents.contains_key(&id),
+            "registration keyed on parsed agentId"
+        );
+        assert_eq!(s.background_agent_order[0], id);
+    });
+    assert_eq!(
+        *bg_counter.borrow(),
+        1,
+        "SessionBackgroundAgentsChanged emitted exactly once on registration"
+    );
+
+    // Idempotency: a duplicate terminal-status update with the same
+    // raw_output must NOT re-register or re-emit. Drives the
+    // `contains_key` guard in apply_subagent_lifecycle.
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            let raw = serde_json::Value::String(
+                "agentId: a30f92a688e431edc\noutput_file: /tmp/agent-a30f92a688e431edc.output"
+                    .to_string(),
+            );
+            let call = acp::ToolCall::new(
+                acp::ToolCallId::new("toolu_agent_1".to_string()),
+                "Agent".to_string(),
+            )
+            .kind(acp::ToolKind::Think)
+            .status(acp::ToolCallStatus::Completed)
+            .raw_output(raw)
+            .meta(Some(acp_thread::meta_with_tool_name("Agent")));
+            t.upsert_tool_call(call, cx).expect("upsert duplicate");
+        });
+    });
+    cx.executor().run_until_parked();
+    assert_eq!(
+        *bg_counter.borrow(),
+        1,
+        "duplicate Agent-terminal update is a no-op (idempotent registration)"
+    );
+}
+
 /// Pin the error-string set that `resume_session` treats as "session gone,
 /// try the next cwd candidate (and ultimately mint a new ACP session)".
 ///

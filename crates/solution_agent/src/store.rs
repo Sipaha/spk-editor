@@ -70,7 +70,6 @@ pub struct SolutionAgentStore {
     /// `Task<()>` so dropping kills the watcher cleanly. Populated by
     /// `ensure_background_agent_watcher` (called from the tool-call
     /// handler in a later task of the Background Agents Strip plan).
-    #[allow(dead_code, reason = "wired up by a follow-up task; see plan")]
     background_agent_watchers: HashMap<SolutionSessionId, gpui::Task<()>>,
     /// Throttler for `workspace.session_metrics_changed` notifications.
     /// Caps emit rate at ~1 per 2 seconds per session so chatty fields
@@ -207,7 +206,13 @@ impl SubagentView {
 /// layout. `encoded-cwd` is "every char in `cwd.to_string_lossy()`
 /// with `/` and `.` replaced by `-`". Returns `None` when `cwd` is
 /// empty (legacy session) — those can't host managed agents anyway.
-#[allow(dead_code, reason = "called by ensure_background_agent_watcher; wired in a follow-up task")]
+/// Case-insensitive match for the claude `Agent` tool name. Lives next
+/// to `background_agent_dir_for` because both feed the managed-agent
+/// registration path; keeping them adjacent makes the wiring obvious.
+fn tool_name_is_agent(name: Option<&str>) -> bool {
+    matches!(name, Some(n) if n.eq_ignore_ascii_case("agent"))
+}
+
 fn background_agent_dir_for(cwd: &std::path::Path, acp_session_id: &str) -> Option<PathBuf> {
     if cwd.as_os_str().is_empty() {
         return None;
@@ -2374,6 +2379,16 @@ impl SolutionAgentStore {
             is_terminal: bool,
             label_from_raw_input: Option<SharedString>,
             subagent_type: Option<String>,
+            /// The tool's programmatic name (e.g. `"Task"`, `"Agent"`)
+            /// captured so the post-lifecycle branch can dispatch on
+            /// `eq_ignore_ascii_case("agent")` without re-borrowing the
+            /// entry from the thread.
+            tool_name: Option<String>,
+            /// JSON-encoded `raw_output` payload (only meaningful for the
+            /// terminal `Agent` branch — claude's managed-agent dispatcher
+            /// stashes `agentId` + `output_file` here when the tool call
+            /// completes). Empty for in-progress / non-Agent calls.
+            raw_output_text: Option<String>,
         }
         let snapshot = {
             let session = session_entity.read(cx);
@@ -2415,6 +2430,15 @@ impl SolutionAgentStore {
                 }
                 None => (None, None),
             };
+            let tool_name_owned = if tool_name.is_empty() {
+                None
+            } else {
+                Some(tool_name.to_string())
+            };
+            let raw_output_text = call
+                .raw_output
+                .as_ref()
+                .and_then(|v| serde_json::to_string(v).ok());
             Snapshot {
                 id: SharedString::from(call.id.0.to_string()),
                 is_task_like,
@@ -2422,6 +2446,8 @@ impl SolutionAgentStore {
                 is_terminal,
                 label_from_raw_input,
                 subagent_type,
+                tool_name: tool_name_owned,
+                raw_output_text,
             }
         };
 
@@ -2490,6 +2516,86 @@ impl SolutionAgentStore {
         if changed {
             cx.emit(SolutionAgentStoreEvent::SessionSubagentsChanged(session_id));
         }
+
+        // Managed-agent registration (Task 8 of the Background Agents Strip
+        // plan). claude_code's `Agent` tool is its async sub-agent dispatch;
+        // when the call completes its `raw_output` carries `agentId: <hex>`
+        // + `output_file: <path>.output` so we can tail the JSONL transcript
+        // the worker is appending to. We register a `BackgroundAgent` for
+        // every fresh announcement and spawn the per-session directory
+        // watcher (idempotent — `ensure_background_agent_watcher` no-ops on
+        // a duplicate call). The Task branch above already removed the
+        // subagent pill, so the Agent dispatch briefly shows as an active
+        // subagent and then transitions to a background-agent strip entry —
+        // matches the pre-feature behaviour for `Task` and adds the strip
+        // on top.
+        if snapshot.is_terminal && tool_name_is_agent(snapshot.tool_name.as_deref()) {
+            let raw_output_text = snapshot.raw_output_text.unwrap_or_default();
+            if let Some((agent_id_str, output_file)) =
+                crate::background_agent::parse_managed_agent_announcement(&raw_output_text)
+            {
+                let canonical =
+                    std::fs::read_link(&output_file).unwrap_or_else(|_| output_file.clone());
+                let id = crate::background_agent::BackgroundAgentId::new(agent_id_str);
+                let already = session_entity
+                    .read(cx)
+                    .background_agents
+                    .contains_key(&id);
+                if !already {
+                    let id_for_insert = id.clone();
+                    let path_for_insert = canonical.clone();
+                    session_entity.update(cx, |s, _| {
+                        s.background_agents.insert(
+                            id_for_insert.clone(),
+                            crate::background_agent::BackgroundAgent {
+                                id: id_for_insert.clone(),
+                                jsonl_path: path_for_insert,
+                                registered_at: chrono::Utc::now(),
+                                latest: None,
+                            },
+                        );
+                        s.background_agent_order.push(id_for_insert);
+                    });
+                    cx.emit(SolutionAgentStoreEvent::SessionBackgroundAgentsChanged(
+                        session_id,
+                    ));
+
+                    // Persist to SQLite if the store has a backing DB.
+                    // In-memory test stores leave `persistence` as `None`
+                    // and rely on the in-RAM map only.
+                    if let Some(db) = self.persistence.clone() {
+                        let row = crate::db::BackgroundAgentRow {
+                            solution_session_id: session_id.to_string(),
+                            agent_id: id.as_str().to_string(),
+                            jsonl_path: canonical.to_string_lossy().into_owned(),
+                            registered_at_ms: chrono::Utc::now().timestamp_millis(),
+                            last_seen_label: None,
+                            last_mtime_ms: None,
+                            stop_reason: None,
+                        };
+                        cx.background_spawn(async move {
+                            db.save_background_agent(row).await.log_err();
+                        })
+                        .detach();
+                    }
+
+                    // The watcher needs a `fs::Fs` handle. `SolutionAgentStore`
+                    // has no `fs` field; source it from the session's project
+                    // (most live sessions have one). A session without a
+                    // project just skips the watcher — the row is still
+                    // registered and the UI can render the pill, but live
+                    // tailing waits for a project attach.
+                    if let Some(fs) = session_entity
+                        .read(cx)
+                        .project
+                        .as_ref()
+                        .map(|p| p.read(cx).fs().clone())
+                    {
+                        self.ensure_background_agent_watcher(session_id, fs, cx);
+                    }
+                }
+            }
+        }
     }
 
     /// Spawn (idempotently) a per-session watcher on the
@@ -2503,7 +2609,6 @@ impl SolutionAgentStore {
     /// Called from the tool-call handler (Task 8) when claude announces
     /// a managed agent. Safe to call repeatedly: a second call for the
     /// same session is a no-op.
-    #[allow(dead_code, reason = "wired in a follow-up task; see plan")]
     pub(crate) fn ensure_background_agent_watcher(
         &mut self,
         session_id: SolutionSessionId,
@@ -2568,7 +2673,6 @@ impl SolutionAgentStore {
     /// the snapshot was actually stored. No-op when the session has
     /// gone away, the agent isn't tracked anymore, the file can't be
     /// read, or it has no usable last line.
-    #[allow(dead_code, reason = "called by ensure_background_agent_watcher; wired in a follow-up task")]
     pub(crate) fn refresh_background_agent_snapshot(
         &mut self,
         session_id: SolutionSessionId,
