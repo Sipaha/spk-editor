@@ -208,6 +208,12 @@ pub struct Tail {
 /// [`JSONL_LINE_CAP`] bytes for the final-line slice — earlier lines
 /// in the read window are ignored, since only the latest one drives
 /// the snapshot.
+///
+/// `since_offset` MUST be either `0` or a `new_offset` value returned
+/// by a previous call. Passing an arbitrary byte offset that falls
+/// mid-line will cause `last_line` to contain a JSON fragment, which
+/// `parse_jsonl_snapshot` silently discards as malformed — masking the
+/// real most-recent snapshot.
 pub fn tail_jsonl(path: &Path, since_offset: u64) -> std::io::Result<Tail> {
     use std::io::{Seek, SeekFrom};
     let mut f = std::fs::File::open(path)?;
