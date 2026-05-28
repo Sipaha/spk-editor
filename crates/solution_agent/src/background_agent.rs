@@ -174,6 +174,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_managed_agent_announcement_rejects_fifteen_char_hex_id() {
+        let raw = "agentId: a30f92a688e431e\noutput_file: /tmp/x.output";
+        assert!(parse_managed_agent_announcement(raw).is_none());
+    }
+
+    #[test]
+    fn parse_managed_agent_announcement_accepts_sixteen_char_hex_id() {
+        let raw = "agentId: a30f92a688e431ed\noutput_file: /tmp/x.output";
+        let parsed = parse_managed_agent_announcement(raw);
+        assert!(parsed.is_some());
+        let (id, path) = parsed.unwrap();
+        assert_eq!(id, "a30f92a688e431ed");
+        assert_eq!(path, std::path::PathBuf::from("/tmp/x.output"));
+    }
+
+    #[test]
     fn parse_managed_agent_announcement_requires_dot_output_suffix() {
         let raw = "agentId: a30f92a688e431edc\noutput_file: /tmp/x.jsonl";
         assert!(parse_managed_agent_announcement(raw).is_none());
