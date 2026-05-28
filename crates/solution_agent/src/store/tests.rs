@@ -3392,6 +3392,134 @@ async fn agent_terminal_with_parseable_raw_output_registers_background_agent(
     );
 }
 
+/// Task 9: a Managed Agent whose `latest.stop_reason` is `Some(...)` is
+/// removed from the session on the next `tick_background_agents` pass,
+/// and a `SessionBackgroundAgentsChanged` event is emitted.
+#[gpui::test]
+async fn done_agent_removed_on_tick(cx: &mut TestAppContext) {
+    let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+    let bg_id = crate::background_agent::BackgroundAgentId::new("a30f92a688e431edc");
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        let session = s.read(cx).session(session_id).unwrap();
+        session.update(cx, |s, _| {
+            s.background_agents.insert(
+                bg_id.clone(),
+                crate::background_agent::BackgroundAgent {
+                    id: bg_id.clone(),
+                    jsonl_path: "/nonexistent".into(),
+                    registered_at: chrono::Utc::now(),
+                    latest: Some(crate::background_agent::BackgroundAgentSnapshot {
+                        mtime: std::time::SystemTime::now(),
+                        activity_label: SharedString::from("Done."),
+                        stop_reason: Some(SharedString::from("end_turn")),
+                    }),
+                },
+            );
+            s.background_agent_order.push(bg_id.clone());
+        });
+    });
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        s.update(cx, |s, cx| s.tick_background_agents(cx));
+    });
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        let session = s.read(cx).session(session_id).unwrap();
+        assert!(
+            session.read(cx).background_agents.is_empty(),
+            "done agent must be removed on tick"
+        );
+        assert!(
+            session.read(cx).background_agent_order.is_empty(),
+            "order vec must be pruned in lockstep"
+        );
+    });
+}
+
+/// Task 9: an agent with a stale snapshot beyond
+/// `MANAGED_AGENT_STALE_TIMEOUT + MANAGED_AGENT_DEAD_LINGER`
+/// (V1 hardcoded: 120s + 300s = 420s) is removed on tick.
+#[gpui::test]
+async fn stale_agent_lingers_briefly_then_removed(cx: &mut TestAppContext) {
+    let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+    let bg_id = crate::background_agent::BackgroundAgentId::new("a30f92a688e431edc");
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        let session = s.read(cx).session(session_id).unwrap();
+        session.update(cx, |s, _| {
+            s.background_agents.insert(
+                bg_id.clone(),
+                crate::background_agent::BackgroundAgent {
+                    id: bg_id.clone(),
+                    jsonl_path: "/nonexistent".into(),
+                    registered_at: chrono::Utc::now(),
+                    latest: Some(crate::background_agent::BackgroundAgentSnapshot {
+                        mtime: std::time::SystemTime::now()
+                            - std::time::Duration::from_secs(500),
+                        activity_label: SharedString::from("Bash: x"),
+                        stop_reason: None,
+                    }),
+                },
+            );
+            s.background_agent_order.push(bg_id.clone());
+        });
+    });
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        s.update(cx, |s, cx| s.tick_background_agents(cx));
+    });
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        let session = s.read(cx).session(session_id).unwrap();
+        assert!(
+            session.read(cx).background_agents.is_empty(),
+            "stale-beyond-linger agent must be removed on tick"
+        );
+    });
+}
+
+/// Task 9: a fresh (non-terminal, recent mtime) Managed Agent must NOT
+/// be removed by `tick_background_agents` — only done + long-dead are
+/// candidates. Guards against the tick over-pruning live work.
+#[gpui::test]
+async fn fresh_agent_survives_tick(cx: &mut TestAppContext) {
+    let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+    let bg_id = crate::background_agent::BackgroundAgentId::new("a30f92a688e431edc");
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        let session = s.read(cx).session(session_id).unwrap();
+        session.update(cx, |s, _| {
+            s.background_agents.insert(
+                bg_id.clone(),
+                crate::background_agent::BackgroundAgent {
+                    id: bg_id.clone(),
+                    jsonl_path: "/nonexistent".into(),
+                    registered_at: chrono::Utc::now(),
+                    latest: Some(crate::background_agent::BackgroundAgentSnapshot {
+                        mtime: std::time::SystemTime::now(),
+                        activity_label: SharedString::from("Bash: x"),
+                        stop_reason: None,
+                    }),
+                },
+            );
+            s.background_agent_order.push(bg_id.clone());
+        });
+    });
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        s.update(cx, |s, cx| s.tick_background_agents(cx));
+    });
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        let session = s.read(cx).session(session_id).unwrap();
+        assert!(
+            session.read(cx).background_agents.contains_key(&bg_id),
+            "fresh agent must survive a tick"
+        );
+    });
+}
+
 /// Pin the error-string set that `resume_session` treats as "session gone,
 /// try the next cwd candidate (and ultimately mint a new ACP session)".
 ///

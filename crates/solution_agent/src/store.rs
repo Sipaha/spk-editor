@@ -78,6 +78,9 @@ pub struct SolutionAgentStore {
     /// notifications do NOT trigger resync on the client.
     metrics_emitter: MetricsEmitter,
     _solution_subscription: Option<Subscription>,
+    /// 1 Hz healthcheck loop that drives `tick_background_agents`.
+    /// Held so the timer cancels when the store is dropped.
+    _bg_agents_tick: Option<Task<()>>,
 }
 
 struct EntryUpdateThrottle {
@@ -212,6 +215,16 @@ impl SubagentView {
 fn tool_name_is_agent(name: Option<&str>) -> bool {
     matches!(name, Some(n) if n.eq_ignore_ascii_case("agent"))
 }
+
+/// Seconds of file inactivity before a managed (background) agent
+/// is considered dead. V1 hardcoded; a settings key can be added in
+/// V2 once we have a real need for per-installation tuning.
+const MANAGED_AGENT_STALE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(120);
+/// Seconds a dead managed-agent pill lingers in the strip before
+/// auto-disappearing. Same V1 hardcoded rationale as above.
+const MANAGED_AGENT_DEAD_LINGER: std::time::Duration =
+    std::time::Duration::from_secs(300);
 
 fn background_agent_dir_for(cwd: &std::path::Path, acp_session_id: &str) -> Option<PathBuf> {
     if cwd.as_os_str().is_empty() {
@@ -589,6 +602,24 @@ impl SolutionAgentStore {
         // `try_global` (the public sentinel for "is solutions::init done?").
         let solution_subscription = SolutionStore::try_global(cx)
             .map(|store| cx.subscribe(&store, Self::on_solution_event));
+        // 1 Hz background-agent healthcheck. Drops done agents and prunes
+        // long-dead ones; rendering-side "dead" detection (orange pill) uses
+        // `MANAGED_AGENT_STALE_TIMEOUT` directly off the snapshot mtime, so
+        // the tick is only responsible for eventual cleanup, not the
+        // first-observation transition.
+        let bg_agents_tick = cx.spawn(async move |this, cx: &mut AsyncApp| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                if this
+                    .update(cx, |this, cx| this.tick_background_agents(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
         Self {
             sessions: HashMap::new(),
             by_solution: HashMap::new(),
@@ -601,6 +632,7 @@ impl SolutionAgentStore {
             background_agent_watchers: HashMap::new(),
             metrics_emitter: MetricsEmitter::new(),
             _solution_subscription: solution_subscription,
+            _bg_agents_tick: Some(bg_agents_tick),
         }
     }
 
@@ -2717,6 +2749,75 @@ impl SolutionAgentStore {
             cx.emit(SolutionAgentStoreEvent::SessionBackgroundAgentsChanged(
                 session_id,
             ));
+        }
+    }
+
+    /// One pass over every session's background agents. Removes agents
+    /// whose latest snapshot carries a `stop_reason` (terminal done),
+    /// plus agents that have been silently dead beyond
+    /// `MANAGED_AGENT_STALE_TIMEOUT + MANAGED_AGENT_DEAD_LINGER`. Dead
+    /// detection itself (orange pill) is rendering-side using the same
+    /// stale timeout — the tick just drops the entries that have
+    /// fully expired.
+    pub fn tick_background_agents(&mut self, cx: &mut Context<Self>) {
+        let now = std::time::SystemTime::now();
+        let session_ids: Vec<SolutionSessionId> =
+            self.all_sessions().map(|e| e.read(cx).id).collect();
+        for session_id in session_ids {
+            let Some(session) = self.session(session_id) else {
+                continue;
+            };
+            // Skip sessions with no registered agents — the vast majority of
+            // sessions never spawn a managed agent, and `update` is not free.
+            if session.read(cx).background_agents.is_empty() {
+                continue;
+            }
+            let to_remove: Vec<crate::background_agent::BackgroundAgentId> =
+                session.update(cx, |s, _| {
+                    let candidates: Vec<crate::background_agent::BackgroundAgentId> = s
+                        .background_agent_order
+                        .iter()
+                        .filter(|id| {
+                            let Some(ba) = s.background_agents.get(id) else {
+                                return false;
+                            };
+                            let Some(snap) = ba.latest.as_ref() else {
+                                return false;
+                            };
+                            if snap.stop_reason.is_some() {
+                                return true;
+                            }
+                            let elapsed =
+                                now.duration_since(snap.mtime).unwrap_or_default();
+                            elapsed > MANAGED_AGENT_STALE_TIMEOUT + MANAGED_AGENT_DEAD_LINGER
+                        })
+                        .cloned()
+                        .collect();
+                    for id in &candidates {
+                        s.background_agents.remove(id);
+                        s.background_agent_order.retain(|x| x != id);
+                    }
+                    candidates
+                });
+            if !to_remove.is_empty() {
+                cx.emit(SolutionAgentStoreEvent::SessionBackgroundAgentsChanged(
+                    session_id,
+                ));
+                if let Some(db) = self.persistence.clone() {
+                    let session_id_string = session_id.to_string();
+                    for agent_id in to_remove {
+                        let db = db.clone();
+                        let session_id_string = session_id_string.clone();
+                        let agent_id_string = agent_id.as_str().to_string();
+                        cx.background_spawn(async move {
+                            db.delete_background_agent(session_id_string, agent_id_string)
+                                .await
+                                .log_err();
+                        })
+                        .detach();
+                    }
+                }
+            }
         }
     }
 
