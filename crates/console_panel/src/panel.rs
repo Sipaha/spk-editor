@@ -340,15 +340,36 @@ impl ConsolePanel {
                 panel.active_index = Some(panel.tabs.len() - 1);
             }
             cx.notify();
+            // Reconcile SolutionSession.tab_order against the restored panel
+            // strip. Without this, boot leaves two sources of truth: this
+            // panel's persisted tabs vs. the tab_order column hydrated by
+            // restore_open_tabs — they were free to diverge once a desktop
+            // user added a tab in a previous run (only ConsolePanel persisted
+            // the new tab; tab_order stayed pointing at the previous set).
+            // Calling persist here at end of restore harmonises them.
+            panel.persist(cx);
         });
 
         Ok(())
     }
 
-    /// Snapshot the current tab list into `console_panel_state`. Cheap and
-    /// idempotent: a DELETE-then-INSERT replacement keyed by `workspace_id`
-    /// happens off the main thread inside a single sqlite transaction.
+    /// Snapshot the current tab list into `console_panel_state` AND reconcile
+    /// the global `SolutionSession.tab_order` field so `workspace.snapshot`
+    /// (the mobile WorkspaceScreen feed) returns the same set of chat tabs
+    /// the user actually sees on the desktop strip. Without that reconciliation
+    /// the two stores diverge: `console_panel_state` tracks every panel
+    /// mutation, but `tab_order` was only being touched by the mobile-side
+    /// `workspace.open_session` / `close_session` RPCs and by the boot-time
+    /// `restore_open_tabs` DB hydration — so a desktop user opening a new
+    /// console here left mobile seeing a stale set of sessions from whatever
+    /// `tab_order` happened to be persisted last.
     fn persist(&self, cx: &mut Context<Self>) {
+        // Reconcile tab_order on every persist (add / close / reorder / restore).
+        // `persist_tab_order` already emits the seq-ed `workspace.session_opened`
+        // / `workspace.session_closed` deltas, so the mobile client picks up
+        // the new strip without a manual snapshot refresh.
+        self.sync_chat_tab_order(cx);
+
         // Snapshot tab state synchronously — we only read TerminalView /
         // SolutionSession entities here, never the Workspace. Workspace lookup
         // for `database_id` is deferred into the spawned task below so this
@@ -398,6 +419,61 @@ impl ConsolePanel {
                 .log_err();
         })
         .detach();
+    }
+
+    /// Project the in-memory chat-tab order onto `SolutionSession.tab_order`
+    /// per solution. Terminal tabs are ignored — only chat tabs map onto
+    /// `solution_agent` sessions. Called from [`persist`] so every tab
+    /// mutation (add / close / reorder / restore) keeps the field aligned
+    /// with what the panel actually shows.
+    fn sync_chat_tab_order(&self, cx: &mut Context<Self>) {
+        let Some(store) = SolutionAgentStore::try_global(cx) else {
+            return;
+        };
+        let chat_ids: Vec<SolutionSessionId> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| match tab {
+                ConsoleTab::Chat { session_id, .. } => Some(*session_id),
+                ConsoleTab::Terminal { .. } => None,
+            })
+            .collect();
+
+        // Bucket chat session ids by solution_id, preserving tab-strip order
+        // within each bucket. The workspace is typically a single Solution but
+        // the model doesn't enforce that — group defensively so a cross-
+        // solution panel layout (rare / future) doesn't silently truncate
+        // any solution's tab strip to the first one we encounter.
+        //
+        // `persist_tab_order` clears tab_order on every session of the given
+        // solution that isn't in `ordered_ids`. Solutions absent from the
+        // panel are intentionally NOT touched — those tabs live elsewhere
+        // (other workspaces / future mobile-only strips) and we don't want
+        // to clobber their state.
+        let mut per_solution: std::collections::HashMap<SolutionId, Vec<SolutionSessionId>> =
+            std::collections::HashMap::new();
+        {
+            let store_ref = store.read(cx);
+            for session_id in &chat_ids {
+                let Some(entity) = store_ref.session(*session_id) else {
+                    continue;
+                };
+                let solution_id = entity.read(cx).solution_id.clone();
+                per_solution
+                    .entry(solution_id)
+                    .or_default()
+                    .push(*session_id);
+            }
+        }
+
+        if per_solution.is_empty() {
+            return;
+        }
+        store.update(cx, |store, cx| {
+            for (solution_id, ordered_ids) in per_solution {
+                store.persist_tab_order(solution_id, ordered_ids, cx);
+            }
+        });
     }
 }
 
