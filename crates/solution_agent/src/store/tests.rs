@@ -3414,6 +3414,7 @@ async fn done_agent_removed_on_tick(cx: &mut TestAppContext) {
                         activity_label: SharedString::from("Done."),
                         stop_reason: Some(SharedString::from("end_turn")),
                     }),
+                    last_offset: 0,
                 },
             );
             s.background_agent_order.push(bg_id.clone());
@@ -3460,6 +3461,7 @@ async fn stale_agent_lingers_briefly_then_removed(cx: &mut TestAppContext) {
                         activity_label: SharedString::from("Bash: x"),
                         stop_reason: None,
                     }),
+                    last_offset: 0,
                 },
             );
             s.background_agent_order.push(bg_id.clone());
@@ -3501,6 +3503,7 @@ async fn fresh_agent_survives_tick(cx: &mut TestAppContext) {
                         activity_label: SharedString::from("Bash: x"),
                         stop_reason: None,
                     }),
+                    last_offset: 0,
                 },
             );
             s.background_agent_order.push(bg_id.clone());

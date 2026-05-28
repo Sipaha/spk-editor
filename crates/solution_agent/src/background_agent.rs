@@ -101,6 +101,13 @@ pub struct BackgroundAgent {
     pub jsonl_path: PathBuf,
     pub registered_at: DateTime<Utc>,
     pub latest: Option<BackgroundAgentSnapshot>,
+    /// Byte offset past the last bytes that `refresh_background_agent_snapshot`
+    /// successfully tailed. Carried across fs-watch events so each refresh
+    /// only re-reads the new bytes (capped at `JSONL_LINE_CAP`) instead of
+    /// the whole transcript. Reset to 0 by `tail_jsonl` when the file
+    /// shrinks (truncation / replacement), so a rotated JSONL re-reads
+    /// from the beginning rather than getting stuck past EOF.
+    pub last_offset: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -227,7 +234,11 @@ pub fn tail_jsonl(path: &Path, since_offset: u64) -> std::io::Result<Tail> {
     let metadata = f.metadata()?;
     let mtime = metadata.modified()?;
     let len = metadata.len();
-    if since_offset >= len {
+    // Truncation / replacement: caller's stored offset points past EOF.
+    // Re-read from byte 0 so a rotated JSONL surfaces its current tail
+    // instead of getting stuck on the stale offset.
+    let since_offset = if since_offset > len { 0 } else { since_offset };
+    if since_offset == len {
         return Ok(Tail {
             last_line: None,
             new_offset: len,
@@ -669,6 +680,52 @@ mod tests {
         let tail = tail_jsonl(&path, 0)?;
         // Cap behaviour: last_line is None when the line exceeds the cap.
         assert!(tail.last_line.is_none(), "oversize line should be dropped");
+        Ok(())
+    }
+
+    #[test]
+    fn tail_jsonl_resumes_from_offset_skipping_old_lines() -> std::io::Result<()> {
+        use std::io::Write;
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("agent.jsonl");
+        let mut f = std::fs::File::create(&path)?;
+        writeln!(f, r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"old"}}]}}}}"#)?;
+        let first = tail_jsonl(&path, 0)?;
+        assert!(first.last_line.as_deref().is_some_and(|s| s.contains("\"old\"")));
+        // Resume from the offset — no new bytes, no new line.
+        let second = tail_jsonl(&path, first.new_offset)?;
+        assert!(second.last_line.is_none(), "no new bytes → no new line");
+        assert_eq!(second.new_offset, first.new_offset);
+        // Append a fresh line; resume should surface only it.
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path)?;
+        writeln!(f, r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"new"}}]}}}}"#)?;
+        let third = tail_jsonl(&path, second.new_offset)?;
+        let line = third.last_line.expect("appended line should surface");
+        assert!(line.contains("\"new\""));
+        assert!(!line.contains("\"old\""), "incremental tail must not re-read pre-offset bytes");
+        Ok(())
+    }
+
+    #[test]
+    fn tail_jsonl_resets_offset_when_file_shrinks() -> std::io::Result<()> {
+        use std::io::Write;
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("rotated.jsonl");
+        // Original large content; caller stores an offset past current EOF.
+        {
+            let mut f = std::fs::File::create(&path)?;
+            writeln!(f, r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"original padded line"}}]}}}}"#)?;
+        }
+        let original = tail_jsonl(&path, 0)?;
+        // File rotated: truncated then a small fresh line written.
+        std::fs::File::create(&path)?;
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path)?;
+        writeln!(f, r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"fresh"}}]}}}}"#)?;
+        // Caller passes the stale offset that now points past the new EOF.
+        // tail_jsonl must reset to 0 and surface the fresh line, not return empty.
+        let after = tail_jsonl(&path, original.new_offset)?;
+        let line = after.last_line.expect("post-truncation tail should re-read from start");
+        assert!(line.contains("\"fresh\""));
         Ok(())
     }
 }

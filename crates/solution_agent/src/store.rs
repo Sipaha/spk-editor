@@ -2601,6 +2601,7 @@ impl SolutionAgentStore {
                                 jsonl_path: path_for_insert,
                                 registered_at: chrono::Utc::now(),
                                 latest: None,
+                                last_offset: 0,
                             },
                         );
                         s.background_agent_order.push(id_for_insert);
@@ -2740,26 +2741,37 @@ impl SolutionAgentStore {
         let Some(session) = self.session(session_id) else {
             return;
         };
-        let Some(jsonl_path) = session
+        let Some((jsonl_path, since_offset)) = session
             .read(cx)
             .background_agents
             .get(&agent_id)
-            .map(|ba| ba.jsonl_path.clone())
+            .map(|ba| (ba.jsonl_path.clone(), ba.last_offset))
         else {
             return;
         };
-        let tail = match crate::background_agent::tail_jsonl(&jsonl_path, 0) {
+        let tail = match crate::background_agent::tail_jsonl(&jsonl_path, since_offset) {
             Ok(t) => t,
             Err(_) => return,
         };
-        let Some(line) = tail.last_line else { return };
-        let mut snapshot = crate::background_agent::parse_jsonl_snapshot(&line);
-        snapshot.mtime = tail.mtime;
+        let new_offset = tail.new_offset;
+        let snapshot = tail.last_line.as_ref().map(|line| {
+            let mut snap = crate::background_agent::parse_jsonl_snapshot(line);
+            snap.mtime = tail.mtime;
+            snap
+        });
         let mut changed = false;
         session.update(cx, |s, _| {
             if let Some(ba) = s.background_agents.get_mut(&agent_id) {
-                ba.latest = Some(snapshot);
-                changed = true;
+                // Always advance the offset (or rewind on truncation —
+                // `tail_jsonl` already handled the reset). Only update
+                // `latest` when this tail actually yielded a new line;
+                // otherwise the previously-known snapshot remains the
+                // user-visible state.
+                ba.last_offset = new_offset;
+                if let Some(snap) = snapshot {
+                    ba.latest = Some(snap);
+                    changed = true;
+                }
             }
         });
         if changed {
@@ -2881,6 +2893,7 @@ impl SolutionAgentStore {
             crate::background_agent::BackgroundAgentId,
             std::path::PathBuf,
             Option<crate::background_agent::BackgroundAgentSnapshot>,
+            u64,
         )> = Vec::new();
 
         for row in rows {
@@ -2891,29 +2904,30 @@ impl SolutionAgentStore {
                 to_drop_from_db.push((row.solution_session_id.clone(), row.agent_id));
                 continue;
             }
-            let snap: Option<crate::background_agent::BackgroundAgentSnapshot> =
-                crate::background_agent::tail_jsonl(&path, 0)
-                    .ok()
-                    .and_then(|t| {
-                        let mtime = t.mtime;
-                        t.last_line.map(|line| {
-                            let mut s = crate::background_agent::parse_jsonl_snapshot(&line);
-                            s.mtime = mtime;
-                            s
-                        })
+            let (snap, last_offset) = match crate::background_agent::tail_jsonl(&path, 0) {
+                Ok(t) => {
+                    let mtime = t.mtime;
+                    let s = t.last_line.map(|line| {
+                        let mut s = crate::background_agent::parse_jsonl_snapshot(&line);
+                        s.mtime = mtime;
+                        s
                     });
+                    (s, t.new_offset)
+                }
+                Err(_) => (None, 0),
+            };
             if let Some(ref s) = snap
                 && s.stop_reason.is_some()
             {
                 to_drop_from_db.push((row.solution_session_id.clone(), row.agent_id));
                 continue;
             }
-            to_register.push((agent_id, path, snap));
+            to_register.push((agent_id, path, snap, last_offset));
         }
 
         if !to_register.is_empty() {
             session.update(cx, |s, _| {
-                for (agent_id, path, snap) in &to_register {
+                for (agent_id, path, snap, last_offset) in &to_register {
                     s.background_agents.insert(
                         agent_id.clone(),
                         crate::background_agent::BackgroundAgent {
@@ -2921,6 +2935,7 @@ impl SolutionAgentStore {
                             jsonl_path: path.clone(),
                             registered_at: chrono::Utc::now(),
                             latest: snap.clone(),
+                            last_offset: *last_offset,
                         },
                     );
                     s.background_agent_order.push(agent_id.clone());

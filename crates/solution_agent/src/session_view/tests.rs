@@ -137,6 +137,7 @@ fn make_background_agent(id: &str) -> crate::background_agent::BackgroundAgent {
         jsonl_path: std::path::PathBuf::from("/dev/null"),
         registered_at: chrono::Utc::now(),
         latest: None,
+        last_offset: 0,
     }
 }
 
