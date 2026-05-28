@@ -196,7 +196,7 @@ fn open_solution_as_new_workspace(
         };
         if add_to_existing {
             let new_workspace = opened.workspace.clone();
-            let target_sol_id = sol_id_for_lookup;
+            let target_sol_id = sol_id_for_lookup.clone();
             cx.update(|cx| {
                 opened
                     .window
@@ -215,6 +215,19 @@ fn open_solution_as_new_workspace(
                     .log_err();
             });
         }
+        // event_sources.rs::observe_new only fires for FRESH MultiWorkspace
+        // entities, so adding a solution into an existing window
+        // (OpenMode::Add) leaves `open_solutions: HashSet` un-flipped — no
+        // workspace.solution_opened delta reaches the mobile client and the
+        // mark_closed release observer never gets registered either, so
+        // closing the window later won't drop it from mobile's strip.
+        // mark_open is idempotent on the HashSet — for the NewWindow case
+        // observe_new still races us and the second insert no-ops.
+        cx.update(|cx| {
+            if let Some(store) = SolutionStore::try_global(cx) {
+                store.update(cx, |s, cx| s.mark_open(sol_id_for_lookup.clone(), cx));
+            }
+        });
         if info.is_empty {
             let sol_id_for_page = sol_id_for_page.clone();
             let name_for_page = info.name.clone();

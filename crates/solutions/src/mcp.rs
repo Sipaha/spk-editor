@@ -734,11 +734,20 @@ impl McpServerTool for OpenSolutionTool {
 
         // Persist failure here is non-fatal: the open already happened and the
         // user should see a window even if we lose the recency update.
+        // mark_open is also fired here because OpenMode::Activate reuses an
+        // existing MultiWorkspace and so event_sources.rs::observe_new (which
+        // is the canonical mark_open trigger) never fires for this add — the
+        // remote client would otherwise see the new solution missing from
+        // workspace.snapshot until the next desktop restart. mark_open is
+        // idempotent on the HashSet, so a duplicate call from observe_new on
+        // a NewWindow path no-ops.
         cx.update(|cx| {
             let store = SolutionStore::global(cx);
             store
-                .update(cx, |s, cx| s.touch_last_opened(&sol_id, cx))
-                .log_err();
+                .update(cx, |s, cx| {
+                    s.touch_last_opened(&sol_id, cx).log_err();
+                    s.mark_open(sol_id.clone(), cx);
+                });
             if let Some(welcome) = welcome_window {
                 welcome
                     .update(cx, |_, window, _| window.remove_window())
