@@ -28,7 +28,7 @@ use workspace::{
 };
 
 use crate::actions::{NewChat, NewTerminal, ToggleFocus};
-use crate::{ChatProvider, ConsolePanelSettings, TerminalProvider};
+use crate::{ChatProvider, ChatProviderEvent, ConsolePanelSettings, TerminalProvider};
 
 const CONSOLE_PANEL_KEY: &str = "ConsolePanel";
 
@@ -112,11 +112,43 @@ impl ConsolePanel {
     pub fn new(
         workspace: WeakEntity<Workspace>,
         store: Entity<SolutionAgentStore>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let settings = ConsolePanelSettings::get_global(cx).clone();
         let terminal_provider = cx.new(|_| TerminalProvider::new(workspace.clone()));
         let chat_provider = cx.new(|cx| ChatProvider::new(workspace.clone(), store, cx));
+        // Subscribe to external store mutations (mobile-side wire RPCs
+        // driving the same store) so the desktop strip mirrors them in
+        // real time. The handler filters by this panel's active
+        // solution_id so a foreign-solution mutation doesn't open
+        // ghost tabs in unrelated workspaces.
+        let chat_event_sub = cx.subscribe_in(
+            &chat_provider,
+            window,
+            |this, _provider, event, window, cx| match event {
+                ChatProviderEvent::TabsChanged {
+                    solution_id,
+                    opened,
+                    closed,
+                } => this.apply_external_tab_changes(
+                    solution_id.clone(),
+                    opened.clone(),
+                    closed.clone(),
+                    window,
+                    cx,
+                ),
+                ChatProviderEvent::SessionRemoved(id) => {
+                    this.close_chat_tab_by_session_id(*id, cx);
+                }
+                ChatProviderEvent::SessionCreatedExternally(_) => {
+                    // No-op: creates without an `open_session` follow-up
+                    // don't pin the session in the strip; the user has to
+                    // explicitly open it. Matches desktop's "new session"
+                    // path, which calls open_session after create_session.
+                }
+            },
+        );
         Self {
             workspace,
             tabs: Vec::new(),
@@ -129,7 +161,7 @@ impl ConsolePanel {
             pending_terminals_to_add: 0,
             deferred_tasks: HashMap::default(),
             assistant_enabled: false,
-            _subscriptions: Vec::new(),
+            _subscriptions: vec![chat_event_sub],
         }
     }
 
@@ -152,8 +184,8 @@ impl ConsolePanel {
         // boots. Tests that don't init the store can't load the panel either,
         // which matches TerminalPanel's old behaviour for solution_agent.
         let store = workspace.update(&mut cx, |_, cx| SolutionAgentStore::global(cx))?;
-        let panel = workspace.update_in(&mut cx, |workspace, _, cx| {
-            cx.new(|cx| Self::new(workspace.weak_handle(), store, cx))
+        let panel = workspace.update_in(&mut cx, |workspace, window, cx| {
+            cx.new(|cx| Self::new(workspace.weak_handle(), store, window, cx))
         })?;
 
         // Best-effort restore: a failure here must not block the workspace
@@ -340,15 +372,36 @@ impl ConsolePanel {
                 panel.active_index = Some(panel.tabs.len() - 1);
             }
             cx.notify();
+            // Reconcile SolutionSession.tab_order against the restored panel
+            // strip. Without this, boot leaves two sources of truth: this
+            // panel's persisted tabs vs. the tab_order column hydrated by
+            // restore_open_tabs — they were free to diverge once a desktop
+            // user added a tab in a previous run (only ConsolePanel persisted
+            // the new tab; tab_order stayed pointing at the previous set).
+            // Calling persist here at end of restore harmonises them.
+            panel.persist(cx);
         });
 
         Ok(())
     }
 
-    /// Snapshot the current tab list into `console_panel_state`. Cheap and
-    /// idempotent: a DELETE-then-INSERT replacement keyed by `workspace_id`
-    /// happens off the main thread inside a single sqlite transaction.
+    /// Snapshot the current tab list into `console_panel_state` AND reconcile
+    /// the global `SolutionSession.tab_order` field so `workspace.snapshot`
+    /// (the mobile WorkspaceScreen feed) returns the same set of chat tabs
+    /// the user actually sees on the desktop strip. Without that reconciliation
+    /// the two stores diverge: `console_panel_state` tracks every panel
+    /// mutation, but `tab_order` was only being touched by the mobile-side
+    /// `workspace.open_session` / `close_session` RPCs and by the boot-time
+    /// `restore_open_tabs` DB hydration — so a desktop user opening a new
+    /// console here left mobile seeing a stale set of sessions from whatever
+    /// `tab_order` happened to be persisted last.
     fn persist(&self, cx: &mut Context<Self>) {
+        // Reconcile tab_order on every persist (add / close / reorder / restore).
+        // `persist_tab_order` already emits the seq-ed `workspace.session_opened`
+        // / `workspace.session_closed` deltas, so the mobile client picks up
+        // the new strip without a manual snapshot refresh.
+        self.sync_chat_tab_order(cx);
+
         // Snapshot tab state synchronously — we only read TerminalView /
         // SolutionSession entities here, never the Workspace. Workspace lookup
         // for `database_id` is deferred into the spawned task below so this
@@ -398,6 +451,61 @@ impl ConsolePanel {
                 .log_err();
         })
         .detach();
+    }
+
+    /// Project the in-memory chat-tab order onto `SolutionSession.tab_order`
+    /// per solution. Terminal tabs are ignored — only chat tabs map onto
+    /// `solution_agent` sessions. Called from [`persist`] so every tab
+    /// mutation (add / close / reorder / restore) keeps the field aligned
+    /// with what the panel actually shows.
+    fn sync_chat_tab_order(&self, cx: &mut Context<Self>) {
+        let Some(store) = SolutionAgentStore::try_global(cx) else {
+            return;
+        };
+        let chat_ids: Vec<SolutionSessionId> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| match tab {
+                ConsoleTab::Chat { session_id, .. } => Some(*session_id),
+                ConsoleTab::Terminal { .. } => None,
+            })
+            .collect();
+
+        // Bucket chat session ids by solution_id, preserving tab-strip order
+        // within each bucket. The workspace is typically a single Solution but
+        // the model doesn't enforce that — group defensively so a cross-
+        // solution panel layout (rare / future) doesn't silently truncate
+        // any solution's tab strip to the first one we encounter.
+        //
+        // `persist_tab_order` clears tab_order on every session of the given
+        // solution that isn't in `ordered_ids`. Solutions absent from the
+        // panel are intentionally NOT touched — those tabs live elsewhere
+        // (other workspaces / future mobile-only strips) and we don't want
+        // to clobber their state.
+        let mut per_solution: std::collections::HashMap<SolutionId, Vec<SolutionSessionId>> =
+            std::collections::HashMap::new();
+        {
+            let store_ref = store.read(cx);
+            for session_id in &chat_ids {
+                let Some(entity) = store_ref.session(*session_id) else {
+                    continue;
+                };
+                let solution_id = entity.read(cx).solution_id.clone();
+                per_solution
+                    .entry(solution_id)
+                    .or_default()
+                    .push(*session_id);
+            }
+        }
+
+        if per_solution.is_empty() {
+            return;
+        }
+        store.update(cx, |store, cx| {
+            for (solution_id, ordered_ids) in per_solution {
+                store.persist_tab_order(solution_id, ordered_ids, cx);
+            }
+        });
     }
 }
 
@@ -1154,6 +1262,93 @@ impl ConsolePanel {
         cx.notify();
         self.persist(cx);
     }
+
+    /// React to an external `persist_tab_order` mutation (mobile wire RPC,
+    /// most commonly): close any local tab whose session is in `closed`,
+    /// then spawn a tab for each session in `opened` that isn't already
+    /// represented. Scoped to this panel's active solution — events for
+    /// foreign solutions are ignored.
+    fn apply_external_tab_changes(
+        &mut self,
+        solution_id: SolutionId,
+        opened: Vec<SolutionSessionId>,
+        closed: Vec<SolutionSessionId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let active_solution =
+            workspace.read_with(cx, |ws, cx| active_solution_id_for_workspace(ws, cx));
+        if active_solution.as_ref() != Some(&solution_id) {
+            return;
+        }
+        for id in closed {
+            self.close_chat_tab_by_session_id(id, cx);
+        }
+        for id in opened {
+            if self.has_chat_tab_for(id) {
+                continue;
+            }
+            // Spawn the tab. `new_tab_from_existing` returns a Task that
+            // resolves once the SessionSessionView is wired up.
+            let task = self
+                .chat_provider
+                .update(cx, |provider, cx| {
+                    provider.new_tab_from_existing(id, window, cx)
+                });
+            cx.spawn(async move |this, cx| {
+                let view = task.await.log_err()?;
+                this.update(cx, |this, cx| {
+                    if this.has_chat_tab_for(id) {
+                        // Race: a parallel handler already added the
+                        // tab while we awaited the view. Drop ours.
+                        return;
+                    }
+                    this.tabs.push(ConsoleTab::Chat {
+                        view,
+                        session_id: id,
+                    });
+                    let new_index = this.tabs.len() - 1;
+                    if this.active_index.is_none() {
+                        this.active_index = Some(new_index);
+                    }
+                    cx.notify();
+                    this.persist(cx);
+                })
+                .log_err();
+                Some(())
+            })
+            .detach();
+        }
+    }
+
+    /// Returns true when one of [`self.tabs`] is a Chat tab for
+    /// [`session_id`]. Used by the external-mutation path to dedupe
+    /// against tabs the user (or a previous handler) already opened.
+    fn has_chat_tab_for(&self, session_id: SolutionSessionId) -> bool {
+        self.tabs.iter().any(|tab| {
+            matches!(tab, ConsoleTab::Chat { session_id: sid, .. } if *sid == session_id)
+        })
+    }
+
+    /// Close the Chat tab (if any) hosting [`session_id`]. No-op when
+    /// no such tab is open. Driven by external store mutations: the
+    /// wire-side `workspace.close_session` RPC and the destructive
+    /// `solution_agent.delete_session` path both surface here.
+    fn close_chat_tab_by_session_id(
+        &mut self,
+        session_id: SolutionSessionId,
+        cx: &mut Context<Self>,
+    ) {
+        let index = self.tabs.iter().position(|tab| {
+            matches!(tab, ConsoleTab::Chat { session_id: sid, .. } if *sid == session_id)
+        });
+        if let Some(index) = index {
+            self.close_tab(index, cx);
+        }
+    }
 }
 
 impl Panel for ConsolePanel {
@@ -1286,8 +1481,8 @@ mod tests {
             cx.add_window(|window, cx| Workspace::test_new(project, window, cx));
 
         let panel = window_handle
-            .update(cx, |workspace, _window, cx| {
-                cx.new(|cx| ConsolePanel::new(workspace.weak_handle(), store, cx))
+            .update(cx, |workspace, window, cx| {
+                cx.new(|cx| ConsolePanel::new(workspace.weak_handle(), store, window, cx))
             })
             .unwrap();
 

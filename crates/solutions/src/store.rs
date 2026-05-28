@@ -8,8 +8,8 @@ use crate::dock_snapshot::{DockSnapshots, SolutionDockSnapshot};
 use crate::tabs_snapshot::{SolutionTabsSnapshot, TabSnapshots};
 use anyhow::{Context as _, Result, bail};
 use chrono::Utc;
-use collections::HashMap;
-use gpui::{App, AppContext as _, Entity, EventEmitter, Global};
+use collections::{HashMap, HashSet};
+use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global};
 use std::path::PathBuf;
 use std::sync::Arc;
 use util::ResultExt as _;
@@ -46,6 +46,13 @@ pub struct SolutionStore {
     /// don't have to round-trip through SQL on every render.
     pub(crate) panel_member_selections:
         HashMap<(SolutionId, crate::db::PanelKind), CatalogId>,
+    /// Runtime-only set of solutions whose desktop window is currently open.
+    /// Populated by `event_sources::install` from MultiWorkspace lifecycle
+    /// (observe_new fires on window creation; observe_release fires on close).
+    /// Tests use `mark_open` directly to fake an open window.
+    /// Not persisted — every process restart starts empty and reconciles via
+    /// the `observe_new::<MultiWorkspace>` hook.
+    pub(crate) open_solutions: HashSet<SolutionId>,
 }
 
 #[derive(Clone, Debug)]
@@ -92,6 +99,23 @@ pub enum SolutionStoreEvent {
         id: SolutionId,
         root: std::path::PathBuf,
     },
+    /// Emitted by `mark_closed`. Distinct from `Changed` so UI subscribers
+    /// can drive workspace-tab close-out from a single seam regardless of
+    /// who triggered the close (desktop UI button vs. wire-side
+    /// `workspace.close_solution` from the mobile client). Without this
+    /// the wire path only flipped the `open` flag + emitted the mobile
+    /// notification, leaving the corresponding desktop workspace tabs
+    /// open until the user closed them manually.
+    Closed { id: SolutionId },
+    /// Emitted by `mark_open`. Distinct from `Changed` so cross-crate
+    /// observers (notably `workspace_events`, which can see both
+    /// `SolutionStore` and `SolutionAgentStore`) can react with side
+    /// effects this crate can't do itself — most importantly fanning
+    /// out one `workspace.session_opened` notification per tab-pinned
+    /// session for the just-opened solution. Without that fan-out the
+    /// mobile mirror sees the solution row appear with `sessions: []`
+    /// even when the persisted tab strip has entries.
+    Opened { id: SolutionId },
 }
 
 impl EventEmitter<SolutionStoreEvent> for SolutionStore {}
@@ -150,6 +174,7 @@ impl SolutionStore {
             tab_snapshots: TabSnapshots::default(),
             dock_snapshots: DockSnapshots::default(),
             panel_member_selections,
+            open_solutions: HashSet::default(),
         });
         cx.set_global(GlobalSolutionStore(store));
     }
@@ -223,6 +248,7 @@ impl SolutionStore {
             tab_snapshots: TabSnapshots::default(),
             dock_snapshots: DockSnapshots::default(),
             panel_member_selections: HashMap::default(),
+            open_solutions: HashSet::default(),
         })
     }
 
@@ -607,6 +633,19 @@ impl SolutionStore {
         // stale entries don't leak past the deletion.
         self.panel_member_selections
             .retain(|(sid, _), _| sid != id);
+        // Emit the sequenced workspace-level notification so the mobile snapshot
+        // (and any other listener) updates regardless of who triggered the delete.
+        // Reserve seq first, then drop the borrow, then emit — avoids holding
+        // &WorkspaceEventCoordinator while also borrowing cx for emit_notification.
+        let seq_opt =
+            editor_mcp::workspace_seq::WorkspaceEventCoordinator::try_global(cx)
+                .map(|c| c.next_seq());
+        if let Some(seq) = seq_opt {
+            editor_mcp::emit_notification(cx, "workspace.solution_deleted", serde_json::json!({
+                "seq": seq,
+                "solution_id": id.as_str(),
+            }));
+        }
         cx.emit(SolutionStoreEvent::Changed);
         if let Some(root) = root {
             cx.emit(SolutionStoreEvent::Deleted {
@@ -686,6 +725,76 @@ impl SolutionStore {
         cx.emit(SolutionStoreEvent::Changed);
         cx.notify();
         Ok(())
+    }
+
+    /// Returns `true` if the solution's desktop window is currently tracked as open.
+    pub fn is_open(&self, id: &SolutionId) -> bool {
+        self.open_solutions.contains(id)
+    }
+
+    /// Mark a solution's window as open. Idempotent — repeat calls are no-ops.
+    /// Emits `Changed` so existing MCP observers react automatically.
+    /// Also emits a sequenced `workspace.solution_opened` notification so the
+    /// mobile client updates regardless of who triggered the open.
+    pub fn mark_open(&mut self, id: SolutionId, cx: &mut Context<Self>) {
+        if !self.open_solutions.insert(id.clone()) {
+            return; // already open — no-op
+        }
+        // Build a minimal summary inline (cannot call mcp::build_summary here
+        // because that re-borrows SolutionStore via try_global, which would
+        // panic while we are inside a mutable update of the same entity).
+        // sessions is always empty: solutions does not depend on solution_agent
+        // (cycle). The mobile client calls workspace.snapshot for full state.
+        let solution_json = self.config.solutions.iter()
+            .find(|s| s.id == id)
+            .map(|sol| serde_json::json!({
+                "id": sol.id.as_str(),
+                "name": sol.name,
+                "root": sol.root.to_string_lossy(),
+                "member_count": sol.members.len(),
+                "last_opened_at": sol.last_opened_at.map(|t| t.to_rfc3339()),
+                "open": true,
+                "main_window_id": serde_json::Value::Null,
+            }));
+        // Reserve seq first, then drop the borrow, then emit — avoids holding
+        // &WorkspaceEventCoordinator while also borrowing cx for emit_notification.
+        let seq_opt =
+            editor_mcp::workspace_seq::WorkspaceEventCoordinator::try_global(cx)
+                .map(|c| c.next_seq());
+        if let Some(seq) = seq_opt {
+            editor_mcp::emit_notification(cx, "workspace.solution_opened", serde_json::json!({
+                "seq": seq,
+                "solution": solution_json,
+                "sessions": [],
+            }));
+        }
+        cx.emit(SolutionStoreEvent::Opened { id: id.clone() });
+        cx.emit(SolutionStoreEvent::Changed);
+        cx.notify();
+    }
+
+    /// Mark a solution's window as closed. Idempotent — repeat calls are no-ops.
+    /// Emits `Changed` so existing MCP observers react automatically.
+    /// Also emits a sequenced `workspace.solution_closed` notification so the
+    /// mobile client updates regardless of who triggered the close.
+    pub fn mark_closed(&mut self, id: &SolutionId, cx: &mut Context<Self>) {
+        if !self.open_solutions.remove(id) {
+            return; // already closed — no-op
+        }
+        // Reserve seq first, then drop the borrow, then emit — avoids holding
+        // &WorkspaceEventCoordinator while also borrowing cx for emit_notification.
+        let seq_opt =
+            editor_mcp::workspace_seq::WorkspaceEventCoordinator::try_global(cx)
+                .map(|c| c.next_seq());
+        if let Some(seq) = seq_opt {
+            editor_mcp::emit_notification(cx, "workspace.solution_closed", serde_json::json!({
+                "seq": seq,
+                "solution_id": id.as_str(),
+            }));
+        }
+        cx.emit(SolutionStoreEvent::Closed { id: id.clone() });
+        cx.emit(SolutionStoreEvent::Changed);
+        cx.notify();
     }
 
     pub fn paths_for_open(&self, id: &SolutionId) -> Result<Vec<PathBuf>> {
@@ -774,6 +883,31 @@ impl SolutionStore {
             .iter_mut()
             .find(|s| s.id == *id)
             .with_context(|| format!("solution not found: {}", id.0))
+    }
+
+    /// Insert a minimal Solution (name + temp root, no members, no DB write)
+    /// for use in unit tests. Returns the generated `SolutionId`.
+    /// Only available in test builds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn create_for_test_minimal(
+        &mut self,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) -> SolutionId {
+        let taken: Vec<String> = self.config.solutions.iter().map(|s| s.id.0.clone()).collect();
+        let slug = crate::slug::unique_slug(name, &taken);
+        let id = SolutionId(slug.clone());
+        let root = std::env::temp_dir().join("spke-test-solutions").join(&slug);
+        self.config.solutions.push(Solution {
+            id: id.clone(),
+            name: name.into(),
+            root,
+            members: vec![],
+            last_opened_at: None,
+        });
+        cx.emit(SolutionStoreEvent::Changed);
+        cx.notify();
+        id
     }
 
     #[cfg(test)]

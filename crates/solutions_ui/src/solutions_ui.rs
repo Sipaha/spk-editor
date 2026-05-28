@@ -45,6 +45,7 @@ pub fn init(cx: &mut App) {
     cx.observe_new(register_tab_actions).detach();
     cx.observe_new(register_member_sync_observer).detach();
     cx.observe_new(register_solution_delete_observer).detach();
+    cx.observe_new(register_solution_close_observer).detach();
     welcome::init(cx);
     switch::register_mcp(cx);
 }
@@ -178,6 +179,46 @@ fn register_solution_delete_observer(
             if let Some(mw) = cx.update(|_, _| mw_weak.upgrade()).ok().flatten() {
                 mw.update_in(cx, |mw, window, cx| {
                     close_workspaces_under_root_in(mw, &root, window, cx);
+                })
+                .log_err();
+            }
+        })
+        .detach();
+    })
+    .detach();
+}
+
+/// Mirror of [`register_solution_delete_observer`] for the non-destructive
+/// close path. Listens for [`SolutionStoreEvent::Closed`] (emitted by
+/// `SolutionStore::mark_closed`) and tears down every workspace tab in
+/// every `MultiWorkspace` that hosts the closed solution. Without this,
+/// a `workspace.close_solution` RPC from the mobile client only flipped
+/// the `open` flag and emitted the mobile-facing wire notification, but
+/// left the corresponding desktop workspace tabs visible until the user
+/// closed them by hand. The desktop tab-bar "Close" action also calls
+/// `mark_closed`, so both paths converge on the same teardown seam.
+fn register_solution_close_observer(
+    _workspace: &mut Workspace,
+    window: Option<&mut Window>,
+    cx: &mut gpui::Context<Workspace>,
+) {
+    use util::ResultExt as _;
+    let Some(window) = window else { return };
+    let Some(store) = SolutionStore::try_global(cx) else {
+        return;
+    };
+    cx.subscribe_in(&store, window, |workspace, _store, event, window, cx| {
+        let SolutionStoreEvent::Closed { id } = event else {
+            return;
+        };
+        let Some(mw_weak) = workspace.multi_workspace().cloned() else {
+            return;
+        };
+        let id = id.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            if let Some(mw) = cx.update(|_, _| mw_weak.upgrade()).ok().flatten() {
+                mw.update_in(cx, |mw, window, cx| {
+                    close_solution_workspaces_in(mw, &id, window, cx);
                 })
                 .log_err();
             }
@@ -436,6 +477,22 @@ fn close_solution(
                 })
                 .log_err();
         }
+        // Drive `mark_closed` from here too. The MultiWorkspace release
+        // observer in `solutions::event_sources` only fires when the
+        // entire window drops (every solution in it closed), so a
+        // multi-solution window that closes ONE of N solutions never
+        // fired `mark_closed` for that solution — the mobile client
+        // missed the `workspace.solution_closed` notification and showed
+        // a stale row. Calling it here covers the "still other
+        // solutions in the window" case; `mark_closed` is idempotent on
+        // an already-closed id, so the subsequent release-observer fire
+        // on the eventual window drop is a safe no-op.
+        cx.update(|_, cx| {
+            if let Some(store) = solutions::SolutionStore::try_global(cx) {
+                store.update(cx, |s, cx| s.mark_closed(&sol_id_for_defer, cx));
+            }
+        })
+        .log_err();
     })
     .detach();
 }

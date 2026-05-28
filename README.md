@@ -1,8 +1,15 @@
-# SPK Editor
+# Sawe
 
-SPK Editor is a personal fork of [Zed](https://zed.dev) by Zed Industries, Inc., modified by **Simonov Pavel** ([@Sipaha](https://github.com/Sipaha)).
+**Sawe — Solution-Aware Workspace Editor.** An AI-native, multi-project IDE forked from [Zed](https://zed.dev). Free, open-source, no telemetry, no cloud sign-in. Maintained by **Simonov Pavel** ([@Sipaha](https://github.com/Sipaha)).
 
-This fork is built around tight integration with [Claude Code](https://claude.ai/code) as an external agent (via the Agent Client Protocol). It does **not** operate any of the Zed Industries cloud services that the upstream editor uses by default:
+*"Zed" is a trademark of Zed Industries; Sawe is not affiliated with or endorsed by Zed Industries. Internal identifiers (binary name `spk-editor`, config dirs, app bundle name) are mid-migration from the previous brand and still reflect the old name in code paths below.*
+
+Sawe is built around two ideas:
+
+- **Solutions** — a multi-project workspace abstraction: group N git repos as worktrees in one editor window (like an "IDEA Solution" spanning multiple projects).
+- **Solution-scoped AI** — multiple [Claude Code](https://claude.ai/code) agent sessions per Solution (via the Agent Client Protocol), each a first-class pane item that understands the whole Solution rather than individual files. AI auth uses your existing Claude subscription via `~/.claude/`; no API keys.
+
+Sawe does **not** operate any of the Zed Industries cloud services that upstream Zed uses by default:
 
 - No telemetry is sent.
 - No auto-update channel — the binary is built from source.
@@ -50,7 +57,7 @@ script/bundle-windows.ps1   # produces the Inno Setup installer
 
 ## Running unsigned binaries
 
-SPK Editor binaries are **not signed or notarized**. To run on each OS:
+Sawe binaries are **not signed or notarized**. To run on each OS:
 
 - **Linux**: no extra step.
 - **macOS**: Gatekeeper will refuse to launch. Right-click the app → Open, or run `xattr -dr com.apple.quarantine /Applications/SpkEditor.app`.
@@ -76,13 +83,13 @@ For upstream Zed bugs (anything not specific to this fork), please file directly
 
 ## License
 
-SPK Editor inherits Zed's licensing unchanged:
+Sawe inherits Zed's licensing unchanged:
 
 - The editor (`crates/zed`) is licensed under **GPL-3.0-or-later**.
 - The collab server (`crates/collab*`) is licensed under **AGPL-3.0** (kept in the tree but not built / run by default in spk-editor).
 - The shared libraries (`gpui`, etc.) are licensed under **Apache-2.0**.
 
-See `LICENSE-GPL`, `LICENSE-AGPL`, `LICENSE-APACHE`. All `Copyright Zed Industries, Inc.` notices are preserved per GPL §5(a). The legal documents inherited from upstream Zed are in `legal/upstream-zed/`; they describe Zed Industries' hosted services and **do not apply to spk-editor builds** (which operate no service infrastructure).
+See `LICENSE-GPL`, `LICENSE-AGPL`, `LICENSE-APACHE`. All `Copyright Zed Industries, Inc.` notices are preserved per GPL §5(a). The legal documents inherited from upstream Zed are in `legal/upstream-zed/`; they describe Zed Industries' hosted services and **do not apply to Sawe builds** (which operate no service infrastructure).
 
 License-compliance for third-party dependencies is enforced by `cargo-about` (see `script/licenses/`). To re-check locally:
 
@@ -97,4 +104,4 @@ This fork is periodically merged from <https://github.com/zed-industries/zed>. I
 
 ## Acknowledgements
 
-All credit for the editor itself goes to **Zed Industries, Inc.** and the upstream Zed contributors. SPK Editor is a thin reskin + service-detachment layer on top of their work.
+All credit for the editor core — rendering, buffer, language services, GPUI — goes to **Zed Industries, Inc.** and the upstream Zed contributors. Sawe builds a substantial workflow layer on top of that core: multi-project Solutions, first-class AI sessions, embedded MCP server, headless platform, run configurations, remote control, and the surrounding service-detachment.

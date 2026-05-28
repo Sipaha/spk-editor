@@ -148,7 +148,7 @@ pub struct SolutionSummary {
     pub member_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_opened_at: Option<String>,
-    pub window_open: bool,
+    pub open: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub main_window_id: Option<String>,
 }
@@ -190,15 +190,21 @@ impl McpServerTool for ListSolutionsTool {
     }
 }
 
-fn build_summary(sol: &Solution, cx: &App) -> SolutionSummary {
+pub fn build_summary(sol: &Solution, cx: &App) -> SolutionSummary {
+    // `main_window_id` is still derived from live window enumeration (needed
+    // by the UI to focus the correct window). Only the `open` flag moves to
+    // stored runtime data so tests can flip it without spawning real windows.
     let main_window_id = find_window_id_for_solution(&sol.root, cx);
+    let open = SolutionStore::try_global(cx)
+        .map(|store| store.read(cx).is_open(&sol.id))
+        .unwrap_or(false);
     SolutionSummary {
         id: sol.id.as_str().to_string(),
         name: sol.name.clone(),
         root: sol.root.to_string_lossy().into_owned(),
         member_count: sol.members.len(),
         last_opened_at: sol.last_opened_at.map(|t| t.to_rfc3339()),
-        window_open: main_window_id.is_some(),
+        open,
         main_window_id,
     }
 }
@@ -728,11 +734,20 @@ impl McpServerTool for OpenSolutionTool {
 
         // Persist failure here is non-fatal: the open already happened and the
         // user should see a window even if we lose the recency update.
+        // mark_open is also fired here because OpenMode::Activate reuses an
+        // existing MultiWorkspace and so event_sources.rs::observe_new (which
+        // is the canonical mark_open trigger) never fires for this add — the
+        // remote client would otherwise see the new solution missing from
+        // workspace.snapshot until the next desktop restart. mark_open is
+        // idempotent on the HashSet, so a duplicate call from observe_new on
+        // a NewWindow path no-ops.
         cx.update(|cx| {
             let store = SolutionStore::global(cx);
             store
-                .update(cx, |s, cx| s.touch_last_opened(&sol_id, cx))
-                .log_err();
+                .update(cx, |s, cx| {
+                    s.touch_last_opened(&sol_id, cx).log_err();
+                    s.mark_open(sol_id.clone(), cx);
+                });
             if let Some(welcome) = welcome_window {
                 welcome
                     .update(cx, |_, window, _| window.remove_window())
@@ -4837,7 +4852,7 @@ mod tests {
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0].name, "Test Sol");
         assert_eq!(arr[0].member_count, 0);
-        assert!(!arr[0].window_open);
+        assert!(!arr[0].open);
     }
 
     #[test]

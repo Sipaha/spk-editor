@@ -15,9 +15,10 @@ use util::ResultExt;
 
 use crate::adapter::AdapterRegistry;
 use crate::db::SolutionAgentDb;
+use crate::metrics_emitter::MetricsEmitter;
 use crate::model::{
-    AgentServerId, SessionState, SolutionSession, SolutionSessionId, SolutionSessionMetadata,
-    SubagentTab,
+    AgentServerId, SessionContextCount, SessionState, SolutionSession, SolutionSessionId,
+    SolutionSessionMetadata, SubagentTab,
 };
 use crate::notifier;
 use crate::pool::SubprocessPool;
@@ -64,6 +65,12 @@ pub struct SolutionAgentStore {
     /// breach — a continuously-streaming entry mustn't be able to starve
     /// the trailing-edge emit indefinitely.
     entry_update_throttles: HashMap<(SolutionSessionId, usize), EntryUpdateThrottle>,
+    /// Throttler for `workspace.session_metrics_changed` notifications.
+    /// Caps emit rate at ~1 per 2 seconds per session so chatty fields
+    /// (`last_activity_at`, `total_tokens`, `max_tokens`) don't flood
+    /// the wire on every token-usage update. Non-sequenced: missed metric
+    /// notifications do NOT trigger resync on the client.
+    metrics_emitter: MetricsEmitter,
     _solution_subscription: Option<Subscription>,
 }
 
@@ -87,6 +94,23 @@ pub enum SolutionAgentStoreEvent {
         parent_session_id: Option<SolutionSessionId>,
     },
     SessionClosed(SolutionSessionId),
+    /// The set of sessions whose `tab_order IS NOT NULL` changed for
+    /// `solution_id`. Emitted by `persist_tab_order` so that local UI
+    /// consumers (notably `ConsolePanel`) can reactively add/remove the
+    /// actual tabs in response to mutations driven from outside the
+    /// panel — most importantly the wire-side
+    /// `workspace.{open,close}_session` RPCs from the mobile client,
+    /// which previously updated `tab_order` + the wire notification but
+    /// left the desktop tab strip stale.
+    ///
+    /// `opened` and `closed` carry the diff against the pre-mutation
+    /// set; both lists can be empty when `persist_tab_order` was called
+    /// for a reorder-only change (same set, different order).
+    TabsChanged {
+        solution_id: SolutionId,
+        opened: Vec<SolutionSessionId>,
+        closed: Vec<SolutionSessionId>,
+    },
     SessionStateChanged(SolutionSessionId),
     SessionTitleChanged(SolutionSessionId),
     /// Carries the entry index that was appended / updated so external
@@ -117,6 +141,17 @@ pub enum SolutionAgentStoreEvent {
     /// MCP wire's `session_active_subagents_changed` notification (Etap 5),
     /// so both desktop and mobile redraw without polling the session entity.
     SessionSubagentsChanged(SolutionSessionId),
+    /// Emitted when a session's conversation context has just been wiped
+    /// in-place by `/clear` (`reset_context`) or `/compact`
+    /// (`rotate_context`). Remote clients use this to drop their cached
+    /// entry list for the session and re-fetch from scratch (the
+    /// `session_id` is stable across the swap — only the transcript is
+    /// gone). `context_count` is the post-operation value (incremented
+    /// by `rotate_context`, left as-is by `reset_context`).
+    SessionContextReset {
+        id: SolutionSessionId,
+        context_count: SessionContextCount,
+    },
 }
 
 impl EventEmitter<SolutionAgentStoreEvent> for SolutionAgentStore {}
@@ -484,6 +519,7 @@ impl SolutionAgentStore {
             server_registry: HashMap::new(),
             focus_resolver: None,
             entry_update_throttles: HashMap::new(),
+            metrics_emitter: MetricsEmitter::new(),
             _solution_subscription: solution_subscription,
         }
     }
@@ -1251,6 +1287,28 @@ impl SolutionAgentStore {
         id
     }
 
+    /// Test-only helper: insert a minimal `SolutionSession` (idle, no acp
+    /// thread) into the store for the given solution. Returns the new session
+    /// id. Used by integration tests that need a session without going through
+    /// the full `create_session` flow.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn create_for_test_minimal(
+        &mut self,
+        solution_id: &SolutionId,
+        title: &str,
+        cx: &mut Context<Self>,
+    ) -> SolutionSessionId {
+        let id = SolutionSessionId::new();
+        let mut session = SolutionSession::new_idle(
+            id,
+            solution_id.clone(),
+            SharedString::from("mock-agent"),
+            acp::SessionId::new(format!("acp-{}", id.as_str())),
+        );
+        session.title = SharedString::from(title);
+        self.register_prebuilt_session(session, cx)
+    }
+
     /// Restore tabs the user had open the last time they closed this
     /// Solution, **without spawning the agent subprocess**. For each
     /// session id where `tab_order IS NOT NULL`, hydrate a
@@ -1312,8 +1370,12 @@ impl SolutionAgentStore {
             // that are now backed by a live `Entity<SolutionSession>`.
             let result_ids: Vec<SolutionSessionId> = this.update(cx, |this, cx| {
                 let mut hydrated: Vec<SolutionSessionId> = Vec::with_capacity(ordered_ids.len());
-                for id in &ordered_ids {
-                    if this.sessions.contains_key(id) {
+                for (tab_idx, id) in ordered_ids.iter().enumerate() {
+                    let tab_order = Some(tab_idx as i64);
+                    if let Some(entity) = this.sessions.get(id) {
+                        // Session already live — just stamp the tab_order so the
+                        // in-memory view stays consistent with the DB column.
+                        entity.update(cx, |s, _| s.tab_order = tab_order);
                         hydrated.push(*id);
                         continue;
                     }
@@ -1361,6 +1423,7 @@ impl SolutionAgentStore {
                         // on every `TokenUsageUpdated` event.
                         s.cached_total_tokens = meta.total_tokens;
                         s.parent_session_id = meta.parent_session_id;
+                        s.tab_order = tab_order;
                         s
                     });
                     this.sessions.insert(meta.id, entity);
@@ -1415,6 +1478,16 @@ impl SolutionAgentStore {
                 .list_open_session_ids(solution_id.clone())
                 .await?
                 .into_iter()
+                .collect();
+            // Fetch the ordered tab-strip list so we can stamp
+            // `tab_order` on freshly-hydrated sessions. Sessions not
+            // in this list get `tab_order = None` (closed/hidden tab).
+            let tabbed_ids: Vec<SolutionSessionId> =
+                db.list_open_tabs(solution_id.clone()).await.unwrap_or_default();
+            let tab_order_map: std::collections::HashMap<SolutionSessionId, i64> = tabbed_ids
+                .iter()
+                .enumerate()
+                .map(|(i, id)| (*id, i as i64))
                 .collect();
             if open_ids.is_empty() {
                 return Ok(Vec::new());
@@ -1493,6 +1566,7 @@ impl SolutionAgentStore {
                             }
                         })
                         .unwrap_or_default();
+                    let session_tab_order = tab_order_map.get(&meta.id).copied();
                     let entity = cx.new(|_| {
                         let mut s = SolutionSession::new_idle(
                             meta.id,
@@ -1509,6 +1583,7 @@ impl SolutionAgentStore {
                         s.entry_created_ms = restored_created_ms;
                         s.cached_total_tokens = meta.total_tokens;
                         s.parent_session_id = meta.parent_session_id;
+                        s.tab_order = session_tab_order;
                         s
                     });
                     // Insert into `self.sessions` so the phone's
@@ -1529,6 +1604,45 @@ impl SolutionAgentStore {
                     // it to by_solution at that point.
                     this.sessions.insert(meta.id, entity);
                     hydrated.push(meta.id);
+                }
+                // Fan out `workspace.session_opened` for every freshly-hydrated
+                // session that ended up tab-pinned. The store path that drives
+                // the sequenced delta (`persist_tab_order`) is NOT invoked
+                // here because the tab_order was set directly on the in-memory
+                // entity above; without this manual emit a mobile client
+                // that's already connected to the desktop process would never
+                // hear about the just-hydrated sessions (their `tab_order` is
+                // populated but no notification ever fired). The mobile-side
+                // mirror would only learn via the next `workspace.snapshot`
+                // round-trip — which doesn't happen until the user toggles
+                // reconnect or backgrounds and resumes the app. Symptom:
+                // opening a previously-closed solution from the picker
+                // showed the row with zero consoles even though the desktop
+                // had restored them. The emit shape is identical to
+                // `persist_tab_order`'s; the mobile applier is idempotent
+                // on duplicate session_opened with the same id.
+                if let Some(coord) =
+                    editor_mcp::workspace_seq::WorkspaceEventCoordinator::try_global(cx)
+                {
+                    for id in &hydrated {
+                        let Some(entity) = this.sessions.get(id) else {
+                            continue;
+                        };
+                        let (is_tabbed, summary) = entity.read_with(cx, |s, cx| {
+                            (s.tab_order.is_some(), crate::mcp::session_summary(s, cx))
+                        });
+                        if !is_tabbed {
+                            continue;
+                        }
+                        coord.emit_sequenced(
+                            cx,
+                            "workspace.session_opened",
+                            serde_json::json!({
+                                "solution_id": solution_id.as_str(),
+                                "session": summary,
+                            }),
+                        );
+                    }
                 }
                 if !hydrated.is_empty() {
                     cx.notify();
@@ -1580,6 +1694,18 @@ impl SolutionAgentStore {
             db.mark_closed(id, Some(Utc::now())).detach_and_log_err(cx);
         }
         cx.emit(SolutionAgentStoreEvent::SessionClosed(id));
+        // Emit sequenced workspace notification so remote clients can
+        // drop the session from their in-memory maps immediately.
+        // `solution_id` was captured above while `session_read` was live
+        // (before the entity was removed from `self.sessions`).
+        // Guard with `try_global` so test contexts that don't install the
+        // MCP layer don't panic.
+        if let Some(coord) = editor_mcp::workspace_seq::WorkspaceEventCoordinator::try_global(cx) {
+            coord.emit_sequenced(cx, "workspace.session_deleted", serde_json::json!({
+                "solution_id": solution_id.as_str(),
+                "session_id": id.to_string(),
+            }));
+        }
         cx.notify();
         Ok(())
     }
@@ -1660,6 +1786,7 @@ impl SolutionAgentStore {
             s.state = SessionState::Errored(SharedString::from("restarting…"));
         });
         cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+        self.emit_session_state_changed_workspace(&session_id, cx);
         // Best-effort close of the old session; we still spawn the new
         // one even if removal fails so the user isn't stranded.
         if let Err(err) = self.close_session(session_id, cx) {
@@ -1693,7 +1820,7 @@ impl SolutionAgentStore {
         let Some(session_entity) = self.sessions.get(&session_id).cloned() else {
             return Task::ready(Err(anyhow!("unknown session {session_id}")));
         };
-        let (solution_id, agent_id, project, current_count) = {
+        let (solution_id, agent_id, project, current_count, session_cwd) = {
             let s = session_entity.read(cx);
             let project = match s.project.clone() {
                 Some(project) => project,
@@ -1709,6 +1836,7 @@ impl SolutionAgentStore {
                 s.agent_id.clone(),
                 project,
                 s.context_count,
+                s.cwd.clone(),
             )
         };
         let pair = (solution_id.clone(), agent_id);
@@ -1736,8 +1864,21 @@ impl SolutionAgentStore {
                 (task, meta)
             })?;
             let connection = connection_task.await?;
+            // Preserve the session's per-tab working directory across
+            // /compact. Without this the rotated thread would be created
+            // with cwd=solution.root, so the agent's bash tool — which
+            // inherits NewSessionRequest.cwd as its "Primary working
+            // directory" — would silently switch from the member subdir
+            // (e.g. `voxelcraft`) to the solution root after compaction
+            // and then fail commands that depend on `Cargo.toml` /
+            // `.git` being present.
+            let work_dir = if session_cwd.as_os_str().is_empty() {
+                solution.root.clone()
+            } else {
+                session_cwd.clone()
+            };
             let work_dirs =
-                util::path_list::PathList::new(&[solution.root.to_string_lossy().into_owned()]);
+                util::path_list::PathList::new(&[work_dir.to_string_lossy().into_owned()]);
             let new_thread_task = cx.update(|cx| {
                 connection
                     .clone()
@@ -1785,6 +1926,11 @@ impl SolutionAgentStore {
                 session_entity.update(cx, |s, _| s._acp_subscription = Some(new_sub));
                 store.persist_session_row(session_id, cx);
                 cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+                store.emit_session_state_changed_workspace(&session_id, cx);
+                cx.emit(SolutionAgentStoreEvent::SessionContextReset {
+                    id: session_id,
+                    context_count: new_count,
+                });
                 cx.notify();
                 new_count
             })?;
@@ -1823,9 +1969,14 @@ impl SolutionAgentStore {
         // solution below (same fallback the cold→live auto-wake path uses
         // in `queue::send_message_blocks_with_wake`), so reset works on
         // cold sessions too.
-        let (solution_id, agent_id, cached_project) = {
+        let (solution_id, agent_id, cached_project, session_cwd) = {
             let s = session_entity.read(cx);
-            (s.solution_id.clone(), s.agent_id.clone(), s.project.clone())
+            (
+                s.solution_id.clone(),
+                s.agent_id.clone(),
+                s.project.clone(),
+                s.cwd.clone(),
+            )
         };
         let pair = (solution_id.clone(), agent_id);
 
@@ -1859,8 +2010,18 @@ impl SolutionAgentStore {
                 (task, meta)
             })?;
             let connection = connection_task.await?;
+            // Preserve the session's per-tab working directory across
+            // /clear. Same reason as `rotate_context` above: the rotated
+            // thread otherwise inherits cwd=solution.root and the agent's
+            // bash tool silently switches away from the member subdir
+            // the tab was bound to.
+            let work_dir = if session_cwd.as_os_str().is_empty() {
+                solution.root.clone()
+            } else {
+                session_cwd.clone()
+            };
             let work_dirs =
-                util::path_list::PathList::new(&[solution.root.to_string_lossy().into_owned()]);
+                util::path_list::PathList::new(&[work_dir.to_string_lossy().into_owned()]);
             let new_thread_task = cx.update(|cx| {
                 connection
                     .clone()
@@ -1920,7 +2081,16 @@ impl SolutionAgentStore {
                 let new_sub = store.subscribe_to_session(session_id, new_thread, cx);
                 session_entity.update(cx, |s, _| s._acp_subscription = Some(new_sub));
                 store.persist_session_row(session_id, cx);
+                // `reset_context` does not bump `context_count` (only
+                // `rotate_context` does), so read the current value to
+                // forward as-is on the wire.
+                let context_count = session_entity.read(cx).context_count;
                 cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+                store.emit_session_state_changed_workspace(&session_id, cx);
+                cx.emit(SolutionAgentStoreEvent::SessionContextReset {
+                    id: session_id,
+                    context_count,
+                });
                 if had_pending {
                     cx.emit(SolutionAgentStoreEvent::SessionQueueChanged(session_id));
                 }
@@ -1950,6 +2120,72 @@ impl SolutionAgentStore {
         ordered_ids: Vec<SolutionSessionId>,
         cx: &mut Context<Self>,
     ) {
+        // Capture the OLD set of in-strip session ids (tab_order.is_some())
+        // BEFORE the apply mutates in-memory state.
+        let old_set: std::collections::HashSet<SolutionSessionId> = self
+            .sessions
+            .values()
+            .filter_map(|entity| {
+                let s = entity.read(cx);
+                if s.solution_id == solution_id && s.tab_order.is_some() {
+                    Some(s.id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Update the in-memory field first (synchronous, on the foreground
+        // thread) so that `workspace.snapshot` sees the new strip state
+        // immediately — before the async DB write completes.
+        self.apply_tab_order_to_memory(&solution_id, &ordered_ids, cx);
+
+        // Compute NEW set from the ordered_ids that were just applied.
+        let new_set: std::collections::HashSet<SolutionSessionId> =
+            ordered_ids.iter().cloned().collect();
+
+        // Diff and emit one workspace.session_opened / workspace.session_closed
+        // per actual transition so downstream clients stay in sync without a
+        // full snapshot refresh. Guard with `try_global` so test contexts that
+        // don't install the MCP layer don't panic.
+        let opened_ids: Vec<SolutionSessionId> =
+            new_set.difference(&old_set).copied().collect();
+        let closed_ids: Vec<SolutionSessionId> =
+            old_set.difference(&new_set).copied().collect();
+        if let Some(coord) =
+            editor_mcp::workspace_seq::WorkspaceEventCoordinator::try_global(cx)
+        {
+            for opened_id in &opened_ids {
+                if let Some(entity) = self.sessions.get(opened_id) {
+                    let summary =
+                        entity.read_with(cx, |s, cx| crate::mcp::session_summary(s, cx));
+                    coord.emit_sequenced(cx, "workspace.session_opened", serde_json::json!({
+                        "solution_id": solution_id.as_str(),
+                        "session": summary,
+                    }));
+                }
+            }
+            for closed_id in &closed_ids {
+                coord.emit_sequenced(cx, "workspace.session_closed", serde_json::json!({
+                    "solution_id": solution_id.as_str(),
+                    "session_id": closed_id.to_string(),
+                }));
+            }
+        }
+
+        // Local fan-out: the ConsolePanel observes this to add / remove the
+        // actual tab on the desktop strip in response to mutations driven
+        // from outside the panel (notably the wire-side
+        // `workspace.{open,close}_session` RPCs from mobile clients).
+        // Always emit, even when both lists are empty (a pure reorder) —
+        // future consumers may want to react to that too; current
+        // `ConsolePanel` subscriber filters out the empty case.
+        cx.emit(SolutionAgentStoreEvent::TabsChanged {
+            solution_id: solution_id.clone(),
+            opened: opened_ids,
+            closed: closed_ids,
+        });
+
         let Some(db) = self.persistence.clone() else {
             return;
         };
@@ -1959,6 +2195,29 @@ impl SolutionAgentStore {
                 .log_err();
         })
         .detach();
+    }
+
+    /// Update the in-memory `tab_order` field on every session that belongs to
+    /// `solution_id`. Sessions whose id appears in `ordered_ids` receive their
+    /// 0-based index; all others are cleared to `None` (tab closed / hidden).
+    ///
+    /// Must be called from the foreground thread (takes `cx` for entity access).
+    fn apply_tab_order_to_memory(
+        &self,
+        solution_id: &SolutionId,
+        ordered_ids: &[SolutionSessionId],
+        cx: &mut Context<Self>,
+    ) {
+        for entity in self.sessions.values() {
+            let entity = entity.clone();
+            let belongs = entity.read(cx).solution_id == *solution_id;
+            if !belongs {
+                continue;
+            }
+            let id = entity.read(cx).id;
+            let new_order = ordered_ids.iter().position(|oid| *oid == id).map(|i| i as i64);
+            entity.update(cx, |s, _| s.tab_order = new_order);
+        }
     }
 
     /// Schedule a debounce-friendly write of the session's serialised snapshot
@@ -2267,6 +2526,24 @@ impl SolutionAgentStore {
                             s.last_turn_duration = Some(d);
                         }
                     });
+                    // Emit a metrics notification on turn completion so the
+                    // mobile client sees an updated last_activity_at without
+                    // waiting for the next TokenUsageUpdated. Throttled
+                    // (2 s window) and non-sequenced per spec.
+                    let (last_activity_at, total_tokens, max_tokens) = {
+                        let r = s.read(cx);
+                        (r.last_activity_at, r.cached_total_tokens, r.cached_max_tokens)
+                    };
+                    self.metrics_emitter.emit_if_ready(
+                        cx,
+                        &session_id,
+                        serde_json::json!({
+                            "session_id": session_id.to_string(),
+                            "last_activity_at": last_activity_at,
+                            "total_tokens": total_tokens,
+                            "max_tokens": max_tokens,
+                        }),
+                    );
                 }
                 // Token usage is finalised on turn completion — refresh DB
                 // so the History popover token column reflects the latest.
@@ -2397,6 +2674,24 @@ impl SolutionAgentStore {
                         s.cached_total_tokens = total;
                         s.cached_max_tokens = max;
                     });
+                    // Throttled non-sequenced notification — at most one
+                    // emit per 2 s per session. The client treats a
+                    // missed metric notify as "check on next snapshot
+                    // resync"; no gap-detection or seq field needed.
+                    let (last_activity_at, total_tokens, max_tokens) = {
+                        let r = s.read(cx);
+                        (r.last_activity_at, r.cached_total_tokens, r.cached_max_tokens)
+                    };
+                    self.metrics_emitter.emit_if_ready(
+                        cx,
+                        &session_id,
+                        serde_json::json!({
+                            "session_id": session_id.to_string(),
+                            "last_activity_at": last_activity_at,
+                            "total_tokens": total_tokens,
+                            "max_tokens": max_tokens,
+                        }),
+                    );
                 }
                 self.persist_session_row(session_id, cx);
             }
@@ -2552,6 +2847,35 @@ impl SolutionAgentStore {
         cx.notify();
     }
 
+    /// Emit a sequenced `workspace.session_state_changed` notification for
+    /// `session_id`. Reads the current session state from `self.sessions`
+    /// and builds the wire payload using the same `session_summary` helper
+    /// that the MCP `list_sessions` / `get_session` tools use, so remote
+    /// clients receive a fully consistent state object.
+    ///
+    /// No-ops gracefully when the session is not found (already removed) or
+    /// when `WorkspaceEventCoordinator` is not installed (test contexts that
+    /// don't initialise the MCP layer).
+    fn emit_session_state_changed_workspace(
+        &self,
+        session_id: &SolutionSessionId,
+        cx: &App,
+    ) {
+        let Some(coord) = editor_mcp::workspace_seq::WorkspaceEventCoordinator::try_global(cx)
+        else {
+            return;
+        };
+        let Some(entity) = self.sessions.get(session_id) else {
+            return;
+        };
+        let summary = entity.read_with(cx, |s, cx| crate::mcp::session_summary(s, cx));
+        coord.emit_sequenced(cx, "workspace.session_state_changed", serde_json::json!({
+            "solution_id": summary.solution_id,
+            "session_id": summary.id,
+            "state": summary.state,
+        }));
+    }
+
     /// Wraps a `SessionState` mutation so notifier hooks fire uniformly:
     ///   1. Snapshot previous state.
     ///   2. Apply `f` to mutate state.
@@ -2576,6 +2900,7 @@ impl SolutionAgentStore {
         let next = session.read(cx).state.clone();
         if std::mem::discriminant(&previous) != std::mem::discriminant(&next) {
             cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+            self.emit_session_state_changed_workspace(&session_id, cx);
         }
         // Drop the Stopping safety-net task whenever the session leaves
         // Stopping by any path (Stopped event handler, Error handler,

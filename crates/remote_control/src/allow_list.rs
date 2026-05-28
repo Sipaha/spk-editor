@@ -37,7 +37,7 @@ pub fn translate(method: &str) -> Option<&'static str> {
         "remote.solution_agent.get_session" => Some("solution_agent.get_session"),
         "remote.solution_agent.get_session_entry" => Some("solution_agent.get_session_entry"),
         "remote.solution_agent.create_session" => Some("solution_agent.create_session"),
-        "remote.solution_agent.close_session" => Some("solution_agent.close_session"),
+        "remote.solution_agent.delete_session" => Some("solution_agent.delete_session"),
         "remote.solution_agent.send_message" => Some("solution_agent.send_message"),
         "remote.solution_agent.send_message_blocks" => Some("solution_agent.send_message_blocks"),
         "remote.solution_agent.cancel_turn" => Some("solution_agent.cancel_turn"),
@@ -51,6 +51,17 @@ pub fn translate(method: &str) -> Option<&'static str> {
         "remote.solution_agent.upload_status" => Some("solution_agent.upload_status"),
         "remote.solution_agent.upload_finish" => Some("solution_agent.upload_finish"),
         "remote.solution_agent.upload_abort" => Some("solution_agent.upload_abort"),
+        // Unified open-workspace (wire schema v2). The bulk read +
+        // closed-list picker query + four lifecycle tools that drive
+        // the mobile WorkspaceScreen. Non-destructive — these don't
+        // expose file or project surfaces, only solution / session
+        // open/close + the corresponding seq-ack.
+        "remote.workspace.snapshot" => Some("workspace.snapshot"),
+        "remote.workspace.list_solutions" => Some("workspace.list_solutions"),
+        "remote.workspace.open_solution" => Some("workspace.open_solution"),
+        "remote.workspace.close_solution" => Some("workspace.close_solution"),
+        "remote.workspace.open_session" => Some("workspace.open_session"),
+        "remote.workspace.close_session" => Some("workspace.close_session"),
         _ => None,
     }
 }
@@ -74,6 +85,7 @@ pub fn should_forward_event(kind: &str) -> bool {
     // member list after an add. Mobile subscribes to all of these.
     kind.starts_with("agent_session_")
         || kind.starts_with("upload_")
+        || kind.starts_with("workspace.")
         || kind == "solution_member_add_progress"
         || kind == "solution_member_add_completed"
         || kind == "solution_changed"
@@ -130,8 +142,8 @@ mod tests {
                 "solution_agent.create_session",
             ),
             (
-                "remote.solution_agent.close_session",
-                "solution_agent.close_session",
+                "remote.solution_agent.delete_session",
+                "solution_agent.delete_session",
             ),
             (
                 "remote.solution_agent.send_message",
@@ -185,6 +197,12 @@ mod tests {
                 "remote.solution_agent.upload_abort",
                 "solution_agent.upload_abort",
             ),
+            ("remote.workspace.snapshot", "workspace.snapshot"),
+            ("remote.workspace.list_solutions", "workspace.list_solutions"),
+            ("remote.workspace.open_solution", "workspace.open_solution"),
+            ("remote.workspace.close_solution", "workspace.close_solution"),
+            ("remote.workspace.open_session", "workspace.open_session"),
+            ("remote.workspace.close_session", "workspace.close_session"),
         ];
         for (wire, bare) in cases {
             assert_eq!(translate(wire), Some(*bare), "for {wire}");

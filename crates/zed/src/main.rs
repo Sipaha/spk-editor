@@ -750,6 +750,7 @@ fn main() {
         solutions::init(cx);
         editor_mcp::init(cx);
         solution_agent::init(cx);
+        workspace_events::init(cx);
         solution_git::init(cx);
         solutions_ui::init(cx);
         run_config::init(cx);

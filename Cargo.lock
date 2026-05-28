@@ -5607,6 +5607,7 @@ dependencies = [
  "fs2",
  "gpui",
  "log",
+ "parking_lot",
  "paths",
  "pretty_assertions",
  "run_config",
@@ -22396,6 +22397,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "workspace_events"
+version = "0.1.0"
+dependencies = [
+ "acp_thread",
+ "anyhow",
+ "chrono",
+ "context_server",
+ "db",
+ "editor_mcp",
+ "gpui",
+ "log",
+ "schemars 1.0.4",
+ "serde",
+ "serde_json",
+ "settings",
+ "smol",
+ "solution_agent",
+ "solutions",
+ "tempfile",
+ "workspace",
+]
+
+[[package]]
 name = "worktree"
 version = "0.1.0"
 dependencies = [
@@ -22997,6 +23021,7 @@ dependencies = [
  "windows 0.61.3",
  "winresource",
  "workspace",
+ "workspace_events",
  "zed-reqwest",
  "zed_actions",
  "zed_env_vars",

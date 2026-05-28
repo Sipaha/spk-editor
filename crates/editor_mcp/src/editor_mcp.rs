@@ -15,6 +15,7 @@ mod tier;
 mod tier_guard;
 mod tools;
 mod window_ids;
+pub mod workspace_seq;
 
 pub use handoff::{HandoffOutcome, try_handoff_to_existing_instance};
 pub use lifecycle::{runtime_dir, set_runtime_dir_for_test, socket_path, start_server};
