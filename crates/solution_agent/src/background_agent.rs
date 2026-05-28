@@ -16,7 +16,7 @@
 //!   completed `Agent`-tool_call `raw_output`.
 //! - JSONL tail / convert helpers (added in later tasks).
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -287,10 +287,12 @@ pub fn tail_jsonl(path: &Path, since_offset: u64) -> std::io::Result<Tail> {
 ///     [`ToolCallStatus::Pending`].
 ///   * Malformed JSON rows are silently skipped.
 ///
-/// Two passes: first collects the set of `tool_use_id`s that have a
-/// paired `tool_result`; second emits entries.
+/// Two passes: first collects each `tool_use_id` that has a paired
+/// `tool_result`, carrying the result's text + error flag so the
+/// second pass can stamp the matching [`ToolCall`] with its content
+/// and a [`ToolCallStatus::Failed`] when claude flagged `is_error`.
 pub fn jsonl_to_entries<S: AsRef<str>>(lines: &[S], cx: &mut App) -> Vec<AgentThreadEntry> {
-    let mut paired: HashSet<String> = HashSet::new();
+    let mut paired: HashMap<String, ToolResultInfo> = HashMap::new();
     for line in lines {
         let trimmed = line.as_ref().trim();
         if trimmed.is_empty() {
@@ -314,7 +316,16 @@ pub fn jsonl_to_entries<S: AsRef<str>>(lines: &[S], cx: &mut App) -> Vec<AgentTh
                 continue;
             }
             if let Some(id) = block.get("tool_use_id").and_then(Value::as_str) {
-                paired.insert(id.to_string());
+                paired.insert(
+                    id.to_string(),
+                    ToolResultInfo {
+                        is_error: block
+                            .get("is_error")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                        content_text: tool_result_content_text(block),
+                    },
+                );
             }
         }
     }
@@ -369,9 +380,36 @@ fn jsonl_user_to_entries(value: &Value, out: &mut Vec<AgentThreadEntry>, cx: &mu
     }
 }
 
+struct ToolResultInfo {
+    is_error: bool,
+    content_text: String,
+}
+
+/// Concatenate every `text`-typed block under a `tool_result`'s
+/// `content` array (separated by `\n`). Non-text blocks (images,
+/// resources) are silently dropped — V2 lossy.
+fn tool_result_content_text(block: &Value) -> String {
+    let mut out = String::new();
+    let Some(content) = block.get("content").and_then(Value::as_array) else {
+        return out;
+    };
+    for b in content {
+        if b.get("type").and_then(Value::as_str) != Some("text") {
+            continue;
+        }
+        if let Some(t) = b.get("text").and_then(Value::as_str) {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(t);
+        }
+    }
+    out
+}
+
 fn jsonl_assistant_to_entries(
     value: &Value,
-    paired: &HashSet<String>,
+    paired: &HashMap<String, ToolResultInfo>,
     out: &mut Vec<AgentThreadEntry>,
     cx: &mut App,
 ) {
@@ -420,18 +458,29 @@ fn jsonl_assistant_to_entries(
                 let name = SharedString::from(
                     block.get("name").and_then(Value::as_str).unwrap_or("tool"),
                 );
-                let has_result = paired.contains(tool_use_id);
+                let result = paired.get(tool_use_id);
                 let raw_input = block.get("input").cloned();
-                let status = if has_result {
-                    ToolCallStatus::Completed
-                } else {
-                    ToolCallStatus::Pending
+                let status = match result {
+                    None => ToolCallStatus::Pending,
+                    Some(info) if info.is_error => ToolCallStatus::Failed,
+                    Some(_) => ToolCallStatus::Completed,
                 };
+                let content: Vec<acp_thread::ToolCallContent> = result
+                    .filter(|info| !info.content_text.is_empty())
+                    .map(|info| {
+                        let md = cx.new(|cx| {
+                            Markdown::new(info.content_text.clone().into(), None, None, cx)
+                        });
+                        vec![acp_thread::ToolCallContent::ContentBlock(
+                            ContentBlock::Markdown { markdown: md },
+                        )]
+                    })
+                    .unwrap_or_default();
                 out.push(AgentThreadEntry::ToolCall(ToolCall {
                     id: acp::ToolCallId::new(format!("background:{tool_use_id}")),
                     label: cx.new(|cx| Markdown::new(name.clone(), None, None, cx)),
                     kind: acp::ToolKind::Other,
-                    content: Vec::new(),
+                    content,
                     status,
                     locations: Vec::new(),
                     resolved_locations: Vec::new(),
@@ -689,6 +738,54 @@ mod tests {
             "trailing text must be Message chunk, got {:?}",
             text_msg.chunks[0],
         );
+    }
+
+    #[gpui::test]
+    async fn jsonl_to_entries_lifts_tool_result_text_into_content(cx: &mut gpui::TestAppContext) {
+        let lines = vec![
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_2","name":"Bash","input":{"command":"ls"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","content":[{"type":"text","text":"src/\ntarget/"}]}]}}"#,
+        ];
+        let entries = cx.update(|cx| jsonl_to_entries(&lines, cx));
+        let acp_thread::AgentThreadEntry::ToolCall(tc) = &entries[0] else {
+            panic!("expected ToolCall, got {:?}", entries[0]);
+        };
+        assert_eq!(tc.content.len(), 1, "result text should land as one ContentBlock");
+        assert!(matches!(
+            tc.content[0],
+            acp_thread::ToolCallContent::ContentBlock(acp_thread::ContentBlock::Markdown { .. })
+        ));
+    }
+
+    #[gpui::test]
+    async fn jsonl_to_entries_tool_result_is_error_lands_failed(cx: &mut gpui::TestAppContext) {
+        let lines = vec![
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_3","name":"Bash","input":{"command":"bad"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_3","is_error":true,"content":[{"type":"text","text":"command not found"}]}]}}"#,
+        ];
+        let entries = cx.update(|cx| jsonl_to_entries(&lines, cx));
+        let acp_thread::AgentThreadEntry::ToolCall(tc) = &entries[0] else {
+            panic!("expected ToolCall, got {:?}", entries[0]);
+        };
+        assert!(
+            matches!(tc.status, acp_thread::ToolCallStatus::Failed),
+            "is_error=true should land Failed, got {:?}",
+            tc.status,
+        );
+        assert_eq!(tc.content.len(), 1, "error text still lifted into content");
+    }
+
+    #[gpui::test]
+    async fn jsonl_to_entries_unpaired_tool_use_has_empty_content(cx: &mut gpui::TestAppContext) {
+        let lines = vec![
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_4","name":"Bash","input":{"command":"ls"}}]}}"#,
+        ];
+        let entries = cx.update(|cx| jsonl_to_entries(&lines, cx));
+        let acp_thread::AgentThreadEntry::ToolCall(tc) = &entries[0] else {
+            panic!("expected ToolCall, got {:?}", entries[0]);
+        };
+        assert!(matches!(tc.status, acp_thread::ToolCallStatus::Pending));
+        assert!(tc.content.is_empty(), "unpaired tool_use should have no content");
     }
 
     #[gpui::test]
