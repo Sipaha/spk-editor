@@ -388,11 +388,9 @@ fn jsonl_assistant_to_entries(
                 let Some(tool_use_id) = block.get("id").and_then(Value::as_str) else {
                     continue;
                 };
-                let name = block
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("tool")
-                    .to_string();
+                let name = SharedString::from(
+                    block.get("name").and_then(Value::as_str).unwrap_or("tool"),
+                );
                 let has_result = paired.contains(tool_use_id);
                 let raw_input = block.get("input").cloned();
                 let status = if has_result {
@@ -402,7 +400,7 @@ fn jsonl_assistant_to_entries(
                 };
                 out.push(AgentThreadEntry::ToolCall(ToolCall {
                     id: acp::ToolCallId::new(format!("background:{tool_use_id}")),
-                    label: cx.new(|cx| Markdown::new(name.clone().into(), None, None, cx)),
+                    label: cx.new(|cx| Markdown::new(name.clone(), None, None, cx)),
                     kind: acp::ToolKind::Other,
                     content: Vec::new(),
                     status,
@@ -411,7 +409,7 @@ fn jsonl_assistant_to_entries(
                     raw_input,
                     raw_input_markdown: None,
                     raw_output: None,
-                    tool_name: Some(SharedString::from(name)),
+                    tool_name: Some(name),
                     subagent_session_info: None,
                     subagent_id: None,
                     status_started_at: None,
@@ -649,6 +647,14 @@ mod tests {
             .filter(|e| matches!(e, acp_thread::AgentThreadEntry::ToolCall(_)))
             .count();
         assert_eq!(tool_call_count, 1);
+        let acp_thread::AgentThreadEntry::ToolCall(tc) = &entries[0] else {
+            panic!("expected ToolCall at index 0, got {:?}", entries[0]);
+        };
+        assert!(
+            matches!(tc.status, acp_thread::ToolCallStatus::Completed),
+            "paired tool_use should land Completed, got {:?}",
+            tc.status,
+        );
     }
 
     #[test]
