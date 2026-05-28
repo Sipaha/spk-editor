@@ -94,6 +94,23 @@ pub enum SolutionAgentStoreEvent {
         parent_session_id: Option<SolutionSessionId>,
     },
     SessionClosed(SolutionSessionId),
+    /// The set of sessions whose `tab_order IS NOT NULL` changed for
+    /// `solution_id`. Emitted by `persist_tab_order` so that local UI
+    /// consumers (notably `ConsolePanel`) can reactively add/remove the
+    /// actual tabs in response to mutations driven from outside the
+    /// panel — most importantly the wire-side
+    /// `workspace.{open,close}_session` RPCs from the mobile client,
+    /// which previously updated `tab_order` + the wire notification but
+    /// left the desktop tab strip stale.
+    ///
+    /// `opened` and `closed` carry the diff against the pre-mutation
+    /// set; both lists can be empty when `persist_tab_order` was called
+    /// for a reorder-only change (same set, different order).
+    TabsChanged {
+        solution_id: SolutionId,
+        opened: Vec<SolutionSessionId>,
+        closed: Vec<SolutionSessionId>,
+    },
     SessionStateChanged(SolutionSessionId),
     SessionTitleChanged(SolutionSessionId),
     /// Carries the entry index that was appended / updated so external
@@ -2092,10 +2109,14 @@ impl SolutionAgentStore {
         // per actual transition so downstream clients stay in sync without a
         // full snapshot refresh. Guard with `try_global` so test contexts that
         // don't install the MCP layer don't panic.
+        let opened_ids: Vec<SolutionSessionId> =
+            new_set.difference(&old_set).copied().collect();
+        let closed_ids: Vec<SolutionSessionId> =
+            old_set.difference(&new_set).copied().collect();
         if let Some(coord) =
             editor_mcp::workspace_seq::WorkspaceEventCoordinator::try_global(cx)
         {
-            for opened_id in new_set.difference(&old_set) {
+            for opened_id in &opened_ids {
                 if let Some(entity) = self.sessions.get(opened_id) {
                     let summary =
                         entity.read_with(cx, |s, cx| crate::mcp::session_summary(s, cx));
@@ -2105,13 +2126,26 @@ impl SolutionAgentStore {
                     }));
                 }
             }
-            for closed_id in old_set.difference(&new_set) {
+            for closed_id in &closed_ids {
                 coord.emit_sequenced(cx, "workspace.session_closed", serde_json::json!({
                     "solution_id": solution_id.as_str(),
                     "session_id": closed_id.to_string(),
                 }));
             }
         }
+
+        // Local fan-out: the ConsolePanel observes this to add / remove the
+        // actual tab on the desktop strip in response to mutations driven
+        // from outside the panel (notably the wire-side
+        // `workspace.{open,close}_session` RPCs from mobile clients).
+        // Always emit, even when both lists are empty (a pure reorder) —
+        // future consumers may want to react to that too; current
+        // `ConsolePanel` subscriber filters out the empty case.
+        cx.emit(SolutionAgentStoreEvent::TabsChanged {
+            solution_id: solution_id.clone(),
+            opened: opened_ids,
+            closed: closed_ids,
+        });
 
         let Some(db) = self.persistence.clone() else {
             return;

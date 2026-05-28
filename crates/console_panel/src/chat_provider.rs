@@ -17,6 +17,26 @@ pub struct ChatProvider {
 
 pub enum ChatProviderEvent {
     SessionCreatedExternally(SolutionSessionId),
+    /// A `persist_tab_order` mutation outside the local panel changed
+    /// the set of sessions whose `tab_order IS NOT NULL` for
+    /// `solution_id`. `ConsolePanel` reacts to add the tabs in `opened`
+    /// (when they belong to its active solution) and close any local
+    /// tab whose session id is in `closed`.
+    ///
+    /// Primary driver is the wire-side
+    /// `workspace.{open,close}_session` RPCs from the mobile client;
+    /// without this seam mobile-side strip changes only updated the
+    /// `tab_order` field and the wire notification, leaving the
+    /// desktop strip stale.
+    TabsChanged {
+        solution_id: SolutionId,
+        opened: Vec<SolutionSessionId>,
+        closed: Vec<SolutionSessionId>,
+    },
+    /// A session was removed from the store (destructive
+    /// `solution_agent.delete_session`). `ConsolePanel` closes its tab
+    /// if it had one.
+    SessionRemoved(SolutionSessionId),
 }
 
 impl EventEmitter<ChatProviderEvent> for ChatProvider {}
@@ -28,8 +48,32 @@ impl ChatProvider {
         cx: &mut Context<Self>,
     ) -> Self {
         let subscription = cx.subscribe(&store, |this, _store, event, cx| {
-            if let SolutionAgentStoreEvent::SessionCreated { id, .. } = event {
-                cx.emit(ChatProviderEvent::SessionCreatedExternally(*id));
+            match event {
+                SolutionAgentStoreEvent::SessionCreated { id, .. } => {
+                    cx.emit(ChatProviderEvent::SessionCreatedExternally(*id));
+                }
+                SolutionAgentStoreEvent::TabsChanged {
+                    solution_id,
+                    opened,
+                    closed,
+                } => {
+                    if opened.is_empty() && closed.is_empty() {
+                        // Reorder-only — current `ConsolePanel` doesn't
+                        // mirror the order itself (it preserves user
+                        // arrangement); skip the emit so observers don't
+                        // get woken up for nothing.
+                        return;
+                    }
+                    cx.emit(ChatProviderEvent::TabsChanged {
+                        solution_id: solution_id.clone(),
+                        opened: opened.clone(),
+                        closed: closed.clone(),
+                    });
+                }
+                SolutionAgentStoreEvent::SessionClosed(id) => {
+                    cx.emit(ChatProviderEvent::SessionRemoved(*id));
+                }
+                _ => {}
             }
             let _ = this;
         });

@@ -122,6 +122,12 @@ pub fn install(cx: &mut App) {
                         }),
                     );
                 }
+                // `TabsChanged` drives `ConsolePanel` tab synchronisation
+                // via a separate per-panel subscriber; the workspace-
+                // events coordinator doesn't need to forward it
+                // (sequenced `workspace.session_{opened,closed}` already
+                // ride out from `persist_tab_order` itself).
+                SolutionAgentStoreEvent::TabsChanged { .. } => {}
             }),
         );
     });
