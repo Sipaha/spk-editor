@@ -19,7 +19,7 @@
 //! plan, tabs disappear naturally when the parent `Task` ToolCall
 //! completes / fails / is cancelled. Background-agent pills carry a ×
 //! close button ONLY when they are in the `Dead` rendering state
-//! (their JSONL hasn't been written to for `MANAGED_AGENT_STALE_TIMEOUT`
+//! (their JSONL hasn't been written to for `agent.managed_agent_stale_timeout_secs`
 //! and no terminal `stop_reason` was ever observed); a Dead pill can
 //! be dismissed manually because the healthcheck tick only prunes it
 //! after a much longer linger window. `Done` pills (terminal
@@ -33,7 +33,7 @@ use ui::{Label, LabelSize, Tooltip};
 use super::SolutionSessionView;
 use crate::background_agent::{BackgroundAgentId, BackgroundAgentSnapshot};
 use crate::model::SolutionSession;
-use crate::store::{MANAGED_AGENT_STALE_TIMEOUT, SubagentView};
+use crate::store::SubagentView;
 
 /// Build the subagent-tabs strip. Returns `None` when the session
 /// has no in-flight subagents so the caller can `when_some(...)` the
@@ -64,6 +64,11 @@ pub(super) fn render_task_subagent_strip(
     // out here — they auto-hide on terminal `stop_reason`, no UI
     // surface required.
     let now = SystemTime::now();
+    let stale = {
+        use ::agent_settings::AgentSettings;
+        use settings::Settings;
+        Duration::from_secs(AgentSettings::get_global(cx).managed_agent_stale_timeout_secs)
+    };
     let bg_agents: Vec<(SharedString, SharedString, BackgroundAgentDisplayState)> = session_ref
         .background_agent_order
         .iter()
@@ -75,11 +80,7 @@ pub(super) fn render_task_subagent_strip(
                     .unwrap_or_else(|| SharedString::new_static("Starting…"));
                 let display_label =
                     SharedString::from(format!("{}·{}", id.short(), label_body));
-                let display_state = classify_background_agent_display(
-                    snap,
-                    now,
-                    MANAGED_AGENT_STALE_TIMEOUT,
-                );
+                let display_state = classify_background_agent_display(snap, now, stale);
                 (
                     SharedString::from(id.as_str().to_string()),
                     display_label,

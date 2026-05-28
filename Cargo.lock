@@ -16905,6 +16905,7 @@ dependencies = [
  "action_log",
  "agent-client-protocol",
  "agent_servers",
+ "agent_settings",
  "anyhow",
  "ashpd",
  "async-channel 2.5.0",

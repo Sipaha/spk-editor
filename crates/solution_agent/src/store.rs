@@ -216,16 +216,6 @@ fn tool_name_is_agent(name: Option<&str>) -> bool {
     matches!(name, Some(n) if n.eq_ignore_ascii_case("agent"))
 }
 
-/// Seconds of file inactivity before a managed (background) agent
-/// is considered dead. V1 hardcoded; a settings key can be added in
-/// V2 once we have a real need for per-installation tuning.
-pub(crate) const MANAGED_AGENT_STALE_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(120);
-/// Seconds a dead managed-agent pill lingers in the strip before
-/// auto-disappearing. Same V1 hardcoded rationale as above.
-const MANAGED_AGENT_DEAD_LINGER: std::time::Duration =
-    std::time::Duration::from_secs(300);
-
 fn background_agent_dir_for(cwd: &std::path::Path, acp_session_id: &str) -> Option<PathBuf> {
     if cwd.as_os_str().is_empty() {
         return None;
@@ -604,7 +594,7 @@ impl SolutionAgentStore {
             .map(|store| cx.subscribe(&store, Self::on_solution_event));
         // 1 Hz background-agent healthcheck. Drops done agents and prunes
         // long-dead ones; rendering-side "dead" detection (orange pill) uses
-        // `MANAGED_AGENT_STALE_TIMEOUT` directly off the snapshot mtime, so
+        // `agent.managed_agent_stale_timeout_secs` directly off the snapshot mtime, so
         // the tick is only responsible for eventual cleanup, not the
         // first-observation transition.
         let bg_agents_tick = cx.spawn(async move |this, cx: &mut AsyncApp| {
@@ -2782,11 +2772,25 @@ impl SolutionAgentStore {
     /// One pass over every session's background agents. Removes agents
     /// whose latest snapshot carries a `stop_reason` (terminal done),
     /// plus agents that have been silently dead beyond
-    /// `MANAGED_AGENT_STALE_TIMEOUT + MANAGED_AGENT_DEAD_LINGER`. Dead
-    /// detection itself (orange pill) is rendering-side using the same
-    /// stale timeout — the tick just drops the entries that have
-    /// fully expired.
+    /// `agent.managed_agent_stale_timeout_secs +
+    /// agent.managed_agent_dead_linger_secs`. Dead detection itself
+    /// (orange pill) is rendering-side using the same stale timeout —
+    /// the tick just drops the entries that have fully expired.
     pub fn tick_background_agents(&mut self, cx: &mut Context<Self>) {
+        use ::agent_settings::AgentSettings;
+        use settings::Settings;
+        // `try_get` keeps tests that don't register `AgentSettings` (the bare
+        // pool tests) usable — they have no background agents anyway, so the
+        // fallback values are never observed.
+        let (stale_secs, linger_secs) = AgentSettings::try_get(cx)
+            .map(|s| {
+                (
+                    s.managed_agent_stale_timeout_secs,
+                    s.managed_agent_dead_linger_secs,
+                )
+            })
+            .unwrap_or((120, 300));
+        let expiry = std::time::Duration::from_secs(stale_secs + linger_secs);
         let now = std::time::SystemTime::now();
         let session_ids: Vec<SolutionSessionId> =
             self.all_sessions().map(|e| e.read(cx).id).collect();
@@ -2816,7 +2820,7 @@ impl SolutionAgentStore {
                             }
                             let elapsed =
                                 now.duration_since(snap.mtime).unwrap_or_default();
-                            elapsed > MANAGED_AGENT_STALE_TIMEOUT + MANAGED_AGENT_DEAD_LINGER
+                            elapsed > expiry
                         })
                         .cloned()
                         .collect();
@@ -2855,7 +2859,7 @@ impl SolutionAgentStore {
     ///     (the agent finished while we were closed).
     ///   * else → register with the live snapshot. The render-side
     ///     classifier decides Dead vs Running based on mtime and
-    ///     [`MANAGED_AGENT_STALE_TIMEOUT`], so we don't need to flag dead
+    ///     `agent.managed_agent_stale_timeout_secs`, so we don't need to flag dead
     ///     here.
     /// Always called inside the foreground hydrate path with the DB rows
     /// already loaded (caller pre-fetches off the foreground thread).

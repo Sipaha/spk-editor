@@ -168,6 +168,8 @@ pub struct AgentSettings {
     pub show_merge_conflict_indicator: bool,
     pub tool_permissions: ToolPermissions,
     pub new_thread_location: NewThreadLocation,
+    pub managed_agent_stale_timeout_secs: u64,
+    pub managed_agent_dead_linger_secs: u64,
 }
 
 impl AgentSettings {
@@ -672,6 +674,10 @@ impl Settings for AgentSettings {
             show_merge_conflict_indicator: agent.show_merge_conflict_indicator.unwrap(),
             tool_permissions: compile_tool_permissions(agent.tool_permissions),
             new_thread_location: agent.new_thread_location.unwrap_or_default(),
+            managed_agent_stale_timeout_secs: agent
+                .managed_agent_stale_timeout_secs
+                .unwrap_or(120),
+            managed_agent_dead_linger_secs: agent.managed_agent_dead_linger_secs.unwrap_or(300),
         }
     }
 }
