@@ -451,6 +451,16 @@ impl McpServerTool for CreateSolutionTool {
             let store = SolutionStore::global(cx);
             let root_base = crate::SolutionsSettings::get_global(cx).root.clone();
             let id = store.update(cx, |s, cx| s.create_solution(&input.name, root_base, cx))?;
+            // Auto-open the freshly-created solution. Without this the new
+            // entry stays in the closed-solutions picker only — the workspace
+            // mirror (mobile + desktop) doesn't surface it, and a user who
+            // just typed a name + tapped Create sees nothing change on either
+            // side. `mark_open` is idempotent and emits both `Changed` +
+            // `Opened` events, which fan out to the desktop window observer
+            // (no-op for a fresh empty solution — no member paths yet) and
+            // the mobile `workspace.solution_opened` wire delta the mirror
+            // listens for.
+            store.update(cx, |s, cx| s.mark_open(id.clone(), cx));
             Ok(id.as_str().to_string())
         })?;
         Ok(ToolResponse {
