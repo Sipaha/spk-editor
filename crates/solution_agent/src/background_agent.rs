@@ -392,7 +392,25 @@ fn jsonl_assistant_to_entries(
                 }
             }
             "thinking" => {
-                // V1 ignores assistant `thinking` blocks for the strip.
+                // Render claude's reasoning trace as a folded `Thought`
+                // chunk, the same shape `cold_persistence::from_persisted`
+                // produces. Flush pending text first so order is
+                // preserved across mixed text/thinking blocks.
+                if let Some(thought) = block.get("thinking").and_then(Value::as_str) {
+                    flush_pending_assistant_text(&mut pending_text, out, cx);
+                    out.push(AgentThreadEntry::AssistantMessage(AssistantMessage {
+                        chunks: vec![AssistantMessageChunk::Thought {
+                            block: ContentBlock::Markdown {
+                                markdown: cx.new(|cx| {
+                                    Markdown::new(thought.into(), None, None, cx)
+                                }),
+                            },
+                        }],
+                        indented: false,
+                        is_subagent_output: false,
+                        subagent_id: None,
+                    }));
+                }
             }
             "tool_use" => {
                 flush_pending_assistant_text(&mut pending_text, out, cx);
@@ -644,6 +662,33 @@ mod tests {
         ];
         let entries = cx.update(|cx| jsonl_to_entries(&lines, cx));
         assert_eq!(entries.len(), 1);
+    }
+
+    #[gpui::test]
+    async fn jsonl_to_entries_renders_thinking_as_thought_chunk(cx: &mut gpui::TestAppContext) {
+        let lines = vec![
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"weighing the trade-offs"},{"type":"text","text":"answer"}]}}"#,
+        ];
+        let entries = cx.update(|cx| jsonl_to_entries(&lines, cx));
+        // Thinking flushes pending text first (empty here), emits its
+        // own AssistantMessage, then the trailing text emits another.
+        assert_eq!(entries.len(), 2, "thinking + text = two AssistantMessages");
+        let acp_thread::AgentThreadEntry::AssistantMessage(thought_msg) = &entries[0] else {
+            panic!("expected AssistantMessage at index 0, got {:?}", entries[0]);
+        };
+        assert!(
+            matches!(thought_msg.chunks[0], acp_thread::AssistantMessageChunk::Thought { .. }),
+            "first chunk must be Thought, got {:?}",
+            thought_msg.chunks[0],
+        );
+        let acp_thread::AgentThreadEntry::AssistantMessage(text_msg) = &entries[1] else {
+            panic!("expected AssistantMessage at index 1, got {:?}", entries[1]);
+        };
+        assert!(
+            matches!(text_msg.chunks[0], acp_thread::AssistantMessageChunk::Message { .. }),
+            "trailing text must be Message chunk, got {:?}",
+            text_msg.chunks[0],
+        );
     }
 
     #[gpui::test]
