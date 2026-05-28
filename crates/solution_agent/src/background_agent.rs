@@ -16,13 +16,20 @@
 //!   completed `Agent`-tool_call `raw_output`.
 //! - JSONL tail / convert helpers (added in later tasks).
 
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
+use acp_thread::{
+    AgentThreadEntry, AssistantMessage, AssistantMessageChunk, ContentBlock, ToolCall,
+    ToolCallStatus, UserMessage,
+};
+use agent_client_protocol::schema as acp;
 use chrono::{DateTime, Utc};
-use gpui::SharedString;
+use gpui::{App, AppContext, SharedString};
+use markdown::Markdown;
 use regex::Regex;
 use serde_json::Value;
 
@@ -251,6 +258,192 @@ pub fn tail_jsonl(path: &Path, since_offset: u64) -> std::io::Result<Tail> {
     })
 }
 
+/// Lossy V1 converter from a managed-agent JSONL transcript into a
+/// list of [`AgentThreadEntry`] for cold rendering in the strip.
+///
+/// Mapping:
+///   * `system` rows → skipped.
+///   * `user.message.content` text blocks → one
+///     [`AgentThreadEntry::UserMessage`] per non-empty text block.
+///     `tool_result` blocks are NOT promoted to entries — they only
+///     drive [`ToolCallStatus`] of the paired `tool_use` (see below).
+///   * `assistant.message.content` text blocks → concatenated, then
+///     emitted as one [`AgentThreadEntry::AssistantMessage`]. A
+///     `tool_use` block flushes the pending text first, then emits
+///     [`AgentThreadEntry::ToolCall`] with status
+///     [`ToolCallStatus::Completed`] if some later `user.tool_result`
+///     references it by `tool_use_id`, else
+///     [`ToolCallStatus::Pending`].
+///   * Malformed JSON rows are silently skipped.
+///
+/// Two passes: first collects the set of `tool_use_id`s that have a
+/// paired `tool_result`; second emits entries.
+pub fn jsonl_to_entries<S: AsRef<str>>(lines: &[S], cx: &mut App) -> Vec<AgentThreadEntry> {
+    let mut paired: HashSet<String> = HashSet::new();
+    for line in lines {
+        let trimmed = line.as_ref().trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) != Some("user") {
+            continue;
+        }
+        let Some(content) = value
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        for block in content {
+            if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                continue;
+            }
+            if let Some(id) = block.get("tool_use_id").and_then(Value::as_str) {
+                paired.insert(id.to_string());
+            }
+        }
+    }
+
+    let mut entries: Vec<AgentThreadEntry> = Vec::new();
+    for line in lines {
+        let trimmed = line.as_ref().trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        match value.get("type").and_then(Value::as_str).unwrap_or("") {
+            "system" => continue,
+            "user" => jsonl_user_to_entries(&value, &mut entries, cx),
+            "assistant" => jsonl_assistant_to_entries(&value, &paired, &mut entries, cx),
+            _ => continue,
+        }
+    }
+    entries
+}
+
+fn jsonl_user_to_entries(value: &Value, out: &mut Vec<AgentThreadEntry>, cx: &mut App) {
+    let Some(content) = value
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    for block in content {
+        let typ = block.get("type").and_then(Value::as_str).unwrap_or("");
+        if typ != "text" {
+            continue;
+        }
+        let Some(text) = block.get("text").and_then(Value::as_str) else {
+            continue;
+        };
+        if text.is_empty() {
+            continue;
+        }
+        out.push(AgentThreadEntry::UserMessage(UserMessage {
+            id: None,
+            content: ContentBlock::Markdown {
+                markdown: cx.new(|cx| Markdown::new(text.to_string().into(), None, None, cx)),
+            },
+            chunks: Vec::new(),
+            checkpoint: None,
+            indented: false,
+        }));
+    }
+}
+
+fn jsonl_assistant_to_entries(
+    value: &Value,
+    paired: &HashSet<String>,
+    out: &mut Vec<AgentThreadEntry>,
+    cx: &mut App,
+) {
+    let Some(content) = value
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    let mut pending_text = String::new();
+    for block in content {
+        let typ = block.get("type").and_then(Value::as_str).unwrap_or("");
+        match typ {
+            "text" => {
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                    pending_text.push_str(text);
+                }
+            }
+            "thinking" => {
+                // V1 ignores assistant `thinking` blocks for the strip.
+            }
+            "tool_use" => {
+                flush_pending_assistant_text(&mut pending_text, out, cx);
+                let Some(tool_use_id) = block.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let name = block
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool")
+                    .to_string();
+                let has_result = paired.contains(tool_use_id);
+                let raw_input = block.get("input").cloned();
+                let status = if has_result {
+                    ToolCallStatus::Completed
+                } else {
+                    ToolCallStatus::Pending
+                };
+                out.push(AgentThreadEntry::ToolCall(ToolCall {
+                    id: acp::ToolCallId::new(format!("background:{tool_use_id}")),
+                    label: cx.new(|cx| Markdown::new(name.clone().into(), None, None, cx)),
+                    kind: acp::ToolKind::Other,
+                    content: Vec::new(),
+                    status,
+                    locations: Vec::new(),
+                    resolved_locations: Vec::new(),
+                    raw_input,
+                    raw_input_markdown: None,
+                    raw_output: None,
+                    tool_name: Some(SharedString::from(name)),
+                    subagent_session_info: None,
+                    subagent_id: None,
+                    status_started_at: None,
+                }));
+            }
+            _ => continue,
+        }
+    }
+    flush_pending_assistant_text(&mut pending_text, out, cx);
+}
+
+fn flush_pending_assistant_text(
+    pending: &mut String,
+    out: &mut Vec<AgentThreadEntry>,
+    cx: &mut App,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let text = std::mem::take(pending);
+    out.push(AgentThreadEntry::AssistantMessage(AssistantMessage {
+        chunks: vec![AssistantMessageChunk::Message {
+            block: ContentBlock::Markdown {
+                markdown: cx.new(|cx| Markdown::new(text.into(), None, None, cx)),
+            },
+        }],
+        indented: false,
+        is_subagent_output: false,
+        subagent_id: None,
+    }));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,6 +604,51 @@ mod tests {
         assert!(last.contains(r#""type":"assistant""#));
         assert!(tail.new_offset > 0);
         Ok(())
+    }
+
+    #[gpui::test]
+    async fn jsonl_to_entries_basic_round(cx: &mut gpui::TestAppContext) {
+        let lines = vec![
+            r#"{"type":"system","subtype":"init"}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"world"}]}}"#,
+        ];
+        let entries = cx.update(|cx| jsonl_to_entries(&lines, cx));
+        assert_eq!(entries.len(), 2, "system row should be skipped");
+        let roles: Vec<_> = entries
+            .iter()
+            .map(|e| match e {
+                acp_thread::AgentThreadEntry::UserMessage(_) => "user",
+                acp_thread::AgentThreadEntry::AssistantMessage(_) => "assistant",
+                acp_thread::AgentThreadEntry::ToolCall(_) => "tool_call",
+                acp_thread::AgentThreadEntry::CompletedPlan(_) => "plan",
+            })
+            .collect();
+        assert_eq!(roles, vec!["user", "assistant"]);
+    }
+
+    #[gpui::test]
+    async fn jsonl_to_entries_skips_malformed_rows(cx: &mut gpui::TestAppContext) {
+        let lines = vec![
+            "not json",
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"only valid"}]}}"#,
+        ];
+        let entries = cx.update(|cx| jsonl_to_entries(&lines, cx));
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[gpui::test]
+    async fn jsonl_to_entries_pairs_tool_use_with_tool_result(cx: &mut gpui::TestAppContext) {
+        let lines = vec![
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text","text":"foo bar"}]}]}}"#,
+        ];
+        let entries = cx.update(|cx| jsonl_to_entries(&lines, cx));
+        let tool_call_count = entries
+            .iter()
+            .filter(|e| matches!(e, acp_thread::AgentThreadEntry::ToolCall(_)))
+            .count();
+        assert_eq!(tool_call_count, 1);
     }
 
     #[test]
