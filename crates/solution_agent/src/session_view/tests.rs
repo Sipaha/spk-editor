@@ -205,6 +205,24 @@ fn next_selection_after_change_preserves_background_view() {
 }
 
 #[test]
+fn compose_disabled_predicate_returns_false_for_main() {
+    assert!(!super::compose_disabled_for(&SubagentView::Main));
+}
+
+#[test]
+fn compose_disabled_predicate_returns_false_for_task() {
+    assert!(!super::compose_disabled_for(&SubagentView::Task(
+        SharedString::from("toolu_a")
+    )));
+}
+
+#[test]
+fn compose_disabled_predicate_returns_true_for_background() {
+    let id = crate::background_agent::BackgroundAgentId::new("a30f92");
+    assert!(super::compose_disabled_for(&SubagentView::Background(id)));
+}
+
+#[test]
 fn unpack_recalled_bundle_handles_more_images_than_placeholders() {
     // Defensive: if the text somehow lost its `[image #N]` placeholders
     // (e.g. user manually edited them out before submission), images

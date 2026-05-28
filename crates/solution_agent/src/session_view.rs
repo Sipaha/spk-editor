@@ -898,6 +898,18 @@ impl SolutionSessionView {
         }
     }
 
+    /// `true` when the compose row should be view-only (no input, no
+    /// send, no Submit). Currently fires for `Background` views — the
+    /// user is looking at a Managed Agent's JSONL transcript that has
+    /// no live agent attached on the parent thread, so any input would
+    /// be sent to the parent agent instead of the background one and
+    /// produce a confusing UX. The fix is to flip the view back to
+    /// `Main` first. Delegates to a pure free fn for unit-testability,
+    /// mirroring `next_selection_after_background_change`.
+    fn compose_disabled(&self) -> bool {
+        compose_disabled_for(&self.selected_subagent)
+    }
+
     /// React to `SessionBackgroundAgentsChanged`. If the currently
     /// selected `Background(id)` view's agent has been removed from
     /// `session.background_agents` (× close, healthcheck reaper, or a
@@ -1546,6 +1558,12 @@ impl SolutionSessionView {
     }
 
     fn submit_compose_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.compose_disabled() {
+            // Background view: parent thread has no live agent for the
+            // selected Managed Agent. Silently drop — the UI also hides
+            // the Send button, this guard catches keybinding paths.
+            return;
+        }
         let content = self.compose_editor.read(cx).text(cx);
         if content.trim().is_empty() && self.pending_images.is_empty() {
             return;
@@ -1865,6 +1883,13 @@ impl SolutionSessionView {
     /// button stays useful if the agent flips to Idle between render
     /// and click.
     fn submit_compose_and_interrupt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.compose_disabled() {
+            // Background view: see `submit_compose_now`. Skip both the
+            // send AND the interrupt — interrupting the parent thread
+            // while the user is viewing a Managed Agent transcript
+            // would surprise them.
+            return;
+        }
         let was_running = matches!(self.session.read(cx).state, SessionState::Running { .. });
         let had_compose_input = !self.compose_editor.read(cx).is_empty(cx);
         if had_compose_input {
@@ -2107,6 +2132,14 @@ impl SolutionSessionView {
         let focus = self.compose_editor.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
     }
+}
+
+/// Pure predicate: `true` when the compose row should be view-only
+/// for the given `selected_subagent`. Extracted as a free fn so
+/// `tests.rs` can exercise it without spinning up a full GPUI view —
+/// same pattern as `next_selection_after_background_change`.
+pub(crate) fn compose_disabled_for(view: &crate::store::SubagentView) -> bool {
+    matches!(view, crate::store::SubagentView::Background(_))
 }
 
 #[cfg(test)]
@@ -2825,7 +2858,30 @@ impl Render for SolutionSessionView {
                 crate::status_row::render_status_row(self, is_resuming, cx)
             })
             .when_some(task_subagent_strip, |this, strip| this.child(strip))
-            .child({
+            .child(if self.compose_disabled() {
+                // Background view: the parent thread has no agent
+                // attached to the selected Managed Agent, so any
+                // input would be misrouted to the parent. Render a
+                // view-only label that tells the user how to recover
+                // (flip the pill back to Main). Submit handlers
+                // (`submit_compose_now` etc.) also early-return on
+                // this predicate as a belt-and-braces guard for any
+                // keybinding path that bypasses the button.
+                h_flex()
+                    .id("compose-row-disabled")
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .bg(cx.theme().colors().panel_background)
+                    .border_t_1()
+                    .border_color(cx.theme().colors().border_variant)
+                    .child(
+                        Label::new("View only · switch to Main to send")
+                            .color(Color::Muted)
+                            .size(LabelSize::Small),
+                    )
+                    .into_any_element()
+            } else {
                 // Compose row + resize handle in a single flex_col:
                 // top 6px is the drag handle (sticks out of the editor
                 // bg, makes itself visible against the conversation),
@@ -3053,7 +3109,8 @@ impl Render for SolutionSessionView {
                         .size(LabelSize::XSmall),
                     );
                 }
-                compose_row.child(compose_inner)
+                compose_row.child(compose_inner).into_any_element()
             })
     }
 }
+
