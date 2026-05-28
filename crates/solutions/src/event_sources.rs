@@ -136,6 +136,11 @@ pub fn install(cx: &mut App) {
                     // per-Workspace subscriber in `solutions_ui`; this
                     // coordinator-level handler doesn't need to react.
                     SolutionStoreEvent::Closed { .. } => {}
+                    // `Opened` drives the per-session `workspace.session_opened`
+                    // fan-out via the subscriber installed by `workspace_events`
+                    // (which sees both stores). This coordinator doesn't need
+                    // to react.
+                    SolutionStoreEvent::Opened { .. } => {}
                 }),
             );
         }

@@ -107,6 +107,15 @@ pub enum SolutionStoreEvent {
     /// notification, leaving the corresponding desktop workspace tabs
     /// open until the user closed them manually.
     Closed { id: SolutionId },
+    /// Emitted by `mark_open`. Distinct from `Changed` so cross-crate
+    /// observers (notably `workspace_events`, which can see both
+    /// `SolutionStore` and `SolutionAgentStore`) can react with side
+    /// effects this crate can't do itself — most importantly fanning
+    /// out one `workspace.session_opened` notification per tab-pinned
+    /// session for the just-opened solution. Without that fan-out the
+    /// mobile mirror sees the solution row appear with `sessions: []`
+    /// even when the persisted tab strip has entries.
+    Opened { id: SolutionId },
 }
 
 impl EventEmitter<SolutionStoreEvent> for SolutionStore {}
@@ -759,6 +768,7 @@ impl SolutionStore {
                 "sessions": [],
             }));
         }
+        cx.emit(SolutionStoreEvent::Opened { id: id.clone() });
         cx.emit(SolutionStoreEvent::Changed);
         cx.notify();
     }

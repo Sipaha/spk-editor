@@ -1605,6 +1605,45 @@ impl SolutionAgentStore {
                     this.sessions.insert(meta.id, entity);
                     hydrated.push(meta.id);
                 }
+                // Fan out `workspace.session_opened` for every freshly-hydrated
+                // session that ended up tab-pinned. The store path that drives
+                // the sequenced delta (`persist_tab_order`) is NOT invoked
+                // here because the tab_order was set directly on the in-memory
+                // entity above; without this manual emit a mobile client
+                // that's already connected to the desktop process would never
+                // hear about the just-hydrated sessions (their `tab_order` is
+                // populated but no notification ever fired). The mobile-side
+                // mirror would only learn via the next `workspace.snapshot`
+                // round-trip — which doesn't happen until the user toggles
+                // reconnect or backgrounds and resumes the app. Symptom:
+                // opening a previously-closed solution from the picker
+                // showed the row with zero consoles even though the desktop
+                // had restored them. The emit shape is identical to
+                // `persist_tab_order`'s; the mobile applier is idempotent
+                // on duplicate session_opened with the same id.
+                if let Some(coord) =
+                    editor_mcp::workspace_seq::WorkspaceEventCoordinator::try_global(cx)
+                {
+                    for id in &hydrated {
+                        let Some(entity) = this.sessions.get(id) else {
+                            continue;
+                        };
+                        let (is_tabbed, summary) = entity.read_with(cx, |s, cx| {
+                            (s.tab_order.is_some(), crate::mcp::session_summary(s, cx))
+                        });
+                        if !is_tabbed {
+                            continue;
+                        }
+                        coord.emit_sequenced(
+                            cx,
+                            "workspace.session_opened",
+                            serde_json::json!({
+                                "solution_id": solution_id.as_str(),
+                                "session": summary,
+                            }),
+                        );
+                    }
+                }
                 if !hydrated.is_empty() {
                     cx.notify();
                 }

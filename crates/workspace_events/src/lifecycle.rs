@@ -55,37 +55,15 @@ pub(crate) fn open_solution_impl(cx: &mut App, id: &SolutionId) -> Result<u64> {
         // reconnect via workspace.snapshot anyway.
     }
 
-    // mark_open itself emits the sequenced workspace.solution_opened event.
-    // That delta ships with `sessions: []` because the `solutions` crate can
-    // not depend on `solution_agent` (cycle). Mobile would otherwise see the
-    // solution appear with zero consoles — even though [restore_open_tabs]
-    // already stamped `tab_order` on the solution's sessions at boot, so
-    // they really are tabbed. Emit one `workspace.session_opened` per
-    // already-tabbed session here in `workspace_events`, which has both
-    // stores in scope. (Idempotent on the mobile delta applier — duplicate
-    // session_opened for an id it already shows is dropped.)
+    // `mark_open` emits the sequenced `workspace.solution_opened` notification
+    // (with `sessions: []` due to the cross-crate cycle constraint — solutions
+    // cannot see solution_agent) AND the local `SolutionStoreEvent::Opened`
+    // event. The per-session-deltas fan-out is driven from that event by the
+    // `install_solution_open_observer` subscriber in this crate, which sees
+    // both stores. That keeps the walk consistent across every `mark_open`
+    // call site (wire RPC here, desktop UI button, event-source bootstrap
+    // observers) without each one re-implementing the same walk.
     store.update(cx, |s, cx| s.mark_open(id.clone(), cx));
-    if let Some(agent) = solution_agent::store::SolutionAgentStore::try_global(cx) {
-        let coord = WorkspaceEventCoordinator::global(cx);
-        let summaries = agent.read_with(cx, |a, cx| {
-            a.all_sessions()
-                .filter_map(|entity| {
-                    let s = entity.read(cx);
-                    if s.solution_id == *id && s.tab_order.is_some() {
-                        Some(solution_agent::mcp::session_summary(s, cx))
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-        });
-        for summary in summaries {
-            coord.emit_sequenced(cx, "workspace.session_opened", serde_json::json!({
-                "solution_id": id.as_str(),
-                "session": summary,
-            }));
-        }
-    }
 
     // Return the seq just reserved by mark_open's emit_sequenced call.
     Ok(WorkspaceEventCoordinator::global(cx).current_seq())

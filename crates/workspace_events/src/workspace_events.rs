@@ -10,7 +10,8 @@
 //! Subsequent tasks fill these out. For now we expose `init` so `crates/zed`
 //! can wire us up without further plumbing later.
 
-use gpui::App;
+use gpui::{App, AppContext, Context, Entity, Global, Subscription};
+use solutions::{SolutionStore, SolutionStoreEvent};
 
 mod coordinator;
 mod dto;
@@ -28,6 +29,75 @@ pub use list::ListSolutionsTool;
 pub fn init(cx: &mut App) {
     coordinator::install(cx);
     mcp::register(cx);
+    install_solution_open_observer(cx);
+}
+
+/// Tiny holder entity that owns a `SolutionStore` subscription for the
+/// lifetime of the process. The subscriber listens for
+/// [`SolutionStoreEvent::Opened`] and fans out a
+/// `workspace.session_opened` notification per session whose
+/// `tab_order IS NOT NULL` for the just-opened solution.
+///
+/// This lives here (not in `solutions`) because building the session
+/// list requires reading `SolutionAgentStore`, and the `solutions`
+/// crate cannot depend on `solution_agent` (cycle). `workspace_events`
+/// already sees both stores.
+///
+/// Idempotent: a second `install_solution_open_observer` call replaces
+/// the global, dropping the previous subscription.
+struct SolutionOpenObserver {
+    _subscription: Subscription,
+}
+
+struct GlobalSolutionOpenObserver(#[allow(dead_code)] Entity<SolutionOpenObserver>);
+impl Global for GlobalSolutionOpenObserver {}
+
+fn install_solution_open_observer(cx: &mut App) {
+    let Some(store) = SolutionStore::try_global(cx) else {
+        return;
+    };
+    let observer = cx.new(|cx: &mut Context<SolutionOpenObserver>| {
+        let subscription = cx.subscribe(&store, |_this, _store, event, cx| {
+            let SolutionStoreEvent::Opened { id } = event else {
+                return;
+            };
+            let id = id.clone();
+            let Some(agent) = solution_agent::store::SolutionAgentStore::try_global(cx)
+            else {
+                return;
+            };
+            let summaries = agent.read_with(cx, |a, cx| {
+                a.all_sessions()
+                    .filter_map(|entity| {
+                        let s = entity.read(cx);
+                        if s.solution_id == id && s.tab_order.is_some() {
+                            Some(solution_agent::mcp::session_summary(s, cx))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            });
+            if summaries.is_empty() {
+                return;
+            }
+            let coord = WorkspaceEventCoordinator::global(cx);
+            for summary in summaries {
+                coord.emit_sequenced(
+                    cx,
+                    "workspace.session_opened",
+                    serde_json::json!({
+                        "solution_id": id.as_str(),
+                        "session": summary,
+                    }),
+                );
+            }
+        });
+        SolutionOpenObserver {
+            _subscription: subscription,
+        }
+    });
+    cx.set_global(GlobalSolutionOpenObserver(observer));
 }
 
 /// Expose `build_snapshot` for integration tests that need to check the
