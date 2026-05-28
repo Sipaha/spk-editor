@@ -321,6 +321,19 @@ pub struct SolutionSessionView {
     /// `AgentThreadEntry` enum is `!Clone`, so we can't materialise
     /// the slice every closure invocation.
     background_entries_for_render: Vec<AgentThreadEntry>,
+    /// Freshness fingerprint of `background_entries_for_render`: the
+    /// `BackgroundAgentId` whose JSONL was last converted, plus the file
+    /// mtime + size at conversion time. On each Background render we
+    /// stat the JSONL (~one syscall, no read) and reuse the cached
+    /// `Vec<AgentThreadEntry>` when the fingerprint matches, so a 5 MiB
+    /// transcript doesn't get re-parsed + re-`Markdown`-allocated every
+    /// frame. Cleared whenever the view leaves Background or the
+    /// selected agent disappears.
+    background_entries_fingerprint: Option<(
+        crate::background_agent::BackgroundAgentId,
+        std::time::SystemTime,
+        u64,
+    )>,
     /// `true` on the previous render frame if `selected_subagent` was a
     /// `Background` view. Tracked so a tab switch (Main↔Background or
     /// Task↔Background) can reset `list_state` to the new entry count
@@ -535,6 +548,7 @@ impl SolutionSessionView {
             selected_subagent: crate::store::SubagentView::default(),
             tool_tick: None,
             background_entries_for_render: Vec::new(),
+            background_entries_fingerprint: None,
             prev_render_background: None,
         };
         // Detect any thread that is already attached at construction
@@ -935,32 +949,58 @@ impl SolutionSessionView {
     /// Task (and clears any stale background entries to release the
     /// owned `Markdown` widgets they carry).
     ///
-    /// V1 reads the whole file synchronously on every render that lands
-    /// on a Background view; capped at the last 5 MiB so a runaway
-    /// transcript can't unbounded-allocate. V2 should cache + invalidate
-    /// on the `SessionBackgroundAgentsChanged` event.
+    /// Capped at the last 5 MiB so a runaway transcript can't
+    /// unbounded-allocate. Reads are skipped via an mtime+size
+    /// fingerprint compare against `background_entries_fingerprint`,
+    /// so a sticky Background view that the file hasn't mutated
+    /// reuses its cached `Vec<AgentThreadEntry>` without re-parsing.
     pub(crate) fn build_background_entries_for_render(&mut self, cx: &mut App) -> bool {
         use crate::store::SubagentView;
-        let path = match &self.selected_subagent {
+        let (selected_id, path) = match &self.selected_subagent {
             SubagentView::Main | SubagentView::Task(_) => {
                 if !self.background_entries_for_render.is_empty() {
                     self.background_entries_for_render.clear();
                 }
+                self.background_entries_fingerprint = None;
                 return false;
             }
             SubagentView::Background(id) => {
                 match self.session.read(cx).background_agents.get(id) {
-                    Some(agent) => agent.jsonl_path.clone(),
+                    Some(agent) => (id.clone(), agent.jsonl_path.clone()),
                     None => {
                         // Stale selection. `on_background_agents_changed`
                         // will snap us back to Main on the next store
                         // event tick; for this frame, paint empty.
                         self.background_entries_for_render.clear();
+                        self.background_entries_fingerprint = None;
                         return true;
                     }
                 }
             }
         };
+        // Cheap freshness check: stat the file and compare mtime+size
+        // against the cached fingerprint. One syscall (~10µs) vs a
+        // 5 MiB read + parse + Markdown allocation (~1ms-10ms). A
+        // missing file or stat error falls through to the read path
+        // which produces an empty Vec and clears the fingerprint, so
+        // the next live JSONL write re-populates.
+        let stat = std::fs::metadata(&path).ok();
+        if let Some(meta) = stat.as_ref()
+            && let Ok(mtime) = meta.modified()
+        {
+            let size = meta.len();
+            let fresh = self
+                .background_entries_fingerprint
+                .as_ref()
+                .is_some_and(|(cached_id, cached_mtime, cached_size)| {
+                    cached_id == &selected_id
+                        && *cached_mtime == mtime
+                        && *cached_size == size
+                });
+            if fresh {
+                return true;
+            }
+        }
         let content = std::fs::read_to_string(&path).unwrap_or_default();
         const SOFT_CAP: usize = 5 * 1024 * 1024;
         let trimmed: &str = if content.len() > SOFT_CAP {
@@ -979,6 +1019,9 @@ impl SolutionSessionView {
         };
         let lines: Vec<&str> = trimmed.lines().collect();
         self.background_entries_for_render = crate::background_agent::jsonl_to_entries(&lines, cx);
+        self.background_entries_fingerprint = stat
+            .as_ref()
+            .and_then(|meta| meta.modified().ok().map(|mtime| (selected_id, mtime, meta.len())));
         true
     }
 
