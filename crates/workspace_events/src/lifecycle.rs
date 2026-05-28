@@ -22,6 +22,30 @@ pub(crate) fn open_solution_impl(cx: &mut App, id: &SolutionId) -> Result<u64> {
         return Ok(coord.current_seq());
     }
 
+    // Dispatch the real desktop window-open. Without this the mobile picker's
+    // "Open" tap only flipped `open_solutions: HashSet`, leaving the desktop
+    // window closed — the user saw nothing happen on the desktop and a blank
+    // strip on the mobile (no consoles materialised because no ConsolePanel
+    // had hydrated yet to flip `tab_order`). Mirrors `solutions.open`'s
+    // open_paths call. Detached: the mobile RPC returns the reserved seq
+    // immediately; the window comes up async. The window-lifecycle hook in
+    // event_sources.rs will fire mark_open again when the workspace is bound;
+    // it's idempotent on the HashSet so the duplicate is a harmless no-op.
+    let paths = store.read_with(cx, |s, _| s.paths_for_open(id))?;
+    if !paths.is_empty() {
+        let app_state = workspace::AppState::global(cx);
+        let mut options = workspace::OpenOptions::default();
+        options.focus = Some(true);
+        options.open_mode = workspace::OpenMode::Activate;
+        let task = workspace::open_paths(&paths, app_state, options, cx);
+        cx.spawn(async move |_| {
+            if let Err(err) = task.await {
+                log::warn!("workspace.open_solution: open_paths failed: {err:#}");
+            }
+        })
+        .detach();
+    }
+
     // Hydrate restored sessions for this solution (idempotent if already hydrated).
     // Done before mark_open so any sessions in memory are captured by the snapshot.
     if let Some(agent) = solution_agent::store::SolutionAgentStore::try_global(cx) {

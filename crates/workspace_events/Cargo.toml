@@ -36,6 +36,10 @@ solution_agent.workspace = true
 acp_thread.workspace = true
 log.workspace = true
 
+# Required by workspace.open_solution to actually open the desktop window
+# (open_paths + AppState + OpenOptions live in `workspace`).
+workspace.workspace = true
+
 [dev-dependencies]
 db = { workspace = true, features = ["test-support"] }
 editor_mcp.workspace = true
