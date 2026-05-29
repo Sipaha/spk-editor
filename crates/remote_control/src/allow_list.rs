@@ -43,6 +43,9 @@ pub fn translate(method: &str) -> Option<&'static str> {
         "remote.solution_agent.cancel_turn" => Some("solution_agent.cancel_turn"),
         "remote.solution_agent.authorize_tool_call" => Some("solution_agent.authorize_tool_call"),
         "remote.solution_agent.get_session_children" => Some("solution_agent.get_session_children"),
+        "remote.solution_agent.get_session_background_shells" => {
+            Some("solution_agent.get_session_background_shells")
+        }
         "remote.solution_agent.rename_session" => Some("solution_agent.rename_session"),
         "remote.solution_agent.restart_agent" => Some("solution_agent.restart_agent"),
         "remote.solution_agent.reset_context" => Some("solution_agent.reset_context"),
@@ -166,6 +169,10 @@ mod tests {
                 "solution_agent.get_session_children",
             ),
             (
+                "remote.solution_agent.get_session_background_shells",
+                "solution_agent.get_session_background_shells",
+            ),
+            (
                 "remote.solution_agent.rename_session",
                 "solution_agent.rename_session",
             ),
@@ -243,6 +250,9 @@ mod tests {
         assert!(should_forward_event("agent_session_title_changed"));
         assert!(should_forward_event("agent_session_message_appended"));
         assert!(should_forward_event("agent_session_notification_sent"));
+        assert!(should_forward_event(
+            "agent_session_background_shells_changed"
+        ));
     }
 
     #[test]

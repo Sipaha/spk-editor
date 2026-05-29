@@ -7,7 +7,8 @@
 //!
 //! Wired event kinds: `agent_session_created`, `agent_session_closed`,
 //! `agent_session_state_changed`, `agent_session_title_changed`,
-//! `agent_session_message_appended`, `agent_session_notification_sent`.
+//! `agent_session_message_appended`, `agent_session_notification_sent`,
+//! `agent_session_background_shells_changed`.
 
 use gpui::{App, AppContext as _, Entity, Global, Subscription};
 use serde_json::json;
@@ -134,11 +135,14 @@ pub fn install(cx: &mut App) {
                 // event is consumed locally (session_view subscribes
                 // directly to the store).
                 SolutionAgentStoreEvent::SessionBackgroundAgentsChanged(_) => {}
-                // Background-shell updates are consumed locally for now
-                // (session_view subscribes to the store directly); a
-                // dedicated wire notification is a later task in the
-                // Background Shells Strip plan.
-                SolutionAgentStoreEvent::SessionBackgroundShellsChanged(_) => {}
+                SolutionAgentStoreEvent::SessionBackgroundShellsChanged(id) => {
+                    let payload = build_background_shells_changed_payload(*id, cx);
+                    editor_mcp::emit_notification(
+                        cx,
+                        "agent_session_background_shells_changed",
+                        payload,
+                    );
+                }
             }),
         );
     });
@@ -314,6 +318,38 @@ pub(crate) fn build_active_subagents_changed_payload(
     json!({
         "session_id": session_id.to_string(),
         "active_subagents": subagents,
+    })
+}
+
+/// Build the JSON payload for an `agent_session_background_shells_changed`
+/// notification. Walks the session's `background_shell_order` via the shared
+/// `mcp::build_background_shells_vec` helper (lite — `include_output = false`,
+/// so the heavy `output_tail` is omitted; clients re-fetch it on demand via
+/// `get_session_background_shells { include_output: true }`). The wire shape
+/// matches what the tool returns on a cold fetch, so clients can apply either
+/// path interchangeably.
+///
+/// When the session is gone (race between close + queued notification),
+/// emits `background_shells: []` so the consumer's "clear the strip" handler
+/// still fires correctly.
+pub(crate) fn build_background_shells_changed_payload(
+    session_id: crate::model::SolutionSessionId,
+    cx: &App,
+) -> serde_json::Value {
+    let background_shells: Vec<crate::mcp::BackgroundShellDto> = SolutionAgentStore::try_global(cx)
+        .and_then(|store| {
+            store.read_with(cx, |store, cx| {
+                let session = store.session(session_id)?;
+                Some(crate::mcp::build_background_shells_vec(
+                    session.read(cx),
+                    false,
+                ))
+            })
+        })
+        .unwrap_or_default();
+    json!({
+        "session_id": session_id.to_string(),
+        "background_shells": background_shells,
     })
 }
 
@@ -521,6 +557,86 @@ mod tests {
             assert!(
                 bundles.is_empty(),
                 "empty queue must emit an empty bundles array"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn background_shells_changed_payload_is_lite_and_ordered(cx: &mut TestAppContext) {
+        use crate::background_shell::{
+            BackgroundShell, BackgroundShellId, BackgroundShellSnapshot, ShellRuntimeState,
+        };
+        use gpui::SharedString;
+
+        let (session_id, _acp_thread, _tmp) =
+            crate::store::tests::create_session_with_thread(cx).await;
+
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            let session = store.read(cx).session(session_id).expect("session");
+            session.update(cx, |session, _| {
+                let shell = BackgroundShell {
+                    id: BackgroundShellId::new("zzz999"),
+                    command: SharedString::from("tail -f log"),
+                    output_path: std::path::PathBuf::from("/tmp/zzz999.output"),
+                    registered_at: chrono::Utc::now(),
+                    latest: Some(BackgroundShellSnapshot {
+                        mtime: std::time::UNIX_EPOCH
+                            + std::time::Duration::from_millis(1_700_000_000_000),
+                        output_tail: SharedString::from("heavy tail that must NOT ship\n"),
+                    }),
+                    last_offset: 30,
+                    state: ShellRuntimeState::Running,
+                };
+                session.background_shell_order.push(shell.id.clone());
+                session.background_shells.insert(shell.id.clone(), shell);
+            });
+        });
+
+        cx.update(|cx| {
+            let payload = build_background_shells_changed_payload(session_id, cx);
+            let obj = payload.as_object().expect("object");
+            assert_eq!(
+                obj.get("session_id").and_then(|v| v.as_str()),
+                Some(session_id.to_string().as_str())
+            );
+            let shells = obj
+                .get("background_shells")
+                .and_then(|v| v.as_array())
+                .expect("background_shells");
+            assert_eq!(shells.len(), 1);
+            let shell = shells[0].as_object().expect("shell object");
+            assert_eq!(shell.get("id").and_then(|v| v.as_str()), Some("zzz999"));
+            assert_eq!(shell.get("state").and_then(|v| v.as_str()), Some("running"));
+            assert!(
+                shell.get("mtime_ms").and_then(|v| v.as_i64()).is_some(),
+                "lite payload still carries mtime_ms"
+            );
+            assert!(
+                shell.get("output_tail").is_none(),
+                "lite notification payload must NOT ship the heavy output_tail"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn background_shells_changed_payload_empty_when_session_gone(cx: &mut TestAppContext) {
+        let registry = Arc::new(AdapterRegistry::new());
+        cx.update(|cx| SolutionAgentStore::init_global(cx, registry));
+
+        cx.update(|cx| {
+            let payload = build_background_shells_changed_payload(
+                crate::model::SolutionSessionId::new(),
+                cx,
+            );
+            let obj = payload.as_object().expect("object");
+            let shells = obj
+                .get("background_shells")
+                .and_then(|v| v.as_array())
+                .expect("background_shells");
+            assert!(
+                shells.is_empty(),
+                "missing session must emit an empty background_shells array"
             );
         });
     }

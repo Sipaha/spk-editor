@@ -10,6 +10,7 @@ use gpui::{App, AsyncApp, Entity};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::background_shell::BackgroundShell;
 use crate::model::{SolutionSession, SolutionSessionId};
 use crate::store::{PersistedSession, SolutionAgentStore};
 use gpui::SharedString;
@@ -66,6 +67,9 @@ pub fn register(cx: &mut App) {
     });
     editor_mcp::register_tool(cx, |server| {
         server.add_tool(GetSessionChildrenTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(GetSessionBackgroundShellsTool);
     });
     editor_mcp::register_tool(cx, |server| {
         server.add_tool(UploadInitTool);
@@ -546,6 +550,163 @@ impl McpServerTool for GetSessionChildrenTool {
                 text: format!("{} child session(s)", children.len()),
             }],
             structured_content: GetSessionChildrenResult { children },
+        })
+    }
+}
+
+// =====================================================================
+// solution_agent.get_session_background_shells
+// =====================================================================
+
+/// One background shell surfaced to MCP consumers. Mirrors the in-memory
+/// [`BackgroundShell`] entry: the launch `id` + `command`, the
+/// `state_text` lifecycle string ([`ShellRuntimeState::to_state_text`]),
+/// and the latest snapshot's `mtime` as unix-millis. `output_tail` is the
+/// only heavy field and is opt-in via the tool's `include_output` param
+/// (the lite shape used by `agent_session_background_shells_changed`
+/// always omits it).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BackgroundShellDto {
+    /// Launch token Claude Code assigned the shell (e.g. `bvb4ful1z`).
+    pub id: String,
+    /// Command line captured at launch (truncated at the call-site).
+    pub command: String,
+    /// "running" | "exited:N" | "exited" | "killed"
+    /// ([`crate::background_shell::ShellRuntimeState::to_state_text`]).
+    pub state: String,
+    /// Latest snapshot's `mtime` as unix-millis. `None` when no snapshot
+    /// has been captured yet, or (defensively) when the mtime is pre-epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtime_ms: Option<i64>,
+    /// Trailing chunk of the shell's stdout/stderr. Only present when the
+    /// caller passed `include_output: true` AND a snapshot exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tail: Option<String>,
+}
+
+/// Build a [`BackgroundShellDto`] from a tracked [`BackgroundShell`].
+/// Shared by the `get_session_background_shells` tool (with the param's
+/// `include_output`) and `event_sources::build_background_shells_changed_payload`
+/// (always lite, `include_output = false`) so both wire paths agree on
+/// the shape. Pure (no `cx`), so it lives here and event_sources reaches
+/// it via `crate::mcp::` exactly like `build_active_subagents_vec`.
+pub(crate) fn background_shell_dto(shell: &BackgroundShell, include_output: bool) -> BackgroundShellDto {
+    let mtime_ms = shell.latest.as_ref().and_then(|snapshot| {
+        snapshot
+            .mtime
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .ok()
+    });
+    let output_tail = include_output
+        .then(|| {
+            shell
+                .latest
+                .as_ref()
+                .map(|snapshot| snapshot.output_tail.to_string())
+        })
+        .flatten();
+    BackgroundShellDto {
+        id: shell.id.to_string(),
+        command: shell.command.to_string(),
+        state: shell.state.to_state_text(),
+        mtime_ms,
+        output_tail,
+    }
+}
+
+/// Walk a session's `background_shell_order` in insertion order and convert
+/// each tracked shell into its wire form. Skips ids with no matching map
+/// entry (defensive — the order vec is kept 1:1 with the map). Shared by the
+/// tool handler and the notification builder, hence the single helper.
+pub(crate) fn build_background_shells_vec(
+    session: &SolutionSession,
+    include_output: bool,
+) -> Vec<BackgroundShellDto> {
+    let mut out = Vec::with_capacity(session.background_shell_order.len());
+    for id in &session.background_shell_order {
+        match session.background_shells.get(id) {
+            Some(shell) => out.push(background_shell_dto(shell, include_output)),
+            None => {
+                log::warn!(
+                    "background_shell_order has id {id} with no matching background_shells entry \
+                     (insertion-order vector drifted from the map)"
+                );
+            }
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct GetSessionBackgroundShellsParams {
+    pub session_id: String,
+    /// Default false. When true each returned shell carries its
+    /// `output_tail` (the heavy field); otherwise only id/command/state/mtime.
+    #[serde(default)]
+    pub include_output: bool,
+}
+
+impl<'de> Deserialize<'de> for GetSessionBackgroundShellsParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            session_id: String,
+            #[serde(default)]
+            include_output: bool,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            session_id: inner.session_id,
+            include_output: inner.include_output,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct GetSessionBackgroundShellsResult {
+    /// Background shells in `background_shell_order` (insertion order) — the
+    /// same order the desktop strip renders pills.
+    pub background_shells: Vec<BackgroundShellDto>,
+}
+
+#[derive(Clone)]
+pub struct GetSessionBackgroundShellsTool;
+
+impl McpServerTool for GetSessionBackgroundShellsTool {
+    type Input = GetSessionBackgroundShellsParams;
+    type Output = GetSessionBackgroundShellsResult;
+    const NAME: &'static str = "solution_agent.get_session_background_shells";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.session_id.is_empty(),
+            "invalid_params: session_id is required"
+        );
+        let session_id = SolutionSessionId::parse(&input.session_id)
+            .map_err(|e| anyhow!("bad session id: {e}"))?;
+        let include_output = input.include_output;
+
+        let background_shells = cx.update(|cx| -> Result<Vec<BackgroundShellDto>> {
+            let store = SolutionAgentStore::global(cx);
+            store.read_with(cx, |store, cx| -> Result<Vec<BackgroundShellDto>> {
+                let session = store
+                    .session(session_id)
+                    .ok_or_else(|| anyhow!("session_not_found: {session_id}"))?;
+                Ok(build_background_shells_vec(session.read(cx), include_output))
+            })
+        })?;
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("{} background shell(s)", background_shells.len()),
+            }],
+            structured_content: GetSessionBackgroundShellsResult { background_shells },
         })
     }
 }
@@ -4360,6 +4521,149 @@ mod tests {
         assert!(
             result.structured_content.children.is_empty(),
             "leaf session has no children"
+        );
+    }
+
+    /// Seed two background shells (insertion-ordered) into a session, the
+    /// second carrying a `latest` snapshot with a known `output_tail` + mtime.
+    /// Returns the mtime-millis stamped on the second shell so the test can
+    /// assert `mtime_ms`.
+    fn seed_background_shells(
+        cx: &mut gpui::TestAppContext,
+        session_id: crate::model::SolutionSessionId,
+    ) -> i64 {
+        use crate::background_shell::{
+            BackgroundShellId, BackgroundShellSnapshot, ShellRuntimeState,
+        };
+        // Pick a fixed post-epoch instant so the mtime_ms assertion is exact.
+        let mtime = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_123);
+        let expected_ms = 1_700_000_000_123_i64;
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            let session = store.read(cx).session(session_id).expect("session");
+            session.update(cx, |session, _| {
+                let first = BackgroundShell {
+                    id: BackgroundShellId::new("aaa111"),
+                    command: SharedString::from("sleep 60"),
+                    output_path: std::path::PathBuf::from("/tmp/aaa111.output"),
+                    registered_at: chrono::Utc::now(),
+                    latest: None,
+                    last_offset: 0,
+                    state: ShellRuntimeState::Running,
+                };
+                let second = BackgroundShell {
+                    id: BackgroundShellId::new("bbb222"),
+                    command: SharedString::from("cargo build"),
+                    output_path: std::path::PathBuf::from("/tmp/bbb222.output"),
+                    registered_at: chrono::Utc::now(),
+                    latest: Some(BackgroundShellSnapshot {
+                        mtime,
+                        output_tail: SharedString::from("compiling...\n"),
+                    }),
+                    last_offset: 13,
+                    state: ShellRuntimeState::Exited(Some(0)),
+                };
+                session
+                    .background_shell_order
+                    .push(first.id.clone());
+                session
+                    .background_shell_order
+                    .push(second.id.clone());
+                session.background_shells.insert(first.id.clone(), first);
+                session.background_shells.insert(second.id.clone(), second);
+            });
+        });
+        expected_ms
+    }
+
+    #[gpui::test]
+    async fn get_session_background_shells_omits_output_by_default(cx: &mut gpui::TestAppContext) {
+        let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+        let expected_ms = seed_background_shells(cx, session_id);
+
+        let result = GetSessionBackgroundShellsTool
+            .run(
+                GetSessionBackgroundShellsParams {
+                    session_id: session_id.to_string(),
+                    include_output: false,
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session_background_shells");
+        let shells = &result.structured_content.background_shells;
+        assert_eq!(shells.len(), 2, "both seeded shells returned");
+        // Ordered per background_shell_order: aaa111 first, bbb222 second.
+        assert_eq!(shells[0].id, "aaa111");
+        assert_eq!(shells[0].command, "sleep 60");
+        assert_eq!(shells[0].state, "running");
+        assert_eq!(shells[0].mtime_ms, None, "first shell has no snapshot");
+        assert_eq!(shells[0].output_tail, None);
+
+        assert_eq!(shells[1].id, "bbb222");
+        assert_eq!(shells[1].state, "exited:0");
+        assert_eq!(shells[1].mtime_ms, Some(expected_ms));
+        assert_eq!(
+            shells[1].output_tail, None,
+            "include_output=false omits the tail even when a snapshot exists"
+        );
+
+        match &result.content[0] {
+            ToolResponseContent::Text { text } => {
+                assert_eq!(text, "2 background shell(s)");
+            }
+            _ => panic!("expected text content"),
+        }
+    }
+
+    #[gpui::test]
+    async fn get_session_background_shells_includes_output_when_requested(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+        seed_background_shells(cx, session_id);
+
+        let result = GetSessionBackgroundShellsTool
+            .run(
+                GetSessionBackgroundShellsParams {
+                    session_id: session_id.to_string(),
+                    include_output: true,
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session_background_shells include_output");
+        let shells = &result.structured_content.background_shells;
+        // The first shell has no snapshot → still None even with the flag.
+        assert_eq!(shells[0].output_tail, None);
+        // The second shell's snapshot tail is surfaced.
+        assert_eq!(
+            shells[1].output_tail.as_deref(),
+            Some("compiling...\n"),
+            "include_output=true surfaces the snapshot's output_tail"
+        );
+    }
+
+    #[gpui::test]
+    async fn get_session_background_shells_unknown_session_errors(cx: &mut gpui::TestAppContext) {
+        // Seed the store global so the lookup branch (not a missing global)
+        // is exercised, then query a well-formed but absent id.
+        let (_real_session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+        let unknown = "abcd1234";
+        let err = GetSessionBackgroundShellsTool
+            .run(
+                GetSessionBackgroundShellsParams {
+                    session_id: unknown.to_string(),
+                    include_output: false,
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect_err("expected session_not_found error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("session_not_found"),
+            "expected session_not_found in {msg:?}"
         );
     }
 
