@@ -2311,7 +2311,10 @@ impl SolutionSessionView {
 /// `tests.rs` can exercise it without spinning up a full GPUI view —
 /// same pattern as `next_selection_after_background_change`.
 pub(crate) fn compose_disabled_for(view: &crate::store::SubagentView) -> bool {
-    matches!(view, crate::store::SubagentView::Background(_))
+    matches!(
+        view,
+        crate::store::SubagentView::Background(_) | crate::store::SubagentView::Shell(_)
+    )
 }
 
 /// Build the single-row drill-in body for a `Shell(id)` view: a header

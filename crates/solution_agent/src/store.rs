@@ -1771,6 +1771,25 @@ impl SolutionAgentStore {
                         this.reconcile_background_agents_for(*sid, rows, cx);
                     }
                 }
+                // Background shell rows are ephemeral: the subprocess and
+                // its /tmp output file are both gone after a restart. Drop
+                // the stale rows so they don't accumulate across restarts.
+                // We never restore them into `background_shells` — a fresh
+                // shell must be launched by the user after resume.
+                if let Some(db) = this.persistence.clone() {
+                    for sid in &hydrated {
+                        let session_id = sid.to_string();
+                        cx.background_spawn({
+                            let db = db.clone();
+                            async move {
+                                db.delete_background_shells_for_session(session_id)
+                                    .await
+                                    .log_err();
+                            }
+                        })
+                        .detach();
+                    }
+                }
                 // Fan out `workspace.session_opened` for every freshly-hydrated
                 // session that ended up tab-pinned. The store path that drives
                 // the sequenced delta (`persist_tab_order`) is NOT invoked

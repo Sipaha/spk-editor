@@ -279,6 +279,12 @@ fn compose_disabled_predicate_returns_true_for_background() {
 }
 
 #[test]
+fn compose_disabled_predicate_returns_true_for_shell() {
+    let id = crate::background_shell::BackgroundShellId::new("x");
+    assert!(super::compose_disabled_for(&SubagentView::Shell(id)));
+}
+
+#[test]
 fn unpack_recalled_bundle_handles_more_images_than_placeholders() {
     // Defensive: if the text somehow lost its `[image #N]` placeholders
     // (e.g. user manually edited them out before submission), images
