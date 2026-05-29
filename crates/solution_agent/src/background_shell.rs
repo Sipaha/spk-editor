@@ -13,12 +13,14 @@
 //!   state per shell.
 //! - [`ShellRuntimeState`] — running / exited / killed lifecycle enum.
 //! - [`parse_task_notification`] — parser for `<task-notification>` completion blocks.
+//! - [`parse_kill_shell_input`] — extractor for `KillShell` tool_call inputs.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
 use regex::Regex;
+use serde_json::Value;
 
 use chrono::{DateTime, Utc};
 use gpui::SharedString;
@@ -159,6 +161,22 @@ pub fn parse_task_notification(text: &str) -> Option<TaskNotification> {
         .and_then(|m| m.as_str().parse::<i32>().ok());
     let status = ShellRuntimeState::Exited(exit_code);
     Some(TaskNotification { id, status })
+}
+
+// ---------------------------------------------------------------------------
+// Task 4 — `parse_kill_shell_input`
+// ---------------------------------------------------------------------------
+
+/// Extract the target shell id from a `KillShell` tool_call's `raw_input`.
+/// Accepts either `shell_id` or `bash_id` (string). Returns `None` if neither
+/// is a non-empty string.
+pub fn parse_kill_shell_input(raw_input: &Value) -> Option<BackgroundShellId> {
+    let id_str = raw_input
+        .get("shell_id")
+        .or_else(|| raw_input.get("bash_id"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())?;
+    Some(BackgroundShellId::new(id_str))
 }
 
 #[cfg(test)]
@@ -308,5 +326,35 @@ mod tests {
 </task-notification>"#;
         let result = parse_task_notification(text).unwrap();
         assert_eq!(result.status, ShellRuntimeState::Exited(Some(-1)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 4 — parse_kill_shell_input
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_kill_shell_input_shell_id_key() {
+        let input = serde_json::json!({"shell_id": "bvb4ful1z"});
+        let result = parse_kill_shell_input(&input).unwrap();
+        assert_eq!(result.as_str(), "bvb4ful1z");
+    }
+
+    #[test]
+    fn parse_kill_shell_input_bash_id_key() {
+        let input = serde_json::json!({"bash_id": "abc"});
+        let result = parse_kill_shell_input(&input).unwrap();
+        assert_eq!(result.as_str(), "abc");
+    }
+
+    #[test]
+    fn parse_kill_shell_input_empty_object_returns_none() {
+        let input = serde_json::json!({});
+        assert!(parse_kill_shell_input(&input).is_none());
+    }
+
+    #[test]
+    fn parse_kill_shell_input_empty_string_returns_none() {
+        let input = serde_json::json!({"shell_id": ""});
+        assert!(parse_kill_shell_input(&input).is_none());
     }
 }
