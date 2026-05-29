@@ -80,6 +80,15 @@ pub struct SolutionAgentStore {
     /// `background_agent_watchers` (separate map so the two pipelines arm /
     /// cancel independently).
     background_shell_watchers: HashMap<SolutionSessionId, gpui::Task<()>>,
+    /// Forward-only scan cursor into each session's PARENT session JSONL
+    /// transcript, used by `scan_parent_jsonl_for_completions` to detect
+    /// `<task-notification>` completion lines on the 1 Hz tick. Lazily
+    /// initialised to the file's CURRENT length the first time a session is
+    /// scanned — so we only observe completions FORWARD from editor launch
+    /// and never re-flip shells off historical notifications. Cleared for a
+    /// session once it has no `background_shells`, so a future shell re-arms
+    /// from the then-current EOF.
+    parent_jsonl_scan_offsets: HashMap<SolutionSessionId, u64>,
     /// Throttler for `workspace.session_metrics_changed` notifications.
     /// Caps emit rate at ~1 per 2 seconds per session so chatty fields
     /// (`last_activity_at`, `total_tokens`, `max_tokens`) don't flood
@@ -236,7 +245,10 @@ fn tool_name_is_agent(name: Option<&str>) -> bool {
     matches!(name, Some(n) if n.eq_ignore_ascii_case("agent"))
 }
 
-fn background_agent_dir_for(cwd: &std::path::Path, acp_session_id: &str) -> Option<PathBuf> {
+/// `~/.claude/projects/<encoded-cwd>/` — the per-project root claude
+/// writes session transcripts and subagent dirs under. `None` when `cwd`
+/// is empty (legacy session) or `home_dir()` can't be resolved.
+fn claude_project_dir_for(cwd: &std::path::Path) -> Option<PathBuf> {
     if cwd.as_os_str().is_empty() {
         return None;
     }
@@ -252,10 +264,95 @@ fn background_agent_dir_for(cwd: &std::path::Path, acp_session_id: &str) -> Opti
         dirs::home_dir()?
             .join(".claude")
             .join("projects")
-            .join(encoded)
+            .join(encoded),
+    )
+}
+
+fn background_agent_dir_for(cwd: &std::path::Path, acp_session_id: &str) -> Option<PathBuf> {
+    Some(
+        claude_project_dir_for(cwd)?
             .join(acp_session_id)
             .join("subagents"),
     )
+}
+
+/// The PARENT session's on-disk JSONL transcript:
+/// `~/.claude/projects/<encoded-cwd>/<acp_session_id>.jsonl`. claude
+/// appends every parent-thread message (including the `<task-notification>`
+/// user message a background shell emits on completion) to this file. Uses
+/// the same cwd encoding as [`background_agent_dir_for`]. `None` under the
+/// same conditions (empty cwd / unresolvable home).
+fn parent_session_jsonl_for(cwd: &std::path::Path, acp_session_id: &str) -> Option<PathBuf> {
+    Some(claude_project_dir_for(cwd)?.join(format!("{acp_session_id}.jsonl")))
+}
+
+/// Defensive per-tick read cap for the parent-JSONL scan. A single JSONL
+/// message line is small; this only bounds a pathological burst.
+const PARENT_JSONL_READ_CAP: u64 = 1024 * 1024;
+
+/// Read `[offset, end)` of `path` and split it into COMPLETE lines (those
+/// terminated by `\n`). Returns the complete lines plus the byte count
+/// consumed (the offset of the byte just past the last `\n`), so a trailing
+/// partial line is left unconsumed for the next tick. Returns `None` on any
+/// IO error. The read is capped at [`PARENT_JSONL_READ_CAP`] bytes per call.
+fn read_complete_lines_from(
+    path: &std::path::Path,
+    offset: u64,
+    end: u64,
+) -> Option<(Vec<String>, u64)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let to_read = std::cmp::min(end.saturating_sub(offset), PARENT_JSONL_READ_CAP);
+    if to_read == 0 {
+        return Some((Vec::new(), 0));
+    }
+    let mut file = std::fs::File::open(path).ok()?;
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    let mut buf = Vec::with_capacity(to_read as usize);
+    file.take(to_read).read_to_end(&mut buf).ok()?;
+    // Consume up to and including the last newline; bytes after it are a
+    // partial line we re-read next tick.
+    let last_newline = buf.iter().rposition(|b| *b == b'\n');
+    let Some(last_newline) = last_newline else {
+        return Some((Vec::new(), 0));
+    };
+    let consumed = (last_newline + 1) as u64;
+    let complete = &buf[..=last_newline];
+    let lines = String::from_utf8_lossy(complete)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect();
+    Some((lines, consumed))
+}
+
+/// Pure scan: for each raw JSONL line, if it carries a `<task-notification>`
+/// completion block whose `<task-id>` matches a tracked shell, emit the
+/// `(id, terminal-state)` pair. The `<...>` tags and `(exit code N)` suffix
+/// appear LITERALLY in the JSON string value (only newlines inside are
+/// `\n`-escaped), so the existing regex-based `parse_task_notification`
+/// matches the raw line directly — no JSON parse / unescape needed.
+fn scan_lines_for_completions(
+    lines: &[String],
+    background_shells: &std::collections::HashMap<
+        crate::background_shell::BackgroundShellId,
+        crate::background_shell::BackgroundShell,
+    >,
+) -> Vec<(
+    crate::background_shell::BackgroundShellId,
+    crate::background_shell::ShellRuntimeState,
+)> {
+    let mut out = Vec::new();
+    for line in lines {
+        if !line.contains("<task-notification>") {
+            continue;
+        }
+        if let Some(tn) = crate::background_shell::parse_task_notification(line) {
+            if background_shells.contains_key(&tn.id) {
+                out.push((tn.id, tn.status));
+            }
+        }
+    }
+    out
 }
 
 /// Last 4 chars of a `toolu_xxx` id, used as the short-id suffix in
@@ -624,6 +721,7 @@ impl SolutionAgentStore {
                 if this
                     .update(cx, |this, cx| {
                         this.tick_background_agents(cx);
+                        this.scan_parent_jsonls_for_completions(cx);
                         this.tick_background_shells(cx);
                     })
                     .is_err()
@@ -643,6 +741,7 @@ impl SolutionAgentStore {
             entry_update_throttles: HashMap::new(),
             background_agent_watchers: HashMap::new(),
             background_shell_watchers: HashMap::new(),
+            parent_jsonl_scan_offsets: HashMap::new(),
             metrics_emitter: MetricsEmitter::new(),
             _solution_subscription: solution_subscription,
             _bg_agents_tick: Some(bg_agents_tick),
@@ -3302,6 +3401,102 @@ impl SolutionAgentStore {
     /// last-observed write — it stops advancing once the command finishes)
     /// when a snapshot exists, else from `registered_at` (a shell that
     /// produced zero output and finished must still age out).
+    /// One pass over every session: incrementally tail the PARENT session
+    /// JSONL for `<task-notification>` lines and flip matching tracked shells
+    /// to their terminal [`ShellRuntimeState`]. Runs on the same 1 Hz tick as
+    /// the reap pass, BEFORE it, so a freshly-Exited shell is flipped this
+    /// tick (and the reap can later drop it once stale).
+    pub fn scan_parent_jsonls_for_completions(&mut self, cx: &mut Context<Self>) {
+        let session_ids: Vec<SolutionSessionId> =
+            self.all_sessions().map(|e| e.read(cx).id).collect();
+        for session_id in session_ids {
+            self.scan_parent_jsonl_for_completions(session_id, cx);
+        }
+    }
+
+    /// Scan a single session's parent JSONL transcript for newly-appended
+    /// `<task-notification>` completion lines and flip the matching tracked
+    /// shells via [`Self::mark_background_shell_state`].
+    ///
+    /// Forward-only: the per-session offset is lazily initialised to the
+    /// file's CURRENT length on first sight (so historical notifications are
+    /// never re-applied) and only advanced past the last COMPLETE newline, so
+    /// a half-written trailing line is re-read next tick. No-op when the
+    /// session tracks no shells, when none of them are still `Running`, or
+    /// when the parent JSONL can't be resolved / doesn't exist.
+    fn scan_parent_jsonl_for_completions(
+        &mut self,
+        session_id: SolutionSessionId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session(session_id) else {
+            self.parent_jsonl_scan_offsets.remove(&session_id);
+            return;
+        };
+        let (has_shells, any_running, cwd, acp_session_id) = {
+            let s = session.read(cx);
+            let any_running = s.background_shells.values().any(|sh| {
+                matches!(sh.state, crate::background_shell::ShellRuntimeState::Running)
+            });
+            (
+                !s.background_shells.is_empty(),
+                any_running,
+                s.cwd.clone(),
+                s.acp_session_id.0.to_string(),
+            )
+        };
+        if !has_shells {
+            // Re-arm from the then-current EOF the next time a shell registers.
+            self.parent_jsonl_scan_offsets.remove(&session_id);
+            return;
+        }
+        if !any_running {
+            // Everything already terminal — nothing left to flip.
+            return;
+        }
+        let Some(path) = parent_session_jsonl_for(&cwd, &acp_session_id) else {
+            return;
+        };
+        let metadata = match std::fs::metadata(&path) {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        let len = metadata.len();
+        // Lazy-init: first sight pins the cursor at the current EOF so we only
+        // observe completions forward from now.
+        let offset = match self.parent_jsonl_scan_offsets.get(&session_id) {
+            Some(off) => {
+                // Truncation / rotation: cursor past EOF → re-read from start.
+                if *off > len { 0 } else { *off }
+            }
+            None => {
+                self.parent_jsonl_scan_offsets.insert(session_id, len);
+                return;
+            }
+        };
+        if len <= offset {
+            return;
+        }
+        let (lines, consumed) = match read_complete_lines_from(&path, offset, len) {
+            Some(read) => read,
+            None => return,
+        };
+        // Advance the cursor past the bytes we've fully consumed (the last
+        // complete newline), leaving any trailing partial line for next tick.
+        self.parent_jsonl_scan_offsets
+            .insert(session_id, offset + consumed);
+        if lines.is_empty() {
+            return;
+        }
+        let completions = {
+            let s = session.read(cx);
+            scan_lines_for_completions(&lines, &s.background_shells)
+        };
+        for (shell_id, state) in completions {
+            self.mark_background_shell_state(session_id, shell_id, state, cx);
+        }
+    }
+
     pub fn tick_background_shells(&mut self, cx: &mut Context<Self>) {
         use ::agent_settings::AgentSettings;
         use settings::Settings;
@@ -4274,6 +4469,109 @@ mod background_agent_dir_tests {
         assert!(
             super::background_agent_dir_for(std::path::Path::new(""), "ses-x").is_none()
         );
+    }
+
+    #[test]
+    fn parent_session_jsonl_for_encodes_cwd_and_appends_jsonl() {
+        let path = super::parent_session_jsonl_for(
+            std::path::Path::new("/home/spk/projects/foo.bar"),
+            "ses-xyz",
+        );
+        let path = path.expect("home_dir must resolve in test env");
+        let s = path.to_string_lossy();
+        assert!(
+            s.contains("-home-spk-projects-foo-bar"),
+            "expected encoded cwd in path, got {:?}",
+            path
+        );
+        assert!(s.ends_with("ses-xyz.jsonl"), "got {:?}", path);
+    }
+
+    #[test]
+    fn parent_session_jsonl_for_empty_cwd_returns_none() {
+        assert!(
+            super::parent_session_jsonl_for(std::path::Path::new(""), "ses-x").is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+mod parent_jsonl_scan_tests {
+    use super::*;
+    use crate::background_shell::{
+        BackgroundShell, BackgroundShellId, ShellRuntimeState,
+    };
+    use std::collections::HashMap;
+
+    fn running_shell(id: &str) -> (BackgroundShellId, BackgroundShell) {
+        let bid = BackgroundShellId::new(id);
+        (
+            bid.clone(),
+            BackgroundShell {
+                id: bid,
+                command: "sleep 60".into(),
+                output_path: std::path::PathBuf::from(format!("/tmp/{id}.output")),
+                registered_at: chrono::Utc::now(),
+                latest: None,
+                last_offset: 0,
+                state: ShellRuntimeState::Running,
+            },
+        )
+    }
+
+    const REAL_JSONL_LINE: &str = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"<task-notification>\n<task-id>bvb4ful1z</task-id>\n<tool-use-id>toolu_01AqJufkNFAd7Aef3ojZ8d5J</tool-use-id>\n<status>completed</status>\n<summary>Background command \"Sleep for 60 seconds in background\" completed (exit code 0)</summary>\n</task-notification>"}]},"uuid":"abc-123"}"#;
+
+    #[test]
+    fn scan_lines_flips_known_shell_to_exited_with_code() {
+        let mut shells = HashMap::new();
+        let (id, shell) = running_shell("bvb4ful1z");
+        shells.insert(id.clone(), shell);
+        let lines = vec![REAL_JSONL_LINE.to_string()];
+        let out = scan_lines_for_completions(&lines, &shells);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, id);
+        assert_eq!(out[0].1, ShellRuntimeState::Exited(Some(0)));
+    }
+
+    #[test]
+    fn scan_lines_ignores_unknown_id() {
+        let mut shells = HashMap::new();
+        let (id, shell) = running_shell("someotherid");
+        shells.insert(id, shell);
+        let lines = vec![REAL_JSONL_LINE.to_string()];
+        assert!(scan_lines_for_completions(&lines, &shells).is_empty());
+    }
+
+    #[test]
+    fn scan_lines_ignores_non_notification_lines() {
+        let mut shells = HashMap::new();
+        let (id, shell) = running_shell("bvb4ful1z");
+        shells.insert(id, shell);
+        let lines = vec![
+            r#"{"type":"assistant","message":{"role":"assistant","content":"hi"}}"#
+                .to_string(),
+        ];
+        assert!(scan_lines_for_completions(&lines, &shells).is_empty());
+    }
+
+    #[test]
+    fn read_complete_lines_leaves_trailing_partial_for_next_tick() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("ses.jsonl");
+        // Two complete lines + a trailing partial (no newline).
+        let content = "line one\nline two\npartial-no-newline";
+        std::fs::write(&path, content).expect("write");
+        let end = content.len() as u64;
+        let (lines, consumed) =
+            read_complete_lines_from(&path, 0, end).expect("read ok");
+        assert_eq!(lines, vec!["line one".to_string(), "line two".to_string()]);
+        // Consumed only through the second newline; the partial is left.
+        assert_eq!(consumed, "line one\nline two\n".len() as u64);
+        // A re-read from the advanced offset with no new bytes yields nothing.
+        let (lines2, consumed2) =
+            read_complete_lines_from(&path, consumed, end).expect("read ok");
+        assert!(lines2.is_empty());
+        assert_eq!(consumed2, 0);
     }
 }
 

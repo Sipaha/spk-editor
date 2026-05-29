@@ -4223,3 +4223,170 @@ async fn reconciliation_registers_alive_row(cx: &mut TestAppContext) {
         assert!(s.background_agents.values().next().unwrap().latest.is_some());
     });
 }
+
+/// Removes a directory subtree on drop — used to clean up the
+/// `~/.claude/projects/<encoded-cwd>/` dir the live-scan test must create at
+/// the real (home-derived) path the resolver computes.
+struct CleanupDir(PathBuf);
+impl Drop for CleanupDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// End-to-end: a Running shell flips to `Exited(Some(0))` when a realistic
+/// single-line `<task-notification>` JSON `user` message is appended to the
+/// parent session JSONL and `scan_parent_jsonl_for_completions` runs. Also
+/// asserts the forward-only offset: a second scan with no new bytes is a
+/// no-op (the shell stays exactly where the first scan left it).
+#[gpui::test]
+fn scan_parent_jsonl_flips_running_shell_to_exited(cx: &mut TestAppContext) {
+    use crate::background_shell::{BackgroundShell, BackgroundShellId, ShellRuntimeState};
+
+    let registry = Arc::new(AdapterRegistry::new());
+    cx.update(|cx| SolutionAgentStore::init_global(cx, registry));
+
+    // Unique cwd so the home-derived JSONL path never collides with a real
+    // session or a parallel test run.
+    let unique = format!(
+        "/tmp/spk-scan-test-{}-{}",
+        std::process::id(),
+        SolutionSessionId::new()
+    );
+    let cwd = PathBuf::from(&unique);
+    let acp_id = "ses-scan-xyz";
+
+    let jsonl = super::parent_session_jsonl_for(&cwd, acp_id)
+        .expect("home_dir resolves in test");
+    let project_dir = jsonl.parent().expect("jsonl has parent").to_path_buf();
+    let _cleanup = CleanupDir(project_dir.clone());
+    std::fs::create_dir_all(&project_dir).expect("create project dir");
+    // Pre-existing historical content the scan must skip past (offset lazy-init
+    // to current EOF on first sight).
+    std::fs::write(&jsonl, b"{\"type\":\"system\",\"old\":true}\n")
+        .expect("seed jsonl");
+
+    let session_id = SolutionSessionId::new();
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let entity = cx.new(|_| {
+                let mut s = SolutionSession::new_idle(
+                    session_id,
+                    SolutionId("sol-scan".into()),
+                    SharedString::from("claude-acp"),
+                    agent_client_protocol::schema::SessionId::new(acp_id),
+                );
+                s.cwd = cwd.clone();
+                let id = BackgroundShellId::new("bvb4ful1z");
+                s.background_shells.insert(
+                    id.clone(),
+                    BackgroundShell {
+                        id: id.clone(),
+                        command: "sleep 60".into(),
+                        output_path: PathBuf::from("/tmp/bvb4ful1z.output"),
+                        registered_at: Utc::now(),
+                        latest: None,
+                        last_offset: 0,
+                        state: ShellRuntimeState::Running,
+                    },
+                );
+                s.background_shell_order.push(id);
+                s
+            });
+            store.sessions.insert(session_id, entity);
+            store
+                .by_solution
+                .entry(SolutionId("sol-scan".into()))
+                .or_default()
+                .push(session_id);
+            // First scan: lazy-inits the offset to current EOF, flips nothing.
+            store.scan_parent_jsonl_for_completions(session_id, cx);
+        });
+    });
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(session_id).unwrap();
+        let shell = session
+            .read(cx)
+            .background_shells
+            .get(&BackgroundShellId::new("bvb4ful1z"))
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            shell.state,
+            ShellRuntimeState::Running,
+            "historical content must not flip the shell"
+        );
+    });
+
+    // Append the realistic single-line completion notification.
+    {
+        use std::io::Write;
+        let line = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"<task-notification>\\n<task-id>bvb4ful1z</task-id>\\n<status>completed</status>\\n<summary>Background command \\\"sleep 60\\\" completed (exit code 0)</summary>\\n</task-notification>\"}]},\"uuid\":\"abc-123\"}\n";
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&jsonl)
+            .expect("reopen jsonl");
+        f.write_all(line.as_bytes()).expect("append notification");
+    }
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            store.scan_parent_jsonl_for_completions(session_id, cx);
+        });
+    });
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(session_id).unwrap();
+        let shell = session
+            .read(cx)
+            .background_shells
+            .get(&BackgroundShellId::new("bvb4ful1z"))
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            shell.state,
+            ShellRuntimeState::Exited(Some(0)),
+            "completion notification must flip Running -> Exited(0)"
+        );
+    });
+
+    // Second scan, no new bytes: idempotent no-op (state unchanged).
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            store.scan_parent_jsonl_for_completions(session_id, cx);
+        });
+        let session = store.read(cx).session(session_id).unwrap();
+        let shell = session
+            .read(cx)
+            .background_shells
+            .get(&BackgroundShellId::new("bvb4ful1z"))
+            .cloned()
+            .unwrap();
+        assert_eq!(shell.state, ShellRuntimeState::Exited(Some(0)));
+    });
+
+    // Unknown-id notification flips nothing.
+    {
+        use std::io::Write;
+        let line = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"<task-notification>\\n<task-id>unknownid99</task-id>\\n<status>completed</status>\\n<summary>done (exit code 0)</summary>\\n</task-notification>\"}]}}\n";
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&jsonl)
+            .expect("reopen jsonl");
+        f.write_all(line.as_bytes()).expect("append unknown");
+    }
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            store.scan_parent_jsonl_for_completions(session_id, cx);
+        });
+        let session = store.read(cx).session(session_id).unwrap();
+        assert_eq!(session.read(cx).background_shells.len(), 1);
+    });
+}
