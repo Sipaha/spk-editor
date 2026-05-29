@@ -9,6 +9,28 @@ V3 **Background Shells Strip** shipped end-to-end to `main` (all 14 plan tasks
 (`--no-deps`), release-fast binary rebuilt for hands-on testing. Live `Exited(code)`
 badges now work (gotcha #1 RESOLVED — see below).
 
+## Continued this session (after V3 shipped)
+
+- **Code review** (`/review-changes`, Sonnet+Opus) of the whole session → fixes in
+  `spk-editor` `7f86c01ea8` (committed + **pushed** to origin): unique per-pill `{id}-close`
+  ElementIds (was a constant → × click misrouting with ≥2 terminal pills); `read_complete_lines_from`
+  skips an over-cap line instead of wedging the completion scan forever (+ regression test);
+  doc/test fixes. Deferred (follow-up): extract the background-shell machinery out of the
+  `store.rs` god-object into `store/background_shell.rs` (recorded in the review dismissed archive).
+  New review-surfaced memories: [[incremental-tail-offset-wedge]], [[gpui-duplicate-elementid-in-lists]].
+- **Background Shells on Mobile arc** (F-arc precedent, two repos — NOT yet pushed):
+  - SERVER `spk-editor` `cdfd800e0f`: `get_session_background_shells` tool + `BackgroundShellDto`
+    + `agent_session_background_shells_changed` notification (replaced the event_sources no-op) +
+    remote_control allow-list. Additive, no wire-schema bump. 330 `solution_agent` tests.
+  - CLIENT `spk-editor-mobile` `2ae83135`: `BackgroundShellDto`/payload DTOs (+7 `:core` tests),
+    notification dispatch + `DetailNotificationRouter.onBackgroundShellsChanged`, `SessionDetailStore`
+    `backgroundShells` StateFlow, `BackgroundShellStrip` pills + `include_output` stdout drill-in sheet.
+    `:core:test` green; `:app:assembleDebug` OK (debug APK ~22.4 MB).
+  - Plan: `docs/superpowers/plans/2026-05-29-background-shells-on-mobile.md` (COMPLETE).
+  - **To test end-to-end:** rebuild the editor release-fast (to serve the new wire) + install the
+    Android debug APK; open a session with a background shell → pill strip + tap → stdout sheet.
+  - Out of scope (follow-ups): background *agents* on mobile (same pattern); a kill action from mobile.
+
 ## The big pivot this session
 
 The committed V3 plan was built on a **false premise** (its Constraint #1: "background

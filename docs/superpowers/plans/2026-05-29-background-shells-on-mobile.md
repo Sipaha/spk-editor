@@ -1,6 +1,11 @@
 # Background Shells on Mobile — implementation plan
 
-**Status:** ready to dispatch
+**Status:** COMPLETE (2026-05-29). Server: `spk-editor` `cdfd800e0f` (get_session_background_shells
+tool + agent_session_background_shells_changed notification + allow-list; 330 solution_agent tests,
+clippy clean). Client: `spk-editor-mobile` `2ae83135` (BackgroundShellDto + dispatch + BackgroundShellStrip
+pills + stdout drill-in sheet; `:core:test` green incl. 7 new BackgroundShellTest; `:app:assembleDebug`
+OK, debug APK ~22.4 MB). Additive wire, no schema bump. Needs: editor release-fast rebuild to serve the
+new wire for end-to-end mobile testing.
 **Track:** HEAVY, two repos (server in `spk-editor`, client in `spk-editor-mobile`).
 **Goal:** Surface the desktop V3 "Background Shells Strip" on the Android client — a pill
 strip of the session's background shells (Bash run_in_background) with state + a drill-in
