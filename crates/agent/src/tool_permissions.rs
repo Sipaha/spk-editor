@@ -600,6 +600,8 @@ mod tests {
             new_thread_location: Default::default(),
             sidebar_side: Default::default(),
             thinking_display: Default::default(),
+            managed_agent_stale_timeout_secs: 120,
+            managed_agent_dead_linger_secs: 300,
         }
     }
 
