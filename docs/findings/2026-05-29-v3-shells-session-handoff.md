@@ -29,7 +29,18 @@ badges now work (gotcha #1 RESOLVED — see below).
   - Plan: `docs/superpowers/plans/2026-05-29-background-shells-on-mobile.md` (COMPLETE).
   - **To test end-to-end:** rebuild the editor release-fast (to serve the new wire) + install the
     Android debug APK; open a session with a background shell → pill strip + tap → stdout sheet.
-  - Out of scope (follow-ups): background *agents* on mobile (same pattern); a kill action from mobile.
+  - Out of scope (follow-ups): a kill action from mobile.
+- **Background Agents on Mobile arc** (mirror of the shells arc — two repos):
+  - SERVER `spk-editor` `f0d1c197b7`: `get_session_background_agents` tool + `BackgroundAgentDto`
+    (label/mtime_ms/stop_reason — no command/output_tail, no include flag) +
+    `agent_session_background_agents_changed` notification (replaced its no-op) + allow-list. 334 tests.
+  - CLIENT `spk-editor-mobile` `93969b7`: DTO + dispatch + `onBackgroundAgentsChanged` +
+    `backgroundAgents` StateFlow + `BackgroundAgentStrip` (running/done pills) + minimal drill-in sheet
+    (no network fetch — DTO has everything). `:core:test` green (+6); `:app:assembleDebug` ~23.6 MB.
+  - Plan: `docs/superpowers/plans/2026-05-29-background-agents-on-mobile.md` (COMPLETE).
+  - Follow-up: full JSONL-transcript drill-in for agents (the rich desktop view); a kill action from mobile.
+  - Mobile now has THREE strips: active subagents (F-arc), background shells, background agents — each
+    a separate row. Merging them into one row is a deferred UX follow-up.
 
 ## The big pivot this session
 

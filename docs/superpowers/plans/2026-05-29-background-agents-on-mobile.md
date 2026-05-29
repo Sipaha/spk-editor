@@ -1,6 +1,11 @@
 # Background Agents on Mobile — implementation plan
 
-**Status:** ready to dispatch
+**Status:** COMPLETE (2026-05-29). Server: `spk-editor` `f0d1c197b7` (get_session_background_agents
+tool + agent_session_background_agents_changed notification + allow-list; 334 solution_agent tests,
+clippy clean). Client: `spk-editor-mobile` `93969b7` (BackgroundAgentDto + dispatch + BackgroundAgentStrip
+pills running/done + minimal drill-in sheet; `:core:test` green incl. 6 new BackgroundAgentTest;
+`:app:assembleDebug` OK, debug APK ~23.6 MB). Additive, no schema bump. Needs editor release-fast
+rebuild to serve the new wire. Follow-up: full JSONL-transcript drill-in for agents.
 **Track:** HEAVY, two repos. **This is a near-exact mirror of the just-shipped
 `2026-05-29-background-shells-on-mobile.md` arc** — read that plan + its commits
 (`spk-editor cdfd800e0f`, `spk-editor-mobile 2ae83135`) as the template. This doc only
