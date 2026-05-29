@@ -14,8 +14,9 @@
 //! - [`ShellRuntimeState`] — running / exited / killed lifecycle enum.
 //! - [`parse_task_notification`] — parser for `<task-notification>` completion blocks.
 //! - [`parse_kill_shell_input`] — extractor for `KillShell` tool_call inputs.
+//! - [`tail_output`] — incremental tail helper for plain-text `.output` files.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
@@ -177,6 +178,51 @@ pub fn parse_kill_shell_input(raw_input: &Value) -> Option<BackgroundShellId> {
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())?;
     Some(BackgroundShellId::new(id_str))
+}
+
+// ---------------------------------------------------------------------------
+// Task 5 — `tail_output`
+// ---------------------------------------------------------------------------
+
+/// 64 KiB cap on the trailing chunk returned by [`tail_output`].
+const OUTPUT_TAIL_CAP: usize = 64 * 1024;
+
+/// Result of a [`tail_output`] call.
+#[derive(Debug, Clone)]
+pub struct OutputTail {
+    /// Trailing chunk of the file's bytes as UTF-8 (lossy), capped at `OUTPUT_TAIL_CAP`.
+    pub text: String,
+    /// Offset just past EOF after the read; pass back as `since_offset` next call.
+    pub new_offset: u64,
+    pub mtime: SystemTime,
+}
+
+/// Tail a plain-text background-shell `.output` file. Unlike `tail_jsonl` (last
+/// line only), this returns the trailing window of the file content for display.
+/// Reads from `max(since_offset, len - OUTPUT_TAIL_CAP)` to EOF. Resets
+/// `since_offset` to 0 when it exceeds `len` (truncation/rotation). A missing file
+/// propagates as `Err` (`std::io::ErrorKind::NotFound`) — the caller treats that as
+/// "no snapshot yet", NOT a hard failure.
+pub fn tail_output(path: &Path, since_offset: u64) -> std::io::Result<OutputTail> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    let mtime = metadata.modified()?;
+    let len = metadata.len();
+    // Truncation / rotation: stored offset points past EOF — re-read from start.
+    let since_offset = if since_offset > len { 0 } else { since_offset };
+    // Start reading from the further of since_offset and (len - cap).
+    let read_start = std::cmp::max(since_offset, len.saturating_sub(OUTPUT_TAIL_CAP as u64));
+    file.seek(SeekFrom::Start(read_start))?;
+    let to_read = len - read_start;
+    let mut buf = Vec::with_capacity(to_read as usize);
+    file.take(to_read).read_to_end(&mut buf)?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    Ok(OutputTail {
+        text,
+        new_offset: len,
+        mtime,
+    })
 }
 
 #[cfg(test)]
@@ -356,5 +402,73 @@ mod tests {
     fn parse_kill_shell_input_empty_string_returns_none() {
         let input = serde_json::json!({"shell_id": ""});
         assert!(parse_kill_shell_input(&input).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 5 — tail_output
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tail_output_short_file_fully_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.output");
+        std::fs::write(&path, b"hello world\n").unwrap();
+        let result = tail_output(&path, 0).unwrap();
+        assert_eq!(result.text, "hello world\n");
+        assert_eq!(result.new_offset, 12);
+    }
+
+    #[test]
+    fn tail_output_large_file_returns_only_trailing_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large.output");
+        // Write OUTPUT_TAIL_CAP + 1000 bytes: prefix 'A's then trailing 'B's.
+        let prefix_size = 1000usize;
+        let cap = OUTPUT_TAIL_CAP;
+        let mut content = vec![b'A'; prefix_size];
+        content.extend(vec![b'B'; cap]);
+        std::fs::write(&path, &content).unwrap();
+        let result = tail_output(&path, 0).unwrap();
+        // Only trailing cap bytes should be returned.
+        assert_eq!(result.text.len(), cap);
+        assert!(result.text.chars().all(|c| c == 'B'));
+        assert_eq!(result.new_offset, (prefix_size + cap) as u64);
+    }
+
+    #[test]
+    fn tail_output_incremental_read_only_new_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("incremental.output");
+        std::fs::write(&path, b"first line\n").unwrap();
+        let first = tail_output(&path, 0).unwrap();
+        assert_eq!(first.text, "first line\n");
+        // Append more content.
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"second line\n").unwrap();
+        drop(file);
+        let second = tail_output(&path, first.new_offset).unwrap();
+        assert_eq!(second.text, "second line\n");
+    }
+
+    #[test]
+    fn tail_output_truncated_file_resets_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rotated.output");
+        std::fs::write(&path, b"original content\n").unwrap();
+        let first = tail_output(&path, 0).unwrap();
+        // Simulate truncation: write new shorter content, pass old offset > new len.
+        std::fs::write(&path, b"new\n").unwrap();
+        let result = tail_output(&path, first.new_offset).unwrap();
+        // Offset was reset to 0 → reads full new content.
+        assert_eq!(result.text, "new\n");
+        assert_eq!(result.new_offset, 4);
+    }
+
+    #[test]
+    fn tail_output_missing_file_returns_not_found() {
+        let result = tail_output(std::path::Path::new("/nonexistent/path/foo.output"), 0);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
     }
 }
