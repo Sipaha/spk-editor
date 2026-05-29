@@ -541,7 +541,6 @@ fn serializable_snapshot(session: &SolutionSession, cx: &App) -> Vec<u8> {
         .cold_entries
         .iter()
         .enumerate()
-        .map(|(i, e)| (i, e))
         .chain(
             live_entries
                 .iter()

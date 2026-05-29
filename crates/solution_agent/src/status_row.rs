@@ -401,7 +401,7 @@ pub(crate) fn render_status_row(
                 .icon_size(IconSize::Small)
                 .icon_color(trigger_color)
                 .tooltip(ui::Tooltip::text(trigger_tooltip));
-            let weak_view = Some(weak_view.clone());
+            let weak_view = Some(weak_view);
             PopoverMenu::new("solution-status-cleanup-menu")
                 .trigger(trigger)
                 .menu(move |window, cx| {

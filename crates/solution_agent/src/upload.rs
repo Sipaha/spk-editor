@@ -945,7 +945,7 @@ mod tests {
             "opening fence too short ({opening_len}); inner 5-backtick line would break out",
         );
         // The closing fence is the LAST non-empty line and must match.
-        let closing = body.lines().filter(|l| !l.is_empty()).last().unwrap();
+        let closing = body.lines().rfind(|l| !l.is_empty()).unwrap();
         let closing_len = closing.chars().take_while(|&c| c == '`').count();
         assert_eq!(opening_len, closing_len, "open/close fences must match");
     }

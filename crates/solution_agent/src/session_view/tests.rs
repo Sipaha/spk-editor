@@ -74,7 +74,7 @@ fn next_selection_after_change_keeps_still_active_selection() {
     let mut active: HashMap<SharedString, SubagentTab> = HashMap::new();
     active.insert(id_a.clone(), make_tab("A"));
     active.insert(id_b.clone(), make_tab("B"));
-    let order = vec![id_a.clone(), id_b.clone()];
+    let order = vec![id_a.clone(), id_b];
     let next = SolutionSessionView::next_selection_after_change(
         &SubagentView::Task(id_a.clone()),
         &active,
