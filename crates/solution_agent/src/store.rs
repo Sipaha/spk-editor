@@ -71,6 +71,15 @@ pub struct SolutionAgentStore {
     /// `ensure_background_agent_watcher` (called from the tool-call
     /// handler in a later task of the Background Agents Strip plan).
     background_agent_watchers: HashMap<SolutionSessionId, gpui::Task<()>>,
+    /// One per-session background-shell watcher task — alive as long as the
+    /// session has >=1 registered `background_shells`. Stored as `Task<()>`
+    /// so dropping kills the watcher cleanly. Populated by
+    /// `ensure_background_shell_watcher` (called from the tool-call handler
+    /// when claude announces a `Bash(run_in_background=true)` launch). Keyed
+    /// by `session_id` and structurally identical to
+    /// `background_agent_watchers` (separate map so the two pipelines arm /
+    /// cancel independently).
+    background_shell_watchers: HashMap<SolutionSessionId, gpui::Task<()>>,
     /// Throttler for `workspace.session_metrics_changed` notifications.
     /// Caps emit rate at ~1 per 2 seconds per session so chatty fields
     /// (`last_activity_at`, `total_tokens`, `max_tokens`) don't flood
@@ -154,6 +163,11 @@ pub enum SolutionAgentStoreEvent {
     /// update, dead-detection, or removal. Same debounce semantics as
     /// `SessionSubagentsChanged`: emitted only when the map actually changed.
     SessionBackgroundAgentsChanged(SolutionSessionId),
+    /// `SolutionSession::background_shells` changed — registration, live-tail
+    /// snapshot update, or terminal-state transition. Same debounce semantics
+    /// as `SessionBackgroundAgentsChanged`: emitted only when the map actually
+    /// changed (a re-tail of an unchanged `.output` file does NOT re-emit).
+    SessionBackgroundShellsChanged(SolutionSessionId),
     /// Emitted when a session's conversation context has just been wiped
     /// in-place by `/clear` (`reset_context`) or `/compact`
     /// (`rotate_context`). Remote clients use this to drop their cached
@@ -620,6 +634,7 @@ impl SolutionAgentStore {
             focus_resolver: None,
             entry_update_throttles: HashMap::new(),
             background_agent_watchers: HashMap::new(),
+            background_shell_watchers: HashMap::new(),
             metrics_emitter: MetricsEmitter::new(),
             _solution_subscription: solution_subscription,
             _bg_agents_tick: Some(bg_agents_tick),
@@ -2451,6 +2466,11 @@ impl SolutionAgentStore {
             /// stashes `agentId` + `output_file` here when the tool call
             /// completes). Empty for in-progress / non-Agent calls.
             raw_output_text: Option<String>,
+            /// Raw tool-call input JSON, captured so the background-shell
+            /// branch can read `run_in_background` + `command` without
+            /// re-borrowing the entry. `None` when the tool call has no
+            /// `raw_input`.
+            raw_input: Option<serde_json::Value>,
         }
         let snapshot = {
             let session = session_entity.read(cx);
@@ -2510,8 +2530,118 @@ impl SolutionAgentStore {
                 subagent_type,
                 tool_name: tool_name_owned,
                 raw_output_text,
+                raw_input: call.raw_input.clone(),
             }
         };
+
+        // Background-shell registration (Tasks 7 + 9 of the Background
+        // Shells Strip plan). claude's `Bash(run_in_background=true)` launches
+        // a detached process that writes its combined stdout/stderr to an
+        // on-disk `tasks/<id>.output` file; the path + short id are surfaced
+        // in the launch announcement carried in the tool call's `raw_output`.
+        //
+        // This MUST run before the `is_task_like` early-return below: `Bash`
+        // is not in the `Task | Agent` task-like set, so the gate would
+        // otherwise skip it. We register the shell, persist it, arm the
+        // per-session `tasks/` watcher, and do one inline tail to close the
+        // launch→first-write race — then fall through to the early-return
+        // (which fires for `Bash`, leaving the subagent-pill logic untouched).
+        if snapshot.is_terminal
+            && snapshot.tool_name.as_deref() == Some("Bash")
+            && snapshot
+                .raw_input
+                .as_ref()
+                .and_then(|v| v.get("run_in_background"))
+                .and_then(|v| v.as_bool())
+                == Some(true)
+        {
+            let raw_output_text = snapshot.raw_output_text.clone().unwrap_or_default();
+            if let Some((shell_id, output_path)) =
+                crate::background_shell::parse_bash_bg_launch(&raw_output_text)
+            {
+                let already = session_entity
+                    .read(cx)
+                    .background_shells
+                    .contains_key(&shell_id);
+                if !already {
+                    // Command label: prefer `raw_input.command`, fall back to
+                    // `raw_input.description`; truncate to 120 chars so a long
+                    // pipeline doesn't blow out the strip.
+                    let command_label: SharedString = snapshot
+                        .raw_input
+                        .as_ref()
+                        .and_then(|v| {
+                            v.get("command")
+                                .or_else(|| v.get("description"))
+                                .and_then(|c| c.as_str())
+                        })
+                        .map(|s| s.chars().take(120).collect::<String>())
+                        .unwrap_or_default()
+                        .into();
+                    let registered_at = chrono::Utc::now();
+                    let id_for_insert = shell_id.clone();
+                    let path_for_insert = output_path.clone();
+                    let command_for_insert = command_label.clone();
+                    session_entity.update(cx, |s, _| {
+                        s.background_shells.insert(
+                            id_for_insert.clone(),
+                            crate::background_shell::BackgroundShell {
+                                id: id_for_insert.clone(),
+                                command: command_for_insert,
+                                output_path: path_for_insert,
+                                registered_at,
+                                latest: None,
+                                last_offset: 0,
+                                state: crate::background_shell::ShellRuntimeState::Running,
+                            },
+                        );
+                        s.background_shell_order.push(id_for_insert);
+                    });
+                    cx.emit(SolutionAgentStoreEvent::SessionBackgroundShellsChanged(
+                        session_id,
+                    ));
+
+                    // Persist to SQLite if the store has a backing DB. The
+                    // in-memory test stores leave `persistence` as `None`.
+                    if let Some(db) = self.persistence.clone() {
+                        let row = crate::db::BackgroundShellRow {
+                            solution_session_id: session_id.to_string(),
+                            shell_id: shell_id.as_str().to_string(),
+                            command: command_label.to_string(),
+                            output_path: output_path.to_string_lossy().into_owned(),
+                            registered_at_ms: registered_at.timestamp_millis(),
+                            last_tail: None,
+                            last_mtime_ms: None,
+                            state_text: "running".to_string(),
+                        };
+                        cx.background_spawn(async move {
+                            db.save_background_shell(row).await.log_err();
+                        })
+                        .detach();
+                    }
+
+                    // Arm the per-session watcher on the `tasks/` directory
+                    // (the announcement path's parent). A session without a
+                    // project skips the watcher — the row is still registered
+                    // and the inline refresh below seeds the first snapshot.
+                    if let (Some(fs), Some(tasks_dir)) = (
+                        session_entity
+                            .read(cx)
+                            .project
+                            .as_ref()
+                            .map(|p| p.read(cx).fs().clone()),
+                        output_path.parent().map(|p| p.to_path_buf()),
+                    ) {
+                        self.ensure_background_shell_watcher(session_id, fs, tasks_dir, cx);
+                    }
+
+                    // Close the launch→watcher-subscribe race: claude often
+                    // has already written the first bytes by the time `Bash`
+                    // returns, but `fs.watch` resolves on a background task.
+                    self.refresh_background_shell_snapshot(session_id, shell_id, cx);
+                }
+            }
+        }
 
         if !snapshot.is_task_like {
             return;
@@ -2789,6 +2919,115 @@ impl SolutionAgentStore {
         });
         if changed {
             cx.emit(SolutionAgentStoreEvent::SessionBackgroundAgentsChanged(
+                session_id,
+            ));
+        }
+    }
+
+    /// Spawn (idempotently) a per-session watcher on the `tasks/`
+    /// directory that hosts the background-shell `.output` files (passed
+    /// in as `tasks_dir` — it's the parent of the announcement path; we do
+    /// NOT re-derive it from cwd the way the managed-agent watcher does,
+    /// since the layout is `/tmp/claude-<uid>/<encoded-cwd>/<ses>/tasks/`
+    /// rather than `~/.claude/...`). Each `PathEvent` on a `<id>.output`
+    /// filename triggers a `refresh_background_shell_snapshot` for the
+    /// matching tracked `BackgroundShell`. The watcher task lives in
+    /// `background_shell_watchers` keyed by `session_id` — drop the entry
+    /// (or drop the store) to cancel. Safe to call repeatedly: a second
+    /// call for the same session is a no-op.
+    pub(crate) fn ensure_background_shell_watcher(
+        &mut self,
+        session_id: SolutionSessionId,
+        fs: Arc<dyn fs::Fs>,
+        tasks_dir: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        if self.background_shell_watchers.contains_key(&session_id) {
+            return;
+        }
+        let task = cx.spawn(async move |this, cx| {
+            let (mut stream, _watcher) = fs
+                .watch(&tasks_dir, std::time::Duration::from_millis(200))
+                .await;
+            use futures::StreamExt;
+            while let Some(events) = stream.next().await {
+                for event in events {
+                    let Some(name) = event.path.file_name().and_then(|n| n.to_str()) else {
+                        continue;
+                    };
+                    if !name.ends_with(".output") {
+                        continue;
+                    }
+                    let shell_id_str = name.trim_end_matches(".output").to_string();
+                    // Dropping the Result is the established cancellation
+                    // signal: if the store entity is gone, the watcher
+                    // task is about to be dropped anyway.
+                    let _ = this.update(cx, |this, cx| {
+                        this.refresh_background_shell_snapshot(
+                            session_id,
+                            crate::background_shell::BackgroundShellId::new(shell_id_str),
+                            cx,
+                        );
+                    });
+                }
+            }
+        });
+        self.background_shell_watchers.insert(session_id, task);
+    }
+
+    /// Live-tail the `.output` file for `shell_id` on `session_id`, write
+    /// the trailing window into `BackgroundShell::latest`, and emit
+    /// [`SolutionAgentStoreEvent::SessionBackgroundShellsChanged`] iff the
+    /// file actually advanced. Unlike the managed-agent snapshot (last
+    /// JSONL line only), this reads the full trailing window for display —
+    /// so we pass `0` to `tail_output` and let its 64 KiB cap bound the
+    /// read. No-op when the session is gone, the shell isn't tracked, or
+    /// the file can't be read yet (missing file → "no snapshot yet", not a
+    /// failure). Does NOT touch `state`: registration sets `Running` and
+    /// the terminal-state transition (Task 8) owns the rest.
+    pub(crate) fn refresh_background_shell_snapshot(
+        &mut self,
+        session_id: SolutionSessionId,
+        shell_id: crate::background_shell::BackgroundShellId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session(session_id) else {
+            return;
+        };
+        let Some((output_path, stored_last_offset)) = session
+            .read(cx)
+            .background_shells
+            .get(&shell_id)
+            .map(|sh| (sh.output_path.clone(), sh.last_offset))
+        else {
+            return;
+        };
+        // Always read the full trailing window (offset 0) for display; the
+        // `changed` decision below uses the file length, not this read start.
+        let tail = match crate::background_shell::tail_output(&output_path, 0) {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+        let new_offset = tail.new_offset;
+        // The file advanced iff its end moved past what we last recorded.
+        // A first non-empty read (stored offset 0, file non-empty) also
+        // counts as changed.
+        let changed = new_offset != stored_last_offset;
+        let tail_text = tail.text;
+        let tail_mtime = tail.mtime;
+        session.update(cx, |s, _| {
+            if let Some(sh) = s.background_shells.get_mut(&shell_id) {
+                sh.last_offset = new_offset;
+                if !tail_text.is_empty() {
+                    sh.latest = Some(crate::background_shell::BackgroundShellSnapshot {
+                        mtime: tail_mtime,
+                        output_tail: tail_text.into(),
+                    });
+                }
+            }
+        });
+        if changed {
+            cx.emit(SolutionAgentStoreEvent::SessionBackgroundShellsChanged(
                 session_id,
             ));
         }

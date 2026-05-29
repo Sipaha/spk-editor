@@ -3392,6 +3392,192 @@ async fn agent_terminal_with_parseable_raw_output_registers_background_agent(
     );
 }
 
+/// Build a `Bash` ToolCall carrying a `run_in_background` flag in
+/// `raw_input` and the launch announcement in `raw_output`. Mirrors how
+/// claude_code shapes a backgrounded `Bash` call.
+fn make_bash_bg_tool_call(
+    id: &str,
+    command: &str,
+    run_in_background: bool,
+    raw_output: Option<&str>,
+) -> agent_client_protocol::schema::ToolCall {
+    use agent_client_protocol::schema as acp;
+    let mut raw_input = serde_json::Map::new();
+    raw_input.insert("command".into(), serde_json::Value::String(command.into()));
+    raw_input.insert(
+        "run_in_background".into(),
+        serde_json::Value::Bool(run_in_background),
+    );
+    let mut call = acp::ToolCall::new(acp::ToolCallId::new(id.to_string()), "Bash".to_string())
+        .kind(acp::ToolKind::Execute)
+        .status(acp::ToolCallStatus::Completed)
+        .meta(Some(acp_thread::meta_with_tool_name("Bash")))
+        .raw_input(serde_json::Value::Object(raw_input));
+    if let Some(out) = raw_output {
+        call = call.raw_output(serde_json::Value::String(out.to_string()));
+    }
+    call
+}
+
+/// Background-Shells-Strip Tasks 7 + 9: a terminal `Bash` tool call with
+/// `run_in_background=true` and a parseable launch announcement registers a
+/// `BackgroundShell` (before the `is_task_like` gate, since `Bash` is not a
+/// task-like tool) and emits `SessionBackgroundShellsChanged`.
+#[gpui::test]
+async fn bash_run_in_background_terminal_registers_background_shell(cx: &mut TestAppContext) {
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+
+    let bg_counter = Rc::new(std::cell::RefCell::new(0usize));
+    let _bg_sub = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let counter = bg_counter.clone();
+        cx.subscribe(&store, move |_store, event, _cx| {
+            if let SolutionAgentStoreEvent::SessionBackgroundShellsChanged(id) = event
+                && *id == session_id
+            {
+                *counter.borrow_mut() += 1;
+            }
+        })
+    });
+
+    const ANNOUNCEMENT: &str = "Command running in background with ID: bvb4ful1z. Output is being written to: /tmp/claude-1000/-home-spk-proj/ses-x/tasks/bvb4ful1z.output. You will be notified when it completes.";
+
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.upsert_tool_call(
+                make_bash_bg_tool_call("toolu_bash_1", "sleep 60", true, Some(ANNOUNCEMENT)),
+                cx,
+            )
+            .expect("upsert bash bg");
+        });
+    });
+    cx.executor().run_until_parked();
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(session_id).expect("session exists");
+        let s = session.read(cx);
+        assert_eq!(
+            s.background_shells.len(),
+            1,
+            "one background-shell registered on Bash(bg) terminal"
+        );
+        assert_eq!(s.background_shell_order.len(), 1, "order vec parallel");
+        let id = crate::background_shell::BackgroundShellId::new("bvb4ful1z");
+        assert!(
+            s.background_shells.contains_key(&id),
+            "registration keyed on parsed shell id"
+        );
+        assert_eq!(s.background_shell_order[0], id);
+        let shell = s.background_shells.get(&id).expect("shell present");
+        assert_eq!(
+            shell.output_path,
+            PathBuf::from(
+                "/tmp/claude-1000/-home-spk-proj/ses-x/tasks/bvb4ful1z.output"
+            ),
+            "output_path parsed from announcement"
+        );
+        assert_eq!(shell.command.as_ref(), "sleep 60", "command label captured");
+        assert_eq!(
+            shell.state,
+            crate::background_shell::ShellRuntimeState::Running,
+            "fresh shell is Running"
+        );
+    });
+    assert_eq!(
+        *bg_counter.borrow(),
+        1,
+        "SessionBackgroundShellsChanged emitted exactly once on registration"
+    );
+}
+
+/// Tasks 7 + 9: a `Bash` tool call WITHOUT `run_in_background` (false) must
+/// NOT register a background shell — the `run_in_background == Some(true)`
+/// guard rejects it.
+#[gpui::test]
+async fn bash_without_run_in_background_registers_no_shell(cx: &mut TestAppContext) {
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+
+    const ANNOUNCEMENT: &str = "Command running in background with ID: bvb4ful1z. Output is being written to: /tmp/claude-1000/proj/tasks/bvb4ful1z.output. You will be notified.";
+
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.upsert_tool_call(
+                // run_in_background = false, but with an announcement-shaped
+                // raw_output — the guard must still reject it.
+                make_bash_bg_tool_call("toolu_bash_2", "echo hi", false, Some(ANNOUNCEMENT)),
+                cx,
+            )
+            .expect("upsert non-bg bash");
+        });
+    });
+    cx.executor().run_until_parked();
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(session_id).expect("session exists");
+        let s = session.read(cx);
+        assert!(
+            s.background_shells.is_empty(),
+            "no shell registered for a non-background Bash call"
+        );
+        assert!(s.background_shell_order.is_empty());
+    });
+}
+
+/// Tasks 7 + 9: after registration, `refresh_background_shell_snapshot`
+/// live-tails the on-disk `.output` file into `BackgroundShell::latest`.
+/// Drives the full launch→register→tail pipeline against a real temp file.
+#[gpui::test]
+async fn refresh_background_shell_snapshot_tails_output_file(cx: &mut TestAppContext) {
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let output_path = dir.path().join("tasks").join("bvb4ful1z.output");
+    std::fs::create_dir_all(output_path.parent().expect("parent")).expect("mkdir tasks");
+    std::fs::write(&output_path, b"line one\nline two\n").expect("write output");
+
+    let announcement = format!(
+        "Command running in background with ID: bvb4ful1z. Output is being written to: {}. You will be notified.",
+        output_path.display()
+    );
+
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.upsert_tool_call(
+                make_bash_bg_tool_call("toolu_bash_3", "tail -f log", true, Some(&announcement)),
+                cx,
+            )
+            .expect("upsert bash bg");
+        });
+    });
+    cx.executor().run_until_parked();
+
+    // The inline refresh in the registration branch already tailed the file
+    // (the announcement path is a real temp file). Assert the snapshot.
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(session_id).expect("session exists");
+        let s = session.read(cx);
+        let id = crate::background_shell::BackgroundShellId::new("bvb4ful1z");
+        let shell = s.background_shells.get(&id).expect("shell present");
+        let latest = shell
+            .latest
+            .as_ref()
+            .expect("inline refresh seeded a snapshot from the real file");
+        assert!(
+            latest.output_tail.contains("line one")
+                && latest.output_tail.contains("line two"),
+            "tail captured the file bytes, got: {:?}",
+            latest.output_tail
+        );
+        assert_eq!(
+            shell.last_offset, 18,
+            "offset advanced past the 18 written bytes"
+        );
+    });
+}
+
 /// Task 9: a Managed Agent whose `latest.stop_reason` is `Some(...)` is
 /// removed from the session on the next `tick_background_agents` pass,
 /// and a `SessionBackgroundAgentsChanged` event is emitted.

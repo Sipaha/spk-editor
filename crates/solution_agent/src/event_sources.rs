@@ -134,6 +134,11 @@ pub fn install(cx: &mut App) {
                 // event is consumed locally (session_view subscribes
                 // directly to the store).
                 SolutionAgentStoreEvent::SessionBackgroundAgentsChanged(_) => {}
+                // Background-shell updates are consumed locally for now
+                // (session_view subscribes to the store directly); a
+                // dedicated wire notification is a later task in the
+                // Background Shells Strip plan.
+                SolutionAgentStoreEvent::SessionBackgroundShellsChanged(_) => {}
             }),
         );
     });
