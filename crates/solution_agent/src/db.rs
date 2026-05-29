@@ -23,6 +23,19 @@ pub struct BackgroundAgentRow {
     pub stop_reason: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackgroundShellRow {
+    pub solution_session_id: String,
+    pub shell_id: String,
+    pub command: String,
+    pub output_path: String,
+    pub registered_at_ms: i64,
+    pub last_tail: Option<String>,
+    pub last_mtime_ms: Option<i64>,
+    /// Serialized runtime state: `"running"`, `"exited:N"`, or `"killed"`.
+    pub state_text: String,
+}
+
 pub struct SolutionAgentDb {
     executor: BackgroundExecutor,
     connection: Arc<Mutex<Connection>>,
@@ -154,6 +167,32 @@ impl SolutionAgentDb {
         .map_err(|e| anyhow!("Failed to create idx_bg_agent_by_session: {}", e))?;
 
         connection.exec(indoc! {"
+            CREATE TABLE IF NOT EXISTS solution_session_background_shell (
+                solution_session_id TEXT NOT NULL,
+                shell_id            TEXT NOT NULL,
+                command             TEXT NOT NULL,
+                output_path         TEXT NOT NULL,
+                registered_at_ms    INTEGER NOT NULL,
+                last_tail           TEXT,
+                last_mtime_ms       INTEGER,
+                state_text          TEXT NOT NULL,
+                PRIMARY KEY (solution_session_id, shell_id)
+            )
+        "})?()
+        .map_err(|e| {
+            anyhow!(
+                "Failed to create solution_session_background_shell table: {}",
+                e
+            )
+        })?;
+
+        connection.exec(indoc! {"
+            CREATE INDEX IF NOT EXISTS idx_bg_shell_by_session
+                ON solution_session_background_shell (solution_session_id)
+        "})?()
+        .map_err(|e| anyhow!("Failed to create idx_bg_shell_by_session: {}", e))?;
+
+        connection.exec(indoc! {"
             CREATE INDEX IF NOT EXISTS idx_session_by_solution
                 ON solution_sessions (solution_id, last_activity_at DESC)
         "})?()
@@ -236,6 +275,48 @@ impl SolutionAgentDb {
         self.executor.spawn(async move {
             let connection = connection.lock();
             delete_background_agent_by_id(&connection, &solution_session_id, &agent_id)
+        })
+    }
+
+    pub fn save_background_shell(&self, row: BackgroundShellRow) -> Task<Result<()>> {
+        let connection = self.connection.clone();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            insert_or_update_background_shell(&connection, &row)
+        })
+    }
+
+    pub fn load_background_shells(
+        &self,
+        solution_session_id: String,
+    ) -> Task<Result<Vec<BackgroundShellRow>>> {
+        let connection = self.connection.clone();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            select_background_shells_for_session(&connection, &solution_session_id)
+        })
+    }
+
+    pub fn delete_background_shell(
+        &self,
+        solution_session_id: String,
+        shell_id: String,
+    ) -> Task<Result<()>> {
+        let connection = self.connection.clone();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            delete_background_shell_by_id(&connection, &solution_session_id, &shell_id)
+        })
+    }
+
+    pub fn delete_background_shells_for_session(
+        &self,
+        solution_session_id: String,
+    ) -> Task<Result<()>> {
+        let connection = self.connection.clone();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            delete_background_shells_for_session(&connection, &solution_session_id)
         })
     }
 
@@ -611,6 +692,104 @@ fn delete_background_agent_by_id(
     Ok(())
 }
 
+fn insert_or_update_background_shell(
+    connection: &Connection,
+    row: &BackgroundShellRow,
+) -> Result<()> {
+    let mut stmt = connection.exec_bound::<(
+        String,
+        String,
+        String,
+        String,
+        i64,
+        Option<String>,
+        Option<i64>,
+        String,
+    )>(indoc! {"
+        INSERT INTO solution_session_background_shell
+            (solution_session_id, shell_id, command, output_path, registered_at_ms,
+             last_tail, last_mtime_ms, state_text)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(solution_session_id, shell_id) DO UPDATE SET
+            command          = excluded.command,
+            output_path      = excluded.output_path,
+            last_tail        = excluded.last_tail,
+            last_mtime_ms    = excluded.last_mtime_ms,
+            state_text       = excluded.state_text
+    "})?;
+    stmt((
+        row.solution_session_id.clone(),
+        row.shell_id.clone(),
+        row.command.clone(),
+        row.output_path.clone(),
+        row.registered_at_ms,
+        row.last_tail.clone(),
+        row.last_mtime_ms,
+        row.state_text.clone(),
+    ))?;
+    Ok(())
+}
+
+fn select_background_shells_for_session(
+    connection: &Connection,
+    solution_session_id: &str,
+) -> Result<Vec<BackgroundShellRow>> {
+    let mut stmt = connection.select_bound::<String, (
+        String,
+        String,
+        String,
+        String,
+        i64,
+        Option<String>,
+        Option<i64>,
+        String,
+    )>(indoc! {"
+        SELECT solution_session_id, shell_id, command, output_path,
+               registered_at_ms, last_tail, last_mtime_ms, state_text
+        FROM   solution_session_background_shell
+        WHERE  solution_session_id = ?
+    "})?;
+    let rows = stmt(solution_session_id.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|(sid, shell_id, command, output_path, r, lt, m, st)| BackgroundShellRow {
+            solution_session_id: sid,
+            shell_id,
+            command,
+            output_path,
+            registered_at_ms: r,
+            last_tail: lt,
+            last_mtime_ms: m,
+            state_text: st,
+        })
+        .collect())
+}
+
+fn delete_background_shell_by_id(
+    connection: &Connection,
+    solution_session_id: &str,
+    shell_id: &str,
+) -> Result<()> {
+    let mut stmt = connection.exec_bound::<(String, String)>(indoc! {"
+        DELETE FROM solution_session_background_shell
+        WHERE solution_session_id = ? AND shell_id = ?
+    "})?;
+    stmt((solution_session_id.to_string(), shell_id.to_string()))?;
+    Ok(())
+}
+
+fn delete_background_shells_for_session(
+    connection: &Connection,
+    solution_session_id: &str,
+) -> Result<()> {
+    let mut stmt = connection.exec_bound::<String>(indoc! {"
+        DELETE FROM solution_session_background_shell
+        WHERE solution_session_id = ?
+    "})?;
+    stmt(solution_session_id.to_string())?;
+    Ok(())
+}
+
 fn delete_by_solution(connection: &Connection, solution_id: &SolutionId) -> Result<()> {
     let mut delete = connection.exec_bound::<String>(indoc! {"
         DELETE FROM solution_sessions WHERE solution_id = ?
@@ -964,6 +1143,104 @@ mod tests {
             .unwrap();
         let loaded = db.load_background_agents("ses-1".into()).await.unwrap();
         assert!(loaded.is_empty());
+    }
+
+    #[gpui::test]
+    async fn background_shell_round_trip(cx: &mut gpui::TestAppContext) {
+        let executor = cx.executor();
+        let db = SolutionAgentDb::open(executor).unwrap();
+        let row = BackgroundShellRow {
+            solution_session_id: "ses-1".into(),
+            shell_id: "bvb4ful1z".into(),
+            command: "npm run watch".into(),
+            output_path: "/tmp/bvb4ful1z.output".into(),
+            registered_at_ms: 1_700_000_000_000,
+            last_tail: Some("Watching for changes...".into()),
+            last_mtime_ms: Some(1_700_000_001_000),
+            state_text: "running".into(),
+        };
+        db.save_background_shell(row.clone()).await.unwrap();
+        let loaded = db.load_background_shells("ses-1".into()).await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0], row);
+
+        // Verify None variants for optional fields also round-trip.
+        let row_no_opts = BackgroundShellRow {
+            solution_session_id: "ses-1".into(),
+            shell_id: "xyz123".into(),
+            command: "sleep 60".into(),
+            output_path: "/tmp/xyz123.output".into(),
+            registered_at_ms: 1_700_000_002_000,
+            last_tail: None,
+            last_mtime_ms: None,
+            state_text: "exited:0".into(),
+        };
+        db.save_background_shell(row_no_opts.clone()).await.unwrap();
+        let loaded = db.load_background_shells("ses-1".into()).await.unwrap();
+        assert_eq!(loaded.len(), 2);
+        let found = loaded.iter().find(|r| r.shell_id == "xyz123").unwrap();
+        assert_eq!(found, &row_no_opts);
+    }
+
+    #[gpui::test]
+    async fn background_shell_delete_by_id(cx: &mut gpui::TestAppContext) {
+        let executor = cx.executor();
+        let db = SolutionAgentDb::open(executor).unwrap();
+        let row = BackgroundShellRow {
+            solution_session_id: "ses-1".into(),
+            shell_id: "bvb4ful1z".into(),
+            command: "npm run watch".into(),
+            output_path: "/tmp/bvb4ful1z.output".into(),
+            registered_at_ms: 1_700_000_000_000,
+            last_tail: None,
+            last_mtime_ms: None,
+            state_text: "running".into(),
+        };
+        db.save_background_shell(row).await.unwrap();
+        db.delete_background_shell("ses-1".into(), "bvb4ful1z".into())
+            .await
+            .unwrap();
+        let loaded = db.load_background_shells("ses-1".into()).await.unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[gpui::test]
+    async fn background_shell_delete_for_session_only_removes_that_session(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let executor = cx.executor();
+        let db = SolutionAgentDb::open(executor).unwrap();
+
+        let make_row = |session: &str, shell: &str| BackgroundShellRow {
+            solution_session_id: session.into(),
+            shell_id: shell.into(),
+            command: "echo hi".into(),
+            output_path: format!("/tmp/{shell}.output"),
+            registered_at_ms: 1_700_000_000_000,
+            last_tail: None,
+            last_mtime_ms: None,
+            state_text: "killed".into(),
+        };
+
+        db.save_background_shell(make_row("ses-1", "shell-a"))
+            .await
+            .unwrap();
+        db.save_background_shell(make_row("ses-1", "shell-b"))
+            .await
+            .unwrap();
+        db.save_background_shell(make_row("ses-2", "shell-c"))
+            .await
+            .unwrap();
+
+        db.delete_background_shells_for_session("ses-1".into())
+            .await
+            .unwrap();
+
+        let ses1 = db.load_background_shells("ses-1".into()).await.unwrap();
+        assert!(ses1.is_empty());
+        let ses2 = db.load_background_shells("ses-2".into()).await.unwrap();
+        assert_eq!(ses2.len(), 1);
+        assert_eq!(ses2[0].shell_id, "shell-c");
     }
 
     #[gpui::test]
