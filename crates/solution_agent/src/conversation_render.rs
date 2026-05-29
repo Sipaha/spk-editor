@@ -992,6 +992,49 @@ fn render_message_time(
     )
 }
 
+/// Extract a one-line summary of the most informative string value from a
+/// tool call's `raw_input` for display next to the tool name. Mirrors the
+/// pattern from `background_agent::derive_assistant_label`: prefers a
+/// well-known argument name (`command`, `file_path`, `path`, `pattern`,
+/// `query`, `url`) when present so a Bash call surfaces its command,
+/// a Read surfaces its file_path, etc. Falls back to the first non-empty
+/// string value in the input object. Truncates to ~120 chars (single
+/// line, ellipsis suffix on overflow) so even a multi-line bash invocation
+/// stays glanceable on the tool header.
+fn tool_call_arg_preview(raw_input: &serde_json::Value) -> Option<String> {
+    const PREFERRED_KEYS: &[&str] = &[
+        "command",
+        "file_path",
+        "path",
+        "pattern",
+        "query",
+        "url",
+        "old_string",
+    ];
+    const MAX_LEN: usize = 120;
+    let obj = raw_input.as_object()?;
+    let picked = PREFERRED_KEYS
+        .iter()
+        .find_map(|k| obj.get(*k).and_then(|v| v.as_str()).filter(|s| !s.is_empty()))
+        .or_else(|| {
+            obj.values()
+                .find_map(|v| v.as_str().filter(|s| !s.is_empty()))
+        })?;
+    // Single-line: replace embedded newlines with `↵` so a multi-line
+    // shell pipeline collapses without dropping content silently.
+    let single_line: String = picked
+        .chars()
+        .map(|c| if c == '\n' { '↵' } else { c })
+        .collect();
+    let truncated: String = single_line.chars().take(MAX_LEN).collect();
+    let needs_ellipsis = single_line.chars().count() > MAX_LEN;
+    Some(if needs_ellipsis {
+        format!("{truncated}…")
+    } else {
+        truncated
+    })
+}
+
 pub(crate) fn render_tool_call(
     entry_idx: usize,
     call: &ToolCall,
@@ -1024,6 +1067,18 @@ pub(crate) fn render_tool_call(
         None
     };
 
+    // Pull a one-line preview of the most informative input arg so the
+    // header reads e.g. `Bash · cargo build --bin spk-editor …` instead
+    // of a bare `Bash`. Without this the user can't tell which file a
+    // Read targeted, which pattern a Grep searched for, or which command
+    // a Bash actually ran — only the output is shown, which is often
+    // ambiguous (a green `cargo check` and a green `cargo build` look
+    // identical post-hoc).
+    let arg_preview = call
+        .raw_input
+        .as_ref()
+        .and_then(tool_call_arg_preview);
+
     let mut container = v_flex()
         .gap_0p5()
         .my_1()
@@ -1045,6 +1100,19 @@ pub(crate) fn render_tool_call(
                     markdown_for,
                     style,
                 ))
+                .when_some(arg_preview, |this, preview| {
+                    this.child(
+                        Label::new(SharedString::from("·"))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .child(
+                        Label::new(SharedString::from(preview))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted)
+                            .truncate(),
+                    )
+                })
                 .child(
                     Label::new(status_text)
                         .size(LabelSize::XSmall)
@@ -1374,6 +1442,62 @@ mod tests {
         // generates a fresh UUID).
         serde_json::from_value(serde_json::Value::String(label.into()))
             .expect("UserMessageId deserializes from any string")
+    }
+
+    #[test]
+    fn tool_call_arg_preview_prefers_command_for_bash() {
+        let input = serde_json::json!({
+            "description": "Run build",
+            "command": "cargo build --release",
+            "timeout": 600
+        });
+        assert_eq!(
+            tool_call_arg_preview(&input),
+            Some("cargo build --release".to_string()),
+        );
+    }
+
+    #[test]
+    fn tool_call_arg_preview_prefers_file_path_for_read() {
+        let input = serde_json::json!({ "file_path": "/etc/hosts", "offset": 0 });
+        assert_eq!(
+            tool_call_arg_preview(&input),
+            Some("/etc/hosts".to_string()),
+        );
+    }
+
+    #[test]
+    fn tool_call_arg_preview_falls_back_to_first_string_value() {
+        let input = serde_json::json!({ "unknown_field": "some text", "n": 42 });
+        assert_eq!(
+            tool_call_arg_preview(&input),
+            Some("some text".to_string()),
+        );
+    }
+
+    #[test]
+    fn tool_call_arg_preview_collapses_newlines() {
+        let input = serde_json::json!({ "command": "echo a\necho b" });
+        assert_eq!(
+            tool_call_arg_preview(&input).as_deref(),
+            Some("echo a↵echo b"),
+        );
+    }
+
+    #[test]
+    fn tool_call_arg_preview_truncates_with_ellipsis() {
+        let long = "x".repeat(200);
+        let input = serde_json::json!({ "command": long });
+        let preview = tool_call_arg_preview(&input).unwrap();
+        assert!(preview.ends_with('…'));
+        assert!(preview.chars().count() <= 121);
+    }
+
+    #[test]
+    fn tool_call_arg_preview_none_for_empty_input() {
+        assert!(tool_call_arg_preview(&serde_json::json!({})).is_none());
+        assert!(tool_call_arg_preview(&serde_json::json!(null)).is_none());
+        assert!(tool_call_arg_preview(&serde_json::json!({ "command": "" })).is_none());
     }
 
     #[test]
