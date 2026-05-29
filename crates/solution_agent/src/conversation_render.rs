@@ -1011,7 +1011,12 @@ fn tool_call_arg_preview(raw_input: &serde_json::Value) -> Option<String> {
         "url",
         "old_string",
     ];
-    const MAX_LEN: usize = 120;
+    // On its own sub-row under the tool header (`render_tool_call`),
+    // `.truncate()` on the Label clips to whatever width the container
+    // has. The cap below is a memory guard for pathological inputs
+    // (`raw_input` could carry a multi-megabyte string), not a layout
+    // constraint — leave it generous so wide windows show more.
+    const MAX_LEN: usize = 240;
     let obj = raw_input.as_object()?;
     let picked = PREFERRED_KEYS
         .iter()
@@ -1067,11 +1072,11 @@ pub(crate) fn render_tool_call(
         None
     };
 
-    // Pull a one-line preview of the most informative input arg so the
-    // header reads e.g. `Bash · cargo build --bin spk-editor …` instead
-    // of a bare `Bash`. Without this the user can't tell which file a
-    // Read targeted, which pattern a Grep searched for, or which command
-    // a Bash actually ran — only the output is shown, which is often
+    // Pull a one-line preview of the most informative input arg —
+    // command for Bash, file_path for Read/Edit, pattern for Grep, etc.
+    // Without this the user can't tell which file a Read targeted,
+    // which pattern a Grep searched for, or which command a Bash
+    // actually ran — only the output is shown, which is often
     // ambiguous (a green `cargo check` and a green `cargo build` look
     // identical post-hoc).
     let arg_preview = call
@@ -1100,19 +1105,6 @@ pub(crate) fn render_tool_call(
                     markdown_for,
                     style,
                 ))
-                .when_some(arg_preview, |this, preview| {
-                    this.child(
-                        Label::new(SharedString::from("·"))
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    )
-                    .child(
-                        Label::new(SharedString::from(preview))
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted)
-                            .truncate(),
-                    )
-                })
                 .child(
                     Label::new(status_text)
                         .size(LabelSize::XSmall)
@@ -1125,7 +1117,22 @@ pub(crate) fn render_tool_call(
                             .color(Color::Muted),
                     )
                 }),
-        );
+        )
+        // Preview lives on its own row under the header. Saves the
+        // crammed-into-the-title-line layout where a long shell
+        // pipeline truncated mid-word and pushed the status badge off
+        // to the right; the preview now wraps naturally and the
+        // status stays glanceable.
+        .when_some(arg_preview, |this, preview| {
+            this.child(
+                div().pl_4().child(
+                    Label::new(SharedString::from(preview))
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted)
+                        .truncate(),
+                ),
+            )
+        });
 
     let mut span_idx = 1;
     for content in &call.content {
@@ -1486,11 +1493,11 @@ mod tests {
 
     #[test]
     fn tool_call_arg_preview_truncates_with_ellipsis() {
-        let long = "x".repeat(200);
+        let long = "x".repeat(400);
         let input = serde_json::json!({ "command": long });
         let preview = tool_call_arg_preview(&input).unwrap();
         assert!(preview.ends_with('…'));
-        assert!(preview.chars().count() <= 121);
+        assert!(preview.chars().count() <= 241);
     }
 
     #[test]
