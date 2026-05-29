@@ -195,6 +195,12 @@ pub enum SubagentView {
     Main,
     Task(SharedString),
     Background(crate::background_agent::BackgroundAgentId),
+    /// A background shell's (`Bash(run_in_background=true)`) live-tailed
+    /// output view. Like `Background`, it sources from disk rather than the
+    /// parent thread, so it is neither a parent-thread view nor a
+    /// parent-entry match. Drill-in body / pill rendering land in Tasks
+    /// 12/13.
+    Shell(crate::background_shell::BackgroundShellId),
 }
 
 impl SubagentView {

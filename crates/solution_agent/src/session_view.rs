@@ -481,6 +481,11 @@ impl SolutionSessionView {
                         this.on_background_agents_changed(cx);
                     }
                 }
+                crate::store::SolutionAgentStoreEvent::SessionBackgroundShellsChanged(sid) => {
+                    if *sid == this.session.read(cx).id {
+                        this.on_background_shells_changed(cx);
+                    }
+                }
                 _ => {}
             })
         });
@@ -855,7 +860,10 @@ impl SolutionSessionView {
         use crate::store::SubagentView;
         match current {
             SubagentView::Main => SubagentView::Main,
-            SubagentView::Background(_) => current.clone(),
+            // Background + Shell both live in their own on-disk transcript
+            // and don't participate in the parent thread's
+            // `active_subagents` lifecycle — pass through unchanged.
+            SubagentView::Background(_) | SubagentView::Shell(_) => current.clone(),
             SubagentView::Task(id) => {
                 if active_subagents.contains_key(id) {
                     SubagentView::Task(id.clone())
@@ -912,6 +920,26 @@ impl SolutionSessionView {
         }
     }
 
+    /// Pure carry-over fallback for background shells, mirroring
+    /// `next_selection_after_background_change`: identity for non-`Shell`
+    /// selections; identity for `Shell(id)` while the id is still present
+    /// in `background_shells`; `Main` when it isn't. Pure — no side
+    /// effects, so `tests.rs` can exercise the snap-on-drop behaviour
+    /// without a live GPUI view.
+    pub(crate) fn next_selection_after_shells_change(
+        current: &crate::store::SubagentView,
+        background_shells: &HashMap<
+            crate::background_shell::BackgroundShellId,
+            crate::background_shell::BackgroundShell,
+        >,
+    ) -> crate::store::SubagentView {
+        use crate::store::SubagentView;
+        match current {
+            SubagentView::Shell(id) if !background_shells.contains_key(id) => SubagentView::Main,
+            other => other.clone(),
+        }
+    }
+
     /// `true` when the compose row should be view-only (no input, no
     /// send, no Submit). Currently fires for `Background` views — the
     /// user is looking at a Managed Agent's JSONL transcript that has
@@ -942,6 +970,21 @@ impl SolutionSessionView {
         cx.notify();
     }
 
+    /// React to `SessionBackgroundShellsChanged`. If the currently selected
+    /// `Shell(id)` view's shell has been removed from
+    /// `session.background_shells`, snap `selected_subagent` back to `Main`.
+    /// Mirror of `on_background_agents_changed` for the shell pipeline.
+    pub(crate) fn on_background_shells_changed(&mut self, cx: &mut Context<Self>) {
+        let next = Self::next_selection_after_shells_change(
+            &self.selected_subagent,
+            &self.session.read(cx).background_shells,
+        );
+        if next != self.selected_subagent {
+            self.selected_subagent = next;
+        }
+        cx.notify();
+    }
+
     /// Populate `self.background_entries_for_render` from the selected
     /// Background view's JSONL transcript and return `true`, so the
     /// renderer knows to source list rows from that vec instead of the
@@ -957,7 +1000,11 @@ impl SolutionSessionView {
     pub(crate) fn build_background_entries_for_render(&mut self, cx: &mut App) -> bool {
         use crate::store::SubagentView;
         let (selected_id, path) = match &self.selected_subagent {
-            SubagentView::Main | SubagentView::Task(_) => {
+            // Task 12/13: Shell drill-in body sources from the shell's
+            // live-tailed `.output` file, not the background-agent JSONL.
+            // Until that lands, treat it like Main/Task here so this
+            // background-agent renderer paints nothing for it.
+            SubagentView::Main | SubagentView::Task(_) | SubagentView::Shell(_) => {
                 if !self.background_entries_for_render.is_empty() {
                     self.background_entries_for_render.clear();
                 }

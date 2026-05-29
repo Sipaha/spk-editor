@@ -188,6 +188,61 @@ fn next_selection_after_background_change_passes_through_main_and_task() {
     );
 }
 
+fn make_background_shell(id: &str) -> crate::background_shell::BackgroundShell {
+    crate::background_shell::BackgroundShell {
+        id: crate::background_shell::BackgroundShellId::new(id),
+        command: SharedString::from("sleep 100"),
+        output_path: std::path::PathBuf::from("/dev/null"),
+        registered_at: chrono::Utc::now(),
+        latest: None,
+        last_offset: 0,
+        state: crate::background_shell::ShellRuntimeState::Running,
+    }
+}
+
+#[test]
+fn next_selection_after_shells_change_snaps_stale_shell_to_main() {
+    // Stale Shell id: the shell exited / was reaped and is no longer in
+    // the session map. Renderer would paint empty; this snap fires off
+    // the `SessionBackgroundShellsChanged` handler and restores Main.
+    let stale = crate::background_shell::BackgroundShellId::new("bvb4ful1z");
+    let shells = HashMap::new();
+    let next = SolutionSessionView::next_selection_after_shells_change(
+        &SubagentView::Shell(stale),
+        &shells,
+    );
+    assert_eq!(next, SubagentView::Main);
+}
+
+#[test]
+fn next_selection_after_shells_change_keeps_live_shell() {
+    let id = crate::background_shell::BackgroundShellId::new("bvb4ful1z");
+    let mut shells = HashMap::new();
+    shells.insert(id.clone(), make_background_shell("bvb4ful1z"));
+    let next = SolutionSessionView::next_selection_after_shells_change(
+        &SubagentView::Shell(id.clone()),
+        &shells,
+    );
+    assert_eq!(next, SubagentView::Shell(id));
+}
+
+#[test]
+fn next_selection_after_change_preserves_shell_view() {
+    // Shell views render a background shell's live-tailed output, so a
+    // change in the Task subagent set must not perturb them.
+    let shell_id = crate::background_shell::BackgroundShellId::new("bvb4ful1z");
+    let id_a = SharedString::from("toolu_a");
+    let mut active: HashMap<SharedString, SubagentTab> = HashMap::new();
+    active.insert(id_a.clone(), make_tab("A"));
+    let order = vec![id_a];
+    let next = SolutionSessionView::next_selection_after_change(
+        &SubagentView::Shell(shell_id.clone()),
+        &active,
+        &order,
+    );
+    assert_eq!(next, SubagentView::Shell(shell_id));
+}
+
 #[test]
 fn next_selection_after_change_preserves_background_view() {
     // Background views render a Managed Agent's standalone JSONL transcript,
