@@ -3884,6 +3884,199 @@ async fn fresh_agent_survives_tick(cx: &mut TestAppContext) {
     });
 }
 
+/// Helper: insert one background shell into a session's tracking maps.
+fn insert_test_background_shell(
+    cx: &mut TestAppContext,
+    session_id: crate::model::SolutionSessionId,
+    shell_id: &crate::background_shell::BackgroundShellId,
+    state: crate::background_shell::ShellRuntimeState,
+    latest: Option<crate::background_shell::BackgroundShellSnapshot>,
+    registered_at: chrono::DateTime<chrono::Utc>,
+) {
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        let session = s.read(cx).session(session_id).unwrap();
+        session.update(cx, |s, _| {
+            s.background_shells.insert(
+                shell_id.clone(),
+                crate::background_shell::BackgroundShell {
+                    id: shell_id.clone(),
+                    command: SharedString::from("sleep 1"),
+                    output_path: "/nonexistent".into(),
+                    registered_at,
+                    latest,
+                    last_offset: 0,
+                    state,
+                },
+            );
+            s.background_shell_order.push(shell_id.clone());
+        });
+    });
+}
+
+/// Task 10: an `Exited(Some(0))` background shell is reaped on the next
+/// `tick_background_shells` pass (terminal-state arm).
+#[gpui::test]
+async fn exited_shell_removed_on_tick(cx: &mut TestAppContext) {
+    let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+    let shell_id = crate::background_shell::BackgroundShellId::new("bvb4ful1z");
+    insert_test_background_shell(
+        cx,
+        session_id,
+        &shell_id,
+        crate::background_shell::ShellRuntimeState::Exited(Some(0)),
+        Some(crate::background_shell::BackgroundShellSnapshot {
+            // Fresh mtime: proves it's the terminal state, not staleness,
+            // driving the removal.
+            mtime: std::time::SystemTime::now(),
+            output_tail: SharedString::from("done"),
+        }),
+        chrono::Utc::now(),
+    );
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        s.update(cx, |s, cx| s.tick_background_shells(cx));
+    });
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        let session = s.read(cx).session(session_id).unwrap();
+        assert!(
+            session.read(cx).background_shells.is_empty(),
+            "Exited shell must be removed on tick"
+        );
+        assert!(
+            session.read(cx).background_shell_order.is_empty(),
+            "order vec must be pruned in lockstep"
+        );
+    });
+}
+
+/// Task 10: a `Killed` background shell is reaped on tick (terminal-state arm).
+#[gpui::test]
+async fn killed_shell_removed_on_tick(cx: &mut TestAppContext) {
+    let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+    let shell_id = crate::background_shell::BackgroundShellId::new("bvb4ful1z");
+    insert_test_background_shell(
+        cx,
+        session_id,
+        &shell_id,
+        crate::background_shell::ShellRuntimeState::Killed,
+        Some(crate::background_shell::BackgroundShellSnapshot {
+            mtime: std::time::SystemTime::now(),
+            output_tail: SharedString::from("killed"),
+        }),
+        chrono::Utc::now(),
+    );
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        s.update(cx, |s, cx| s.tick_background_shells(cx));
+    });
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        let session = s.read(cx).session(session_id).unwrap();
+        assert!(
+            session.read(cx).background_shells.is_empty(),
+            "Killed shell must be removed on tick"
+        );
+    });
+}
+
+/// Task 10 — THE leak-prevention case: a still-`Running` shell whose
+/// `latest.mtime` is older than stale+linger (420s) is reaped on tick. In the
+/// current build a completed shell almost never flips to `Exited` (the
+/// `<task-notification>` signal is dormant), so without this staleness arm the
+/// finished shell would leak as a "Running" pill forever.
+#[gpui::test]
+async fn stale_running_shell_removed_on_tick(cx: &mut TestAppContext) {
+    let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+    let shell_id = crate::background_shell::BackgroundShellId::new("bvb4ful1z");
+    insert_test_background_shell(
+        cx,
+        session_id,
+        &shell_id,
+        crate::background_shell::ShellRuntimeState::Running,
+        Some(crate::background_shell::BackgroundShellSnapshot {
+            mtime: std::time::SystemTime::now() - std::time::Duration::from_secs(10_000),
+            output_tail: SharedString::from("...stalled output"),
+        }),
+        chrono::Utc::now(),
+    );
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        s.update(cx, |s, cx| s.tick_background_shells(cx));
+    });
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        let session = s.read(cx).session(session_id).unwrap();
+        assert!(
+            session.read(cx).background_shells.is_empty(),
+            "stale-Running shell (mtime beyond stale+linger) must be reaped \
+             on tick — else it leaks as a Running pill forever"
+        );
+    });
+}
+
+/// Task 10: a Running shell with NO snapshot but a stale `registered_at`
+/// (zero output, long since launched) must still age out via the
+/// registered_at fallback.
+#[gpui::test]
+async fn stale_running_shell_no_snapshot_removed_on_tick(cx: &mut TestAppContext) {
+    let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+    let shell_id = crate::background_shell::BackgroundShellId::new("bvb4ful1z");
+    insert_test_background_shell(
+        cx,
+        session_id,
+        &shell_id,
+        crate::background_shell::ShellRuntimeState::Running,
+        None,
+        chrono::Utc::now() - chrono::Duration::seconds(10_000),
+    );
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        s.update(cx, |s, cx| s.tick_background_shells(cx));
+    });
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        let session = s.read(cx).session(session_id).unwrap();
+        assert!(
+            session.read(cx).background_shells.is_empty(),
+            "stale Running shell with no snapshot must age out via registered_at"
+        );
+    });
+}
+
+/// Task 10: a fresh `Running` shell (recent mtime, just registered) must NOT
+/// be removed by `tick_background_shells`. Guards against over-pruning live
+/// shells.
+#[gpui::test]
+async fn fresh_running_shell_survives_tick(cx: &mut TestAppContext) {
+    let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+    let shell_id = crate::background_shell::BackgroundShellId::new("bvb4ful1z");
+    insert_test_background_shell(
+        cx,
+        session_id,
+        &shell_id,
+        crate::background_shell::ShellRuntimeState::Running,
+        Some(crate::background_shell::BackgroundShellSnapshot {
+            mtime: std::time::SystemTime::now(),
+            output_tail: SharedString::from("running..."),
+        }),
+        chrono::Utc::now(),
+    );
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        s.update(cx, |s, cx| s.tick_background_shells(cx));
+    });
+    cx.update(|cx| {
+        let s = SolutionAgentStore::global(cx);
+        let session = s.read(cx).session(session_id).unwrap();
+        assert!(
+            session.read(cx).background_shells.contains_key(&shell_id),
+            "fresh Running shell must survive a tick"
+        );
+    });
+}
+
 /// Pin the error-string set that `resume_session` treats as "session gone,
 /// try the next cwd candidate (and ultimately mint a new ACP session)".
 ///

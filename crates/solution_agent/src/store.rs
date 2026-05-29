@@ -617,7 +617,10 @@ impl SolutionAgentStore {
                     .timer(std::time::Duration::from_secs(1))
                     .await;
                 if this
-                    .update(cx, |this, cx| this.tick_background_agents(cx))
+                    .update(cx, |this, cx| {
+                        this.tick_background_agents(cx);
+                        this.tick_background_shells(cx);
+                    })
                     .is_err()
                 {
                     break;
@@ -3252,6 +3255,101 @@ impl SolutionAgentStore {
                         let agent_id_string = agent_id.as_str().to_string();
                         cx.background_spawn(async move {
                             db.delete_background_agent(session_id_string, agent_id_string)
+                                .await
+                                .log_err();
+                        })
+                        .detach();
+                    }
+                }
+            }
+        }
+    }
+
+    /// 1 Hz healthcheck for background shells, the analog of
+    /// [`tick_background_agents`]. Reaps a shell when it is in a terminal
+    /// state (`Exited`/`Killed`) OR when it has gone stale beyond
+    /// `managed_agent_stale_timeout_secs + managed_agent_dead_linger_secs`.
+    ///
+    /// The staleness check is load-bearing, not redundant: a background shell
+    /// that COMPLETES is, in the current build, almost never marked `Exited`
+    /// (the `<task-notification>` signal is dormant — see commit d88079b2dc),
+    /// so without the age check a finished shell would leak as a "Running"
+    /// pill forever. Age is measured from `latest.mtime` (the output file's
+    /// last-observed write — it stops advancing once the command finishes)
+    /// when a snapshot exists, else from `registered_at` (a shell that
+    /// produced zero output and finished must still age out).
+    pub fn tick_background_shells(&mut self, cx: &mut Context<Self>) {
+        use ::agent_settings::AgentSettings;
+        use settings::Settings;
+        // `try_get` keeps tests that don't register `AgentSettings` usable —
+        // mirrors `tick_background_agents`.
+        let (stale_secs, linger_secs) = AgentSettings::try_get(cx)
+            .map(|s| {
+                (
+                    s.managed_agent_stale_timeout_secs,
+                    s.managed_agent_dead_linger_secs,
+                )
+            })
+            .unwrap_or((120, 300));
+        let expiry = std::time::Duration::from_secs(stale_secs + linger_secs);
+        let now = std::time::SystemTime::now();
+        let session_ids: Vec<SolutionSessionId> =
+            self.all_sessions().map(|e| e.read(cx).id).collect();
+        for session_id in session_ids {
+            let Some(session) = self.session(session_id) else {
+                continue;
+            };
+            if session.read(cx).background_shells.is_empty() {
+                continue;
+            }
+            let to_remove: Vec<crate::background_shell::BackgroundShellId> =
+                session.update(cx, |s, _| {
+                    let candidates: Vec<crate::background_shell::BackgroundShellId> = s
+                        .background_shell_order
+                        .iter()
+                        .filter(|id| {
+                            let Some(shell) = s.background_shells.get(id) else {
+                                return false;
+                            };
+                            if matches!(
+                                shell.state,
+                                crate::background_shell::ShellRuntimeState::Exited(_)
+                                    | crate::background_shell::ShellRuntimeState::Killed
+                            ) {
+                                return true;
+                            }
+                            // Age from the output file's last-observed mtime when a
+                            // snapshot exists, else from registration time.
+                            let age = match shell.latest.as_ref() {
+                                Some(snap) => now.duration_since(snap.mtime).unwrap_or_default(),
+                                None => {
+                                    let registered: std::time::SystemTime =
+                                        shell.registered_at.into();
+                                    now.duration_since(registered).unwrap_or_default()
+                                }
+                            };
+                            age > expiry
+                        })
+                        .cloned()
+                        .collect();
+                    for id in &candidates {
+                        s.background_shells.remove(id);
+                        s.background_shell_order.retain(|x| x != id);
+                    }
+                    candidates
+                });
+            if !to_remove.is_empty() {
+                cx.emit(SolutionAgentStoreEvent::SessionBackgroundShellsChanged(
+                    session_id,
+                ));
+                if let Some(db) = self.persistence.clone() {
+                    let session_id_string = session_id.to_string();
+                    for shell_id in to_remove {
+                        let db = db.clone();
+                        let session_id_string = session_id_string.clone();
+                        let shell_id_string = shell_id.to_string();
+                        cx.background_spawn(async move {
+                            db.delete_background_shell(session_id_string, shell_id_string)
                                 .await
                                 .log_err();
                         })
