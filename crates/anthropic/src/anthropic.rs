@@ -71,16 +71,16 @@ pub enum Model {
     )]
     ClaudeOpus4_6,
     #[serde(
-        rename = "claude-opus-4-7",
-        alias = "claude-opus-4-7-latest",
-        alias = "claude-opus-4-7-1m-context",
-        alias = "claude-opus-4-7-1m-context-latest",
-        alias = "claude-opus-4-7-thinking",
-        alias = "claude-opus-4-7-thinking-latest",
-        alias = "claude-opus-4-7-1m-context-thinking",
-        alias = "claude-opus-4-7-1m-context-thinking-latest"
+        rename = "claude-opus-4-8",
+        alias = "claude-opus-4-8-latest",
+        alias = "claude-opus-4-8-1m-context",
+        alias = "claude-opus-4-8-1m-context-latest",
+        alias = "claude-opus-4-8-thinking",
+        alias = "claude-opus-4-8-thinking-latest",
+        alias = "claude-opus-4-8-1m-context-thinking",
+        alias = "claude-opus-4-8-1m-context-thinking-latest"
     )]
-    ClaudeOpus4_7,
+    ClaudeOpus4_8,
     #[serde(
         rename = "claude-sonnet-4",
         alias = "claude-sonnet-4-latest",
@@ -141,8 +141,8 @@ impl Model {
     }
 
     pub fn from_id(id: &str) -> Result<Self> {
-        if id.starts_with("claude-opus-4-7") {
-            return Ok(Self::ClaudeOpus4_7);
+        if id.starts_with("claude-opus-4-8") {
+            return Ok(Self::ClaudeOpus4_8);
         }
 
         if id.starts_with("claude-opus-4-6") {
@@ -190,7 +190,7 @@ impl Model {
             Self::ClaudeOpus4_1 => "claude-opus-4-1-latest",
             Self::ClaudeOpus4_5 => "claude-opus-4-5-latest",
             Self::ClaudeOpus4_6 => "claude-opus-4-6-latest",
-            Self::ClaudeOpus4_7 => "claude-opus-4-7-latest",
+            Self::ClaudeOpus4_8 => "claude-opus-4-8-latest",
             Self::ClaudeSonnet4 => "claude-sonnet-4-latest",
             Self::ClaudeSonnet4_5 => "claude-sonnet-4-5-latest",
             Self::ClaudeSonnet4_6 => "claude-sonnet-4-6-latest",
@@ -207,7 +207,7 @@ impl Model {
             Self::ClaudeOpus4_1 => "claude-opus-4-1-20250805",
             Self::ClaudeOpus4_5 => "claude-opus-4-5-20251101",
             Self::ClaudeOpus4_6 => "claude-opus-4-6",
-            Self::ClaudeOpus4_7 => "claude-opus-4-7",
+            Self::ClaudeOpus4_8 => "claude-opus-4-8",
             Self::ClaudeSonnet4 => "claude-sonnet-4-20250514",
             Self::ClaudeSonnet4_5 => "claude-sonnet-4-5-20250929",
             Self::ClaudeSonnet4_6 => "claude-sonnet-4-6",
@@ -223,7 +223,7 @@ impl Model {
             Self::ClaudeOpus4_1 => "Claude Opus 4.1",
             Self::ClaudeOpus4_5 => "Claude Opus 4.5",
             Self::ClaudeOpus4_6 => "Claude Opus 4.6",
-            Self::ClaudeOpus4_7 => "Claude Opus 4.7",
+            Self::ClaudeOpus4_8 => "Claude Opus 4.8",
             Self::ClaudeSonnet4 => "Claude Sonnet 4",
             Self::ClaudeSonnet4_5 => "Claude Sonnet 4.5",
             Self::ClaudeSonnet4_6 => "Claude Sonnet 4.6",
@@ -241,7 +241,7 @@ impl Model {
             | Self::ClaudeOpus4_1
             | Self::ClaudeOpus4_5
             | Self::ClaudeOpus4_6
-            | Self::ClaudeOpus4_7
+            | Self::ClaudeOpus4_8
             | Self::ClaudeSonnet4
             | Self::ClaudeSonnet4_5
             | Self::ClaudeSonnet4_6
@@ -267,7 +267,7 @@ impl Model {
             | Self::ClaudeSonnet4_5
             | Self::ClaudeHaiku4_5
             | Self::Claude3Haiku => 200_000,
-            Self::ClaudeOpus4_6 | Self::ClaudeOpus4_7 | Self::ClaudeSonnet4_6 => 1_000_000,
+            Self::ClaudeOpus4_6 | Self::ClaudeOpus4_8 | Self::ClaudeSonnet4_6 => 1_000_000,
             Self::Custom { max_tokens, .. } => *max_tokens,
         }
     }
@@ -280,7 +280,7 @@ impl Model {
             | Self::ClaudeSonnet4_5
             | Self::ClaudeSonnet4_6
             | Self::ClaudeHaiku4_5 => 64_000,
-            Self::ClaudeOpus4_6 | Self::ClaudeOpus4_7 => 128_000,
+            Self::ClaudeOpus4_6 | Self::ClaudeOpus4_8 => 128_000,
             Self::Claude3Haiku => 4_096,
             Self::Custom {
                 max_output_tokens, ..
@@ -294,7 +294,7 @@ impl Model {
             | Self::ClaudeOpus4_1
             | Self::ClaudeOpus4_5
             | Self::ClaudeOpus4_6
-            | Self::ClaudeOpus4_7
+            | Self::ClaudeOpus4_8
             | Self::ClaudeSonnet4
             | Self::ClaudeSonnet4_5
             | Self::ClaudeSonnet4_6
@@ -332,7 +332,7 @@ impl Model {
                     | Self::ClaudeOpus4_1
                     | Self::ClaudeOpus4_5
                     | Self::ClaudeOpus4_6
-                    | Self::ClaudeOpus4_7
+                    | Self::ClaudeOpus4_8
                     | Self::ClaudeSonnet4
                     | Self::ClaudeSonnet4_5
                     | Self::ClaudeSonnet4_6
@@ -350,7 +350,7 @@ impl Model {
             Self::Custom { mode, .. } => matches!(mode, AnthropicModelMode::AdaptiveThinking),
             _ => matches!(
                 self,
-                Self::ClaudeOpus4_6 | Self::ClaudeOpus4_7 | Self::ClaudeSonnet4_6
+                Self::ClaudeOpus4_6 | Self::ClaudeOpus4_8 | Self::ClaudeSonnet4_6
             ),
         }
     }

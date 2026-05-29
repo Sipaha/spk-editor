@@ -85,12 +85,12 @@ pub enum Model {
     )]
     ClaudeOpus4_6,
     #[serde(
-        rename = "claude-opus-4-7",
-        alias = "claude-opus-4-7-latest",
-        alias = "claude-opus-4-7-thinking",
-        alias = "claude-opus-4-7-thinking-latest"
+        rename = "claude-opus-4-8",
+        alias = "claude-opus-4-8-latest",
+        alias = "claude-opus-4-8-thinking",
+        alias = "claude-opus-4-8-thinking-latest"
     )]
-    ClaudeOpus4_7,
+    ClaudeOpus4_8,
     #[serde(
         rename = "claude-sonnet-4-6",
         alias = "claude-sonnet-4-6-latest",
@@ -210,8 +210,8 @@ impl Model {
     }
 
     pub fn from_id(id: &str) -> anyhow::Result<Self> {
-        if id.starts_with("claude-opus-4-7") {
-            Ok(Self::ClaudeOpus4_7)
+        if id.starts_with("claude-opus-4-8") {
+            Ok(Self::ClaudeOpus4_8)
         } else if id.starts_with("claude-opus-4-6") {
             Ok(Self::ClaudeOpus4_6)
         } else if id.starts_with("claude-opus-4-5") {
@@ -239,7 +239,7 @@ impl Model {
             Self::ClaudeOpus4_1 => "claude-opus-4-1",
             Self::ClaudeOpus4_5 => "claude-opus-4-5",
             Self::ClaudeOpus4_6 => "claude-opus-4-6",
-            Self::ClaudeOpus4_7 => "claude-opus-4-7",
+            Self::ClaudeOpus4_8 => "claude-opus-4-8",
             Self::ClaudeSonnet4_6 => "claude-sonnet-4-6",
             Self::Llama4Scout17B => "llama-4-scout-17b",
             Self::Llama4Maverick17B => "llama-4-maverick-17b",
@@ -289,7 +289,7 @@ impl Model {
             Self::ClaudeOpus4_1 => "anthropic.claude-opus-4-1-20250805-v1:0",
             Self::ClaudeOpus4_5 => "anthropic.claude-opus-4-5-20251101-v1:0",
             Self::ClaudeOpus4_6 => "anthropic.claude-opus-4-6-v1",
-            Self::ClaudeOpus4_7 => "anthropic.claude-opus-4-7",
+            Self::ClaudeOpus4_8 => "anthropic.claude-opus-4-8",
             Self::ClaudeSonnet4_6 => "anthropic.claude-sonnet-4-6",
             Self::Llama4Scout17B => "meta.llama4-scout-17b-instruct-v1:0",
             Self::Llama4Maverick17B => "meta.llama4-maverick-17b-instruct-v1:0",
@@ -339,7 +339,7 @@ impl Model {
             Self::ClaudeOpus4_1 => "Claude Opus 4.1",
             Self::ClaudeOpus4_5 => "Claude Opus 4.5",
             Self::ClaudeOpus4_6 => "Claude Opus 4.6",
-            Self::ClaudeOpus4_7 => "Claude Opus 4.7",
+            Self::ClaudeOpus4_8 => "Claude Opus 4.8",
             Self::ClaudeSonnet4_6 => "Claude Sonnet 4.6",
             Self::Llama4Scout17B => "Llama 4 Scout 17B",
             Self::Llama4Maverick17B => "Llama 4 Maverick 17B",
@@ -395,7 +395,7 @@ impl Model {
             | Self::ClaudeOpus4_1
             | Self::ClaudeOpus4_5
             | Self::ClaudeOpus4_6
-            | Self::ClaudeOpus4_7
+            | Self::ClaudeOpus4_8
             | Self::ClaudeSonnet4_6 => 200_000,
             Self::Llama4Scout17B | Self::Llama4Maverick17B => 128_000,
             Self::Gemma3_4B | Self::Gemma3_12B | Self::Gemma3_27B => 128_000,
@@ -429,7 +429,7 @@ impl Model {
             | Self::ClaudeOpus4_5
             | Self::ClaudeSonnet4_6 => 64_000,
             Self::ClaudeOpus4_1 => 32_000,
-            Self::ClaudeOpus4_6 | Self::ClaudeOpus4_7 => 128_000,
+            Self::ClaudeOpus4_6 | Self::ClaudeOpus4_8 => 128_000,
             Self::Llama4Scout17B
             | Self::Llama4Maverick17B
             | Self::Gemma3_4B
@@ -467,7 +467,7 @@ impl Model {
             | Self::ClaudeOpus4_1
             | Self::ClaudeOpus4_5
             | Self::ClaudeOpus4_6
-            | Self::ClaudeOpus4_7
+            | Self::ClaudeOpus4_8
             | Self::ClaudeSonnet4_6 => 1.0,
             Self::Custom {
                 default_temperature,
@@ -485,7 +485,7 @@ impl Model {
             | Self::ClaudeOpus4_1
             | Self::ClaudeOpus4_5
             | Self::ClaudeOpus4_6
-            | Self::ClaudeOpus4_7
+            | Self::ClaudeOpus4_8
             | Self::ClaudeSonnet4_6 => true,
             Self::NovaLite | Self::NovaPro | Self::NovaPremier | Self::Nova2Lite => true,
             Self::MistralLarge3 | Self::PixtralLarge | Self::MagistralSmall => true,
@@ -516,7 +516,7 @@ impl Model {
             | Self::ClaudeOpus4_1
             | Self::ClaudeOpus4_5
             | Self::ClaudeOpus4_6
-            | Self::ClaudeOpus4_7
+            | Self::ClaudeOpus4_8
             | Self::ClaudeSonnet4_6 => true,
             Self::NovaLite | Self::NovaPro => true,
             Self::PixtralLarge => true,
@@ -533,7 +533,7 @@ impl Model {
                 | Self::ClaudeSonnet4_5
                 | Self::ClaudeOpus4_5
                 | Self::ClaudeOpus4_6
-                | Self::ClaudeOpus4_7
+                | Self::ClaudeOpus4_8
                 | Self::ClaudeSonnet4_6
         )
     }
@@ -546,7 +546,7 @@ impl Model {
             | Self::ClaudeOpus4_1
             | Self::ClaudeOpus4_5
             | Self::ClaudeOpus4_6
-            | Self::ClaudeOpus4_7
+            | Self::ClaudeOpus4_8
             | Self::ClaudeSonnet4_6 => true,
             Self::Custom {
                 cache_configuration,
@@ -563,7 +563,7 @@ impl Model {
             | Self::ClaudeOpus4_1
             | Self::ClaudeOpus4_5
             | Self::ClaudeOpus4_6
-            | Self::ClaudeOpus4_7
+            | Self::ClaudeOpus4_8
             | Self::ClaudeSonnet4_6 => Some(BedrockModelCacheConfiguration {
                 max_cache_anchors: 4,
                 min_total_token: 1024,
@@ -589,7 +589,7 @@ impl Model {
                 | Self::ClaudeOpus4_1
                 | Self::ClaudeOpus4_5
                 | Self::ClaudeOpus4_6
-                | Self::ClaudeOpus4_7
+                | Self::ClaudeOpus4_8
                 | Self::ClaudeSonnet4_6
         )
     }
@@ -597,7 +597,7 @@ impl Model {
     pub fn supports_adaptive_thinking(&self) -> bool {
         matches!(
             self,
-            Self::ClaudeOpus4_6 | Self::ClaudeOpus4_7 | Self::ClaudeSonnet4_6
+            Self::ClaudeOpus4_6 | Self::ClaudeOpus4_8 | Self::ClaudeSonnet4_6
         )
     }
 
@@ -629,7 +629,7 @@ impl Model {
                 | Self::ClaudeSonnet4_5
                 | Self::ClaudeOpus4_5
                 | Self::ClaudeOpus4_6
-                | Self::ClaudeOpus4_7
+                | Self::ClaudeOpus4_8
                 | Self::ClaudeSonnet4_6
                 | Self::Nova2Lite
         );
@@ -689,7 +689,7 @@ impl Model {
                 | Self::ClaudeSonnet4_5
                 | Self::ClaudeOpus4_5
                 | Self::ClaudeOpus4_6
-                | Self::ClaudeOpus4_7
+                | Self::ClaudeOpus4_8
                 | Self::ClaudeSonnet4_6
                 | Self::Nova2Lite,
                 "global",
@@ -706,7 +706,7 @@ impl Model {
                 | Self::ClaudeOpus4_1
                 | Self::ClaudeOpus4_5
                 | Self::ClaudeOpus4_6
-                | Self::ClaudeOpus4_7
+                | Self::ClaudeOpus4_8
                 | Self::ClaudeSonnet4_6
                 | Self::Llama4Scout17B
                 | Self::Llama4Maverick17B
@@ -728,7 +728,7 @@ impl Model {
                 | Self::ClaudeSonnet4
                 | Self::ClaudeSonnet4_5
                 | Self::ClaudeOpus4_6
-                | Self::ClaudeOpus4_7
+                | Self::ClaudeOpus4_8
                 | Self::ClaudeSonnet4_6
                 | Self::NovaLite
                 | Self::NovaPro
@@ -741,7 +741,7 @@ impl Model {
                 Self::ClaudeHaiku4_5
                 | Self::ClaudeSonnet4_5
                 | Self::ClaudeOpus4_6
-                | Self::ClaudeOpus4_7
+                | Self::ClaudeOpus4_8
                 | Self::ClaudeSonnet4_6,
                 "au",
             ) => Ok(format!("{}.{}", region_group, model_id)),
@@ -816,8 +816,8 @@ mod tests {
             "eu.anthropic.claude-opus-4-6-v1"
         );
         assert_eq!(
-            Model::ClaudeOpus4_7.cross_region_inference_id("eu-west-1", false)?,
-            "eu.anthropic.claude-opus-4-7"
+            Model::ClaudeOpus4_8.cross_region_inference_id("eu-west-1", false)?,
+            "eu.anthropic.claude-opus-4-8"
         );
         Ok(())
     }
@@ -850,8 +850,8 @@ mod tests {
             "au.anthropic.claude-opus-4-6-v1"
         );
         assert_eq!(
-            Model::ClaudeOpus4_7.cross_region_inference_id("ap-southeast-2", false)?,
-            "au.anthropic.claude-opus-4-7"
+            Model::ClaudeOpus4_8.cross_region_inference_id("ap-southeast-2", false)?,
+            "au.anthropic.claude-opus-4-8"
         );
         Ok(())
     }
@@ -914,8 +914,8 @@ mod tests {
             "global.anthropic.claude-opus-4-6-v1"
         );
         assert_eq!(
-            Model::ClaudeOpus4_7.cross_region_inference_id("us-east-1", true)?,
-            "global.anthropic.claude-opus-4-7"
+            Model::ClaudeOpus4_8.cross_region_inference_id("us-east-1", true)?,
+            "global.anthropic.claude-opus-4-8"
         );
         assert_eq!(
             Model::Nova2Lite.cross_region_inference_id("us-east-1", true)?,

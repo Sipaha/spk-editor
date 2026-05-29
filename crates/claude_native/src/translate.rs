@@ -339,7 +339,7 @@ pub const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
 
 /// Infer a context-window size from a Claude model id. JS only bumps to 1 M
 /// when the id contains `1m` (case-insensitive, word-bounded): the public
-/// `claude-sonnet-4-5-1m` / `claude-opus-4-7-1m` variants opt-in to the
+/// `claude-sonnet-4-5-1m` / `claude-opus-4-8-1m` variants opt-in to the
 /// 1 M-token window; everything else uses the 200 k default. Returns `None`
 /// when the heuristic doesn't fire so callers can fall back to the global
 /// default. Mirrors `acp-agent.js::inferContextWindowFromModel:2547`.
@@ -1209,7 +1209,7 @@ mod tests {
             Some(1_000_000)
         );
         assert_eq!(
-            infer_context_window_from_model("claude-opus-4-7-1M"),
+            infer_context_window_from_model("claude-opus-4-8-1M"),
             Some(1_000_000)
         );
         // No "1m" token → falls through to default.
