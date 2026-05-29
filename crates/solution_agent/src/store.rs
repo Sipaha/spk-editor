@@ -978,22 +978,35 @@ impl SolutionAgentStore {
             let acp_session_id = meta.acp_session_id.clone();
             let title_for_load = Some(meta.title.clone());
 
-            // Resume cwd resolution + fallback. claude-acp keys session
-            // jsonl files by the cwd that was active when the session
-            // was *created* (`~/.claude/projects/<sanitized cwd>/<id>.jsonl`).
-            // Because the `(solution, agent)` connection pool spawns one
-            // subprocess per solution with `process.cwd = solution.root`,
-            // *all* jsonls for a solution land under `sanitize(solution.root)`
-            // — regardless of the member-dir cwd we asked for in
-            // `NewSessionRequest::work_dirs`. So we try `solution.root`
-            // FIRST when it differs from the persisted `primary_cwd`;
-            // the primary_cwd attempt stays as a fallback for sessions
-            // that legitimately stored a non-root path (older rows, or a
-            // future per-member pool model). On a successful attempt we
-            // also write the applied cwd back into `session.cwd` so the
-            // *next* resume hits straight away with no retries.
+            // Resume cwd resolution. claude code keys session JSONL files
+            // by the cwd of its subprocess at session-creation time
+            // (`~/.claude/projects/<sanitized cwd>/<id>.jsonl`). Since
+            // `claude_native::open_session` spawns a fresh subprocess
+            // PER ACP-session with `work_dir = work_dirs.first()`, the
+            // JSONL lives under exactly the cwd that was passed in at
+            // creation — which is what `primary_cwd` (`meta.cwd`) holds.
+            //
+            // Historical note: an earlier draft tried `solution.root`
+            // FIRST on the theory that the connection pool unified all
+            // subprocesses on solution.root. That theory was wrong — per
+            // `connection.rs::open_session` each session spawns its own
+            // subprocess — but the consequence was nasty: claude's
+            // `--resume <id>` doesn't fail-fast when the JSONL is
+            // missing. The spawn succeeds; the missing-conversation
+            // error only surfaces inline on the FIRST PROMPT. So the
+            // earlier attempts order would happily attach to a
+            // solution-root subprocess, write `session.cwd =
+            // solution.root` from the "success", and the user's first
+            // turn would crash with "No conversation found" — with the
+            // status row now mis-displaying ROOT.
+            //
+            // Always try the persisted `primary_cwd` first. Keep the
+            // `solution.root` slot only as a fallback for legacy rows
+            // whose `meta.cwd` was empty (treated as solution.root by
+            // the `primary_cwd` initialiser above) — that branch is a
+            // no-op, since the loop just runs the one candidate.
             let attempts: Vec<PathBuf> = if primary_cwd != solution.root {
-                vec![solution.root.clone(), primary_cwd.clone()]
+                vec![primary_cwd.clone(), solution.root.clone()]
             } else {
                 vec![primary_cwd.clone()]
             };
