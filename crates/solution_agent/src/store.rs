@@ -3516,6 +3516,48 @@ impl SolutionAgentStore {
         }
     }
 
+    /// Manually drop a tracked background shell — the × affordance on a
+    /// terminal/stale shell pill. Symmetric to [`Self::remove_background_agent`]:
+    /// removes from the `background_shells` map + `background_shell_order` vec,
+    /// fire-and-forgets the SQLite delete, emits
+    /// [`SolutionAgentStoreEvent::SessionBackgroundShellsChanged`], and drops the
+    /// fs-watch task once no shells remain. No-op when the session is gone or the
+    /// id isn't tracked.
+    pub fn remove_background_shell(
+        &mut self,
+        session_id: SolutionSessionId,
+        id: crate::background_shell::BackgroundShellId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session(session_id) else {
+            return;
+        };
+        let mut removed = false;
+        session.update(cx, |s, _| {
+            if s.background_shells.remove(&id).is_some() {
+                s.background_shell_order.retain(|x| x != &id);
+                removed = true;
+            }
+        });
+        if !removed {
+            return;
+        }
+        if let Some(db) = self.persistence.clone() {
+            let sid = session_id.to_string();
+            let shell_id = id.to_string();
+            cx.background_spawn(async move {
+                db.delete_background_shell(sid, shell_id).await.log_err();
+            })
+            .detach();
+        }
+        cx.emit(SolutionAgentStoreEvent::SessionBackgroundShellsChanged(
+            session_id,
+        ));
+        if session.read(cx).background_shells.is_empty() {
+            self.background_shell_watchers.remove(&session_id);
+        }
+    }
+
     fn handle_acp_event(
         &mut self,
         session_id: SolutionSessionId,
