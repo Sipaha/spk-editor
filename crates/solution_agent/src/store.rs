@@ -2643,6 +2643,33 @@ impl SolutionAgentStore {
             }
         }
 
+        // `KillShell` terminal tool_call → mark the targeted background shell
+        // `Killed`. claude emits a `KillShell` ToolCall (Execute kind) whose
+        // `raw_input` carries the `shell_id`/`bash_id` of the shell to stop;
+        // when it completes, the shell is dead. Like the `Bash(bg)` branch
+        // above, this runs BEFORE the `is_task_like` early-return because
+        // `KillShell` is not in the `Task | Agent` set.
+        if snapshot.is_terminal && snapshot.tool_name.as_deref() == Some("KillShell") {
+            if let Some(shell_id) = snapshot
+                .raw_input
+                .as_ref()
+                .and_then(crate::background_shell::parse_kill_shell_input)
+            {
+                if session_entity
+                    .read(cx)
+                    .background_shells
+                    .contains_key(&shell_id)
+                {
+                    self.mark_background_shell_state(
+                        session_id,
+                        shell_id,
+                        crate::background_shell::ShellRuntimeState::Killed,
+                        cx,
+                    );
+                }
+            }
+        }
+
         if !snapshot.is_task_like {
             return;
         }
@@ -3033,6 +3060,125 @@ impl SolutionAgentStore {
         }
     }
 
+    /// Flip a tracked background shell's [`ShellRuntimeState`] (terminal
+    /// signal handler). Mutates the in-memory map entry, emits
+    /// [`SolutionAgentStoreEvent::SessionBackgroundShellsChanged`], and
+    /// fire-and-forget upserts the row's `state_text` to SQLite (rebuilt
+    /// from the in-memory shell). No-op when the session or the shell id is
+    /// no longer tracked. Used by both terminal signals: the `KillShell`
+    /// tool_call (→ `Killed`) and the `<task-notification>` user message
+    /// (→ `Exited(code)`).
+    fn mark_background_shell_state(
+        &mut self,
+        session_id: SolutionSessionId,
+        shell_id: crate::background_shell::BackgroundShellId,
+        new_state: crate::background_shell::ShellRuntimeState,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session(session_id) else {
+            return;
+        };
+        // Capture the row fields under a short read scope, mutating the state
+        // in the same `update` so the persisted row matches the in-memory one.
+        let row = session.update(cx, |s, _| {
+            let shell = s.background_shells.get_mut(&shell_id)?;
+            if shell.state == new_state {
+                // Idempotent: a duplicate terminal signal (e.g. a re-observed
+                // KillShell on a cold→live replay) must not re-emit.
+                return None;
+            }
+            shell.state = new_state.clone();
+            Some(crate::db::BackgroundShellRow {
+                solution_session_id: session_id.to_string(),
+                shell_id: shell.id.as_str().to_string(),
+                command: shell.command.to_string(),
+                output_path: shell.output_path.to_string_lossy().into_owned(),
+                registered_at_ms: shell.registered_at.timestamp_millis(),
+                last_tail: shell
+                    .latest
+                    .as_ref()
+                    .map(|snap| snap.output_tail.to_string()),
+                last_mtime_ms: shell.latest.as_ref().and_then(|snap| {
+                    snap.mtime
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_millis() as i64)
+                }),
+                state_text: new_state.to_state_text(),
+            })
+        });
+        let Some(row) = row else {
+            return;
+        };
+        cx.emit(SolutionAgentStoreEvent::SessionBackgroundShellsChanged(
+            session_id,
+        ));
+        if let Some(db) = self.persistence.clone() {
+            cx.background_spawn(async move {
+                db.save_background_shell(row).await.log_err();
+            })
+            .detach();
+        }
+    }
+
+    /// Scan a freshly-observed thread entry for a `<task-notification>`
+    /// completion block and, when it targets a tracked background shell,
+    /// flip that shell to its terminal [`ShellRuntimeState`] via
+    /// [`Self::mark_background_shell_state`].
+    ///
+    /// claude's harness injects a `<task-notification>` **user-role message**
+    /// into the thread when a `Bash(run_in_background=true)` command finishes.
+    /// That arrives as an [`acp_thread::AgentThreadEntry::UserMessage`], NOT a
+    /// `ToolCall`, so `apply_subagent_lifecycle` (which early-returns on
+    /// non-ToolCall entries) never sees it — hence this separate scan, called
+    /// from the `NewEntry` / `EntryUpdated` arms.
+    ///
+    /// No-op for any other entry shape, an unparseable / non-notification
+    /// user message, or a notification whose `<task-id>` isn't a shell we
+    /// track. The text is read from the user message's `ContentBlock` via
+    /// `to_markdown`, which returns the raw markdown source (the unescaped
+    /// `<task-notification>` block) for a `Markdown` block.
+    fn observe_task_notification(
+        &mut self,
+        session_id: SolutionSessionId,
+        local_entry_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session_entity) = self.sessions.get(&session_id).cloned() else {
+            return;
+        };
+        let notification = {
+            let session = session_entity.read(cx);
+            let Some(thread) = session.acp_thread() else {
+                return;
+            };
+            let thread_ref = thread.read(cx);
+            let Some(entry) = thread_ref.entries().get(local_entry_index) else {
+                return;
+            };
+            let acp_thread::AgentThreadEntry::UserMessage(message) = entry else {
+                return;
+            };
+            let text = message.content.to_markdown(cx);
+            crate::background_shell::parse_task_notification(text)
+        };
+        let Some(notification) = notification else {
+            return;
+        };
+        if session_entity
+            .read(cx)
+            .background_shells
+            .contains_key(&notification.id)
+        {
+            self.mark_background_shell_state(
+                session_id,
+                notification.id,
+                notification.status,
+                cx,
+            );
+        }
+    }
+
     /// One pass over every session's background agents. Removes agents
     /// whose latest snapshot carries a `stop_reason` (terminal done),
     /// plus agents that have been silently dead beyond
@@ -3352,6 +3498,11 @@ impl SolutionAgentStore {
                     .map(|thread| thread.read(cx).entries().len().saturating_sub(1));
                 if let Some(idx) = local_entry_index {
                     self.apply_subagent_lifecycle(session_id, idx, cx);
+                    // A `<task-notification>` completion block arrives as a
+                    // user-role message, which `apply_subagent_lifecycle`
+                    // ignores (non-ToolCall). Scan the same entry separately so
+                    // a finished `Bash(bg)` shell flips to `Exited(code)`.
+                    self.observe_task_notification(session_id, idx, cx);
                 }
             }
             acp_thread::AcpThreadEvent::Stopped(_) => {
@@ -3627,6 +3778,13 @@ impl SolutionAgentStore {
                 // waiting for the 500 ms debounce that gates
                 // `SessionMessageAppended`.
                 self.apply_subagent_lifecycle(session_id, *idx, cx);
+                // A `<task-notification>` can also surface via an in-place
+                // EntryUpdated (a user message whose text streams in); scan it
+                // here too. `observe_task_notification` is idempotent — the
+                // `mark_background_shell_state` no-op guard rejects a re-observed
+                // terminal state, so a NewEntry + EntryUpdated pair on the same
+                // notification flips the shell exactly once.
+                self.observe_task_notification(session_id, *idx, cx);
                 // Tool-call arg deltas, assistant-text chunks, and tool-
                 // status transitions on an existing entry all surface
                 // here. The pre-fix behaviour fell through to the

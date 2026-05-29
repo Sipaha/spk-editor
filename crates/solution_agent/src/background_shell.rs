@@ -62,6 +62,20 @@ pub enum ShellRuntimeState {
     Killed,
 }
 
+impl ShellRuntimeState {
+    /// Serialize to the `state_text` column convention used by the
+    /// `solution_session_background_shell` table: `"running"`,
+    /// `"exited:N"` / `"exited"` (when the code is unknown), or `"killed"`.
+    pub fn to_state_text(&self) -> String {
+        match self {
+            ShellRuntimeState::Running => "running".to_string(),
+            ShellRuntimeState::Exited(Some(code)) => format!("exited:{code}"),
+            ShellRuntimeState::Exited(None) => "exited".to_string(),
+            ShellRuntimeState::Killed => "killed".to_string(),
+        }
+    }
+}
+
 /// In-memory tracking record for one background shell.
 #[derive(Clone, Debug)]
 pub struct BackgroundShell {
@@ -377,6 +391,22 @@ mod tests {
     // -----------------------------------------------------------------------
     // Task 4 — parse_kill_shell_input
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn shell_runtime_state_to_state_text_round_trip() {
+        assert_eq!(ShellRuntimeState::Running.to_state_text(), "running");
+        assert_eq!(ShellRuntimeState::Exited(Some(0)).to_state_text(), "exited:0");
+        assert_eq!(
+            ShellRuntimeState::Exited(Some(137)).to_state_text(),
+            "exited:137"
+        );
+        assert_eq!(
+            ShellRuntimeState::Exited(Some(-1)).to_state_text(),
+            "exited:-1"
+        );
+        assert_eq!(ShellRuntimeState::Exited(None).to_state_text(), "exited");
+        assert_eq!(ShellRuntimeState::Killed.to_state_text(), "killed");
+    }
 
     #[test]
     fn parse_kill_shell_input_shell_id_key() {

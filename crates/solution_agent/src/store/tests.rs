@@ -3578,6 +3578,181 @@ async fn refresh_background_shell_snapshot_tails_output_file(cx: &mut TestAppCon
     });
 }
 
+/// Test helper: register a `Running` background shell directly on a session,
+/// bypassing the `Bash(bg)` launch-announcement parse path. Used by the Task 8
+/// terminal-signal tests so they can assert the state transition in isolation.
+fn register_background_shell(
+    cx: &mut TestAppContext,
+    session_id: SolutionSessionId,
+    shell_id: &str,
+) {
+    let id = crate::background_shell::BackgroundShellId::new(shell_id.to_string());
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(session_id).expect("session exists");
+        session.update(cx, |s, _| {
+            s.background_shells.insert(
+                id.clone(),
+                crate::background_shell::BackgroundShell {
+                    id: id.clone(),
+                    command: SharedString::from("sleep 60"),
+                    output_path: PathBuf::from("/tmp/claude-1000/tasks").join(format!(
+                        "{shell_id}.output"
+                    )),
+                    registered_at: chrono::Utc::now(),
+                    latest: None,
+                    last_offset: 0,
+                    state: crate::background_shell::ShellRuntimeState::Running,
+                },
+            );
+            s.background_shell_order.push(id);
+        });
+    });
+}
+
+/// Task 8: a terminal `KillShell` tool_call whose `raw_input` carries the
+/// `shell_id` of a tracked background shell flips that shell to
+/// `ShellRuntimeState::Killed` and emits `SessionBackgroundShellsChanged`.
+#[gpui::test]
+async fn kill_shell_terminal_marks_shell_killed(cx: &mut TestAppContext) {
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+    register_background_shell(cx, session_id, "bvb4ful1z");
+
+    let bg_counter = Rc::new(std::cell::RefCell::new(0usize));
+    let _bg_sub = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let counter = bg_counter.clone();
+        cx.subscribe(&store, move |_store, event, _cx| {
+            if let SolutionAgentStoreEvent::SessionBackgroundShellsChanged(id) = event
+                && *id == session_id
+            {
+                *counter.borrow_mut() += 1;
+            }
+        })
+    });
+
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            use agent_client_protocol::schema as acp;
+            let mut raw_input = serde_json::Map::new();
+            raw_input.insert(
+                "shell_id".into(),
+                serde_json::Value::String("bvb4ful1z".into()),
+            );
+            let call = acp::ToolCall::new(
+                acp::ToolCallId::new("toolu_kill_1".to_string()),
+                "KillShell".to_string(),
+            )
+            .kind(acp::ToolKind::Execute)
+            .status(acp::ToolCallStatus::Completed)
+            .meta(Some(acp_thread::meta_with_tool_name("KillShell")))
+            .raw_input(serde_json::Value::Object(raw_input));
+            t.upsert_tool_call(call, cx).expect("upsert KillShell");
+        });
+    });
+    cx.executor().run_until_parked();
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(session_id).expect("session exists");
+        let s = session.read(cx);
+        let id = crate::background_shell::BackgroundShellId::new("bvb4ful1z");
+        let shell = s.background_shells.get(&id).expect("shell still tracked");
+        assert_eq!(
+            shell.state,
+            crate::background_shell::ShellRuntimeState::Killed,
+            "KillShell tool_call flips the shell to Killed"
+        );
+    });
+    assert_eq!(
+        *bg_counter.borrow(),
+        1,
+        "SessionBackgroundShellsChanged emitted exactly once on the kill"
+    );
+}
+
+/// Task 8: a `<task-notification>` user-role message whose `<task-id>` matches
+/// a tracked background shell flips it to `Exited(Some(code))`. Drives the
+/// real NewEntry wiring: `push_user_content_block` appends a `UserMessage`
+/// entry → `AcpThreadEvent::NewEntry` → `observe_task_notification`.
+#[gpui::test]
+async fn task_notification_user_message_marks_shell_exited(cx: &mut TestAppContext) {
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+    register_background_shell(cx, session_id, "bvb4ful1z");
+
+    const NOTIFICATION: &str = r#"<task-notification>
+<task-id>bvb4ful1z</task-id>
+<status>completed</status>
+<summary>Background command "sleep 60" completed (exit code 0)</summary>
+</task-notification>"#;
+
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.push_user_content_block(
+                Some(acp_thread::UserMessageId::new()),
+                agent_client_protocol::schema::ContentBlock::Text(
+                    agent_client_protocol::schema::TextContent::new(NOTIFICATION.to_string()),
+                ),
+                cx,
+            );
+        });
+    });
+    cx.executor().run_until_parked();
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(session_id).expect("session exists");
+        let s = session.read(cx);
+        let id = crate::background_shell::BackgroundShellId::new("bvb4ful1z");
+        let shell = s.background_shells.get(&id).expect("shell still tracked");
+        assert_eq!(
+            shell.state,
+            crate::background_shell::ShellRuntimeState::Exited(Some(0)),
+            "task-notification user message flips the shell to Exited(0)"
+        );
+    });
+}
+
+/// Task 8: a `<task-notification>` for an UNTRACKED shell id is a no-op — no
+/// stray shell is registered and no tracked shell's state changes.
+#[gpui::test]
+async fn task_notification_unknown_shell_is_noop(cx: &mut TestAppContext) {
+    let (session_id, acp_thread, _tmp) = create_session_with_thread(cx).await;
+    register_background_shell(cx, session_id, "tracked123");
+
+    const NOTIFICATION: &str = r#"<task-notification>
+<task-id>unknown999</task-id>
+<status>completed</status>
+<summary>Background command "x" completed (exit code 0)</summary>
+</task-notification>"#;
+
+    cx.update(|cx| {
+        acp_thread.update(cx, |t, cx| {
+            t.push_user_content_block(
+                Some(acp_thread::UserMessageId::new()),
+                agent_client_protocol::schema::ContentBlock::Text(
+                    agent_client_protocol::schema::TextContent::new(NOTIFICATION.to_string()),
+                ),
+                cx,
+            );
+        });
+    });
+    cx.executor().run_until_parked();
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(session_id).expect("session exists");
+        let s = session.read(cx);
+        assert_eq!(s.background_shells.len(), 1, "no stray shell registered");
+        let tracked = crate::background_shell::BackgroundShellId::new("tracked123");
+        assert_eq!(
+            s.background_shells.get(&tracked).expect("tracked present").state,
+            crate::background_shell::ShellRuntimeState::Running,
+            "an unrelated notification leaves the tracked shell Running"
+        );
+    });
+}
+
 /// Task 9: a Managed Agent whose `latest.stop_reason` is `Some(...)` is
 /// removed from the session on the next `tick_background_agents` pass,
 /// and a `SessionBackgroundAgentsChanged` event is emitted.
