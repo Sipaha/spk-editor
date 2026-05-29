@@ -37,8 +37,7 @@ use crate::model::{SessionState, SolutionSessionId, SolutionSessionMetadata};
 /// safety net never trips on a healthy run. 40s leaves a 10s headroom
 /// for cross-process latency without making the user wait noticeably
 /// longer than they already are.
-pub(crate) const STOPPING_SAFETY_NET: std::time::Duration =
-    std::time::Duration::from_secs(40);
+pub(crate) const STOPPING_SAFETY_NET: std::time::Duration = std::time::Duration::from_secs(40);
 
 /// Scan a thread's entries for a tool call sitting in
 /// `WaitingForConfirmation` and, if found, return its id together with a
@@ -277,11 +276,7 @@ impl SolutionAgentStore {
     /// existing timer is reused. The task is stored on the session and
     /// auto-cancelled by [`super::SolutionAgentStore::mutate_state`]
     /// when the session leaves `Stopping` naturally.
-    fn arm_stopping_safety_net(
-        &mut self,
-        session_id: SolutionSessionId,
-        cx: &mut Context<Self>,
-    ) {
+    fn arm_stopping_safety_net(&mut self, session_id: SolutionSessionId, cx: &mut Context<Self>) {
         let Some(session) = self.session(session_id) else {
             return;
         };
@@ -453,8 +448,7 @@ impl SolutionAgentStore {
                 if let Some(native) = connection.downcast::<ClaudeNativeConnection>() {
                     let blocks_text_summary = summarize_blocks_for_log(&blocks);
                     let injected_text = inject_text_from_blocks(&blocks);
-                    let acp_session_id =
-                        session_entity.read(cx).acp_session_id.clone();
+                    let acp_session_id = session_entity.read(cx).acp_session_id.clone();
                     let chars = injected_text.chars().count();
                     let appended =
                         native.inject_user_message_append(&acp_session_id, injected_text);

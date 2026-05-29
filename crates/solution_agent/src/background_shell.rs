@@ -86,8 +86,12 @@ pub struct BackgroundShell {
     pub output_path: PathBuf,
     pub registered_at: DateTime<Utc>,
     pub latest: Option<BackgroundShellSnapshot>,
-    /// Byte offset past the last bytes tailed from `output_path`; carried across
-    /// fs-watch events for incremental tails. (Used by a later task.)
+    /// File length (`new_offset`) recorded by the last successful tail of
+    /// `output_path`. `refresh_background_shell_snapshot` re-reads the full
+    /// trailing window each time (it passes `0` to `tail_output` for a live
+    /// tail, not an incremental one), so this is used purely for change
+    /// detection — the refresh only emits a change event when the new length
+    /// differs from this stored value.
     pub last_offset: u64,
     pub state: ShellRuntimeState,
 }
@@ -104,9 +108,7 @@ static SHELL_ID_RE: OnceLock<Regex> = OnceLock::new();
 static SHELL_OUTPUT_PATH_RE: OnceLock<Regex> = OnceLock::new();
 
 fn shell_id_re() -> &'static Regex {
-    SHELL_ID_RE.get_or_init(|| {
-        Regex::new(r"\bID:\s+(\w+)\b").expect("static regex compiles")
-    })
+    SHELL_ID_RE.get_or_init(|| Regex::new(r"\bID:\s+(\w+)\b").expect("static regex compiles"))
 }
 
 fn shell_output_path_re() -> &'static Regex {
@@ -120,10 +122,7 @@ fn shell_output_path_re() -> &'static Regex {
 /// `written to: <…>.output` path are present; `None` otherwise (caller silently
 /// skips registration so a reshaped future announcement doesn't spam the log).
 pub fn parse_bash_bg_launch(raw_output: &str) -> Option<(BackgroundShellId, PathBuf)> {
-    let shell_id = shell_id_re()
-        .captures(raw_output)?
-        .get(1)?
-        .as_str();
+    let shell_id = shell_id_re().captures(raw_output)?.get(1)?.as_str();
     let output_path = shell_output_path_re()
         .captures(raw_output)?
         .get(1)?
@@ -153,9 +152,8 @@ fn task_id_re() -> &'static Regex {
 }
 
 fn exit_code_re() -> &'static Regex {
-    EXIT_CODE_RE.get_or_init(|| {
-        Regex::new(r"\(exit code (-?\d+)\)").expect("static regex compiles")
-    })
+    EXIT_CODE_RE
+        .get_or_init(|| Regex::new(r"\(exit code (-?\d+)\)").expect("static regex compiles"))
 }
 
 /// Parse a `<task-notification>` block. Returns `None` if the block or its
@@ -285,7 +283,9 @@ mod tests {
         assert_eq!(result.0.as_str(), "bvb4ful1z");
         assert_eq!(
             result.1,
-            PathBuf::from("/tmp/claude-1000/-home-spk--spk-spk-editor-dev-solutions-alphasol/6e524c79-5089-4a74-9419-bd18e9119e0b/tasks/bvb4ful1z.output")
+            PathBuf::from(
+                "/tmp/claude-1000/-home-spk--spk-spk-editor-dev-solutions-alphasol/6e524c79-5089-4a74-9419-bd18e9119e0b/tasks/bvb4ful1z.output"
+            )
         );
     }
 
@@ -325,7 +325,10 @@ mod tests {
         let text = "Command running in background with ID: abc123xyz. Output is being written to: /tmp/claude-1000/tasks/abc123xyz.output. You will be notified.";
         let result = parse_bash_bg_launch(text).unwrap();
         assert_eq!(result.0.as_str(), "abc123xyz");
-        assert_eq!(result.1, PathBuf::from("/tmp/claude-1000/tasks/abc123xyz.output"));
+        assert_eq!(
+            result.1,
+            PathBuf::from("/tmp/claude-1000/tasks/abc123xyz.output")
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -395,7 +398,10 @@ mod tests {
     #[test]
     fn shell_runtime_state_to_state_text_round_trip() {
         assert_eq!(ShellRuntimeState::Running.to_state_text(), "running");
-        assert_eq!(ShellRuntimeState::Exited(Some(0)).to_state_text(), "exited:0");
+        assert_eq!(
+            ShellRuntimeState::Exited(Some(0)).to_state_text(),
+            "exited:0"
+        );
         assert_eq!(
             ShellRuntimeState::Exited(Some(137)).to_state_text(),
             "exited:137"
@@ -474,7 +480,10 @@ mod tests {
         assert_eq!(first.text, "first line\n");
         // Append more content.
         use std::io::Write;
-        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         file.write_all(b"second line\n").unwrap();
         drop(file);
         let second = tail_output(&path, first.new_offset).unwrap();

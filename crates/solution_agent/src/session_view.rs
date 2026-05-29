@@ -799,8 +799,7 @@ impl SolutionSessionView {
                 // to match the new rendered size. Without this the list
                 // keeps the pre-stream height and the new text overflows.
                 let global_idx = cold_offset + *idx;
-                self.list_state
-                    .remeasure_items(global_idx..global_idx + 1);
+                self.list_state.remeasure_items(global_idx..global_idx + 1);
                 if self.find.is_some() {
                     self.recompute_matches(cx);
                 }
@@ -831,17 +830,14 @@ impl SolutionSessionView {
                 // `WaitingForConfirmation`; remeasure the affected row by
                 // id so the buttons are laid out at the correct height
                 // promptly.
-                if let Some(local_idx) =
-                    thread.read(cx).entries().iter().position(|entry| {
-                        matches!(
-                            entry,
-                            AgentThreadEntry::ToolCall(call) if &call.id == tool_call_id
-                        )
-                    })
-                {
+                if let Some(local_idx) = thread.read(cx).entries().iter().position(|entry| {
+                    matches!(
+                        entry,
+                        AgentThreadEntry::ToolCall(call) if &call.id == tool_call_id
+                    )
+                }) {
                     let global_idx = cold_offset + local_idx;
-                    self.list_state
-                        .remeasure_items(global_idx..global_idx + 1);
+                    self.list_state.remeasure_items(global_idx..global_idx + 1);
                 }
             }
             _ => {}
@@ -859,15 +855,12 @@ impl SolutionSessionView {
     /// the strip is hidden anyway, so we render EVERY entry regardless
     /// of `subagent_id`. Otherwise persisted entries stamped with a now-
     /// dead `toolu_xxx` would silently disappear from Main after restart.
-    pub(crate) fn should_render_entry(
-        &self,
-        entry: &AgentThreadEntry,
-        cx: &App,
-    ) -> bool {
+    pub(crate) fn should_render_entry(&self, entry: &AgentThreadEntry, cx: &App) -> bool {
         if self.session.read(cx).active_subagents.is_empty() {
             return true;
         }
-        self.selected_subagent.matches_parent_entry(entry.subagent_id())
+        self.selected_subagent
+            .matches_parent_entry(entry.subagent_id())
     }
 
     /// Snap-to-next helper extracted out of `on_subagents_changed` so
@@ -1062,14 +1055,11 @@ impl SolutionSessionView {
             && let Ok(mtime) = meta.modified()
         {
             let size = meta.len();
-            let fresh = self
-                .background_entries_fingerprint
-                .as_ref()
-                .is_some_and(|(cached_id, cached_mtime, cached_size)| {
-                    cached_id == &selected_id
-                        && *cached_mtime == mtime
-                        && *cached_size == size
-                });
+            let fresh = self.background_entries_fingerprint.as_ref().is_some_and(
+                |(cached_id, cached_mtime, cached_size)| {
+                    cached_id == &selected_id && *cached_mtime == mtime && *cached_size == size
+                },
+            );
             if fresh {
                 return true;
             }
@@ -1092,9 +1082,11 @@ impl SolutionSessionView {
         };
         let lines: Vec<&str> = trimmed.lines().collect();
         self.background_entries_for_render = crate::background_agent::jsonl_to_entries(&lines, cx);
-        self.background_entries_fingerprint = stat
-            .as_ref()
-            .and_then(|meta| meta.modified().ok().map(|mtime| (selected_id, mtime, meta.len())));
+        self.background_entries_fingerprint = stat.as_ref().and_then(|meta| {
+            meta.modified()
+                .ok()
+                .map(|mtime| (selected_id, mtime, meta.len()))
+        });
         true
     }
 
@@ -2345,7 +2337,10 @@ pub(crate) fn build_shell_drill_in_entries(
     };
     let header = format!(
         "`{}` · {} · {} · {}",
-        shell.command, state_label, observed, shell.id.short()
+        shell.command,
+        state_label,
+        observed,
+        shell.id.short()
     );
     let body = match &shell.latest {
         Some(snapshot) => format!("```\n{}\n```", snapshot.output_tail),
@@ -2369,15 +2364,9 @@ pub(crate) fn build_shell_drill_in_entries(
 /// "X ago" formatter for a shell snapshot's `SystemTime` mtime. Converts
 /// to a UTC `DateTime` and formats relative to `now`; an mtime before the
 /// epoch (clock skew) or in the future degrades to `"just now"`.
-fn shell_relative_time(
-    mtime: std::time::SystemTime,
-    now: chrono::DateTime<chrono::Utc>,
-) -> String {
+fn shell_relative_time(mtime: std::time::SystemTime, now: chrono::DateTime<chrono::Utc>) -> String {
     let secs = match mtime.duration_since(std::time::UNIX_EPOCH) {
-        Ok(dur) => now
-            .timestamp()
-            .saturating_sub(dur.as_secs() as i64)
-            .max(0),
+        Ok(dur) => now.timestamp().saturating_sub(dur.as_secs() as i64).max(0),
         Err(_) => return "just now".to_string(),
     };
     if secs < 60 {
@@ -3374,9 +3363,11 @@ impl Render for SolutionSessionView {
                                             .tooltip(Tooltip::text(
                                                 "Stop response (Esc) — clears queued follow-ups",
                                             ))
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.cancel_turn(cx);
-                                            })),
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| {
+                                                    this.cancel_turn(cx);
+                                                }),
+                                            ),
                                         )
                                     }
                                 })
@@ -3395,4 +3386,3 @@ impl Render for SolutionSessionView {
             })
     }
 }
-

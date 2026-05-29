@@ -50,6 +50,7 @@ use agent_settings::AgentSettings;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use collections::HashMap;
+use console_panel::ConsolePanel;
 use editor::{Editor, MultiBuffer};
 use extension::ExtensionEvents;
 use extension_host::ExtensionStore;
@@ -65,7 +66,6 @@ use project::{Project, ProjectPath, Worktree};
 use prompt_store::{PromptStore, UserPromptId};
 use rules_library::{RulesLibrary, open_rules_library};
 use settings::{Settings, update_settings_file};
-use console_panel::ConsolePanel;
 use terminal_view::TerminalView;
 use theme_settings::ThemeSettings;
 use ui::{
@@ -2962,9 +2962,7 @@ impl AgentPanel {
                                                         panel.update(cx, |panel, cx| {
                                                             panel.new_external_agent_thread(
                                                                 &NewExternalAgentThread {
-                                                                    agent: Some(
-                                                                        Agent::NativeAgent,
-                                                                    ),
+                                                                    agent: Some(Agent::NativeAgent),
                                                                 },
                                                                 window,
                                                                 cx,

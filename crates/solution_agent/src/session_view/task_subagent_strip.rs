@@ -80,8 +80,7 @@ pub(super) fn render_task_subagent_strip(
                 let label_body = snap
                     .map(|s| s.activity_label.clone())
                     .unwrap_or_else(|| SharedString::new_static("Starting…"));
-                let display_label =
-                    SharedString::from(format!("{}·{}", id.short(), label_body));
+                let display_label = SharedString::from(format!("{}·{}", id.short(), label_body));
                 let display_state = classify_background_agent_display(snap, now, stale);
                 (
                     SharedString::from(id.as_str().to_string()),
@@ -179,9 +178,8 @@ pub(super) fn render_task_subagent_strip(
             state,
             cx,
             move |this, _, _, cx| {
-                let next = SubagentView::Background(BackgroundAgentId::new(
-                    id_for_listener.clone(),
-                ));
+                let next =
+                    SubagentView::Background(BackgroundAgentId::new(id_for_listener.clone()));
                 if this.selected_subagent != next {
                     this.selected_subagent = next;
                     cx.notify();
@@ -241,8 +239,12 @@ fn pill<F>(
     on_click: F,
 ) -> AnyElement
 where
-    F: Fn(&mut SolutionSessionView, &gpui::ClickEvent, &mut Window, &mut Context<SolutionSessionView>)
-        + 'static,
+    F: Fn(
+            &mut SolutionSessionView,
+            &gpui::ClickEvent,
+            &mut Window,
+            &mut Context<SolutionSessionView>,
+        ) + 'static,
 {
     let colors = cx.theme().colors();
     let (bg, label_color) = if is_active {
@@ -337,10 +339,18 @@ fn background_pill<F, G>(
     on_close: G,
 ) -> AnyElement
 where
-    F: Fn(&mut SolutionSessionView, &gpui::ClickEvent, &mut Window, &mut Context<SolutionSessionView>)
-        + 'static,
-    G: Fn(&mut SolutionSessionView, &gpui::ClickEvent, &mut Window, &mut Context<SolutionSessionView>)
-        + 'static,
+    F: Fn(
+            &mut SolutionSessionView,
+            &gpui::ClickEvent,
+            &mut Window,
+            &mut Context<SolutionSessionView>,
+        ) + 'static,
+    G: Fn(
+            &mut SolutionSessionView,
+            &gpui::ClickEvent,
+            &mut Window,
+            &mut Context<SolutionSessionView>,
+        ) + 'static,
 {
     let colors = cx.theme().colors();
     let (label_color, border_color) = match (state, is_active) {
@@ -350,6 +360,9 @@ where
         (BackgroundAgentDisplayState::Done, _) => unreachable!("done pills are filtered out"),
     };
     let tooltip_text = SharedString::from(format!("Show {}", label));
+    // Per-pill unique id for the × button: a constant id would collide
+    // across multiple Dead pills in the same render tree (duplicate ElementId).
+    let close_id = SharedString::from(format!("{id}-close"));
     let mut pill_row = h_flex()
         .id(id)
         .flex_none()
@@ -374,7 +387,7 @@ where
     if matches!(state, BackgroundAgentDisplayState::Dead) {
         pill_row = pill_row.child(
             h_flex()
-                .id("bg-pill-close")
+                .id(close_id)
                 .flex_none()
                 .px_1()
                 .child(Label::new("×").size(LabelSize::Small).color(Color::Muted))
@@ -465,10 +478,18 @@ fn background_shell_pill<F, G>(
     on_close: G,
 ) -> AnyElement
 where
-    F: Fn(&mut SolutionSessionView, &gpui::ClickEvent, &mut Window, &mut Context<SolutionSessionView>)
-        + 'static,
-    G: Fn(&mut SolutionSessionView, &gpui::ClickEvent, &mut Window, &mut Context<SolutionSessionView>)
-        + 'static,
+    F: Fn(
+            &mut SolutionSessionView,
+            &gpui::ClickEvent,
+            &mut Window,
+            &mut Context<SolutionSessionView>,
+        ) + 'static,
+    G: Fn(
+            &mut SolutionSessionView,
+            &gpui::ClickEvent,
+            &mut Window,
+            &mut Context<SolutionSessionView>,
+        ) + 'static,
 {
     let colors = cx.theme().colors();
     let label_color = match state {
@@ -500,6 +521,9 @@ where
         ShellDisplayState::Exited(_) | ShellDisplayState::Killed | ShellDisplayState::Stale
     );
     let tooltip_text = SharedString::from(format!("Show {}", label));
+    // Per-pill unique id for the × button: a constant id would collide
+    // across multiple terminal/stale shell pills (duplicate ElementId).
+    let close_id = SharedString::from(format!("{id}-close"));
     let mut pill_row = h_flex()
         .id(id)
         .flex_none()
@@ -529,7 +553,7 @@ where
     if show_close {
         pill_row = pill_row.child(
             h_flex()
-                .id("shell-pill-close")
+                .id(close_id)
                 .flex_none()
                 .px_1()
                 .child(Label::new("×").size(LabelSize::Small).color(Color::Muted))

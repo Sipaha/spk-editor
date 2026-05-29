@@ -57,20 +57,26 @@ mod tests {
     use gpui::TestAppContext;
 
     #[gpui::test]
-    async fn emit_if_ready_throttles_repeat_calls_for_same_session(
-        cx: &mut TestAppContext,
-    ) {
+    async fn emit_if_ready_throttles_repeat_calls_for_same_session(cx: &mut TestAppContext) {
         cx.update(|cx| {
             let emitter = MetricsEmitter::new();
             let sid = SolutionSessionId::new();
             // First emit goes through (no panic, no return-early). We can't
             // easily observe the actual notification without a real MCP
             // server, but we CAN observe the `last_emit` map state.
-            emitter.emit_if_ready(cx, &sid, serde_json::json!({ "session_id": sid.to_string() }));
+            emitter.emit_if_ready(
+                cx,
+                &sid,
+                serde_json::json!({ "session_id": sid.to_string() }),
+            );
             assert!(emitter.last_emit.lock().contains_key(&sid));
             let first_time = *emitter.last_emit.lock().get(&sid).unwrap();
             // Immediate second emit should be throttled — last_emit unchanged.
-            emitter.emit_if_ready(cx, &sid, serde_json::json!({ "session_id": sid.to_string() }));
+            emitter.emit_if_ready(
+                cx,
+                &sid,
+                serde_json::json!({ "session_id": sid.to_string() }),
+            );
             let second_time = *emitter.last_emit.lock().get(&sid).unwrap();
             assert_eq!(first_time, second_time, "throttle within window");
         });
@@ -82,8 +88,16 @@ mod tests {
             let emitter = MetricsEmitter::new();
             let sid_a = SolutionSessionId::new();
             let sid_b = SolutionSessionId::new();
-            emitter.emit_if_ready(cx, &sid_a, serde_json::json!({ "session_id": sid_a.to_string() }));
-            emitter.emit_if_ready(cx, &sid_b, serde_json::json!({ "session_id": sid_b.to_string() }));
+            emitter.emit_if_ready(
+                cx,
+                &sid_a,
+                serde_json::json!({ "session_id": sid_a.to_string() }),
+            );
+            emitter.emit_if_ready(
+                cx,
+                &sid_b,
+                serde_json::json!({ "session_id": sid_b.to_string() }),
+            );
             assert!(emitter.last_emit.lock().contains_key(&sid_a));
             assert!(emitter.last_emit.lock().contains_key(&sid_b));
         });

@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use agent_client_protocol::schema as acp;
 use gpui::SharedString;
 
-use super::recall::unpack_recalled_bundle;
 use super::SolutionSessionView;
+use super::recall::unpack_recalled_bundle;
 use crate::model::SubagentTab;
 use crate::store::SubagentView;
 
@@ -127,7 +127,8 @@ fn next_selection_after_change_main_stays_main() {
     active.insert(id_a.clone(), make_tab("A"));
     let order = vec![id_a];
     // Main was already selected — a strip change should not yank us into a tab.
-    let next = SolutionSessionView::next_selection_after_change(&SubagentView::Main, &active, &order);
+    let next =
+        SolutionSessionView::next_selection_after_change(&SubagentView::Main, &active, &order);
     assert_eq!(next, SubagentView::Main);
 }
 
@@ -172,10 +173,7 @@ fn next_selection_after_background_change_keeps_live_background() {
 fn next_selection_after_background_change_passes_through_main_and_task() {
     let agents = HashMap::new();
     assert_eq!(
-        SolutionSessionView::next_selection_after_background_change(
-            &SubagentView::Main,
-            &agents,
-        ),
+        SolutionSessionView::next_selection_after_background_change(&SubagentView::Main, &agents,),
         SubagentView::Main,
     );
     let task_id = SharedString::from("toolu_a");
@@ -342,18 +340,25 @@ async fn build_shell_drill_in_entries_live_shell_renders_tail(cx: &mut gpui::Tes
         shell_entry_markdown(&entries, cx)
     });
     // Header carries the command, "running" state, and the short id.
-    assert!(source.contains("echo hello"), "header has command: {source}");
+    assert!(
+        source.contains("echo hello"),
+        "header has command: {source}"
+    );
     assert!(source.contains("running"), "header has state: {source}");
-    assert!(source.contains("bvb4ful1z"), "header has short id: {source}");
+    assert!(
+        source.contains("bvb4ful1z"),
+        "header has short id: {source}"
+    );
     // Body carries the stdout tail inside a fenced code block.
-    assert!(source.contains("hello world"), "body has the tail: {source}");
+    assert!(
+        source.contains("hello world"),
+        "body has the tail: {source}"
+    );
     assert!(source.contains("```"), "body is fenced: {source}");
 }
 
 #[gpui::test]
-async fn build_shell_drill_in_entries_no_snapshot_shows_placeholder(
-    cx: &mut gpui::TestAppContext,
-) {
+async fn build_shell_drill_in_entries_no_snapshot_shows_placeholder(cx: &mut gpui::TestAppContext) {
     let shell = make_background_shell("bvb4ful1z"); // latest: None
     let now = chrono::Utc::now();
     let source = cx.update(|cx| {

@@ -215,7 +215,9 @@ pub enum SubagentView {
 impl SubagentView {
     /// True when the view sources its entries from the parent
     /// `AcpThread.entries` (Main + Task filter both do); false when
-    /// the view sources from JSONL on disk (Background).
+    /// the view sources from disk rather than the parent thread
+    /// (`Background` tails a managed-agent JSONL; `Shell` tails a
+    /// background-shell `.output` snapshot).
     pub fn is_parent_thread_view(&self) -> bool {
         matches!(self, Self::Main | Self::Task(_))
     }
@@ -313,7 +315,22 @@ fn read_complete_lines_from(
     // partial line we re-read next tick.
     let last_newline = buf.iter().rposition(|b| *b == b'\n');
     let Some(last_newline) = last_newline else {
-        return Some((Vec::new(), 0));
+        // No newline in the window. Two cases:
+        //   - We filled the whole cap → a single line longer than the cap
+        //     (e.g. a large inline `Read` result in the transcript). Pinning
+        //     the offset here would WEDGE the scan forever (consumed=0 every
+        //     tick), silently killing live completion detection for the
+        //     session. Skip the oversized region by advancing past the cap;
+        //     we may land mid-line but resync at the next newline (a fragment
+        //     can't false-match the `<task-notification>` literal).
+        //   - We read short of the cap → just a partial trailing line still
+        //     being written. Wait (consume 0) for the newline to arrive.
+        let consumed = if to_read == PARENT_JSONL_READ_CAP {
+            to_read
+        } else {
+            0
+        };
+        return Some((Vec::new(), consumed));
     };
     let consumed = (last_newline + 1) as u64;
     let complete = &buf[..=last_newline];
@@ -416,11 +433,7 @@ pub(crate) fn cold_entries_from_persisted(
         let legacy_sources: Vec<String> = if !persisted.entry_summaries.is_empty() {
             persisted.entry_summaries
         } else {
-            persisted
-                .entries
-                .into_iter()
-                .map(|e| e.markdown)
-                .collect()
+            persisted.entries.into_iter().map(|e| e.markdown).collect()
         };
         legacy_sources
             .into_iter()
@@ -1984,10 +1997,14 @@ impl SolutionAgentStore {
         // Guard with `try_global` so test contexts that don't install the
         // MCP layer don't panic.
         if let Some(coord) = editor_mcp::workspace_seq::WorkspaceEventCoordinator::try_global(cx) {
-            coord.emit_sequenced(cx, "workspace.session_deleted", serde_json::json!({
-                "solution_id": solution_id.as_str(),
-                "session_id": id.to_string(),
-            }));
+            coord.emit_sequenced(
+                cx,
+                "workspace.session_deleted",
+                serde_json::json!({
+                    "solution_id": solution_id.as_str(),
+                    "session_id": id.to_string(),
+                }),
+            );
         }
         cx.notify();
         Ok(())
@@ -2056,7 +2073,12 @@ impl SolutionAgentStore {
             } else {
                 Some(s.cwd.clone())
             };
-            (s.solution_id.clone(), s.agent_id.clone(), project, cwd_override)
+            (
+                s.solution_id.clone(),
+                s.agent_id.clone(),
+                project,
+                cwd_override,
+            )
         };
         let pair = (solution_id.clone(), agent_id.clone());
         {
@@ -2431,28 +2453,31 @@ impl SolutionAgentStore {
         // per actual transition so downstream clients stay in sync without a
         // full snapshot refresh. Guard with `try_global` so test contexts that
         // don't install the MCP layer don't panic.
-        let opened_ids: Vec<SolutionSessionId> =
-            new_set.difference(&old_set).copied().collect();
-        let closed_ids: Vec<SolutionSessionId> =
-            old_set.difference(&new_set).copied().collect();
-        if let Some(coord) =
-            editor_mcp::workspace_seq::WorkspaceEventCoordinator::try_global(cx)
-        {
+        let opened_ids: Vec<SolutionSessionId> = new_set.difference(&old_set).copied().collect();
+        let closed_ids: Vec<SolutionSessionId> = old_set.difference(&new_set).copied().collect();
+        if let Some(coord) = editor_mcp::workspace_seq::WorkspaceEventCoordinator::try_global(cx) {
             for opened_id in &opened_ids {
                 if let Some(entity) = self.sessions.get(opened_id) {
-                    let summary =
-                        entity.read_with(cx, |s, cx| crate::mcp::session_summary(s, cx));
-                    coord.emit_sequenced(cx, "workspace.session_opened", serde_json::json!({
-                        "solution_id": solution_id.as_str(),
-                        "session": summary,
-                    }));
+                    let summary = entity.read_with(cx, |s, cx| crate::mcp::session_summary(s, cx));
+                    coord.emit_sequenced(
+                        cx,
+                        "workspace.session_opened",
+                        serde_json::json!({
+                            "solution_id": solution_id.as_str(),
+                            "session": summary,
+                        }),
+                    );
                 }
             }
             for closed_id in &closed_ids {
-                coord.emit_sequenced(cx, "workspace.session_closed", serde_json::json!({
-                    "solution_id": solution_id.as_str(),
-                    "session_id": closed_id.to_string(),
-                }));
+                coord.emit_sequenced(
+                    cx,
+                    "workspace.session_closed",
+                    serde_json::json!({
+                        "solution_id": solution_id.as_str(),
+                        "session_id": closed_id.to_string(),
+                    }),
+                );
             }
         }
 
@@ -2498,7 +2523,10 @@ impl SolutionAgentStore {
                 continue;
             }
             let id = entity.read(cx).id;
-            let new_order = ordered_ids.iter().position(|oid| *oid == id).map(|i| i as i64);
+            let new_order = ordered_ids
+                .iter()
+                .position(|oid| *oid == id)
+                .map(|i| i as i64);
             entity.update(cx, |s, _| s.tab_order = new_order);
         }
     }
@@ -2806,10 +2834,7 @@ impl SolutionAgentStore {
             // InProgress→InProgress EntryUpdated as raw_input streams in) must
             // not re-insert or re-emit. Only the first observation registers
             // the tab.
-            let already_tracked = session_entity
-                .read(cx)
-                .active_subagents
-                .contains_key(&id);
+            let already_tracked = session_entity.read(cx).active_subagents.contains_key(&id);
             if already_tracked {
                 // Label is intentionally locked at first observation. Later
                 // EntryUpdated events that finally fill in raw_input.description
@@ -2837,14 +2862,12 @@ impl SolutionAgentStore {
             // Symmetric defensive guard: a terminal-status EntryUpdated on an
             // id we never registered (e.g. the InProgress event arrived after
             // a status flip on a cold→live transition) is a no-op.
-            let tracked = session_entity
-                .read(cx)
-                .active_subagents
-                .contains_key(&id);
+            let tracked = session_entity.read(cx).active_subagents.contains_key(&id);
             if tracked {
                 session_entity.update(cx, |s, _| {
                     s.active_subagents.remove(&id);
-                    s.active_subagent_order.retain(|tracked_id| tracked_id != &id);
+                    s.active_subagent_order
+                        .retain(|tracked_id| tracked_id != &id);
                 });
                 true
             } else {
@@ -2882,10 +2905,7 @@ impl SolutionAgentStore {
                 let canonical =
                     std::fs::read_link(&output_file).unwrap_or_else(|_| output_file.clone());
                 let id = crate::background_agent::BackgroundAgentId::new(agent_id_str);
-                let already = session_entity
-                    .read(cx)
-                    .background_agents
-                    .contains_key(&id);
+                let already = session_entity.read(cx).background_agents.contains_key(&id);
                 if !already {
                     let id_for_insert = id.clone();
                     let path_for_insert = canonical.clone();
@@ -3296,12 +3316,7 @@ impl SolutionAgentStore {
             .background_shells
             .contains_key(&notification.id)
         {
-            self.mark_background_shell_state(
-                session_id,
-                notification.id,
-                notification.status,
-                cx,
-            );
+            self.mark_background_shell_state(session_id, notification.id, notification.status, cx);
         }
     }
 
@@ -3354,8 +3369,7 @@ impl SolutionAgentStore {
                             if snap.stop_reason.is_some() {
                                 return true;
                             }
-                            let elapsed =
-                                now.duration_since(snap.mtime).unwrap_or_default();
+                            let elapsed = now.duration_since(snap.mtime).unwrap_or_default();
                             elapsed > expiry
                         })
                         .cloned()
@@ -3388,19 +3402,6 @@ impl SolutionAgentStore {
         }
     }
 
-    /// 1 Hz healthcheck for background shells, the analog of
-    /// [`tick_background_agents`]. Reaps a shell when it is in a terminal
-    /// state (`Exited`/`Killed`) OR when it has gone stale beyond
-    /// `managed_agent_stale_timeout_secs + managed_agent_dead_linger_secs`.
-    ///
-    /// The staleness check is load-bearing, not redundant: a background shell
-    /// that COMPLETES is, in the current build, almost never marked `Exited`
-    /// (the `<task-notification>` signal is dormant — see commit d88079b2dc),
-    /// so without the age check a finished shell would leak as a "Running"
-    /// pill forever. Age is measured from `latest.mtime` (the output file's
-    /// last-observed write — it stops advancing once the command finishes)
-    /// when a snapshot exists, else from `registered_at` (a shell that
-    /// produced zero output and finished must still age out).
     /// One pass over every session: incrementally tail the PARENT session
     /// JSONL for `<task-notification>` lines and flip matching tracked shells
     /// to their terminal [`ShellRuntimeState`]. Runs on the same 1 Hz tick as
@@ -3436,7 +3437,10 @@ impl SolutionAgentStore {
         let (has_shells, any_running, cwd, acp_session_id) = {
             let s = session.read(cx);
             let any_running = s.background_shells.values().any(|sh| {
-                matches!(sh.state, crate::background_shell::ShellRuntimeState::Running)
+                matches!(
+                    sh.state,
+                    crate::background_shell::ShellRuntimeState::Running
+                )
             });
             (
                 !s.background_shells.is_empty(),
@@ -3497,6 +3501,20 @@ impl SolutionAgentStore {
         }
     }
 
+    /// 1 Hz healthcheck for background shells, the analog of
+    /// [`tick_background_agents`]. Reaps a shell when it is in a terminal
+    /// state (`Exited`/`Killed`) OR when it has gone stale beyond
+    /// `managed_agent_stale_timeout_secs + managed_agent_dead_linger_secs`.
+    ///
+    /// The staleness check is load-bearing, not redundant: even though
+    /// `scan_parent_jsonls_for_completions` now flips most finished shells to
+    /// `Exited` live (via the parent-JSONL `<task-notification>` scan), a shell
+    /// whose subprocess dies without emitting a notification (crash, restart,
+    /// killed harness) would otherwise leak as a "Running" pill forever. Age is
+    /// measured from `latest.mtime` (the output file's last-observed write — it
+    /// stops advancing once the command finishes) when a snapshot exists, else
+    /// from `registered_at` (a shell that produced zero output and finished must
+    /// still age out).
     pub fn tick_background_shells(&mut self, cx: &mut Context<Self>) {
         use ::agent_settings::AgentSettings;
         use settings::Settings;
@@ -3613,8 +3631,7 @@ impl SolutionAgentStore {
 
         for row in rows {
             let path = std::path::PathBuf::from(&row.jsonl_path);
-            let agent_id =
-                crate::background_agent::BackgroundAgentId::new(row.agent_id.clone());
+            let agent_id = crate::background_agent::BackgroundAgentId::new(row.agent_id.clone());
             if !path.exists() {
                 to_drop_from_db.push((row.solution_session_id.clone(), row.agent_id));
                 continue;
@@ -3891,7 +3908,11 @@ impl SolutionAgentStore {
                     // (2 s window) and non-sequenced per spec.
                     let (last_activity_at, total_tokens, max_tokens) = {
                         let r = s.read(cx);
-                        (r.last_activity_at, r.cached_total_tokens, r.cached_max_tokens)
+                        (
+                            r.last_activity_at,
+                            r.cached_total_tokens,
+                            r.cached_max_tokens,
+                        )
                     };
                     self.metrics_emitter.emit_if_ready(
                         cx,
@@ -4039,7 +4060,11 @@ impl SolutionAgentStore {
                     // resync"; no gap-detection or seq field needed.
                     let (last_activity_at, total_tokens, max_tokens) = {
                         let r = s.read(cx);
-                        (r.last_activity_at, r.cached_total_tokens, r.cached_max_tokens)
+                        (
+                            r.last_activity_at,
+                            r.cached_total_tokens,
+                            r.cached_max_tokens,
+                        )
                     };
                     self.metrics_emitter.emit_if_ready(
                         cx,
@@ -4222,11 +4247,7 @@ impl SolutionAgentStore {
     /// No-ops gracefully when the session is not found (already removed) or
     /// when `WorkspaceEventCoordinator` is not installed (test contexts that
     /// don't initialise the MCP layer).
-    fn emit_session_state_changed_workspace(
-        &self,
-        session_id: &SolutionSessionId,
-        cx: &App,
-    ) {
+    fn emit_session_state_changed_workspace(&self, session_id: &SolutionSessionId, cx: &App) {
         let Some(coord) = editor_mcp::workspace_seq::WorkspaceEventCoordinator::try_global(cx)
         else {
             return;
@@ -4235,11 +4256,15 @@ impl SolutionAgentStore {
             return;
         };
         let summary = entity.read_with(cx, |s, cx| crate::mcp::session_summary(s, cx));
-        coord.emit_sequenced(cx, "workspace.session_state_changed", serde_json::json!({
-            "solution_id": summary.solution_id,
-            "session_id": summary.id,
-            "state": summary.state,
-        }));
+        coord.emit_sequenced(
+            cx,
+            "workspace.session_state_changed",
+            serde_json::json!({
+                "solution_id": summary.solution_id,
+                "session_id": summary.id,
+                "state": summary.state,
+            }),
+        );
     }
 
     /// Wraps a `SessionState` mutation so notifier hooks fire uniformly:
@@ -4456,8 +4481,7 @@ mod background_agent_dir_tests {
         );
         let dir = dir.expect("home_dir must resolve in test env");
         assert!(
-            dir.to_string_lossy()
-                .contains("-home-spk-projects-foo-bar"),
+            dir.to_string_lossy().contains("-home-spk-projects-foo-bar"),
             "expected encoded cwd in path, got {:?}",
             dir
         );
@@ -4466,9 +4490,7 @@ mod background_agent_dir_tests {
 
     #[test]
     fn background_agent_dir_for_empty_cwd_returns_none() {
-        assert!(
-            super::background_agent_dir_for(std::path::Path::new(""), "ses-x").is_none()
-        );
+        assert!(super::background_agent_dir_for(std::path::Path::new(""), "ses-x").is_none());
     }
 
     #[test]
@@ -4489,18 +4511,14 @@ mod background_agent_dir_tests {
 
     #[test]
     fn parent_session_jsonl_for_empty_cwd_returns_none() {
-        assert!(
-            super::parent_session_jsonl_for(std::path::Path::new(""), "ses-x").is_none()
-        );
+        assert!(super::parent_session_jsonl_for(std::path::Path::new(""), "ses-x").is_none());
     }
 }
 
 #[cfg(test)]
 mod parent_jsonl_scan_tests {
     use super::*;
-    use crate::background_shell::{
-        BackgroundShell, BackgroundShellId, ShellRuntimeState,
-    };
+    use crate::background_shell::{BackgroundShell, BackgroundShellId, ShellRuntimeState};
     use std::collections::HashMap;
 
     fn running_shell(id: &str) -> (BackgroundShellId, BackgroundShell) {
@@ -4548,8 +4566,7 @@ mod parent_jsonl_scan_tests {
         let (id, shell) = running_shell("bvb4ful1z");
         shells.insert(id, shell);
         let lines = vec![
-            r#"{"type":"assistant","message":{"role":"assistant","content":"hi"}}"#
-                .to_string(),
+            r#"{"type":"assistant","message":{"role":"assistant","content":"hi"}}"#.to_string(),
         ];
         assert!(scan_lines_for_completions(&lines, &shells).is_empty());
     }
@@ -4562,16 +4579,54 @@ mod parent_jsonl_scan_tests {
         let content = "line one\nline two\npartial-no-newline";
         std::fs::write(&path, content).expect("write");
         let end = content.len() as u64;
-        let (lines, consumed) =
-            read_complete_lines_from(&path, 0, end).expect("read ok");
+        let (lines, consumed) = read_complete_lines_from(&path, 0, end).expect("read ok");
         assert_eq!(lines, vec!["line one".to_string(), "line two".to_string()]);
         // Consumed only through the second newline; the partial is left.
         assert_eq!(consumed, "line one\nline two\n".len() as u64);
         // A re-read from the advanced offset with no new bytes yields nothing.
-        let (lines2, consumed2) =
-            read_complete_lines_from(&path, consumed, end).expect("read ok");
+        let (lines2, consumed2) = read_complete_lines_from(&path, consumed, end).expect("read ok");
         assert!(lines2.is_empty());
         assert_eq!(consumed2, 0);
+    }
+
+    #[test]
+    fn read_complete_lines_skips_oversized_line_instead_of_wedging() {
+        // A single line longer than the read cap (e.g. a large inline `Read`
+        // result in the transcript) has no newline in the first cap window.
+        // The scan must SKIP it (advance by the cap) rather than pin the
+        // offset at 0 forever — otherwise live completion detection wedges.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("ses.jsonl");
+        let huge = "x".repeat((PARENT_JSONL_READ_CAP + 4096) as usize);
+        let content = format!("{huge}\nshort tail line\n");
+        std::fs::write(&path, &content).expect("write");
+        let end = content.len() as u64;
+        // First read: full cap window, no newline → skip by exactly the cap.
+        let (lines, consumed) = read_complete_lines_from(&path, 0, end).expect("read ok");
+        assert!(lines.is_empty());
+        assert_eq!(
+            consumed, PARENT_JSONL_READ_CAP,
+            "must advance past oversized line"
+        );
+        // Subsequent reads eventually resync at a newline and surface the tail
+        // line (offset advances every call, so the scan can never wedge).
+        let mut offset = consumed;
+        let mut saw_tail = false;
+        for _ in 0..4 {
+            let (lines, consumed) = read_complete_lines_from(&path, offset, end).expect("read ok");
+            if lines.iter().any(|l| l == "short tail line") {
+                saw_tail = true;
+                break;
+            }
+            offset += consumed;
+            if consumed == 0 {
+                break;
+            }
+        }
+        assert!(
+            saw_tail,
+            "tail line must resurface after skipping the oversized line"
+        );
     }
 }
 
@@ -4607,6 +4662,10 @@ mod subagent_view_tests {
         assert!(SubagentView::Task("x".into()).is_parent_thread_view());
         assert!(
             !SubagentView::Background(crate::background_agent::BackgroundAgentId::new("a30f"))
+                .is_parent_thread_view()
+        );
+        assert!(
+            !SubagentView::Shell(crate::background_shell::BackgroundShellId::new("bvb4ful1z"))
                 .is_parent_thread_view()
         );
     }

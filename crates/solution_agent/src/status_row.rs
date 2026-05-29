@@ -3,8 +3,7 @@
 use chrono::TimeZone as _;
 use gpui::{Animation, AnimationExt, ElementId, pulsating_between};
 use gpui::{
-    Context, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, div, px,
+    Context, IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled, div, px,
 };
 use ui::prelude::*;
 use ui::{CommonAnimationExt, ContextMenu, IconName, Label, LabelSize, PopoverMenu};
@@ -118,7 +117,6 @@ impl SolutionSessionView {
             });
         }));
     }
-
 }
 
 /// Free-function entry point used by `SolutionSessionView::render`. Lives in
@@ -158,518 +156,515 @@ pub(crate) fn render_status_row(
         })
         .and_then(|solution| crate::store::project_name_for_cwd(&solution, &s.cwd, cx))
         .unwrap_or_else(|| SharedString::from("ROOT"));
-        // For most states the short label ("Idle", "Running", …) is
-        // the right thing to show. For `Errored(msg)` we surface the
-        // full message inline so the user actually learns *what* went
-        // wrong (e.g. "You've hit your limit · resets 2:10pm") instead
-        // of just seeing "Error" with no follow-up. The tooltip carries
-        // the same text so very long errors that get truncated by
-        // flexbox can still be read in full on hover.
-        // Cold (no live `AcpThread`) and resuming (cold-tab Send
-        // handshake in flight) are session-level conditions that
-        // don't fit into `SessionState`'s "agent activity" axis —
-        // surface them as override states for the badge so the user
-        // doesn't see a misleading bare "Idle" while the subprocess
-        // is dead-asleep or mid-handshake.
-        let is_cold = s.is_cold();
-        // `is_resuming` is precomputed by the caller (`SolutionSessionView`)
-        // and passed in. Reading it from `active_view` here would double-lease
-        // the view: this method runs inside `nav.update(...)` invoked from
-        // *within* `SolutionSessionView::render`, so the view entity is
-        // already leased by GPUI's renderer.
-        let (state_text, error_text): (SharedString, Option<SharedString>) = if is_resuming {
-            (SharedString::from("Resuming…"), None)
-        } else if is_cold {
-            // The session was restored from disk and the subprocess
-            // hasn't been spawned yet. Tooltip-less label is fine —
-            // the meaning is glanceable (Sleeping = inactive, send
-            // a message to wake it up).
-            (SharedString::from("Sleeping"), None)
-        } else {
-            match &s.state {
-                SessionState::Errored(msg) => (
-                    SharedString::from(format!("Error: {msg}")),
-                    Some(msg.clone()),
-                ),
-                SessionState::Running { started_at, .. } => {
-                    let elapsed = started_at.elapsed().as_secs();
-                    let label = if elapsed >= 1 {
-                        format!("Thinking… {}", format_elapsed(elapsed))
-                    } else {
-                        "Thinking…".to_string()
-                    };
-                    (SharedString::from(label), None)
-                }
-                // "Done in Xs" replaces a bare "Idle" right after a turn
-                // completes so a foreground user gets an explicit "the
-                // agent finished" cue (the desktop notification path is
-                // gated to unfocused panels and ≥5min turns, so without
-                // this an in-foreground watcher only sees "Thinking…"
-                // disappear). Cleared on the next Running transition.
-                SessionState::Idle if s.last_turn_duration.is_some() => {
-                    let secs = s.last_turn_duration.map(|d| d.as_secs()).unwrap_or(0);
-                    let label = if secs >= 1 {
-                        format!("Done in {}", format_elapsed(secs))
-                    } else {
-                        "Done".to_string()
-                    };
-                    (SharedString::from(label), None)
-                }
-                other => (SharedString::from(other.short_label()), None),
+    // For most states the short label ("Idle", "Running", …) is
+    // the right thing to show. For `Errored(msg)` we surface the
+    // full message inline so the user actually learns *what* went
+    // wrong (e.g. "You've hit your limit · resets 2:10pm") instead
+    // of just seeing "Error" with no follow-up. The tooltip carries
+    // the same text so very long errors that get truncated by
+    // flexbox can still be read in full on hover.
+    // Cold (no live `AcpThread`) and resuming (cold-tab Send
+    // handshake in flight) are session-level conditions that
+    // don't fit into `SessionState`'s "agent activity" axis —
+    // surface them as override states for the badge so the user
+    // doesn't see a misleading bare "Idle" while the subprocess
+    // is dead-asleep or mid-handshake.
+    let is_cold = s.is_cold();
+    // `is_resuming` is precomputed by the caller (`SolutionSessionView`)
+    // and passed in. Reading it from `active_view` here would double-lease
+    // the view: this method runs inside `nav.update(...)` invoked from
+    // *within* `SolutionSessionView::render`, so the view entity is
+    // already leased by GPUI's renderer.
+    let (state_text, error_text): (SharedString, Option<SharedString>) = if is_resuming {
+        (SharedString::from("Resuming…"), None)
+    } else if is_cold {
+        // The session was restored from disk and the subprocess
+        // hasn't been spawned yet. Tooltip-less label is fine —
+        // the meaning is glanceable (Sleeping = inactive, send
+        // a message to wake it up).
+        (SharedString::from("Sleeping"), None)
+    } else {
+        match &s.state {
+            SessionState::Errored(msg) => (
+                SharedString::from(format!("Error: {msg}")),
+                Some(msg.clone()),
+            ),
+            SessionState::Running { started_at, .. } => {
+                let elapsed = started_at.elapsed().as_secs();
+                let label = if elapsed >= 1 {
+                    format!("Thinking… {}", format_elapsed(elapsed))
+                } else {
+                    "Thinking…".to_string()
+                };
+                (SharedString::from(label), None)
             }
-        };
-        let is_idle = matches!(s.state, SessionState::Idle) && !is_cold && !is_resuming;
-        let is_running = matches!(s.state, SessionState::Running { .. }) && !is_resuming;
-        let is_errored = matches!(s.state, SessionState::Errored(_));
-        // Live thread → live `TokenUsage`; cold / sleeping → fall
-        // back to the `cached_total_tokens` mirrored from metadata
-        // at restore time + refreshed on every live
-        // `TokenUsageUpdated`. Without this fallback the meter showed
-        // "0 / 1.0M · 0.0%" for any restored conversation, which
-        // looked like the editor lost the agent's context.
-        let usage = s
-            .acp_thread()
-            .and_then(|thread| thread.read(cx).token_usage().cloned())
-            .or_else(|| {
-                s.cached_total_tokens.map(|used| acp_thread::TokenUsage {
-                    used_tokens: used,
-                    ..Default::default()
-                })
-            });
-        // Synchronous read of the agent's current session mode
-        // ("default", "plan", …). Claude exposes this via ACP — when
-        // the connection doesn't implement modes (e.g. mock test
-        // adapter) we just hide the segment.
-        let mode_text: Option<SharedString> = s.acp_thread().and_then(|thread| {
-            let thread = thread.read(cx);
-            let modes = thread.connection().session_modes(thread.session_id(), cx)?;
-            let current = modes.current_mode();
-            modes
-                .all_modes()
-                .into_iter()
-                .find(|m| m.id == current)
-                .map(|m| SharedString::from(m.name))
-                .or_else(|| Some(SharedString::from(current.0.to_string())))
-        });
-        // Newest entry's server-stamped time, if it has a real one. The
-        // newest entry is the last element of `entry_created_ms` (index-
-        // aligned with entries); `> 0` filters out the NO_TIMESTAMP_MS
-        // sentinel and 0/missing. An all-historical or empty session has
-        // no real newest time → we render no relative label at all.
-        let last_activity_ms = s.entry_created_ms.last().copied().filter(|&ms| ms > 0);
-        let _ = s;
-        // While the active session is in `Running`, drive a 1 Hz tick
-        // so the elapsed counter ("Thinking… Ns") in `state_text`
-        // advances even when no AcpThreadEvents fire (long pauses
-        // between tool calls, etc.). Idempotent — the spawn happens
-        // only on the first render that observes Running, and the
-        // task self-cancels by checking `still_running` each tick.
-        if is_running {
-            view.ensure_status_thinking_tick(cx);
-        } else if view.status_thinking_tick.is_some() {
-            view.status_thinking_tick = None;
+            // "Done in Xs" replaces a bare "Idle" right after a turn
+            // completes so a foreground user gets an explicit "the
+            // agent finished" cue (the desktop notification path is
+            // gated to unfocused panels and ≥5min turns, so without
+            // this an in-foreground watcher only sees "Thinking…"
+            // disappear). Cleared on the next Running transition.
+            SessionState::Idle if s.last_turn_duration.is_some() => {
+                let secs = s.last_turn_duration.map(|d| d.as_secs()).unwrap_or(0);
+                let label = if secs >= 1 {
+                    format!("Done in {}", format_elapsed(secs))
+                } else {
+                    "Done".to_string()
+                };
+                (SharedString::from(label), None)
+            }
+            other => (SharedString::from(other.short_label()), None),
         }
-        // Keep the "last activity" relative label fresh with a coarse
-        // ~15s tick for as long as this session tab is open.
-        view.ensure_status_activity_tick(cx);
-        // Prefer the agent's live `active_model` (latched from every
-        // `message_start`, so reflects whichever model claude actually
-        // routed the last turn through — including hot swaps via
-        // `claude --model` after restart). Falls back to the editor-side
-        // selector cache when the agent hasn't seen its first turn yet
-        // or when the connection doesn't expose a live value.
-        view.ensure_status_model_loaded(cx);
-        let model_text = SolutionAgentStore::global(cx)
-            .read(cx)
-            .session(view.session_id())
-            .and_then(|s| s.read(cx).acp_thread().cloned())
-            .and_then(|thread| {
-                let thread = thread.read(cx);
-                thread.connection().active_model(thread.session_id())
+    };
+    let is_idle = matches!(s.state, SessionState::Idle) && !is_cold && !is_resuming;
+    let is_running = matches!(s.state, SessionState::Running { .. }) && !is_resuming;
+    let is_errored = matches!(s.state, SessionState::Errored(_));
+    // Live thread → live `TokenUsage`; cold / sleeping → fall
+    // back to the `cached_total_tokens` mirrored from metadata
+    // at restore time + refreshed on every live
+    // `TokenUsageUpdated`. Without this fallback the meter showed
+    // "0 / 1.0M · 0.0%" for any restored conversation, which
+    // looked like the editor lost the agent's context.
+    let usage = s
+        .acp_thread()
+        .and_then(|thread| thread.read(cx).token_usage().cloned())
+        .or_else(|| {
+            s.cached_total_tokens.map(|used| acp_thread::TokenUsage {
+                used_tokens: used,
+                ..Default::default()
             })
-            .or_else(|| view.status_cached_model.clone());
+        });
+    // Synchronous read of the agent's current session mode
+    // ("default", "plan", …). Claude exposes this via ACP — when
+    // the connection doesn't implement modes (e.g. mock test
+    // adapter) we just hide the segment.
+    let mode_text: Option<SharedString> = s.acp_thread().and_then(|thread| {
+        let thread = thread.read(cx);
+        let modes = thread.connection().session_modes(thread.session_id(), cx)?;
+        let current = modes.current_mode();
+        modes
+            .all_modes()
+            .into_iter()
+            .find(|m| m.id == current)
+            .map(|m| SharedString::from(m.name))
+            .or_else(|| Some(SharedString::from(current.0.to_string())))
+    });
+    // Newest entry's server-stamped time, if it has a real one. The
+    // newest entry is the last element of `entry_created_ms` (index-
+    // aligned with entries); `> 0` filters out the NO_TIMESTAMP_MS
+    // sentinel and 0/missing. An all-historical or empty session has
+    // no real newest time → we render no relative label at all.
+    let last_activity_ms = s.entry_created_ms.last().copied().filter(|&ms| ms > 0);
+    let _ = s;
+    // While the active session is in `Running`, drive a 1 Hz tick
+    // so the elapsed counter ("Thinking… Ns") in `state_text`
+    // advances even when no AcpThreadEvents fire (long pauses
+    // between tool calls, etc.). Idempotent — the spawn happens
+    // only on the first render that observes Running, and the
+    // task self-cancels by checking `still_running` each tick.
+    if is_running {
+        view.ensure_status_thinking_tick(cx);
+    } else if view.status_thinking_tick.is_some() {
+        view.status_thinking_tick = None;
+    }
+    // Keep the "last activity" relative label fresh with a coarse
+    // ~15s tick for as long as this session tab is open.
+    view.ensure_status_activity_tick(cx);
+    // Prefer the agent's live `active_model` (latched from every
+    // `message_start`, so reflects whichever model claude actually
+    // routed the last turn through — including hot swaps via
+    // `claude --model` after restart). Falls back to the editor-side
+    // selector cache when the agent hasn't seen its first turn yet
+    // or when the connection doesn't expose a live value.
+    view.ensure_status_model_loaded(cx);
+    let model_text = SolutionAgentStore::global(cx)
+        .read(cx)
+        .session(view.session_id())
+        .and_then(|s| s.read(cx).acp_thread().cloned())
+        .and_then(|thread| {
+            let thread = thread.read(cx);
+            thread.connection().active_model(thread.session_id())
+        })
+        .or_else(|| view.status_cached_model.clone());
 
-        let raw_used = usage.as_ref().map(|u| u.used_tokens).unwrap_or(0);
-        let peak = view.status_peak_used_tokens;
-        let used = smooth_used_tokens(raw_used, peak);
-        if used != peak {
-            view.status_peak_used_tokens = used;
-        }
-        // claude-acp doesn't always populate `max_tokens` (it's gated by an
-        // upstream beta flag). Once a real limit has been seen for this session
-        // we keep it (cached below) so a later 0/missing update never downgrades
-        // the meter to the global fallback (the 200k/1M flicker). The Claude
-        // Opus 4 window is the fallback only until a real value first arrives.
-        let advertised_max = usage.as_ref().map(|u| u.max_tokens);
-        let (max, new_cached_max) =
-            resolve_max_tokens(advertised_max, view.status_cached_max_tokens);
-        if let Some(cached) = new_cached_max {
-            view.status_cached_max_tokens = Some(cached);
-        }
-        // Display clamp: tokens-in-context can never legitimately exceed the
-        // window. A previously-poisoned reading (the pre-fix
-        // `claude_native::apply_usage` ratcheted peak to the SDK's
-        // sub-call-aggregated `result.usage`, which for a multi-step turn
-        // can be 2-3× the window — observed "1.8M / 1.0M · 100.0%") would
-        // otherwise stay visible across restarts because `cached_total_tokens`
-        // and `peak_used_tokens` carry over. The source fix prevents NEW
-        // overflows; this clamp neutralises the old ones in the UI.
-        let used = used.min(max);
-        let pct = if max == 0 {
-            0.0
-        } else {
-            (used as f64 / max as f64).clamp(0.0, 1.0)
-        };
-        let meter_text = SharedString::from(format!(
-            "{} / {} · {:.1}%",
-            format_tokens_compact(used),
-            format_tokens_compact(max),
-            pct * 100.0
-        ));
-        let bar_color = if pct >= 0.8 {
-            cx.theme().status().error
-        } else if pct >= 0.5 {
-            cx.theme().status().warning
-        } else {
-            cx.theme().colors().text_accent
-        };
+    let raw_used = usage.as_ref().map(|u| u.used_tokens).unwrap_or(0);
+    let peak = view.status_peak_used_tokens;
+    let used = smooth_used_tokens(raw_used, peak);
+    if used != peak {
+        view.status_peak_used_tokens = used;
+    }
+    // claude-acp doesn't always populate `max_tokens` (it's gated by an
+    // upstream beta flag). Once a real limit has been seen for this session
+    // we keep it (cached below) so a later 0/missing update never downgrades
+    // the meter to the global fallback (the 200k/1M flicker). The Claude
+    // Opus 4 window is the fallback only until a real value first arrives.
+    let advertised_max = usage.as_ref().map(|u| u.max_tokens);
+    let (max, new_cached_max) = resolve_max_tokens(advertised_max, view.status_cached_max_tokens);
+    if let Some(cached) = new_cached_max {
+        view.status_cached_max_tokens = Some(cached);
+    }
+    // Display clamp: tokens-in-context can never legitimately exceed the
+    // window. A previously-poisoned reading (the pre-fix
+    // `claude_native::apply_usage` ratcheted peak to the SDK's
+    // sub-call-aggregated `result.usage`, which for a multi-step turn
+    // can be 2-3× the window — observed "1.8M / 1.0M · 100.0%") would
+    // otherwise stay visible across restarts because `cached_total_tokens`
+    // and `peak_used_tokens` carry over. The source fix prevents NEW
+    // overflows; this clamp neutralises the old ones in the UI.
+    let used = used.min(max);
+    let pct = if max == 0 {
+        0.0
+    } else {
+        (used as f64 / max as f64).clamp(0.0, 1.0)
+    };
+    let meter_text = SharedString::from(format!(
+        "{} / {} · {:.1}%",
+        format_tokens_compact(used),
+        format_tokens_compact(max),
+        pct * 100.0
+    ));
+    let bar_color = if pct >= 0.8 {
+        cx.theme().status().error
+    } else if pct >= 0.5 {
+        cx.theme().status().warning
+    } else {
+        cx.theme().colors().text_accent
+    };
 
-        // The compact prompt + the agent's dump need real headroom (~3k
-        // for the prompt, ~10–20k for state.md / decisions.md / next.md
-        // / continue.md combined). A percentage gate misbehaves across
-        // model sizes — 10 % of a 200 k window is only 20 k tokens
-        // (tight) while 10 % of a 1 M window is 100 k (more than
-        // enough). Tie the disable threshold to absolute remaining
-        // tokens instead so the button stays usable on long-context
-        // models even past 90 %.
-        let remaining = max.saturating_sub(used);
-        let too_full = remaining < COMPACT_HEADROOM_MIN_TOKENS;
-        let pct_ok = pct >= COMPACT_BUTTON_MIN_PCT;
-        let compact_enabled = (is_idle || is_cold) && !is_errored && pct_ok && !too_full;
-        let clear_enabled = !is_running && !is_resuming;
-        let trigger_enabled = compact_enabled || clear_enabled;
+    // The compact prompt + the agent's dump need real headroom (~3k
+    // for the prompt, ~10–20k for state.md / decisions.md / next.md
+    // / continue.md combined). A percentage gate misbehaves across
+    // model sizes — 10 % of a 200 k window is only 20 k tokens
+    // (tight) while 10 % of a 1 M window is 100 k (more than
+    // enough). Tie the disable threshold to absolute remaining
+    // tokens instead so the button stays usable on long-context
+    // models even past 90 %.
+    let remaining = max.saturating_sub(used);
+    let too_full = remaining < COMPACT_HEADROOM_MIN_TOKENS;
+    let pct_ok = pct >= COMPACT_BUTTON_MIN_PCT;
+    let compact_enabled = (is_idle || is_cold) && !is_errored && pct_ok && !too_full;
+    let clear_enabled = !is_running && !is_resuming;
+    let trigger_enabled = compact_enabled || clear_enabled;
 
-        let compact_warning = pct >= COMPACT_BUTTON_WARN_PCT && !too_full;
-        let compact_tooltip: SharedString = if is_running || is_resuming {
-            "Wait for the current turn to finish before compacting".into()
-        } else if is_errored {
-            "Compact unavailable while the session is in error".into()
-        } else if too_full {
-            format!(
-                "Only {} of headroom left — start a fresh session manually",
-                format_tokens(remaining)
-            )
-            .into()
-        } else if pct < COMPACT_BUTTON_MIN_PCT {
-            "Conversation is short — compact later".into()
-        } else if compact_warning {
-            "Context is filling up — compact recommended".into()
-        } else if is_cold {
-            "Compact context: wake the session, dump a summary, then continue in a fresh context"
-                .into()
-        } else {
-            "Compact context: agent dumps a summary, then a fresh session continues".into()
-        };
+    let compact_warning = pct >= COMPACT_BUTTON_WARN_PCT && !too_full;
+    let compact_tooltip: SharedString = if is_running || is_resuming {
+        "Wait for the current turn to finish before compacting".into()
+    } else if is_errored {
+        "Compact unavailable while the session is in error".into()
+    } else if too_full {
+        format!(
+            "Only {} of headroom left — start a fresh session manually",
+            format_tokens(remaining)
+        )
+        .into()
+    } else if pct < COMPACT_BUTTON_MIN_PCT {
+        "Conversation is short — compact later".into()
+    } else if compact_warning {
+        "Context is filling up — compact recommended".into()
+    } else if is_cold {
+        "Compact context: wake the session, dump a summary, then continue in a fresh context".into()
+    } else {
+        "Compact context: agent dumps a summary, then a fresh session continues".into()
+    };
 
-        let clear_tooltip: SharedString = if !clear_enabled {
-            "Wait for the current turn to finish before clearing".into()
-        } else {
-            "Clear context: wipe the conversation, keep the tab".into()
-        };
+    let clear_tooltip: SharedString = if !clear_enabled {
+        "Wait for the current turn to finish before clearing".into()
+    } else {
+        "Clear context: wipe the conversation, keep the tab".into()
+    };
 
-        let trigger_tooltip: SharedString = if !trigger_enabled {
-            "Wait for the current turn to finish before cleaning up context".into()
-        } else {
-            "Compact or clear the session's context".into()
-        };
+    let trigger_tooltip: SharedString = if !trigger_enabled {
+        "Wait for the current turn to finish before cleaning up context".into()
+    } else {
+        "Compact or clear the session's context".into()
+    };
 
-        let trigger_color = if compact_warning {
-            Color::Warning
-        } else {
-            Color::Muted
-        };
+    let trigger_color = if compact_warning {
+        Color::Warning
+    } else {
+        Color::Muted
+    };
 
-        let cleanup_button: gpui::AnyElement = if !trigger_enabled {
-            ui::IconButton::new("solution-status-cleanup", IconName::Eraser)
-                .icon_size(IconSize::Small)
-                .icon_color(trigger_color)
-                .disabled(true)
-                .tooltip(ui::Tooltip::text(trigger_tooltip))
-                .into_any_element()
-        } else {
-            let trigger = ui::IconButton::new("solution-status-cleanup", IconName::Eraser)
-                .icon_size(IconSize::Small)
-                .icon_color(trigger_color)
-                .tooltip(ui::Tooltip::text(trigger_tooltip));
-            let weak_view = Some(weak_view);
-            PopoverMenu::new("solution-status-cleanup-menu")
-                .trigger(trigger)
-                .menu(move |window, cx| {
-                    let weak_view = weak_view.clone();
-                    let compact_tooltip = compact_tooltip.clone();
-                    let clear_tooltip = clear_tooltip.clone();
-                    Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
-                        let compact_label: SharedString = if compact_enabled {
-                            "Compact context".into()
-                        } else {
-                            format!("Compact context — {compact_tooltip}").into()
-                        };
-                        let compact_entry = ui::ContextMenuEntry::new(compact_label)
-                            .icon(IconName::Archive)
-                            .icon_color(Color::Muted)
-                            .disabled(!compact_enabled)
-                            .handler({
-                                let weak_view = weak_view.clone();
-                                move |window, cx| {
-                                    let Some(view) =
-                                        weak_view.as_ref().and_then(|w| w.upgrade())
-                                    else {
-                                        return;
-                                    };
-                                    view.update(cx, |view, cx| {
-                                        if is_cold {
-                                            view.start_compact_from_cold(window, cx);
-                                        } else {
-                                            view.start_compact(cx);
-                                        }
-                                    });
-                                }
-                            });
-                        menu = menu.item(compact_entry);
+    let cleanup_button: gpui::AnyElement = if !trigger_enabled {
+        ui::IconButton::new("solution-status-cleanup", IconName::Eraser)
+            .icon_size(IconSize::Small)
+            .icon_color(trigger_color)
+            .disabled(true)
+            .tooltip(ui::Tooltip::text(trigger_tooltip))
+            .into_any_element()
+    } else {
+        let trigger = ui::IconButton::new("solution-status-cleanup", IconName::Eraser)
+            .icon_size(IconSize::Small)
+            .icon_color(trigger_color)
+            .tooltip(ui::Tooltip::text(trigger_tooltip));
+        let weak_view = Some(weak_view);
+        PopoverMenu::new("solution-status-cleanup-menu")
+            .trigger(trigger)
+            .menu(move |window, cx| {
+                let weak_view = weak_view.clone();
+                let compact_tooltip = compact_tooltip.clone();
+                let clear_tooltip = clear_tooltip.clone();
+                Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
+                    let compact_label: SharedString = if compact_enabled {
+                        "Compact context".into()
+                    } else {
+                        format!("Compact context — {compact_tooltip}").into()
+                    };
+                    let compact_entry = ui::ContextMenuEntry::new(compact_label)
+                        .icon(IconName::Archive)
+                        .icon_color(Color::Muted)
+                        .disabled(!compact_enabled)
+                        .handler({
+                            let weak_view = weak_view.clone();
+                            move |window, cx| {
+                                let Some(view) = weak_view.as_ref().and_then(|w| w.upgrade())
+                                else {
+                                    return;
+                                };
+                                view.update(cx, |view, cx| {
+                                    if is_cold {
+                                        view.start_compact_from_cold(window, cx);
+                                    } else {
+                                        view.start_compact(cx);
+                                    }
+                                });
+                            }
+                        });
+                    menu = menu.item(compact_entry);
 
-                        let clear_label: SharedString = if clear_enabled {
-                            "Clear context".into()
-                        } else {
-                            format!("Clear context — {clear_tooltip}").into()
-                        };
-                        let clear_entry = ui::ContextMenuEntry::new(clear_label)
-                            .icon(IconName::Eraser)
-                            .icon_color(Color::Muted)
-                            .disabled(!clear_enabled)
-                            .handler({
-                                move |window, cx| {
-                                    let prompt = window.prompt(
-                                        gpui::PromptLevel::Warning,
-                                        "Clear conversation?",
-                                        Some(
-                                            "The current conversation will be removed from the \
+                    let clear_label: SharedString = if clear_enabled {
+                        "Clear context".into()
+                    } else {
+                        format!("Clear context — {clear_tooltip}").into()
+                    };
+                    let clear_entry = ui::ContextMenuEntry::new(clear_label)
+                        .icon(IconName::Eraser)
+                        .icon_color(Color::Muted)
+                        .disabled(!clear_enabled)
+                        .handler({
+                            move |window, cx| {
+                                let prompt = window.prompt(
+                                    gpui::PromptLevel::Warning,
+                                    "Clear conversation?",
+                                    Some(
+                                        "The current conversation will be removed from the \
                                              session. The agent's history is preserved on disk \
                                              but cannot be restored through History.",
-                                        ),
-                                        &["Cancel", "Clear"],
-                                        cx,
-                                    );
-                                    window
-                                        .spawn(cx, async move |cx| {
-                                            // Button index 1 = Clear; 0 / Esc cancels.
-                                            if prompt.await.ok() != Some(1) {
-                                                return;
-                                            }
-                                            cx.update(|_, cx| {
-                                                SolutionAgentStore::global(cx).update(
-                                                    cx,
-                                                    |store, cx| {
-                                                        store
-                                                            .reset_context(session_id, cx)
-                                                            .detach_and_log_err(cx);
-                                                    },
-                                                );
-                                            })
-                                            .log_err();
+                                    ),
+                                    &["Cancel", "Clear"],
+                                    cx,
+                                );
+                                window
+                                    .spawn(cx, async move |cx| {
+                                        // Button index 1 = Clear; 0 / Esc cancels.
+                                        if prompt.await.ok() != Some(1) {
+                                            return;
+                                        }
+                                        cx.update(|_, cx| {
+                                            SolutionAgentStore::global(cx).update(
+                                                cx,
+                                                |store, cx| {
+                                                    store
+                                                        .reset_context(session_id, cx)
+                                                        .detach_and_log_err(cx);
+                                                },
+                                            );
                                         })
-                                        .detach();
-                                }
-                            });
-                        menu = menu.item(clear_entry);
+                                        .log_err();
+                                    })
+                                    .detach();
+                            }
+                        });
+                    menu = menu.item(clear_entry);
 
-                        menu
-                    }))
-                })
-                .anchor(gpui::Anchor::TopRight)
-                .into_any_element()
-        };
+                    menu
+                }))
+            })
+            .anchor(gpui::Anchor::TopRight)
+            .into_any_element()
+    };
 
-        // State badge ("Thinking… 3m05s" / "Done in 12s" / "Error: …")
-        // anchors the LEFT of the row — that's where the user's eye
-        // lands first, and the row sits directly above the compose
-        // box, so the active-state cue is glanceable while typing the
-        // next message. The meter / agent / model / cwd / mode group
-        // on the right is reference info for the current session, not
-        // status — putting them after the badge gives a clean
-        // "what's happening" → "where it's running" reading order.
-        let state_badge: gpui::AnyElement = {
-            let mut label = Label::new(state_text).size(LabelSize::Small);
-            if error_text.is_some() {
-                label = label.color(Color::Error);
-            } else if is_running || is_resuming {
-                label = label.color(Color::Accent);
-            } else if is_cold {
-                label = label.color(Color::Muted);
-            }
-            let inner: gpui::AnyElement = if is_running {
-                let icon = div()
-                    .flex_none()
-                    .child(
-                        ui::Icon::new(IconName::Sparkle)
-                            .size(IconSize::Small)
-                            .color(Color::Accent),
-                    )
-                    .with_animation(
-                        ElementId::Name("solution-status-thinking-pulse".into()),
-                        Animation::new(std::time::Duration::from_secs(1))
-                            .repeat()
-                            .with_easing(pulsating_between(0.4, 1.0)),
-                        |element: gpui::Div, delta| element.opacity(delta),
-                    );
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(icon)
-                    .child(label)
-                    .into_any_element()
-            } else if is_resuming {
-                // Rotating ⟳ next to "Resuming…" — same visual
-                // vocabulary the in-flight session-creation tabs use,
-                // so the user reads it instantly as "agent is
-                // attaching, hold on".
-                let icon = ui::Icon::new(IconName::ArrowCircle)
-                    .size(IconSize::Small)
-                    .color(Color::Accent)
-                    .with_rotate_animation(2);
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(icon)
-                    .child(label)
-                    .into_any_element()
-            } else if is_cold {
-                // Cold session — clicking the badge wakes the agent
-                // without forcing the user to type-then-send a message
-                // first. Mirrors what `start_resume` does on the next
-                // send path: builds the metadata snapshot and dispatches
-                // the ACP handshake, with the badge flipping to
-                // `Resuming…` on the same tick via `cx.notify`.
-                div()
-                    .id("solution-status-sleep-wake")
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .cursor_pointer()
-                    .tooltip(ui::Tooltip::text("Click to wake the session"))
-                    .child(label)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if this.resuming {
-                            return;
-                        }
-                        this.start_resume(window, cx);
-                    }))
-                    .into_any_element()
-            } else {
-                label.into_any_element()
-            };
-            match error_text {
-                Some(full) => div()
-                    .id("solution-status-error-text")
-                    .tooltip(ui::Tooltip::text(full))
-                    .child(inner)
-                    .into_any_element(),
-                None => inner,
-            }
-        };
-
-        // "Last activity" relative label, sitting right after the state
-        // badge so a stalled agent (Running but last entry long ago) is
-        // obvious at a glance: `Thinking… 8m05s · 8m ago`. Hover reveals
-        // the absolute date-time of the newest entry. Rendered only when
-        // the newest entry carries a real server timestamp — an all-
-        // historical or empty session shows nothing here, leaving the row
-        // visually identical to before.
-        let activity_badge: Option<gpui::AnyElement> = last_activity_ms
-            .and_then(|ms| chrono::Utc.timestamp_millis_opt(ms).single())
-            .map(|dt| {
-                let now = chrono::Utc::now();
-                let relative = relative_time_short(dt, now);
-                let absolute = format_activity_tooltip(dt, now);
-                div()
-                    .id("solution-status-last-activity")
-                    .flex_none()
-                    .tooltip(ui::Tooltip::text(absolute))
-                    .child(
-                        Label::new(relative)
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    )
-                    .into_any_element()
-            });
-
-        // `border_t_1()` (top border): the row now sits between the
-        // conversation list and the compose box, so the separator we
-        // want is at the TOP — without it the row blends into the
-        // conversation. The previous `border_b_1()` made sense when
-        // the row lived directly under the tab strip, but in the new
-        // position a bottom border lands inside the editor_background
-        // strip of the compose wrapper and is invisible.
-        Some(
+    // State badge ("Thinking… 3m05s" / "Done in 12s" / "Error: …")
+    // anchors the LEFT of the row — that's where the user's eye
+    // lands first, and the row sits directly above the compose
+    // box, so the active-state cue is glanceable while typing the
+    // next message. The meter / agent / model / cwd / mode group
+    // on the right is reference info for the current session, not
+    // status — putting them after the badge gives a clean
+    // "what's happening" → "where it's running" reading order.
+    let state_badge: gpui::AnyElement = {
+        let mut label = Label::new(state_text).size(LabelSize::Small);
+        if error_text.is_some() {
+            label = label.color(Color::Error);
+        } else if is_running || is_resuming {
+            label = label.color(Color::Accent);
+        } else if is_cold {
+            label = label.color(Color::Muted);
+        }
+        let inner: gpui::AnyElement = if is_running {
+            let icon = div()
+                .flex_none()
+                .child(
+                    ui::Icon::new(IconName::Sparkle)
+                        .size(IconSize::Small)
+                        .color(Color::Accent),
+                )
+                .with_animation(
+                    ElementId::Name("solution-status-thinking-pulse".into()),
+                    Animation::new(std::time::Duration::from_secs(1))
+                        .repeat()
+                        .with_easing(pulsating_between(0.4, 1.0)),
+                    |element: gpui::Div, delta| element.opacity(delta),
+                );
             div()
                 .flex()
                 .items_center()
-                .gap_2()
-                .px_3()
-                .h_7()
-                .border_t_1()
-                .border_color(cx.theme().colors().border_variant)
-                .child(div().flex_none().child(state_badge))
-                .when_some(activity_badge, |this, badge| {
-                    this.child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
-                        .child(badge)
-                })
-                .child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
-                .child(
-                    div().flex_none().child(
-                        Label::new(meter_text)
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    ),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .w(px(72.0))
-                        .h(px(4.0))
-                        .rounded_full()
-                        .bg(cx.theme().colors().border)
-                        .child(
-                            div()
-                                .h_full()
-                                .w(relative((pct as f32).clamp(0.0, 1.0)))
-                                .rounded_full()
-                                .bg(bar_color),
-                        ),
-                )
-                .child(div().flex_none().child(cleanup_button))
-                .child(
-                    Label::new(agent_id)
-                        .color(Color::Muted)
-                        .size(LabelSize::Small),
-                )
-                .child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
-                .child(
-                    Label::new(cwd_label)
-                        .color(Color::Muted)
-                        .size(LabelSize::Small),
-                )
-                .when_some(model_text, |this, model| {
-                    this.child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
-                        .child(Label::new(model).color(Color::Muted).size(LabelSize::Small))
-                })
-                .when_some(mode_text, |this, mode| {
-                    this.child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
-                        .child(Label::new(mode).color(Color::Muted).size(LabelSize::Small))
-                })
+                .gap_1()
+                .child(icon)
+                .child(label)
+                .into_any_element()
+        } else if is_resuming {
+            // Rotating ⟳ next to "Resuming…" — same visual
+            // vocabulary the in-flight session-creation tabs use,
+            // so the user reads it instantly as "agent is
+            // attaching, hold on".
+            let icon = ui::Icon::new(IconName::ArrowCircle)
+                .size(IconSize::Small)
+                .color(Color::Accent)
+                .with_rotate_animation(2);
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(icon)
+                .child(label)
+                .into_any_element()
+        } else if is_cold {
+            // Cold session — clicking the badge wakes the agent
+            // without forcing the user to type-then-send a message
+            // first. Mirrors what `start_resume` does on the next
+            // send path: builds the metadata snapshot and dispatches
+            // the ACP handshake, with the badge flipping to
+            // `Resuming…` on the same tick via `cx.notify`.
+            div()
+                .id("solution-status-sleep-wake")
+                .flex()
+                .items_center()
+                .gap_1()
+                .cursor_pointer()
+                .tooltip(ui::Tooltip::text("Click to wake the session"))
+                .child(label)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    if this.resuming {
+                        return;
+                    }
+                    this.start_resume(window, cx);
+                }))
+                .into_any_element()
+        } else {
+            label.into_any_element()
+        };
+        match error_text {
+            Some(full) => div()
+                .id("solution-status-error-text")
+                .tooltip(ui::Tooltip::text(full))
+                .child(inner)
                 .into_any_element(),
-        )
+            None => inner,
+        }
+    };
+
+    // "Last activity" relative label, sitting right after the state
+    // badge so a stalled agent (Running but last entry long ago) is
+    // obvious at a glance: `Thinking… 8m05s · 8m ago`. Hover reveals
+    // the absolute date-time of the newest entry. Rendered only when
+    // the newest entry carries a real server timestamp — an all-
+    // historical or empty session shows nothing here, leaving the row
+    // visually identical to before.
+    let activity_badge: Option<gpui::AnyElement> = last_activity_ms
+        .and_then(|ms| chrono::Utc.timestamp_millis_opt(ms).single())
+        .map(|dt| {
+            let now = chrono::Utc::now();
+            let relative = relative_time_short(dt, now);
+            let absolute = format_activity_tooltip(dt, now);
+            div()
+                .id("solution-status-last-activity")
+                .flex_none()
+                .tooltip(ui::Tooltip::text(absolute))
+                .child(
+                    Label::new(relative)
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+                .into_any_element()
+        });
+
+    // `border_t_1()` (top border): the row now sits between the
+    // conversation list and the compose box, so the separator we
+    // want is at the TOP — without it the row blends into the
+    // conversation. The previous `border_b_1()` made sense when
+    // the row lived directly under the tab strip, but in the new
+    // position a bottom border lands inside the editor_background
+    // strip of the compose wrapper and is invisible.
+    Some(
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .h_7()
+            .border_t_1()
+            .border_color(cx.theme().colors().border_variant)
+            .child(div().flex_none().child(state_badge))
+            .when_some(activity_badge, |this, badge| {
+                this.child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
+                    .child(badge)
+            })
+            .child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
+            .child(
+                div().flex_none().child(
+                    Label::new(meter_text)
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(72.0))
+                    .h(px(4.0))
+                    .rounded_full()
+                    .bg(cx.theme().colors().border)
+                    .child(
+                        div()
+                            .h_full()
+                            .w(relative((pct as f32).clamp(0.0, 1.0)))
+                            .rounded_full()
+                            .bg(bar_color),
+                    ),
+            )
+            .child(div().flex_none().child(cleanup_button))
+            .child(
+                Label::new(agent_id)
+                    .color(Color::Muted)
+                    .size(LabelSize::Small),
+            )
+            .child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
+            .child(
+                Label::new(cwd_label)
+                    .color(Color::Muted)
+                    .size(LabelSize::Small),
+            )
+            .when_some(model_text, |this, model| {
+                this.child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
+                    .child(Label::new(model).color(Color::Muted).size(LabelSize::Small))
+            })
+            .when_some(mode_text, |this, mode| {
+                this.child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
+                    .child(Label::new(mode).color(Color::Muted).size(LabelSize::Small))
+            })
+            .into_any_element(),
+    )
 }
 
 /// Hardcoded fallback when claude-acp doesn't advertise the model's
@@ -686,7 +681,10 @@ pub(crate) const DEFAULT_CONTEXT_WINDOW: u64 = 1_000_000;
 /// meter to the global [`DEFAULT_CONTEXT_WINDOW`] fallback (which made the meter
 /// jump 1M → cached → 1M as updates raced). Returns the limit to display and the
 /// value to persist as the session's cached max for the next render.
-pub(crate) fn resolve_max_tokens(advertised: Option<u64>, cached: Option<u64>) -> (u64, Option<u64>) {
+pub(crate) fn resolve_max_tokens(
+    advertised: Option<u64>,
+    cached: Option<u64>,
+) -> (u64, Option<u64>) {
     match advertised.filter(|max| *max > 0) {
         Some(real) => (real, Some(real)),
         None => match cached {
@@ -841,11 +839,20 @@ mod tests {
     #[test]
     fn resolve_max_tokens_keeps_real_value_once_known() {
         // No real value yet, nothing cached → global fallback, nothing to cache.
-        assert_eq!(resolve_max_tokens(None, None), (DEFAULT_CONTEXT_WINDOW, None));
-        assert_eq!(resolve_max_tokens(Some(0), None), (DEFAULT_CONTEXT_WINDOW, None));
+        assert_eq!(
+            resolve_max_tokens(None, None),
+            (DEFAULT_CONTEXT_WINDOW, None)
+        );
+        assert_eq!(
+            resolve_max_tokens(Some(0), None),
+            (DEFAULT_CONTEXT_WINDOW, None)
+        );
 
         // A real advertised value is used and becomes the cache.
-        assert_eq!(resolve_max_tokens(Some(200_000), None), (200_000, Some(200_000)));
+        assert_eq!(
+            resolve_max_tokens(Some(200_000), None),
+            (200_000, Some(200_000))
+        );
 
         // A later 0/missing update after a real value was known must NOT
         // downgrade to the global fallback — the cached max is kept.

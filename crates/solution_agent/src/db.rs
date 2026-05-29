@@ -286,6 +286,13 @@ impl SolutionAgentDb {
         })
     }
 
+    /// Load persisted background-shell rows for a session. NOTE: no hydrate /
+    /// resume path calls this in production — background shells are ephemeral
+    /// (their `/tmp` `.output` files and the claude subprocess both die across
+    /// an editor restart), so persisted rows are *deleted* on resume rather
+    /// than restored (see `delete_background_shells_for_session`). This loader
+    /// exists for round-trip test symmetry with the background-agent table and
+    /// as a building block should crash-recovery visibility be wanted later.
     pub fn load_background_shells(
         &self,
         solution_session_id: String,
@@ -752,16 +759,18 @@ fn select_background_shells_for_session(
     let rows = stmt(solution_session_id.to_string())?;
     Ok(rows
         .into_iter()
-        .map(|(sid, shell_id, command, output_path, r, lt, m, st)| BackgroundShellRow {
-            solution_session_id: sid,
-            shell_id,
-            command,
-            output_path,
-            registered_at_ms: r,
-            last_tail: lt,
-            last_mtime_ms: m,
-            state_text: st,
-        })
+        .map(
+            |(sid, shell_id, command, output_path, r, lt, m, st)| BackgroundShellRow {
+                solution_session_id: sid,
+                shell_id,
+                command,
+                output_path,
+                registered_at_ms: r,
+                last_tail: lt,
+                last_mtime_ms: m,
+                state_text: st,
+            },
+        )
         .collect())
 }
 

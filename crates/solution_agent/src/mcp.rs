@@ -3375,12 +3375,18 @@ mod tests {
 
     #[test]
     fn entry_role_and_status_dto_serialize_snake_case() {
-        assert_eq!(serde_json::to_value(EntryRoleDto::ToolCall).unwrap(), serde_json::json!("tool_call"));
+        assert_eq!(
+            serde_json::to_value(EntryRoleDto::ToolCall).unwrap(),
+            serde_json::json!("tool_call")
+        );
         assert_eq!(
             serde_json::to_value(ToolCallStatusDto::WaitingForConfirmation).unwrap(),
             serde_json::json!("waiting_for_confirmation")
         );
-        assert_eq!(serde_json::to_value(ToolCallStatusDto::Running).unwrap(), serde_json::json!("running"));
+        assert_eq!(
+            serde_json::to_value(ToolCallStatusDto::Running).unwrap(),
+            serde_json::json!("running")
+        );
     }
 
     #[test]
@@ -5168,10 +5174,7 @@ mod tests {
         );
 
         let list_result = ListSessionsTool
-            .run(
-                ListSessionsParams::default(),
-                &mut cx.to_async(),
-            )
+            .run(ListSessionsParams::default(), &mut cx.to_async())
             .await
             .expect("list_sessions");
         let summary = list_result
@@ -5271,9 +5274,8 @@ mod tests {
         seed_subagent_tabs(session_id, &[("toolu_one", "Alpha")], cx);
 
         cx.update(|cx| {
-            let payload = crate::event_sources::build_active_subagents_changed_payload(
-                session_id, cx,
-            );
+            let payload =
+                crate::event_sources::build_active_subagents_changed_payload(session_id, cx);
             let obj = payload.as_object().expect("object");
             assert_eq!(
                 obj.get("session_id").and_then(|v| v.as_str()),

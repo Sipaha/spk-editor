@@ -17,8 +17,8 @@ pub(crate) mod db;
 pub mod event_sources;
 pub(crate) mod expanded_compose;
 pub mod mcp;
-pub(crate) mod metrics_emitter;
 pub mod message_generator;
+pub(crate) mod metrics_emitter;
 pub mod model;
 pub mod notifier;
 pub(crate) mod pool;
@@ -35,11 +35,13 @@ pub use metrics_emitter::MetricsEmitter;
 #[cfg(any(feature = "test-support", test))]
 pub mod test_support;
 
+pub use background_agent::{BackgroundAgent, BackgroundAgentId, BackgroundAgentSnapshot};
+pub use background_shell::{
+    BackgroundShell, BackgroundShellId, BackgroundShellSnapshot, ShellRuntimeState,
+};
 pub use model::{
     AgentServerId, SessionState, SolutionSession, SolutionSessionId, SolutionSessionMetadata,
 };
-pub use background_agent::{BackgroundAgent, BackgroundAgentId, BackgroundAgentSnapshot};
-pub use background_shell::{BackgroundShell, BackgroundShellId, BackgroundShellSnapshot, ShellRuntimeState};
 pub use store::SubagentView;
 
 use std::rc::Rc;

@@ -46,6 +46,7 @@ use prompt_store::{PromptId, PromptStore};
 
 use crate::DEFAULT_THREAD_TITLE;
 use crate::message_editor::SessionCapabilities;
+use console_panel::ConsolePanel;
 use rope::Point;
 use settings::{
     NewThreadLocation, NotifyWhenAgentWaiting, Settings as _, SettingsStore, SidebarSide,
@@ -55,7 +56,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use std::{collections::BTreeMap, rc::Rc, time::Duration};
-use console_panel::ConsolePanel;
 use text::Anchor;
 use theme_settings::{AgentBufferFontSize, AgentUiFontSize};
 use ui::{

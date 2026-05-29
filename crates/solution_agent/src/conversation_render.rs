@@ -682,7 +682,9 @@ pub(crate) fn clean_user_message_text(text: &str) -> String {
         IMAGE_LITERAL_RE.replace_all(&linked, "").into_owned()
     } else {
         USER_IMAGE_PLACEHOLDER_RE
-            .replace_all(&unmarked, |caps: &regex::Captures| rewrite(caps, &mut ordinal))
+            .replace_all(&unmarked, |caps: &regex::Captures| {
+                rewrite(caps, &mut ordinal)
+            })
             .into_owned()
     };
     // Reconstruct with explicit markdown line-break semantics:
@@ -1020,7 +1022,11 @@ fn tool_call_arg_preview(raw_input: &serde_json::Value) -> Option<String> {
     let obj = raw_input.as_object()?;
     let picked = PREFERRED_KEYS
         .iter()
-        .find_map(|k| obj.get(*k).and_then(|v| v.as_str()).filter(|s| !s.is_empty()))
+        .find_map(|k| {
+            obj.get(*k)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+        })
         .or_else(|| {
             obj.values()
                 .find_map(|v| v.as_str().filter(|s| !s.is_empty()))
@@ -1079,10 +1085,7 @@ pub(crate) fn render_tool_call(
     // actually ran — only the output is shown, which is often
     // ambiguous (a green `cargo check` and a green `cargo build` look
     // identical post-hoc).
-    let arg_preview = call
-        .raw_input
-        .as_ref()
-        .and_then(tool_call_arg_preview);
+    let arg_preview = call.raw_input.as_ref().and_then(tool_call_arg_preview);
 
     let mut container = v_flex()
         .gap_0p5()
@@ -1476,10 +1479,7 @@ mod tests {
     #[test]
     fn tool_call_arg_preview_falls_back_to_first_string_value() {
         let input = serde_json::json!({ "unknown_field": "some text", "n": 42 });
-        assert_eq!(
-            tool_call_arg_preview(&input),
-            Some("some text".to_string()),
-        );
+        assert_eq!(tool_call_arg_preview(&input), Some("some text".to_string()),);
     }
 
     #[test]

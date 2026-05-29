@@ -342,11 +342,7 @@ pub(crate) async fn create_session_with_thread(
 /// test can assert how many times the store forwarded a stop to the backend.
 async fn create_session_with_cancel_counter(
     cx: &mut TestAppContext,
-) -> (
-    SolutionSessionId,
-    Arc<AtomicUsize>,
-    tempfile::TempDir,
-) {
+) -> (SolutionSessionId, Arc<AtomicUsize>, tempfile::TempDir) {
     let (solution_id, tmp, project) = setup_solution_and_project(cx).await;
     let agent_id = SharedString::from("mock-agent");
 
@@ -401,7 +397,13 @@ async fn cancel_turn_sets_stopping_and_is_idempotent(cx: &mut TestAppContext) {
     let read_state = |cx: &mut TestAppContext| {
         cx.update(|cx| {
             let store = SolutionAgentStore::global(cx);
-            store.read(cx).session(session_id).expect("session").read(cx).state.clone()
+            store
+                .read(cx)
+                .session(session_id)
+                .expect("session")
+                .read(cx)
+                .state
+                .clone()
         })
     };
 
@@ -472,8 +474,9 @@ async fn stopping_safety_net_force_flips_to_idle(cx: &mut TestAppContext) {
 
     // Net is 40s. Advance past it; the spawned timer fires and
     // mutate_state flips the session back to Idle.
-    cx.executor()
-        .advance_clock(crate::store::queue::STOPPING_SAFETY_NET + std::time::Duration::from_secs(1));
+    cx.executor().advance_clock(
+        crate::store::queue::STOPPING_SAFETY_NET + std::time::Duration::from_secs(1),
+    );
     cx.executor().run_until_parked();
 
     let state_after_net = cx.update(|cx| {
@@ -527,11 +530,7 @@ async fn stopping_safety_net_does_not_fire_after_natural_recovery(cx: &mut TestA
     cx.update(|cx| {
         let store = SolutionAgentStore::global(cx);
         let session = store.read(cx).session(session_id).expect("session");
-        let thread = session
-            .read(cx)
-            .acp_thread()
-            .cloned()
-            .expect("live thread");
+        let thread = session.read(cx).acp_thread().cloned().expect("live thread");
         thread.update(cx, |_thread, cx| {
             cx.emit(acp_thread::AcpThreadEvent::Stopped(
                 agent_client_protocol::schema::StopReason::Cancelled,
@@ -559,8 +558,9 @@ async fn stopping_safety_net_does_not_fire_after_natural_recovery(cx: &mut TestA
             );
         });
     });
-    cx.executor()
-        .advance_clock(crate::store::queue::STOPPING_SAFETY_NET + std::time::Duration::from_secs(1));
+    cx.executor().advance_clock(
+        crate::store::queue::STOPPING_SAFETY_NET + std::time::Duration::from_secs(1),
+    );
     cx.executor().run_until_parked();
 
     let final_state = cx.update(|cx| {
@@ -1312,8 +1312,7 @@ async fn restore_open_tabs_hydrates_cold_sessions(cx: &mut TestAppContext) {
 #[gpui::test]
 async fn cold_entries_from_persisted_v2_reconstructs_per_entry(cx: &mut TestAppContext) {
     use crate::cold_persistence::{
-        PersistedAssistantChunk, PersistedAssistantMessage, PersistedEntryV2,
-        PersistedUserMessage,
+        PersistedAssistantChunk, PersistedAssistantMessage, PersistedEntryV2, PersistedUserMessage,
     };
     let persisted = PersistedSession {
         title: "demo".into(),
@@ -1331,9 +1330,8 @@ async fn cold_entries_from_persisted_v2_reconstructs_per_entry(cx: &mut TestAppC
         ],
         entry_created_ms: vec![1_700_000_000_000, 1_700_000_001_000],
     };
-    let (cold_entries, created_ms) = cx.update(|cx| {
-        crate::store::cold_entries_from_persisted(Some(persisted), cx)
-    });
+    let (cold_entries, created_ms) =
+        cx.update(|cx| crate::store::cold_entries_from_persisted(Some(persisted), cx));
     assert_eq!(cold_entries.len(), 2, "v2 reconstruction must be 1:1");
     assert_eq!(created_ms, vec![1_700_000_000_000, 1_700_000_001_000]);
     assert!(matches!(
@@ -1673,9 +1671,9 @@ async fn reset_context_emits_session_context_reset(cx: &mut TestAppContext) {
         });
     });
 
-    let observed = Rc::new(std::cell::RefCell::new(
-        Vec::<crate::model::SessionContextCount>::new(),
-    ));
+    let observed = Rc::new(std::cell::RefCell::new(Vec::<
+        crate::model::SessionContextCount,
+    >::new()));
     let _subscription = cx.update(|cx| {
         let store = SolutionAgentStore::global(cx);
         let observed = observed.clone();
@@ -1722,9 +1720,9 @@ async fn rotate_context_emits_session_context_reset_with_incremented_count(
         })
     });
 
-    let observed = Rc::new(std::cell::RefCell::new(
-        Vec::<crate::model::SessionContextCount>::new(),
-    ));
+    let observed = Rc::new(std::cell::RefCell::new(Vec::<
+        crate::model::SessionContextCount,
+    >::new()));
     let _subscription = cx.update(|cx| {
         let store = SolutionAgentStore::global(cx);
         let observed = observed.clone();
@@ -2656,9 +2654,7 @@ fn native_mock_binary() -> PathBuf {
 ///       next hook_callback delivers it as additionalContext mid-turn),
 ///   (c) NOT push into `pending_messages` (that's the non-native fallback).
 #[gpui::test]
-async fn send_during_running_on_native_connection_routes_to_inject(
-    cx: &mut TestAppContext,
-) {
+async fn send_during_running_on_native_connection_routes_to_inject(cx: &mut TestAppContext) {
     use acp_thread::{AgentConnection, AgentThreadEntry};
     use agent_client_protocol::schema as acp;
     use agent_servers::{AgentServer, AgentServerDelegate};
@@ -2711,9 +2707,7 @@ async fn send_during_running_on_native_connection_routes_to_inject(
 
     let work_dirs = util::path_list::PathList::new(&[std::env::temp_dir().as_path()]);
     let acp_thread = cx
-        .update(|cx| {
-            Rc::clone(&native).new_session(project.clone(), work_dirs, cx)
-        })
+        .update(|cx| Rc::clone(&native).new_session(project.clone(), work_dirs, cx))
         .await
         .expect("new_session");
 
@@ -2949,7 +2943,11 @@ async fn subagent_inprogress_task_registers_tab(cx: &mut TestAppContext) {
         let session = store.read(cx).session(session_id).expect("session exists");
         let s = session.read(cx);
         assert_eq!(s.active_subagents.len(), 1, "one subagent tracked");
-        assert_eq!(s.active_subagent_order.len(), 1, "order vec parallel to map");
+        assert_eq!(
+            s.active_subagent_order.len(),
+            1,
+            "order vec parallel to map"
+        );
         let key = SharedString::from("toolu_task_1");
         assert_eq!(s.active_subagent_order[0], key);
         let tab = s.active_subagents.get(&key).expect("tab present");
@@ -3150,11 +3148,7 @@ async fn subagent_insertion_order_preserved(cx: &mut TestAppContext) {
         let store = SolutionAgentStore::global(cx);
         let session = store.read(cx).session(session_id).expect("session exists");
         let s = session.read(cx);
-        let order: Vec<&str> = s
-            .active_subagent_order
-            .iter()
-            .map(|s| s.as_ref())
-            .collect();
+        let order: Vec<&str> = s.active_subagent_order.iter().map(|s| s.as_ref()).collect();
         assert_eq!(
             order,
             vec!["toolu_a", "toolu_b", "toolu_c"],
@@ -3350,8 +3344,7 @@ async fn agent_terminal_with_parseable_raw_output_registers_background_agent(
             "one background-agent registered on Agent-tool terminal"
         );
         assert_eq!(s.background_agent_order.len(), 1, "order vec parallel");
-        let id =
-            crate::background_agent::BackgroundAgentId::new("a30f92a688e431edc");
+        let id = crate::background_agent::BackgroundAgentId::new("a30f92a688e431edc");
         assert!(
             s.background_agents.contains_key(&id),
             "registration keyed on parsed agentId"
@@ -3472,9 +3465,7 @@ async fn bash_run_in_background_terminal_registers_background_shell(cx: &mut Tes
         let shell = s.background_shells.get(&id).expect("shell present");
         assert_eq!(
             shell.output_path,
-            PathBuf::from(
-                "/tmp/claude-1000/-home-spk-proj/ses-x/tasks/bvb4ful1z.output"
-            ),
+            PathBuf::from("/tmp/claude-1000/-home-spk-proj/ses-x/tasks/bvb4ful1z.output"),
             "output_path parsed from announcement"
         );
         assert_eq!(shell.command.as_ref(), "sleep 60", "command label captured");
@@ -3566,8 +3557,7 @@ async fn refresh_background_shell_snapshot_tails_output_file(cx: &mut TestAppCon
             .as_ref()
             .expect("inline refresh seeded a snapshot from the real file");
         assert!(
-            latest.output_tail.contains("line one")
-                && latest.output_tail.contains("line two"),
+            latest.output_tail.contains("line one") && latest.output_tail.contains("line two"),
             "tail captured the file bytes, got: {:?}",
             latest.output_tail
         );
@@ -3596,9 +3586,8 @@ fn register_background_shell(
                 crate::background_shell::BackgroundShell {
                     id: id.clone(),
                     command: SharedString::from("sleep 60"),
-                    output_path: PathBuf::from("/tmp/claude-1000/tasks").join(format!(
-                        "{shell_id}.output"
-                    )),
+                    output_path: PathBuf::from("/tmp/claude-1000/tasks")
+                        .join(format!("{shell_id}.output")),
                     registered_at: chrono::Utc::now(),
                     latest: None,
                     last_offset: 0,
@@ -3746,7 +3735,10 @@ async fn task_notification_unknown_shell_is_noop(cx: &mut TestAppContext) {
         assert_eq!(s.background_shells.len(), 1, "no stray shell registered");
         let tracked = crate::background_shell::BackgroundShellId::new("tracked123");
         assert_eq!(
-            s.background_shells.get(&tracked).expect("tracked present").state,
+            s.background_shells
+                .get(&tracked)
+                .expect("tracked present")
+                .state,
             crate::background_shell::ShellRuntimeState::Running,
             "an unrelated notification leaves the tracked shell Running"
         );
@@ -3817,8 +3809,7 @@ async fn stale_agent_lingers_briefly_then_removed(cx: &mut TestAppContext) {
                     jsonl_path: "/nonexistent".into(),
                     registered_at: chrono::Utc::now(),
                     latest: Some(crate::background_agent::BackgroundAgentSnapshot {
-                        mtime: std::time::SystemTime::now()
-                            - std::time::Duration::from_secs(500),
+                        mtime: std::time::SystemTime::now() - std::time::Duration::from_secs(500),
                         activity_label: SharedString::from("Bash: x"),
                         stop_reason: None,
                     }),
@@ -4220,7 +4211,14 @@ async fn reconciliation_registers_alive_row(cx: &mut TestAppContext) {
         let session = s.read(cx).session(session_id).unwrap();
         let s = session.read(cx);
         assert_eq!(s.background_agents.len(), 1);
-        assert!(s.background_agents.values().next().unwrap().latest.is_some());
+        assert!(
+            s.background_agents
+                .values()
+                .next()
+                .unwrap()
+                .latest
+                .is_some()
+        );
     });
 }
 
@@ -4256,15 +4254,13 @@ fn scan_parent_jsonl_flips_running_shell_to_exited(cx: &mut TestAppContext) {
     let cwd = PathBuf::from(&unique);
     let acp_id = "ses-scan-xyz";
 
-    let jsonl = super::parent_session_jsonl_for(&cwd, acp_id)
-        .expect("home_dir resolves in test");
+    let jsonl = super::parent_session_jsonl_for(&cwd, acp_id).expect("home_dir resolves in test");
     let project_dir = jsonl.parent().expect("jsonl has parent").to_path_buf();
     let _cleanup = CleanupDir(project_dir.clone());
     std::fs::create_dir_all(&project_dir).expect("create project dir");
     // Pre-existing historical content the scan must skip past (offset lazy-init
     // to current EOF on first sight).
-    std::fs::write(&jsonl, b"{\"type\":\"system\",\"old\":true}\n")
-        .expect("seed jsonl");
+    std::fs::write(&jsonl, b"{\"type\":\"system\",\"old\":true}\n").expect("seed jsonl");
 
     let session_id = SolutionSessionId::new();
     cx.update(|cx| {

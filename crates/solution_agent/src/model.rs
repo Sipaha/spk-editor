@@ -126,7 +126,10 @@ pub type AgentServerId = SharedString;
 #[derive(Clone, Debug)]
 pub enum SessionState {
     Idle,
-    Running { started_at: Instant, notified: bool },
+    Running {
+        started_at: Instant,
+        notified: bool,
+    },
     /// A cancel was requested; the turn has not yet ended. Bounded by the
     /// backend's 30s interrupt→kill escalation AND by the queue-level
     /// safety net (~40s wall-clock) that force-flips Stopping→Idle if no
@@ -135,7 +138,9 @@ pub enum SessionState {
     /// was already consumed at cancel time and the AcpThread chain never
     /// emits `Stopped`. `started_at` is the monotonic anchor the safety
     /// net uses to compute "Stopping… N seconds" for diagnostics.
-    Stopping { started_at: Instant },
+    Stopping {
+        started_at: Instant,
+    },
     AwaitingInput,
     Errored(SharedString),
 }
@@ -394,10 +399,8 @@ pub struct SolutionSession {
     /// terminal status, this map tracks Anthropic's standalone background
     /// processes whose lifecycle is bound to a separate JSONL file on disk.
     /// Persisted in `solution_session_background_agent`.
-    pub background_agents: HashMap<
-        background_agent::BackgroundAgentId,
-        background_agent::BackgroundAgent,
-    >,
+    pub background_agents:
+        HashMap<background_agent::BackgroundAgentId, background_agent::BackgroundAgent>,
     /// Insertion order of `background_agents`. Used to render pills in
     /// spawn order (HashMap iteration is hash-seeded and unstable).
     pub background_agent_order: Vec<background_agent::BackgroundAgentId>,
@@ -406,10 +409,8 @@ pub struct SolutionSession {
     /// Output lives in an on-disk `.output` file tracked per-shell.
     /// Not cleared on context reset — shells outlive the conversation
     /// window and are reaped by a later task.
-    pub background_shells: HashMap<
-        background_shell::BackgroundShellId,
-        background_shell::BackgroundShell,
-    >,
+    pub background_shells:
+        HashMap<background_shell::BackgroundShellId, background_shell::BackgroundShell>,
     /// Insertion order of `background_shells`. Used to render pills in
     /// spawn order (HashMap iteration is hash-seeded and unstable).
     pub background_shell_order: Vec<background_shell::BackgroundShellId>,

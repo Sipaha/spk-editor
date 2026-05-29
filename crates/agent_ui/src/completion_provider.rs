@@ -9,6 +9,7 @@ use crate::thread_metadata_store::{ThreadMetadata, ThreadMetadataStore};
 use acp_thread::MentionUri;
 use agent_client_protocol::schema as acp;
 use anyhow::Result;
+use console_panel::ConsolePanel;
 use editor::{CompletionProvider, Editor, code_context_menus::COMPLETION_MENU_MAX_WIDTH};
 use futures::FutureExt as _;
 use fuzzy::{PathMatch, StringMatch, StringMatchCandidate};
@@ -24,8 +25,6 @@ use project::{
 };
 use prompt_store::{PromptStore, UserPromptId};
 use rope::Point;
-use settings::Settings;
-use console_panel::ConsolePanel;
 use terminal_view::TerminalView;
 use text::{Anchor, ToOffset as _, ToPoint as _};
 use ui::IconName;
@@ -35,7 +34,6 @@ use util::paths::PathStyle;
 use util::rel_path::RelPath;
 use util::truncate_and_remove_front;
 use workspace::Workspace;
-use workspace::dock::DockPosition;
 
 use crate::AgentPanel;
 use crate::mention_set::MentionSet;

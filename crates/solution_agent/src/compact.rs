@@ -236,10 +236,7 @@ impl SolutionSessionView {
                 reason: None,
             }) => {}
             Err(err) => {
-                self.toast_compact_error(
-                    SharedString::from(format!("Compact failed: {err}")),
-                    cx,
-                );
+                self.toast_compact_error(SharedString::from(format!("Compact failed: {err}")), cx);
             }
         }
     }

@@ -58,4 +58,3 @@ mod tests {
         assert_eq!(s.ephemeral.idle_ttl, Duration::from_secs(60));
     }
 }
-

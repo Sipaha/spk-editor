@@ -221,9 +221,12 @@ impl agent_servers::AgentServer for MockAgentServer {
             if let Some(gate) = gate {
                 gate.recv().await.log_err();
             }
-            let connection: Rc<dyn acp_thread::AgentConnection> = match (prompt_gate, cancel_count) {
+            let connection: Rc<dyn acp_thread::AgentConnection> = match (prompt_gate, cancel_count)
+            {
                 (Some(prompt_gate), _) => Rc::new(MockConnection::with_prompt_gate(prompt_gate)),
-                (None, Some(cancel_count)) => Rc::new(MockConnection::with_cancel_count(cancel_count)),
+                (None, Some(cancel_count)) => {
+                    Rc::new(MockConnection::with_cancel_count(cancel_count))
+                }
                 (None, None) => Rc::new(MockConnection::new()),
             };
             Ok(connection)

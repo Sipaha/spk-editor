@@ -62,10 +62,7 @@ pub fn parse_managed_agent_announcement(raw_output: &str) -> Option<(String, Pat
         .get(1)?
         .as_str()
         .to_string();
-    let path = output_file_re()
-        .captures(raw_output)?
-        .get(1)?
-        .as_str();
+    let path = output_file_re().captures(raw_output)?.get(1)?.as_str();
     Some((id, PathBuf::from(path)))
 }
 
@@ -133,10 +130,7 @@ pub fn parse_jsonl_snapshot(line: &str) -> BackgroundAgentSnapshot {
     let typ = value.get("type").and_then(Value::as_str).unwrap_or("");
     match typ {
         "system" => {
-            let subtype = value
-                .get("subtype")
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            let subtype = value.get("subtype").and_then(Value::as_str).unwrap_or("");
             if subtype == "init" {
                 BackgroundAgentSnapshot {
                     mtime: SystemTime::now(),
@@ -439,9 +433,8 @@ fn jsonl_assistant_to_entries(
                     out.push(AgentThreadEntry::AssistantMessage(AssistantMessage {
                         chunks: vec![AssistantMessageChunk::Thought {
                             block: ContentBlock::Markdown {
-                                markdown: cx.new(|cx| {
-                                    Markdown::new(thought.into(), None, None, cx)
-                                }),
+                                markdown: cx
+                                    .new(|cx| Markdown::new(thought.into(), None, None, cx)),
                             },
                         }],
                         indented: false,
@@ -455,9 +448,8 @@ fn jsonl_assistant_to_entries(
                 let Some(tool_use_id) = block.get("id").and_then(Value::as_str) else {
                     continue;
                 };
-                let name = SharedString::from(
-                    block.get("name").and_then(Value::as_str).unwrap_or("tool"),
-                );
+                let name =
+                    SharedString::from(block.get("name").and_then(Value::as_str).unwrap_or("tool"));
                 let result = paired.get(tool_use_id);
                 let raw_input = block.get("input").cloned();
                 let status = match result {
@@ -547,9 +539,7 @@ mod tests {
         assert_eq!(id, "a30f92a688e431edc");
         assert_eq!(
             path,
-            PathBuf::from(
-                "/tmp/claude-1000/x/abc/tasks/a30f92a688e431edc.output"
-            )
+            PathBuf::from("/tmp/claude-1000/x/abc/tasks/a30f92a688e431edc.output")
         );
     }
 
@@ -672,7 +662,10 @@ mod tests {
         let path = dir.path().join("agent.jsonl");
         let mut f = std::fs::File::create(&path)?;
         writeln!(f, r#"{{"type":"system","subtype":"init"}}"#)?;
-        writeln!(f, r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"hi"}}]}}}}"#)?;
+        writeln!(
+            f,
+            r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"hi"}}]}}}}"#
+        )?;
         f.write_all(b"\n")?; // trailing blank line
         let tail = tail_jsonl(&path, 0)?;
         assert!(tail.last_line.is_some());
@@ -726,7 +719,10 @@ mod tests {
             panic!("expected AssistantMessage at index 0, got {:?}", entries[0]);
         };
         assert!(
-            matches!(thought_msg.chunks[0], acp_thread::AssistantMessageChunk::Thought { .. }),
+            matches!(
+                thought_msg.chunks[0],
+                acp_thread::AssistantMessageChunk::Thought { .. }
+            ),
             "first chunk must be Thought, got {:?}",
             thought_msg.chunks[0],
         );
@@ -734,7 +730,10 @@ mod tests {
             panic!("expected AssistantMessage at index 1, got {:?}", entries[1]);
         };
         assert!(
-            matches!(text_msg.chunks[0], acp_thread::AssistantMessageChunk::Message { .. }),
+            matches!(
+                text_msg.chunks[0],
+                acp_thread::AssistantMessageChunk::Message { .. }
+            ),
             "trailing text must be Message chunk, got {:?}",
             text_msg.chunks[0],
         );
@@ -750,7 +749,11 @@ mod tests {
         let acp_thread::AgentThreadEntry::ToolCall(tc) = &entries[0] else {
             panic!("expected ToolCall, got {:?}", entries[0]);
         };
-        assert_eq!(tc.content.len(), 1, "result text should land as one ContentBlock");
+        assert_eq!(
+            tc.content.len(),
+            1,
+            "result text should land as one ContentBlock"
+        );
         assert!(matches!(
             tc.content[0],
             acp_thread::ToolCallContent::ContentBlock(acp_thread::ContentBlock::Markdown { .. })
@@ -785,7 +788,10 @@ mod tests {
             panic!("expected ToolCall, got {:?}", entries[0]);
         };
         assert!(matches!(tc.status, acp_thread::ToolCallStatus::Pending));
-        assert!(tc.content.is_empty(), "unpaired tool_use should have no content");
+        assert!(
+            tc.content.is_empty(),
+            "unpaired tool_use should have no content"
+        );
     }
 
     #[gpui::test]
@@ -831,20 +837,34 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("agent.jsonl");
         let mut f = std::fs::File::create(&path)?;
-        writeln!(f, r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"old"}}]}}}}"#)?;
+        writeln!(
+            f,
+            r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"old"}}]}}}}"#
+        )?;
         let first = tail_jsonl(&path, 0)?;
-        assert!(first.last_line.as_deref().is_some_and(|s| s.contains("\"old\"")));
+        assert!(
+            first
+                .last_line
+                .as_deref()
+                .is_some_and(|s| s.contains("\"old\""))
+        );
         // Resume from the offset — no new bytes, no new line.
         let second = tail_jsonl(&path, first.new_offset)?;
         assert!(second.last_line.is_none(), "no new bytes → no new line");
         assert_eq!(second.new_offset, first.new_offset);
         // Append a fresh line; resume should surface only it.
         let mut f = std::fs::OpenOptions::new().append(true).open(&path)?;
-        writeln!(f, r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"new"}}]}}}}"#)?;
+        writeln!(
+            f,
+            r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"new"}}]}}}}"#
+        )?;
         let third = tail_jsonl(&path, second.new_offset)?;
         let line = third.last_line.expect("appended line should surface");
         assert!(line.contains("\"new\""));
-        assert!(!line.contains("\"old\""), "incremental tail must not re-read pre-offset bytes");
+        assert!(
+            !line.contains("\"old\""),
+            "incremental tail must not re-read pre-offset bytes"
+        );
         Ok(())
     }
 
@@ -856,17 +876,25 @@ mod tests {
         // Original large content; caller stores an offset past current EOF.
         {
             let mut f = std::fs::File::create(&path)?;
-            writeln!(f, r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"original padded line"}}]}}}}"#)?;
+            writeln!(
+                f,
+                r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"original padded line"}}]}}}}"#
+            )?;
         }
         let original = tail_jsonl(&path, 0)?;
         // File rotated: truncated then a small fresh line written.
         std::fs::File::create(&path)?;
         let mut f = std::fs::OpenOptions::new().append(true).open(&path)?;
-        writeln!(f, r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"fresh"}}]}}}}"#)?;
+        writeln!(
+            f,
+            r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"fresh"}}]}}}}"#
+        )?;
         // Caller passes the stale offset that now points past the new EOF.
         // tail_jsonl must reset to 0 and surface the fresh line, not return empty.
         let after = tail_jsonl(&path, original.new_offset)?;
-        let line = after.last_line.expect("post-truncation tail should re-read from start");
+        let line = after
+            .last_line
+            .expect("post-truncation tail should re-read from start");
         assert!(line.contains("\"fresh\""));
         Ok(())
     }
