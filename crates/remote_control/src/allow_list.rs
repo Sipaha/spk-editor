@@ -46,6 +46,9 @@ pub fn translate(method: &str) -> Option<&'static str> {
         "remote.solution_agent.get_session_background_shells" => {
             Some("solution_agent.get_session_background_shells")
         }
+        "remote.solution_agent.get_session_background_agents" => {
+            Some("solution_agent.get_session_background_agents")
+        }
         "remote.solution_agent.rename_session" => Some("solution_agent.rename_session"),
         "remote.solution_agent.restart_agent" => Some("solution_agent.restart_agent"),
         "remote.solution_agent.reset_context" => Some("solution_agent.reset_context"),
@@ -173,6 +176,10 @@ mod tests {
                 "solution_agent.get_session_background_shells",
             ),
             (
+                "remote.solution_agent.get_session_background_agents",
+                "solution_agent.get_session_background_agents",
+            ),
+            (
                 "remote.solution_agent.rename_session",
                 "solution_agent.rename_session",
             ),
@@ -252,6 +259,9 @@ mod tests {
         assert!(should_forward_event("agent_session_notification_sent"));
         assert!(should_forward_event(
             "agent_session_background_shells_changed"
+        ));
+        assert!(should_forward_event(
+            "agent_session_background_agents_changed"
         ));
     }
 

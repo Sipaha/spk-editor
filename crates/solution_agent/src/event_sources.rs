@@ -8,7 +8,8 @@
 //! Wired event kinds: `agent_session_created`, `agent_session_closed`,
 //! `agent_session_state_changed`, `agent_session_title_changed`,
 //! `agent_session_message_appended`, `agent_session_notification_sent`,
-//! `agent_session_background_shells_changed`.
+//! `agent_session_background_shells_changed`,
+//! `agent_session_background_agents_changed`.
 
 use gpui::{App, AppContext as _, Entity, Global, Subscription};
 use serde_json::json;
@@ -129,12 +130,14 @@ pub fn install(cx: &mut App) {
                 // (sequenced `workspace.session_{opened,closed}` already
                 // ride out from `persist_tab_order` itself).
                 SolutionAgentStoreEvent::TabsChanged { .. } => {}
-                // Background-agent updates are surfaced through a
-                // dedicated wire notification by a later task in the
-                // Background Agents Strip plan; until that lands the
-                // event is consumed locally (session_view subscribes
-                // directly to the store).
-                SolutionAgentStoreEvent::SessionBackgroundAgentsChanged(_) => {}
+                SolutionAgentStoreEvent::SessionBackgroundAgentsChanged(id) => {
+                    let payload = build_background_agents_changed_payload(*id, cx);
+                    editor_mcp::emit_notification(
+                        cx,
+                        "agent_session_background_agents_changed",
+                        payload,
+                    );
+                }
                 SolutionAgentStoreEvent::SessionBackgroundShellsChanged(id) => {
                     let payload = build_background_shells_changed_payload(*id, cx);
                     editor_mcp::emit_notification(
@@ -350,6 +353,34 @@ pub(crate) fn build_background_shells_changed_payload(
     json!({
         "session_id": session_id.to_string(),
         "background_shells": background_shells,
+    })
+}
+
+/// Build the JSON payload for an `agent_session_background_agents_changed`
+/// notification. Walks the session's `background_agent_order` via the shared
+/// `mcp::build_background_agents_vec` helper. The wire shape matches what the
+/// `get_session_background_agents` tool returns on a cold fetch, so clients
+/// can apply either path interchangeably. Managed-agent DTOs are tiny (no
+/// heavy field), so unlike shells there is no lite/full distinction.
+///
+/// When the session is gone (race between close + queued notification),
+/// emits `background_agents: []` so the consumer's "clear the strip" handler
+/// still fires correctly.
+pub(crate) fn build_background_agents_changed_payload(
+    session_id: crate::model::SolutionSessionId,
+    cx: &App,
+) -> serde_json::Value {
+    let background_agents: Vec<crate::mcp::BackgroundAgentDto> = SolutionAgentStore::try_global(cx)
+        .and_then(|store| {
+            store.read_with(cx, |store, cx| {
+                let session = store.session(session_id)?;
+                Some(crate::mcp::build_background_agents_vec(session.read(cx)))
+            })
+        })
+        .unwrap_or_default();
+    json!({
+        "session_id": session_id.to_string(),
+        "background_agents": background_agents,
     })
 }
 
@@ -637,6 +668,113 @@ mod tests {
             assert!(
                 shells.is_empty(),
                 "missing session must emit an empty background_shells array"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn background_agents_changed_payload_is_ordered(cx: &mut TestAppContext) {
+        use crate::background_agent::{
+            BackgroundAgent, BackgroundAgentId, BackgroundAgentSnapshot,
+        };
+        use gpui::SharedString;
+
+        let (session_id, _acp_thread, _tmp) =
+            crate::store::tests::create_session_with_thread(cx).await;
+
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            let session = store.read(cx).session(session_id).expect("session");
+            session.update(cx, |session, _| {
+                // First: snapshot-bearing agent with a known label + mtime.
+                let first = BackgroundAgent {
+                    id: BackgroundAgentId::new("a30f92a688e431ed"),
+                    jsonl_path: std::path::PathBuf::from("/tmp/a30f92a688e431ed.jsonl"),
+                    registered_at: chrono::Utc::now(),
+                    latest: Some(BackgroundAgentSnapshot {
+                        mtime: std::time::UNIX_EPOCH
+                            + std::time::Duration::from_millis(1_700_000_000_000),
+                        activity_label: SharedString::from("Bash: cargo build"),
+                        stop_reason: None,
+                    }),
+                    last_offset: 30,
+                };
+                // Second: snapshot-less agent → Generating… default label.
+                let second = BackgroundAgent {
+                    id: BackgroundAgentId::new("b41a03b799f542fe"),
+                    jsonl_path: std::path::PathBuf::from("/tmp/b41a03b799f542fe.jsonl"),
+                    registered_at: chrono::Utc::now(),
+                    latest: None,
+                    last_offset: 0,
+                };
+                session.background_agent_order.push(first.id.clone());
+                session.background_agent_order.push(second.id.clone());
+                session.background_agents.insert(first.id.clone(), first);
+                session.background_agents.insert(second.id.clone(), second);
+            });
+        });
+
+        cx.update(|cx| {
+            let payload = build_background_agents_changed_payload(session_id, cx);
+            let obj = payload.as_object().expect("object");
+            assert_eq!(
+                obj.get("session_id").and_then(|v| v.as_str()),
+                Some(session_id.to_string().as_str())
+            );
+            let agents = obj
+                .get("background_agents")
+                .and_then(|v| v.as_array())
+                .expect("background_agents");
+            assert_eq!(agents.len(), 2);
+            // Ordered per background_agent_order.
+            let first = agents[0].as_object().expect("agent object");
+            assert_eq!(
+                first.get("id").and_then(|v| v.as_str()),
+                Some("a30f92a688e431ed")
+            );
+            assert_eq!(
+                first.get("label").and_then(|v| v.as_str()),
+                Some("Bash: cargo build")
+            );
+            assert!(
+                first.get("mtime_ms").and_then(|v| v.as_i64()).is_some(),
+                "snapshot-bearing agent carries mtime_ms"
+            );
+            let second = agents[1].as_object().expect("agent object");
+            assert_eq!(
+                second.get("id").and_then(|v| v.as_str()),
+                Some("b41a03b799f542fe")
+            );
+            assert_eq!(
+                second.get("label").and_then(|v| v.as_str()),
+                Some("Generating…"),
+                "snapshot-less agent must use the Generating… default label"
+            );
+            assert!(
+                second.get("mtime_ms").is_none(),
+                "snapshot-less agent omits mtime_ms"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn background_agents_changed_payload_empty_when_session_gone(cx: &mut TestAppContext) {
+        let registry = Arc::new(AdapterRegistry::new());
+        cx.update(|cx| SolutionAgentStore::init_global(cx, registry));
+
+        cx.update(|cx| {
+            let payload = build_background_agents_changed_payload(
+                crate::model::SolutionSessionId::new(),
+                cx,
+            );
+            let obj = payload.as_object().expect("object");
+            let agents = obj
+                .get("background_agents")
+                .and_then(|v| v.as_array())
+                .expect("background_agents");
+            assert!(
+                agents.is_empty(),
+                "missing session must emit an empty background_agents array"
             );
         });
     }

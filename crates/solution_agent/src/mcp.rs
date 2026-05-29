@@ -10,6 +10,7 @@ use gpui::{App, AsyncApp, Entity};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::background_agent::BackgroundAgent;
 use crate::background_shell::BackgroundShell;
 use crate::model::{SolutionSession, SolutionSessionId};
 use crate::store::{PersistedSession, SolutionAgentStore};
@@ -70,6 +71,9 @@ pub fn register(cx: &mut App) {
     });
     editor_mcp::register_tool(cx, |server| {
         server.add_tool(GetSessionBackgroundShellsTool);
+    });
+    editor_mcp::register_tool(cx, |server| {
+        server.add_tool(GetSessionBackgroundAgentsTool);
     });
     editor_mcp::register_tool(cx, |server| {
         server.add_tool(UploadInitTool);
@@ -707,6 +711,150 @@ impl McpServerTool for GetSessionBackgroundShellsTool {
                 text: format!("{} background shell(s)", background_shells.len()),
             }],
             structured_content: GetSessionBackgroundShellsResult { background_shells },
+        })
+    }
+}
+
+// =====================================================================
+// solution_agent.get_session_background_agents
+// =====================================================================
+
+/// One managed background agent surfaced to MCP consumers. Mirrors the
+/// in-memory [`BackgroundAgent`] entry: the launch `id`, the latest
+/// snapshot's `activity_label` (as `label`), the snapshot `mtime` as
+/// unix-millis, and the terminal `stop_reason`. Unlike the shells DTO
+/// there is no heavy field — every agent's fields are tiny, so they
+/// always ship (no `include_output` opt-in). Clients derive "done" from
+/// `stop_reason.is_some()`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct BackgroundAgentDto {
+    /// Launch token Claude Code assigned the agent (e.g. `a30f92a688e431edc`).
+    pub id: String,
+    /// Latest snapshot's `activity_label` (e.g. `Bash: cargo test`), or
+    /// the default `Generating…` when no snapshot has been captured yet.
+    pub label: String,
+    /// Latest snapshot's `mtime` as unix-millis. `None` when no snapshot
+    /// has been captured yet, or (defensively) when the mtime is pre-epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtime_ms: Option<i64>,
+    /// Terminal stop reason (e.g. `end_turn`) once the agent finished.
+    /// `None` while the agent is still running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+}
+
+/// Build a [`BackgroundAgentDto`] from a tracked [`BackgroundAgent`].
+/// Shared by the `get_session_background_agents` tool and
+/// `event_sources::build_background_agents_changed_payload` so both wire
+/// paths agree on the shape. Pure (no `cx`). `label` falls back to the
+/// `Generating…` default when no snapshot exists yet.
+pub(crate) fn background_agent_dto(agent: &BackgroundAgent) -> BackgroundAgentDto {
+    let mtime_ms = agent.latest.as_ref().and_then(|snapshot| {
+        snapshot
+            .mtime
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .ok()
+    });
+    let label = agent
+        .latest
+        .as_ref()
+        .map(|snapshot| snapshot.activity_label.to_string())
+        .unwrap_or_else(|| "Generating…".to_string());
+    let stop_reason = agent
+        .latest
+        .as_ref()
+        .and_then(|snapshot| snapshot.stop_reason.as_ref())
+        .map(|s| s.to_string());
+    BackgroundAgentDto {
+        id: agent.id.to_string(),
+        label,
+        mtime_ms,
+        stop_reason,
+    }
+}
+
+/// Walk a session's `background_agent_order` in insertion order and convert
+/// each tracked agent into its wire form. Skips ids with no matching map
+/// entry (defensive — the order vec is kept 1:1 with the map). Shared by the
+/// tool handler and the notification builder, hence the single helper.
+pub(crate) fn build_background_agents_vec(session: &SolutionSession) -> Vec<BackgroundAgentDto> {
+    let mut out = Vec::with_capacity(session.background_agent_order.len());
+    for id in &session.background_agent_order {
+        match session.background_agents.get(id) {
+            Some(agent) => out.push(background_agent_dto(agent)),
+            None => {
+                log::warn!(
+                    "background_agent_order has id {id} with no matching background_agents entry \
+                     (insertion-order vector drifted from the map)"
+                );
+            }
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct GetSessionBackgroundAgentsParams {
+    pub session_id: String,
+}
+
+impl<'de> Deserialize<'de> for GetSessionBackgroundAgentsParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            session_id: String,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            session_id: inner.session_id,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct GetSessionBackgroundAgentsResult {
+    /// Background agents in `background_agent_order` (insertion order) — the
+    /// same order the desktop strip renders pills.
+    pub background_agents: Vec<BackgroundAgentDto>,
+}
+
+#[derive(Clone)]
+pub struct GetSessionBackgroundAgentsTool;
+
+impl McpServerTool for GetSessionBackgroundAgentsTool {
+    type Input = GetSessionBackgroundAgentsParams;
+    type Output = GetSessionBackgroundAgentsResult;
+    const NAME: &'static str = "solution_agent.get_session_background_agents";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(
+            !input.session_id.is_empty(),
+            "invalid_params: session_id is required"
+        );
+        let session_id = SolutionSessionId::parse(&input.session_id)
+            .map_err(|e| anyhow!("bad session id: {e}"))?;
+
+        let background_agents = cx.update(|cx| -> Result<Vec<BackgroundAgentDto>> {
+            let store = SolutionAgentStore::global(cx);
+            store.read_with(cx, |store, cx| -> Result<Vec<BackgroundAgentDto>> {
+                let session = store
+                    .session(session_id)
+                    .ok_or_else(|| anyhow!("session_not_found: {session_id}"))?;
+                Ok(build_background_agents_vec(session.read(cx)))
+            })
+        })?;
+
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("{} background agent(s)", background_agents.len()),
+            }],
+            structured_content: GetSessionBackgroundAgentsResult { background_agents },
         })
     }
 }
@@ -4655,6 +4803,113 @@ mod tests {
                 GetSessionBackgroundShellsParams {
                     session_id: unknown.to_string(),
                     include_output: false,
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect_err("expected session_not_found error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("session_not_found"),
+            "expected session_not_found in {msg:?}"
+        );
+    }
+
+    /// Seed two background agents (insertion-ordered): the first carries a
+    /// `latest` snapshot with a known `activity_label` + mtime + stop_reason,
+    /// the second has no snapshot (so its DTO label must fall back to the
+    /// `Generating…` default with `mtime_ms == None`). Returns the
+    /// mtime-millis stamped on the first agent so the test can assert it.
+    fn seed_background_agents(
+        cx: &mut gpui::TestAppContext,
+        session_id: crate::model::SolutionSessionId,
+    ) -> i64 {
+        use crate::background_agent::{
+            BackgroundAgent, BackgroundAgentId, BackgroundAgentSnapshot,
+        };
+        // Pick a fixed post-epoch instant so the mtime_ms assertion is exact.
+        let mtime = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_123);
+        let expected_ms = 1_700_000_000_123_i64;
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            let session = store.read(cx).session(session_id).expect("session");
+            session.update(cx, |session, _| {
+                let first = BackgroundAgent {
+                    id: BackgroundAgentId::new("a30f92a688e431ed"),
+                    jsonl_path: std::path::PathBuf::from("/tmp/a30f92a688e431ed.jsonl"),
+                    registered_at: chrono::Utc::now(),
+                    latest: Some(BackgroundAgentSnapshot {
+                        mtime,
+                        activity_label: SharedString::from("Bash: cargo test"),
+                        stop_reason: Some(SharedString::from("end_turn")),
+                    }),
+                    last_offset: 42,
+                };
+                let second = BackgroundAgent {
+                    id: BackgroundAgentId::new("b41a03b799f542fe"),
+                    jsonl_path: std::path::PathBuf::from("/tmp/b41a03b799f542fe.jsonl"),
+                    registered_at: chrono::Utc::now(),
+                    latest: None,
+                    last_offset: 0,
+                };
+                session.background_agent_order.push(first.id.clone());
+                session.background_agent_order.push(second.id.clone());
+                session.background_agents.insert(first.id.clone(), first);
+                session.background_agents.insert(second.id.clone(), second);
+            });
+        });
+        expected_ms
+    }
+
+    #[gpui::test]
+    async fn get_session_background_agents_returns_ordered_agents(cx: &mut gpui::TestAppContext) {
+        let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+        let expected_ms = seed_background_agents(cx, session_id);
+
+        let result = GetSessionBackgroundAgentsTool
+            .run(
+                GetSessionBackgroundAgentsParams {
+                    session_id: session_id.to_string(),
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session_background_agents");
+        let agents = &result.structured_content.background_agents;
+        assert_eq!(agents.len(), 2, "both seeded agents returned");
+        // Ordered per background_agent_order: the snapshot-bearing one first.
+        assert_eq!(agents[0].id, "a30f92a688e431ed");
+        assert_eq!(agents[0].label, "Bash: cargo test");
+        assert_eq!(agents[0].mtime_ms, Some(expected_ms));
+        assert_eq!(agents[0].stop_reason.as_deref(), Some("end_turn"));
+
+        // Snapshot-less agent: label falls back to the Generating… default.
+        assert_eq!(agents[1].id, "b41a03b799f542fe");
+        assert_eq!(
+            agents[1].label, "Generating…",
+            "snapshot-less agent must use the Generating… default label"
+        );
+        assert_eq!(agents[1].mtime_ms, None, "no snapshot → no mtime_ms");
+        assert_eq!(agents[1].stop_reason, None);
+
+        match &result.content[0] {
+            ToolResponseContent::Text { text } => {
+                assert_eq!(text, "2 background agent(s)");
+            }
+            _ => panic!("expected text content"),
+        }
+    }
+
+    #[gpui::test]
+    async fn get_session_background_agents_unknown_session_errors(cx: &mut gpui::TestAppContext) {
+        // Seed the store global so the lookup branch (not a missing global)
+        // is exercised, then query a well-formed but absent id.
+        let (_real_session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+        let unknown = "abcd1234";
+        let err = GetSessionBackgroundAgentsTool
+            .run(
+                GetSessionBackgroundAgentsParams {
+                    session_id: unknown.to_string(),
                 },
                 &mut cx.to_async(),
             )
