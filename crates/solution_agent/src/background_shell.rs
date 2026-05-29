@@ -12,9 +12,7 @@
 //! - [`BackgroundShell`] + [`BackgroundShellSnapshot`] — in-memory tracking
 //!   state per shell.
 //! - [`ShellRuntimeState`] — running / exited / killed lifecycle enum.
-//!
-//! Parsers (launch-announcement regex) and fs-watch / incremental-tail helpers
-//! land in later tasks; this module is pure data scaffolding.
+//! - [`parse_task_notification`] — parser for `<task-notification>` completion blocks.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -116,6 +114,53 @@ pub fn parse_bash_bg_launch(raw_output: &str) -> Option<(BackgroundShellId, Path
     Some((BackgroundShellId::new(shell_id), PathBuf::from(output_path)))
 }
 
+// ---------------------------------------------------------------------------
+// Task 3 — `parse_task_notification`
+// ---------------------------------------------------------------------------
+
+/// Parsed content of a `<task-notification>` block emitted by Claude Code in a
+/// `user`-role message when a background shell completes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskNotification {
+    pub id: BackgroundShellId,
+    pub status: ShellRuntimeState,
+}
+
+static TASK_ID_RE: OnceLock<Regex> = OnceLock::new();
+static EXIT_CODE_RE: OnceLock<Regex> = OnceLock::new();
+
+fn task_id_re() -> &'static Regex {
+    TASK_ID_RE.get_or_init(|| {
+        Regex::new(r"<task-id>\s*([^<\s]+)\s*</task-id>").expect("static regex compiles")
+    })
+}
+
+fn exit_code_re() -> &'static Regex {
+    EXIT_CODE_RE.get_or_init(|| {
+        Regex::new(r"\(exit code (-?\d+)\)").expect("static regex compiles")
+    })
+}
+
+/// Parse a `<task-notification>` block. Returns `None` if the block or its
+/// `<task-id>` is absent. `<status>completed</status>` maps to
+/// `ShellRuntimeState::Exited(Some(N))` where N is parsed from the
+/// `(exit code N)` suffix in `<summary>` (defaulting to `Exited(None)` when the
+/// code is absent/unparseable). Any non-"completed" status also maps defensively
+/// to `Exited(None)` (we don't yet know other status spellings).
+pub fn parse_task_notification(text: &str) -> Option<TaskNotification> {
+    if !text.contains("<task-notification>") {
+        return None;
+    }
+    let id_str = task_id_re().captures(text)?.get(1)?.as_str();
+    let id = BackgroundShellId::new(id_str);
+    let exit_code = exit_code_re()
+        .captures(text)
+        .and_then(|caps| caps.get(1))
+        .and_then(|m| m.as_str().parse::<i32>().ok());
+    let status = ShellRuntimeState::Exited(exit_code);
+    Some(TaskNotification { id, status })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,5 +248,65 @@ mod tests {
         let result = parse_bash_bg_launch(text).unwrap();
         assert_eq!(result.0.as_str(), "abc123xyz");
         assert_eq!(result.1, PathBuf::from("/tmp/claude-1000/tasks/abc123xyz.output"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 3 — parse_task_notification
+    // -----------------------------------------------------------------------
+
+    const REAL_NOTIFICATION: &str = r#"<task-notification>
+<task-id>bvb4ful1z</task-id>
+<tool-use-id>toolu_01AqJufkNFAd7Aef3ojZ8d5J</tool-use-id>
+<output-file>/tmp/claude-1000/.../tasks/bvb4ful1z.output</output-file>
+<status>completed</status>
+<summary>Background command "Sleep for 60 seconds in background" completed (exit code 0)</summary>
+</task-notification>"#;
+
+    #[test]
+    fn parse_task_notification_exit_code_zero() {
+        let result = parse_task_notification(REAL_NOTIFICATION).unwrap();
+        assert_eq!(result.id.as_str(), "bvb4ful1z");
+        assert_eq!(result.status, ShellRuntimeState::Exited(Some(0)));
+    }
+
+    #[test]
+    fn parse_task_notification_exit_code_137() {
+        let text = r#"<task-notification>
+<task-id>abc123def</task-id>
+<status>completed</status>
+<summary>Command failed (exit code 137)</summary>
+</task-notification>"#;
+        let result = parse_task_notification(text).unwrap();
+        assert_eq!(result.id.as_str(), "abc123def");
+        assert_eq!(result.status, ShellRuntimeState::Exited(Some(137)));
+    }
+
+    #[test]
+    fn parse_task_notification_completed_no_exit_code() {
+        let text = r#"<task-notification>
+<task-id>xyz789</task-id>
+<status>completed</status>
+<summary>Background command finished</summary>
+</task-notification>"#;
+        let result = parse_task_notification(text).unwrap();
+        assert_eq!(result.id.as_str(), "xyz789");
+        assert_eq!(result.status, ShellRuntimeState::Exited(None));
+    }
+
+    #[test]
+    fn parse_task_notification_no_block_returns_none() {
+        let text = "Just some regular text without any task notification block";
+        assert!(parse_task_notification(text).is_none());
+    }
+
+    #[test]
+    fn parse_task_notification_negative_exit_code() {
+        let text = r#"<task-notification>
+<task-id>neg99x</task-id>
+<status>completed</status>
+<summary>Killed (exit code -1)</summary>
+</task-notification>"#;
+        let result = parse_task_notification(text).unwrap();
+        assert_eq!(result.status, ShellRuntimeState::Exited(Some(-1)));
     }
 }
