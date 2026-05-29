@@ -4,10 +4,10 @@
 
 ## One-line status
 
-V3 **Background Shells Strip** shipped end-to-end to `main` (all 14 plan tasks),
-317 `solution_agent` tests green, `solution_agent` clippy-clean (`--no-deps`),
-release-fast binary rebuilt for hands-on testing. One known V1 limitation: live
-`Exited(code)` badges are dormant (see gotcha #1).
+V3 **Background Shells Strip** shipped end-to-end to `main` (all 14 plan tasks
++ V3-polish-1), 324 `solution_agent` tests green, `solution_agent` clippy-clean
+(`--no-deps`), release-fast binary rebuilt for hands-on testing. Live `Exited(code)`
+badges now work (gotcha #1 RESOLVED — see below).
 
 ## The big pivot this session
 
@@ -50,6 +50,7 @@ tail. Plan revised + re-committed as `7752146ae2` before any implementation.
 | `7da463dc6e` | T13 shell drill-in live-stdout view |
 | `ea5989ba0e` | T14 disable compose in shell view + drop stale rows on hydrate |
 | `244256d885` | clear clippy debt surfaced by `--no-deps` (identity map, redundant clones, last→rfind) |
+| `9562fdc580` | **V3-polish-1:** flip shells to `Exited(code)` live via parent-JSONL `<task-notification>` scan on the 1Hz tick |
 
 ## How it works now (architecture)
 
@@ -75,18 +76,22 @@ rows dropped on hydrate (no phantom pills after restart).
 
 ## Active gotchas (carry forward)
 
-1. **`Exited(code)` badges are DORMANT in the current build.** `claude_native::translate
-   ::translate_user` (translate.rs:~197) emits `SessionUpdate`s only for `tool_result`
-   user blocks and drops all other user-block types — so a `<task-notification>` text
-   user message never becomes a `UserMessage` entry on the live wire. The
-   `observe_task_notification` scan + `parse_task_notification` are correct and
-   unit-tested end-to-end, but **never fire in production today**. Consequence: a
-   completed shell is NOT marked `Exited`; it shows as Running until
-   `tick_background_shells` reaps it by **output-file staleness** (mtime older than
-   `managed_agent_stale + dead_linger`, default 120+300s). **KillShell→Killed IS live**
-   (KillShell is a real ToolCall entry). **Follow-up to make exit codes live:** extend
-   `translate_user` to surface text-bearing user messages (e.g. as a `UserMessageChunk`);
-   then the scan activates with no other change. This is the single biggest V2 polish item.
+1. **~~`Exited(code)` badges are DORMANT~~ — RESOLVED (`9562fdc580`, V3-polish-1).**
+   Background: `claude_native::translate_user` (translate.rs:~197) emits `SessionUpdate`s
+   only for `tool_result` user blocks, so a `<task-notification>` text user message never
+   becomes a `UserMessage` entry — the original `observe_task_notification` NewEntry scan
+   was dormant. **Rejected the obvious fix** (surfacing it as a `UserMessage` entry) because
+   a `NewEntry` flips the session `Idle→Running` and would leave it STUCK on Running if the
+   bg command completes while idle and claude doesn't auto-resume (the bug the orphan-result
+   path guards against), plus it'd render raw XML in the transcript. **Shipped instead:**
+   the store tails the parent session JSONL on the existing 1Hz tick
+   (`scan_parent_jsonl_for_completions`), raw-line-matches `<task-notification>`, parses,
+   and `mark_background_shell_state(Exited(code))` — no entries, no events, no
+   `claude_native`/`acp_thread` change, no transcript pollution. Forward-only offset
+   (lazy-init to EOF, cleared when a session has no shells). Completed shells now flip to
+   `Exited(N)` within ~1s. `KillShell→Killed` was already live. (The old NewEntry
+   `observe_task_notification` scan remains wired but dormant — harmless; it'd activate if
+   translate ever surfaces these as entries.)
 2. **clippy on `solution_agent` needs `--no-deps`.** `cargo clippy -p solution_agent`
    never lints solution_agent's own code because it fails first on pre-existing
    `-D warnings` errors in dep crates `claude_native` (`int_plus_one`) and `solutions`
@@ -109,18 +114,18 @@ rows dropped on hydrate (no phantom pills after restart).
    done` in the background, then leave it."*
 3. EXPECT: a terminal-icon pill appears in the subagent strip labelled
    `<id> · for i in $(seq 1 30)…`. Click it → drill-in shows the live `tick N` stdout
-   (refreshing as the file grows). After ~60s the command ends; the pill stays "Running"
-   until it goes stale (~7min) then disappears (gotcha #1 — no live Exited badge yet).
+   (refreshing as the file grows). After ~60s the command ends; within ~1s the pill flips
+   to **Exited (0)** (green border, × appears), and the staleness reap later drops it.
 4. Ask claude to *"kill that background shell"* → KillShell → pill flips **Killed**
    (live), × appears.
 
 ## Outstanding pool (next phase candidates, § 7 NEXT)
 
-- **V3-polish-1 (highest leverage):** make `Exited(code)` live by extending
-  `translate_user` to surface text user messages (gotcha #1). Touches `claude_native` —
-  verify it doesn't surface OTHER intentionally-dropped synthetic user messages.
-- **V3-polish-2 (LIGHT):** fix the pre-existing clippy debt in `claude_native` +
-  `solutions` so `./script/clippy` is workspace-clean (gotcha #2).
+- ~~**V3-polish-1:** make `Exited(code)` live~~ — DONE (`9562fdc580`, see gotcha #1).
+- **V3-polish-2 (LIGHT, next pick):** fix the pre-existing clippy debt in `claude_native`
+  (`int_plus_one`) + `solutions` (`disallowed_methods`, `redundant_clone`) so
+  `./script/clippy` is workspace-clean and `cargo clippy -p solution_agent` works without
+  `--no-deps` (gotcha #2).
 - Refresh button on the shell drill-in (deferred — the file tail is already live, so
   lower value than for managed agents).
 - Carried from prior handoff: queue persistence, crash reporting, F/G arcs.
@@ -128,5 +133,6 @@ rows dropped on hydrate (no phantom pills after restart).
 ## Resume recipe
 
 `продолжай` / `resume` → glob `docs/findings/*-session-handoff.md`, read THIS file
-(lex-latest), read `docs/workflow/supervisor-mode.md` §7, `git log --oneline -18`,
-pick from the pool above. V3-polish-1 (live exit codes) is the natural next pick.
+(lex-latest), read `docs/workflow/supervisor-mode.md` §7, `git log --oneline -20`,
+pick from the pool above. V3-polish-2 (workspace clippy debt) is the natural next pick;
+or pivot to the carried-over arcs (queue persistence, crash reporting, F/G).
