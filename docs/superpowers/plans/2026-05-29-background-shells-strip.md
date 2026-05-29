@@ -1,5 +1,12 @@
 # Background Shells Strip — V3 Implementation Plan (REVISED 2026-05-29)
 
+**STATUS: COMPLETE (2026-05-29).** All 14 tasks shipped to `main`, `7752146ae2..244256d885`.
+317 `solution_agent` tests green; `solution_agent` clippy-clean (`--no-deps`). Final
+handoff + per-task SHA table: [`docs/findings/2026-05-29-v3-shells-session-handoff.md`](../../findings/2026-05-29-v3-shells-session-handoff.md).
+Known V1 limitation: live `Exited(code)` badges are dormant until `claude_native::
+translate_user` surfaces text user messages — completed shells reap by output-file
+staleness; KillShell→Killed is live. See the handoff's gotcha #1.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development
 > (recommended) or superpowers:executing-plans to implement task-by-task. Steps use
 > checkbox (`- [ ]`) syntax for tracking.
