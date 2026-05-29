@@ -544,6 +544,28 @@ pub(crate) fn render_status_row(
                     .child(icon)
                     .child(label)
                     .into_any_element()
+            } else if is_cold {
+                // Cold session — clicking the badge wakes the agent
+                // without forcing the user to type-then-send a message
+                // first. Mirrors what `start_resume` does on the next
+                // send path: builds the metadata snapshot and dispatches
+                // the ACP handshake, with the badge flipping to
+                // `Resuming…` on the same tick via `cx.notify`.
+                div()
+                    .id("solution-status-sleep-wake")
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .cursor_pointer()
+                    .tooltip(ui::Tooltip::text("Click to wake the session"))
+                    .child(label)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if this.resuming {
+                            return;
+                        }
+                        this.start_resume(window, cx);
+                    }))
+                    .into_any_element()
             } else {
                 label.into_any_element()
             };

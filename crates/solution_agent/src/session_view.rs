@@ -270,7 +270,7 @@ pub struct SolutionSessionView {
     /// `true` while a `resume_session` task is in flight following a
     /// Send on a cold tab. Drives the inline "Starting agent…"
     /// indicator on the compose row and disables further Send actions.
-    resuming: bool,
+    pub(crate) resuming: bool,
     /// Per-entry-index set of user messages whose queued-prefix marker
     /// the user has clicked open. By default the marker (`[The user
     /// typed the following at HH:MM:SS … queued in advance.]`) is
@@ -1783,7 +1783,7 @@ impl SolutionSessionView {
     /// into the compose box during the 3-4s handshake, the failed
     /// message is prepended (failed_text + "\n" + current_text) so
     /// neither gets clobbered.
-    fn start_resume(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn start_resume(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(workspace) = self.workspace.upgrade() else {
             self.resuming = false;
             self.pending_send = None;
