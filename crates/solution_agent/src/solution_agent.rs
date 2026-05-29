@@ -8,6 +8,7 @@ pub mod actions;
 pub mod adapter;
 pub mod agent_settings;
 pub mod background_agent;
+pub mod background_shell;
 pub mod claude_adapter;
 pub(crate) mod cold_persistence;
 pub(crate) mod compact;
@@ -38,6 +39,7 @@ pub use model::{
     AgentServerId, SessionState, SolutionSession, SolutionSessionId, SolutionSessionMetadata,
 };
 pub use background_agent::{BackgroundAgent, BackgroundAgentId, BackgroundAgentSnapshot};
+pub use background_shell::{BackgroundShell, BackgroundShellId, BackgroundShellSnapshot, ShellRuntimeState};
 pub use store::SubagentView;
 
 use std::rc::Rc;

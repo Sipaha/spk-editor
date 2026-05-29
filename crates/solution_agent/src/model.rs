@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use solutions::SolutionId;
 
 use crate::background_agent;
+use crate::background_shell;
 
 /// Length of a `SolutionSessionId` in ASCII characters. 8 chars over a
 /// 36-char alphabet ≈ 36⁸ ≈ 2.8 × 10¹² combinations — comfortably
@@ -400,6 +401,18 @@ pub struct SolutionSession {
     /// Insertion order of `background_agents`. Used to render pills in
     /// spawn order (HashMap iteration is hash-seeded and unstable).
     pub background_agent_order: Vec<background_agent::BackgroundAgentId>,
+    /// Background shells (`Bash(run_in_background=true)`) launched from
+    /// this session. Keyed by [`background_shell::BackgroundShellId`].
+    /// Output lives in an on-disk `.output` file tracked per-shell.
+    /// Not cleared on context reset — shells outlive the conversation
+    /// window and are reaped by a later task.
+    pub background_shells: HashMap<
+        background_shell::BackgroundShellId,
+        background_shell::BackgroundShell,
+    >,
+    /// Insertion order of `background_shells`. Used to render pills in
+    /// spawn order (HashMap iteration is hash-seeded and unstable).
+    pub background_shell_order: Vec<background_shell::BackgroundShellId>,
     /// Position in the desktop session-tab strip. `None` means the session is
     /// not currently in the strip (either never opened, or its tab was closed
     /// via `persist_tab_order(.., None)`). Populated on `restore_open_tabs`
@@ -456,6 +469,8 @@ impl SolutionSession {
             active_subagent_order: Vec::new(),
             background_agents: HashMap::new(),
             background_agent_order: Vec::new(),
+            background_shells: HashMap::new(),
+            background_shell_order: Vec::new(),
             tab_order: None,
         }
     }
@@ -571,6 +586,8 @@ mod tests {
             active_subagent_order: Vec::new(),
             background_agents: HashMap::new(),
             background_agent_order: Vec::new(),
+            background_shells: HashMap::new(),
+            background_shell_order: Vec::new(),
             tab_order: None,
         }
     }
