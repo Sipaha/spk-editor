@@ -1543,6 +1543,17 @@ impl AgentConnection for ClaudeNativeConnection {
         self.open_session(session, project, work_dirs, None, extra_meta, cx)
     }
 
+    fn active_model(&self, session_id: &acp::SessionId) -> Option<SharedString> {
+        let sessions = self.sessions.borrow();
+        let session = sessions.get(session_id)?;
+        session
+            .shared
+            .active_model
+            .borrow()
+            .clone()
+            .map(SharedString::from)
+    }
+
     fn supports_resume_session(&self) -> bool {
         true
     }

@@ -272,11 +272,22 @@ pub(crate) fn render_status_row(
         // Keep the "last activity" relative label fresh with a coarse
         // ~15s tick for as long as this session tab is open.
         view.ensure_status_activity_tick(cx);
-        // Kick off a model lookup if we don't have one cached yet.
-        // Stored in `status_cached_model` for synchronous reads on later
-        // frames; the spawn de-dupes via `status_pending_model_fetch`.
+        // Prefer the agent's live `active_model` (latched from every
+        // `message_start`, so reflects whichever model claude actually
+        // routed the last turn through — including hot swaps via
+        // `claude --model` after restart). Falls back to the editor-side
+        // selector cache when the agent hasn't seen its first turn yet
+        // or when the connection doesn't expose a live value.
         view.ensure_status_model_loaded(cx);
-        let model_text = view.status_cached_model.clone();
+        let model_text = SolutionAgentStore::global(cx)
+            .read(cx)
+            .session(view.session_id())
+            .and_then(|s| s.read(cx).acp_thread().cloned())
+            .and_then(|thread| {
+                let thread = thread.read(cx);
+                thread.connection().active_model(thread.session_id())
+            })
+            .or_else(|| view.status_cached_model.clone());
 
         let raw_used = usage.as_ref().map(|u| u.used_tokens).unwrap_or(0);
         let peak = view.status_peak_used_tokens;

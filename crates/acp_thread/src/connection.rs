@@ -181,6 +181,19 @@ pub trait AgentConnection {
         None
     }
 
+    /// The model id the agent has actually used on its most recent turn for
+    /// `session_id`. Live value — read on every status-row render. Returns
+    /// `None` before the first turn lands or when the connection doesn't
+    /// track the value at all. Implementations that DO track it (currently
+    /// only `claude_native`, which latches `message_start.model`) should
+    /// keep the read cheap (RefCell borrow + clone). Status surfaces prefer
+    /// this over `model_selector().selected_model()` because the selector
+    /// returns what the editor asked for; this returns what claude actually
+    /// used.
+    fn active_model(&self, _session_id: &acp::SessionId) -> Option<SharedString> {
+        None
+    }
+
     fn telemetry(&self) -> Option<Rc<dyn AgentTelemetry>> {
         None
     }
