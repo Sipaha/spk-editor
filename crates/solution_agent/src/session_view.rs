@@ -334,14 +334,37 @@ pub struct SolutionSessionView {
         std::time::SystemTime,
         u64,
     )>,
-    /// `true` on the previous render frame if `selected_subagent` was a
-    /// `Background` view. Tracked so a tab switch (Main↔Background or
-    /// Task↔Background) can reset `list_state` to the new entry count
-    /// at the next render — without this, swapping into a Background
-    /// view that has a different entry count than the parent thread
-    /// would either over- or under-size the virtualized list and
-    /// silently truncate / overflow the rendered rows.
-    prev_render_background: Option<crate::background_agent::BackgroundAgentId>,
+    /// Owned `AgentThreadEntry`s for a `Shell(id)` drill-in view. Parallel
+    /// to `background_entries_for_render` but sourced from the shell's
+    /// last-observed `BackgroundShellSnapshot` (command/state header +
+    /// fenced stdout-tail body) rather than a JSONL transcript on disk.
+    /// Populated by `build_background_shell_entries_for_render` at the top
+    /// of `Render::render` whenever `selected_subagent == Shell(id)`,
+    /// cleared otherwise. Owned (not borrowed) for the same `!Clone`
+    /// reason as the background vec: the single `AssistantMessage` carries
+    /// a freshly-built `Markdown` widget that can't be cloned per frame.
+    background_shell_entries_for_render: Vec<AgentThreadEntry>,
+    /// Freshness fingerprint of `background_shell_entries_for_render`: the
+    /// `BackgroundShellId` last rendered, plus the snapshot mtime and the
+    /// `output_tail` byte length at build time. When the selected shell's
+    /// snapshot hasn't changed (same id, same mtime, same tail length) we
+    /// reuse the cached `Vec` instead of re-allocating the `Markdown`
+    /// widget. Cleared whenever the view leaves Shell or the selected
+    /// shell disappears from the session map.
+    background_shell_entries_fingerprint: Option<(
+        crate::background_shell::BackgroundShellId,
+        std::time::SystemTime,
+        u64,
+    )>,
+    /// The drill-in selection (`Background(id)` or `Shell(id)`) rendered
+    /// on the previous frame, or `None` for a parent-thread view
+    /// (Main/Task). Tracked so a tab switch into / out of / between
+    /// drill-in views can reset `list_state` to the new entry count at
+    /// the next render — without this, swapping into a drill-in view that
+    /// has a different entry count than the parent thread would either
+    /// over- or under-size the virtualized list and silently truncate /
+    /// overflow the rendered rows.
+    prev_render_drill_in: Option<crate::store::SubagentView>,
 }
 
 impl SolutionSessionView {
@@ -554,7 +577,9 @@ impl SolutionSessionView {
             tool_tick: None,
             background_entries_for_render: Vec::new(),
             background_entries_fingerprint: None,
-            prev_render_background: None,
+            background_shell_entries_for_render: Vec::new(),
+            background_shell_entries_fingerprint: None,
+            prev_render_drill_in: None,
         };
         // Detect any thread that is already attached at construction
         // (e.g. after `resume_session`) and wire its lifecycle hooks.
@@ -1000,10 +1025,11 @@ impl SolutionSessionView {
     pub(crate) fn build_background_entries_for_render(&mut self, cx: &mut App) -> bool {
         use crate::store::SubagentView;
         let (selected_id, path) = match &self.selected_subagent {
-            // Task 12/13: Shell drill-in body sources from the shell's
-            // live-tailed `.output` file, not the background-agent JSONL.
-            // Until that lands, treat it like Main/Task here so this
-            // background-agent renderer paints nothing for it.
+            // Shell drill-in is rendered by
+            // `build_background_shell_entries_for_render` from the shell's
+            // snapshot, not the background-agent JSONL — so this
+            // background-agent renderer paints nothing for it (and for
+            // Main/Task).
             SubagentView::Main | SubagentView::Task(_) | SubagentView::Shell(_) => {
                 if !self.background_entries_for_render.is_empty() {
                     self.background_entries_for_render.clear();
@@ -1069,6 +1095,62 @@ impl SolutionSessionView {
         self.background_entries_fingerprint = stat
             .as_ref()
             .and_then(|meta| meta.modified().ok().map(|mtime| (selected_id, mtime, meta.len())));
+        true
+    }
+
+    /// Populate `self.background_shell_entries_for_render` from the
+    /// selected `Shell(id)` view's last-observed snapshot and return
+    /// `true`, so the renderer sources its single drill-in row from that
+    /// vec. Returns `false` when the current view is Main / Task /
+    /// Background (clearing any stale shell entries to release the owned
+    /// `Markdown` widget they carry).
+    ///
+    /// A snapshot-mtime + tail-length fingerprint skips rebuilding the
+    /// `Markdown` widget when the shell's observed state is unchanged
+    /// since the previous render, mirroring the background JSONL cache. A
+    /// stale id (shell removed from the session map) paints empty for the
+    /// frame; `on_background_shells_changed` snaps the selection back to
+    /// `Main` on the next store-event tick.
+    pub(crate) fn build_background_shell_entries_for_render(&mut self, cx: &mut App) -> bool {
+        use crate::store::SubagentView;
+        let SubagentView::Shell(id) = &self.selected_subagent else {
+            if !self.background_shell_entries_for_render.is_empty() {
+                self.background_shell_entries_for_render.clear();
+            }
+            self.background_shell_entries_fingerprint = None;
+            return false;
+        };
+        let id = id.clone();
+        let shell = match self.session.read(cx).background_shells.get(&id) {
+            Some(shell) => shell.clone(),
+            None => {
+                // Stale selection — `on_background_shells_changed` snaps us
+                // back to Main on the next store tick; paint empty here.
+                self.background_shell_entries_for_render.clear();
+                self.background_shell_entries_fingerprint = None;
+                return true;
+            }
+        };
+        // Cheap freshness check against the snapshot's mtime + tail length.
+        // A shell with no snapshot yet (`latest == None`) fingerprints as
+        // `(id, UNIX_EPOCH, 0)` so the "No output captured yet." body is
+        // also cached and not rebuilt every frame.
+        let (fp_mtime, fp_len) = match &shell.latest {
+            Some(snapshot) => (snapshot.mtime, snapshot.output_tail.len() as u64),
+            None => (std::time::SystemTime::UNIX_EPOCH, 0),
+        };
+        let fresh = self
+            .background_shell_entries_fingerprint
+            .as_ref()
+            .is_some_and(|(cached_id, cached_mtime, cached_len)| {
+                cached_id == &id && *cached_mtime == fp_mtime && *cached_len == fp_len
+            });
+        if fresh {
+            return true;
+        }
+        self.background_shell_entries_for_render =
+            build_shell_drill_in_entries(&shell, chrono::Utc::now(), cx);
+        self.background_shell_entries_fingerprint = Some((id, fp_mtime, fp_len));
         true
     }
 
@@ -2232,6 +2314,80 @@ pub(crate) fn compose_disabled_for(view: &crate::store::SubagentView) -> bool {
     matches!(view, crate::store::SubagentView::Background(_))
 }
 
+/// Build the single-row drill-in body for a `Shell(id)` view: a header
+/// line (command, runtime state, observed-at relative time, short id)
+/// followed by the last-observed stdout tail in a fenced code block.
+/// Returns exactly one `AssistantMessage` carrying a `Markdown` block,
+/// matching the construction `jsonl_to_entries` uses for assistant text.
+/// Extracted as a free fn so `tests.rs` can exercise it with only a
+/// `cx: &mut App` and no full GPUI view.
+pub(crate) fn build_shell_drill_in_entries(
+    shell: &crate::background_shell::BackgroundShell,
+    now: chrono::DateTime<chrono::Utc>,
+    cx: &mut App,
+) -> Vec<AgentThreadEntry> {
+    use crate::background_shell::ShellRuntimeState;
+    let state_label = match (&shell.state, shell.latest.is_none()) {
+        // A shell still "running" but with no fresh snapshot is flagged
+        // stale so the drill-in body matches the strip pill's wording.
+        (ShellRuntimeState::Running, true) => "running (stale)".to_string(),
+        (ShellRuntimeState::Running, false) => "running".to_string(),
+        (ShellRuntimeState::Exited(Some(code)), _) => format!("exited ({code})"),
+        (ShellRuntimeState::Exited(None), _) => "exited".to_string(),
+        (ShellRuntimeState::Killed, _) => "killed".to_string(),
+    };
+    let observed = match &shell.latest {
+        Some(snapshot) => shell_relative_time(snapshot.mtime, now),
+        None => "no output yet".to_string(),
+    };
+    let header = format!(
+        "`{}` · {} · {} · {}",
+        shell.command, state_label, observed, shell.id.short()
+    );
+    let body = match &shell.latest {
+        Some(snapshot) => format!("```\n{}\n```", snapshot.output_tail),
+        None => "_No output captured yet._".to_string(),
+    };
+    let text = format!("{header}\n\n{body}");
+    vec![AgentThreadEntry::AssistantMessage(
+        acp_thread::AssistantMessage {
+            chunks: vec![acp_thread::AssistantMessageChunk::Message {
+                block: acp_thread::ContentBlock::Markdown {
+                    markdown: cx.new(|cx| Markdown::new(text.into(), None, None, cx)),
+                },
+            }],
+            indented: false,
+            is_subagent_output: false,
+            subagent_id: None,
+        },
+    )]
+}
+
+/// "X ago" formatter for a shell snapshot's `SystemTime` mtime. Converts
+/// to a UTC `DateTime` and formats relative to `now`; an mtime before the
+/// epoch (clock skew) or in the future degrades to `"just now"`.
+fn shell_relative_time(
+    mtime: std::time::SystemTime,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let secs = match mtime.duration_since(std::time::UNIX_EPOCH) {
+        Ok(dur) => now
+            .timestamp()
+            .saturating_sub(dur.as_secs() as i64)
+            .max(0),
+        Err(_) => return "just now".to_string(),
+    };
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
+}
+
 #[cfg(test)]
 impl SolutionSessionView {
     /// Minimal test constructor: delegates to `SolutionSessionView::new`
@@ -2286,6 +2442,15 @@ impl SolutionSessionView {
         if matches!(self.selected_subagent, SubagentView::Background(_)) {
             return self
                 .background_entries_for_render
+                .iter()
+                .map(|entry| entry_text_spans(entry, cx))
+                .collect();
+        }
+        // Shell drill-in views source from the parallel shell vec
+        // (populated this frame by `build_background_shell_entries_for_render`).
+        if matches!(self.selected_subagent, SubagentView::Shell(_)) {
+            return self
+                .background_shell_entries_for_render
                 .iter()
                 .map(|entry| entry_text_spans(entry, cx))
                 .collect();
@@ -2404,19 +2569,29 @@ impl Render for SolutionSessionView {
         // dispatch below; the entries vec on `self` lives for the
         // duration of this render frame.
         let is_background = self.build_background_entries_for_render(cx);
+        // Shell drill-in source-switch, parallel to the background path:
+        // populates `background_shell_entries_for_render` from the shell's
+        // snapshot. Both vecs are mutually exclusive (only one of
+        // `selected_subagent`'s variants is active), so `is_drill_in`
+        // below is just `is_background || is_shell`.
+        let is_shell = self.build_background_shell_entries_for_render(cx);
+        let is_drill_in = is_background || is_shell;
         // List-state sizing key changes when we transition Main/Task ↔
-        // Background, because the row counts almost never match. Reset
-        // here (before the processor + sizing pass) so the virtualized
-        // list doesn't draw stale rows from the old source. Tracked as
-        // `Option<id>` rather than `bool` so flipping between two
-        // distinct Background pills also resets.
-        let cur_background_key = match &self.selected_subagent {
-            crate::store::SubagentView::Background(id) => Some(id.clone()),
+        // drill-in (Background/Shell), because the row counts almost never
+        // match. Reset here (before the processor + sizing pass) so the
+        // virtualized list doesn't draw stale rows from the old source.
+        // Keyed on the full `SubagentView` so flipping between two
+        // distinct drill-in pills also resets.
+        let cur_drill_in_key = match &self.selected_subagent {
+            view @ (crate::store::SubagentView::Background(_)
+            | crate::store::SubagentView::Shell(_)) => Some(view.clone()),
             _ => None,
         };
-        if cur_background_key != self.prev_render_background {
+        if cur_drill_in_key != self.prev_render_drill_in {
             let new_count = if is_background {
                 self.background_entries_for_render.len()
+            } else if is_shell {
+                self.background_shell_entries_for_render.len()
             } else {
                 let session = self.session.read(cx);
                 let cold = session.cold_entries.len();
@@ -2429,7 +2604,7 @@ impl Render for SolutionSessionView {
             self.list_state.reset(new_count);
             self.list_state.set_follow_mode(FollowMode::Tail);
             self.list_state.scroll_to_end();
-            self.prev_render_background = cur_background_key;
+            self.prev_render_drill_in = cur_drill_in_key;
         }
         // Pre-pass: build the list of (entry_idx, span_idx) → markdown
         // entity mappings. Done up-front so the borrow on `cx` released by
@@ -2618,17 +2793,18 @@ impl Render for SolutionSessionView {
                     .unwrap_or(0);
                 let entries_count = if is_background {
                     self.background_entries_for_render.len()
+                } else if is_shell {
+                    self.background_shell_entries_for_render.len()
                 } else {
                     cold_count + live_count
                 };
-                // Background views grow their entry count between
-                // renders as new JSONL rows land on disk; the parent-
-                // thread path syncs `list_state` size via
-                // `on_thread_event` (NewEntry/EntriesRemoved). Without
-                // this catch-up, the virtualized list would clamp to
-                // its previous size and silently drop the tail of a
-                // streaming Background transcript.
-                if is_background && self.list_state.item_count() != entries_count {
+                // Drill-in views grow their entry count between renders as
+                // new content lands (JSONL rows on disk for Background, a
+                // fresh snapshot for Shell); the parent-thread path syncs
+                // `list_state` size via `on_thread_event`. Without this
+                // catch-up the virtualized list would clamp to its
+                // previous size and silently drop the tail.
+                if is_drill_in && self.list_state.item_count() != entries_count {
                     self.list_state.reset(entries_count);
                     self.list_state.set_follow_mode(FollowMode::Tail);
                 }
@@ -2657,6 +2833,11 @@ impl Render for SolutionSessionView {
                                     this.selected_subagent,
                                     crate::store::SubagentView::Background(_)
                                 );
+                                let is_shell_inner = matches!(
+                                    this.selected_subagent,
+                                    crate::store::SubagentView::Shell(_)
+                                );
+                                let is_drill_in_inner = is_bg || is_shell_inner;
                                 let session = this.session.read(cx);
                                 // Cold-then-live concatenation: indices
                                 // `[0..cold_count)` route to
@@ -2686,6 +2867,12 @@ impl Render for SolutionSessionView {
                                 ) = if is_bg {
                                     (
                                         this.background_entries_for_render.get(idx),
+                                        gpui::WeakEntity::<acp_thread::AcpThread>::new_invalid(),
+                                        false,
+                                    )
+                                } else if is_shell_inner {
+                                    (
+                                        this.background_shell_entries_for_render.get(idx),
                                         gpui::WeakEntity::<acp_thread::AcpThread>::new_invalid(),
                                         false,
                                     )
@@ -2719,7 +2906,7 @@ impl Render for SolutionSessionView {
                                 // `should_render_entry`'s Main-only
                                 // predicate and the entire transcript
                                 // would render blank.
-                                if !is_bg && !this.should_render_entry(entry, cx) {
+                                if !is_drill_in_inner && !this.should_render_entry(entry, cx) {
                                     return Empty.into_any_element();
                                 }
                                 let rewind_target = if supports_rewind
@@ -2751,6 +2938,8 @@ impl Render for SolutionSessionView {
                                 // entries length for `is_last`.
                                 let entry_count = if is_bg {
                                     this.background_entries_for_render.len()
+                                } else if is_shell_inner {
+                                    this.background_shell_entries_for_render.len()
                                 } else {
                                     session.cold_entries.len()
                                         + session
@@ -2759,7 +2948,7 @@ impl Render for SolutionSessionView {
                                             .unwrap_or(0)
                                 };
                                 let is_last = idx + 1 == entry_count;
-                                let created_ms = if is_bg {
+                                let created_ms = if is_drill_in_inner {
                                     None
                                 } else {
                                     session
@@ -2768,7 +2957,7 @@ impl Render for SolutionSessionView {
                                         .copied()
                                         .filter(|&ms| ms > 0)
                                 };
-                                let prev_ms = if is_bg {
+                                let prev_ms = if is_drill_in_inner {
                                     None
                                 } else {
                                     idx.checked_sub(1)

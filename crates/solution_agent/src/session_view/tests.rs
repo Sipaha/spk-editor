@@ -292,3 +292,104 @@ fn unpack_recalled_bundle_handles_more_images_than_placeholders() {
     assert_eq!(images.len(), 1);
     assert_eq!(images[0].label.as_ref(), "image #?");
 }
+
+// ---------------------------------------------------------------------------
+// Task 13 — Shell drill-in body
+// ---------------------------------------------------------------------------
+
+/// Pull the single `Markdown` source string out of the one
+/// `AssistantMessage` `build_shell_drill_in_entries` produces. Panics in
+/// test code (fine) if the shape isn't the expected single-chunk message.
+fn shell_entry_markdown(entries: &[acp_thread::AgentThreadEntry], cx: &gpui::App) -> String {
+    assert_eq!(entries.len(), 1, "shell drill-in builds exactly one entry");
+    let acp_thread::AgentThreadEntry::AssistantMessage(message) = &entries[0] else {
+        panic!("expected AssistantMessage, got {:?}", entries[0]);
+    };
+    assert_eq!(message.chunks.len(), 1, "single markdown chunk");
+    let acp_thread::AssistantMessageChunk::Message {
+        block: acp_thread::ContentBlock::Markdown { markdown },
+    } = &message.chunks[0]
+    else {
+        panic!("expected a Markdown Message chunk");
+    };
+    markdown.read(cx).source().to_string()
+}
+
+#[gpui::test]
+async fn build_shell_drill_in_entries_live_shell_renders_tail(cx: &mut gpui::TestAppContext) {
+    let mtime = std::time::SystemTime::now();
+    let shell = crate::background_shell::BackgroundShell {
+        id: crate::background_shell::BackgroundShellId::new("bvb4ful1z"),
+        command: SharedString::from("echo hello"),
+        output_path: std::path::PathBuf::from("/dev/null"),
+        registered_at: chrono::Utc::now(),
+        latest: Some(crate::background_shell::BackgroundShellSnapshot {
+            mtime,
+            output_tail: SharedString::from("hello world"),
+        }),
+        last_offset: 0,
+        state: crate::background_shell::ShellRuntimeState::Running,
+    };
+    let now = chrono::Utc::now();
+    let source = cx.update(|cx| {
+        let entries = super::build_shell_drill_in_entries(&shell, now, cx);
+        shell_entry_markdown(&entries, cx)
+    });
+    // Header carries the command, "running" state, and the short id.
+    assert!(source.contains("echo hello"), "header has command: {source}");
+    assert!(source.contains("running"), "header has state: {source}");
+    assert!(source.contains("bvb4ful1z"), "header has short id: {source}");
+    // Body carries the stdout tail inside a fenced code block.
+    assert!(source.contains("hello world"), "body has the tail: {source}");
+    assert!(source.contains("```"), "body is fenced: {source}");
+}
+
+#[gpui::test]
+async fn build_shell_drill_in_entries_no_snapshot_shows_placeholder(
+    cx: &mut gpui::TestAppContext,
+) {
+    let shell = make_background_shell("bvb4ful1z"); // latest: None
+    let now = chrono::Utc::now();
+    let source = cx.update(|cx| {
+        let entries = super::build_shell_drill_in_entries(&shell, now, cx);
+        shell_entry_markdown(&entries, cx)
+    });
+    assert!(
+        source.contains("No output captured yet."),
+        "muted placeholder body: {source}"
+    );
+}
+
+#[gpui::test]
+async fn build_shell_drill_in_entries_exited_state_label(cx: &mut gpui::TestAppContext) {
+    let mut shell = make_background_shell("bvb4ful1z");
+    shell.state = crate::background_shell::ShellRuntimeState::Exited(Some(137));
+    shell.latest = Some(crate::background_shell::BackgroundShellSnapshot {
+        mtime: std::time::SystemTime::now(),
+        output_tail: SharedString::from("done"),
+    });
+    let now = chrono::Utc::now();
+    let source = cx.update(|cx| {
+        let entries = super::build_shell_drill_in_entries(&shell, now, cx);
+        shell_entry_markdown(&entries, cx)
+    });
+    assert!(
+        source.contains("exited (137)"),
+        "exit code in state label: {source}"
+    );
+}
+
+#[gpui::test]
+async fn build_shell_drill_in_entries_stale_running_label(cx: &mut gpui::TestAppContext) {
+    // Running but with no fresh snapshot → flagged "running (stale)".
+    let shell = make_background_shell("bvb4ful1z"); // Running, latest: None
+    let now = chrono::Utc::now();
+    let source = cx.update(|cx| {
+        let entries = super::build_shell_drill_in_entries(&shell, now, cx);
+        shell_entry_markdown(&entries, cx)
+    });
+    assert!(
+        source.contains("running (stale)"),
+        "stale running label: {source}"
+    );
+}
