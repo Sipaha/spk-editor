@@ -642,6 +642,8 @@ pub(crate) fn build_background_shells_vec(
     out
 }
 
+/// List the background shells (`Bash(run_in_background=true)`) registered
+/// for a session, with live state and optional stdout tail.
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct GetSessionBackgroundShellsParams {
     pub session_id: String,
@@ -794,6 +796,8 @@ pub(crate) fn build_background_agents_vec(session: &SolutionSession) -> Vec<Back
     out
 }
 
+/// List the managed background agents registered for a session, with
+/// their label, last-activity time, and stop reason.
 #[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct GetSessionBackgroundAgentsParams {
     pub session_id: String,
