@@ -10,6 +10,7 @@ use gpui::{
 use settings::Settings as _;
 use solution_agent::claude_adapter::CLAUDE_ACP_AGENT_ID;
 use solution_agent::rename_session_modal::RenameSessionModal;
+use solution_agent::reopen_session_modal::{ReopenSessionModal, ReopenableSession};
 use solution_agent::session_view::SolutionSessionView;
 use solution_agent::store::SolutionAgentStore;
 use solution_agent::SolutionSessionId;
@@ -93,6 +94,38 @@ pub enum ConsoleTab {
     },
 }
 
+/// Drag payload for reordering console tabs. The bespoke tab strip
+/// doesn't use a `workspace::Pane` (whose tab bar gets DnD for free), so
+/// the reorder affordance lost in the panel merge is re-implemented here
+/// directly on the strip elements. Carries the source `ix` (consumed by
+/// the drop target's [`ConsolePanel::reorder_tab`]) plus the icon/title
+/// so the drag preview looks like the tab being dragged.
+#[derive(Clone)]
+struct DraggedConsoleTab {
+    ix: usize,
+    icon: IconName,
+    title: SharedString,
+}
+
+impl Render for DraggedConsoleTab {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .h_8()
+            .items_center()
+            .gap_1p5()
+            .px_3()
+            .bg(cx.theme().colors().tab_active_background)
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .child(Icon::new(self.icon).size(IconSize::Small))
+            .child(
+                Label::new(self.title.clone())
+                    .size(LabelSize::Default)
+                    .line_height_style(LineHeightStyle::UiLabel),
+            )
+    }
+}
+
 pub struct ConsolePanel {
     workspace: WeakEntity<Workspace>,
     tabs: Vec<ConsoleTab>,
@@ -105,6 +138,15 @@ pub struct ConsolePanel {
     pending_terminals_to_add: usize,
     deferred_tasks: HashMap<TaskId, Task<()>>,
     assistant_enabled: bool,
+    /// Session whose chat tab should be activated once it lands in the
+    /// strip. Set by [`add_chat_tab_with_cwd`] when the local user creates
+    /// a chat. Because chat tabs now have a single writer
+    /// ([`apply_external_tab_changes`], driven by the store's
+    /// create-implies-open pin), the creating code can't push-and-activate
+    /// the tab directly — it records the id here and whichever of the two
+    /// orderings wins (the tab landing vs. the create future resolving)
+    /// performs the activation and clears this.
+    chat_tab_to_activate: Option<SolutionSessionId>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -161,6 +203,7 @@ impl ConsolePanel {
             pending_terminals_to_add: 0,
             deferred_tasks: HashMap::default(),
             assistant_enabled: false,
+            chat_tab_to_activate: None,
             _subscriptions: vec![chat_event_sub],
         }
     }
@@ -596,7 +639,7 @@ impl ConsolePanel {
                         .items_center()
                         .h_full()
                         .child(
-                            Label::new(title)
+                            Label::new(title.clone())
                                 .size(LabelSize::Default)
                                 .line_height_style(LineHeightStyle::UiLabel)
                                 .truncate(),
@@ -617,7 +660,25 @@ impl ConsolePanel {
                         let position = ev.position;
                         this.show_tab_context_menu(ix, position, window, cx);
                     }),
-                );
+                )
+                // Drag-and-drop reorder (restored from the pre-merge
+                // Pane-backed tab bar). `on_drag` starts the gesture past
+                // GPUI's movement threshold, so the left-click activate
+                // above still fires for a plain click.
+                .on_drag(
+                    DraggedConsoleTab {
+                        ix,
+                        icon,
+                        title: title.clone(),
+                    },
+                    |dragged, _offset, _window, cx| cx.new(|_| dragged.clone()),
+                )
+                .drag_over::<DraggedConsoleTab>(|style, _dragged, _window, cx| {
+                    style.bg(cx.theme().colors().drop_target_background)
+                })
+                .on_drop(cx.listener(move |this, dragged: &DraggedConsoleTab, _window, cx| {
+                    this.reorder_tab(dragged.ix, ix, cx);
+                }));
             strip = strip.child(tab_el);
         }
         strip.child(self.render_plus_popover(cx))
@@ -700,6 +761,22 @@ impl ConsolePanel {
                             menu.separator()
                         } else {
                             menu.action_disabled_when(true, "New AI Chat", NewChat.boxed_clone())
+                        };
+                        // Reopen a chat that was closed (unpinned) but still
+                        // lives on disk — restores the session-history
+                        // affordance lost in the panel merge. Disabled when
+                        // there's no active solution to reopen within.
+                        let menu = {
+                            let weak_self = weak_self.clone();
+                            menu.item(ui::ContextMenuEntry::new("Reopen Closed Chat…").disabled(!has_active_solution).handler(
+                                move |window, cx| {
+                                    if let Some(panel) = weak_self.upgrade() {
+                                        panel.update(cx, |panel, cx| {
+                                            panel.open_reopen_session_modal(window, cx);
+                                        });
+                                    }
+                                },
+                            ))
                         };
                         menu.action("Spawn Task…", zed_actions::Spawn::modal().boxed_clone())
                     }))
@@ -1061,29 +1138,63 @@ impl ConsolePanel {
         &mut self,
         solution_id: SolutionId,
         cwd: Option<PathBuf>,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let task = self.chat_provider.update(cx, |provider, cx| {
-            provider.new_tab(
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let project = workspace.read(cx).project().clone();
+        // Create-implies-open: `create_session_with_cwd` pins the new
+        // session into the strip itself (sets tab_order + emits the
+        // `TabsChanged` fan-out), so the actual tab is built and pushed by
+        // [`apply_external_tab_changes`] — the single chat-tab writer. We
+        // only need to remember which session to activate once its tab
+        // lands. This is the same path a mobile-driven create takes, so the
+        // two surfaces can't diverge.
+        let store = SolutionAgentStore::global(cx);
+        let task = store.update(cx, |store, cx| {
+            store.create_session_with_cwd(
                 solution_id,
                 SharedString::from(CLAUDE_ACP_AGENT_ID),
+                project,
                 cwd,
-                window,
                 cx,
             )
         });
         cx.spawn(async move |this, cx| {
-            let (session_id, view) = task.await?;
+            let session_id = task.await?;
             this.update(cx, |this, cx| {
-                this.tabs.push(ConsoleTab::Chat { view, session_id });
-                this.active_index = Some(this.tabs.len() - 1);
-                cx.notify();
-                this.persist(cx);
+                this.chat_tab_to_activate = Some(session_id);
+                // The tab may already have landed (the create-time pin's
+                // `TabsChanged` can fire before this future resolves) — if
+                // so, activate it now; otherwise the add path activates it.
+                this.activate_chat_tab_if_present(session_id, cx);
             })?;
             anyhow::Ok(())
         })
         .detach_and_log_err(cx);
+    }
+
+    /// If a chat tab for `session_id` is present in the strip, make it the
+    /// active tab (and clear [`chat_tab_to_activate`] if it was the pending
+    /// one). No-op when the tab hasn't landed yet.
+    fn activate_chat_tab_if_present(
+        &mut self,
+        session_id: SolutionSessionId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self.tabs.iter().position(|tab| {
+            matches!(tab, ConsoleTab::Chat { session_id: sid, .. } if *sid == session_id)
+        }) else {
+            return;
+        };
+        self.active_index = Some(ix);
+        if self.chat_tab_to_activate == Some(session_id) {
+            self.chat_tab_to_activate = None;
+        }
+        cx.notify();
+        self.persist(cx);
     }
 
     fn show_tab_context_menu(
@@ -1217,6 +1328,63 @@ impl ConsolePanel {
         });
     }
 
+    /// Reopen-a-closed-chat flow. Hydrates the active solution's
+    /// on-disk sessions, gathers the top-level ones that aren't currently
+    /// pinned in the strip (closed tabs whose transcript survives), and
+    /// opens a picker. Selecting a session re-pins it via
+    /// `SolutionAgentStore::open_session_in_strip` — the same "open" path
+    /// create and the wire RPC use — so the tab lands through the normal
+    /// `TabsChanged` writer.
+    fn open_reopen_session_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(solution_id) = self.active_solution_id(cx) else {
+            return;
+        };
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let store = SolutionAgentStore::global(cx);
+        let hydrate = store.update(cx, |store, cx| {
+            store.hydrate_all_for_solution(solution_id.clone(), cx)
+        });
+        cx.spawn_in(window, async move |_this, cx| {
+            hydrate.await.log_err();
+            workspace
+                .update_in(cx, |workspace, window, cx| {
+                    let store = SolutionAgentStore::global(cx);
+                    let mut reopenable: Vec<(ReopenableSession, _)> = store
+                        .read(cx)
+                        .all_sessions()
+                        .filter_map(|entity| {
+                            let s = entity.read(cx);
+                            if s.solution_id == solution_id
+                                && s.tab_order.is_none()
+                                && s.parent_session_id.is_none()
+                            {
+                                Some((
+                                    ReopenableSession {
+                                        id: s.id,
+                                        title: s.title.clone(),
+                                    },
+                                    s.last_activity_at,
+                                ))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    // Most-recently-active first.
+                    reopenable.sort_by(|a, b| b.1.cmp(&a.1));
+                    let sessions: Vec<ReopenableSession> =
+                        reopenable.into_iter().map(|(s, _)| s).collect();
+                    workspace.toggle_modal(window, cx, move |window, cx| {
+                        ReopenSessionModal::new(sessions, window, cx)
+                    });
+                })
+                .log_err();
+        })
+        .detach();
+    }
+
     fn render_active_tab(&self, _window: &mut Window, _cx: &mut Context<Self>) -> AnyElement {
         let Some(ix) = self.active_index else {
             return div().flex_1().min_h_0().into_any_element();
@@ -1243,6 +1411,30 @@ impl ConsolePanel {
             cx.notify();
             self.persist(cx);
         }
+    }
+
+    /// Move the tab at `from` so it lands at the position currently held by
+    /// the tab at `to` (drag-and-drop reorder). The active tab follows its
+    /// content across the move, then the new order is persisted (which also
+    /// re-syncs `tab_order` for the mobile mirror via [`persist`]).
+    fn reorder_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
+            return;
+        }
+        let tab = self.tabs.remove(from);
+        // `to` indexes the original array; after removing `from` it is still
+        // a valid insertion index because `to <= len - 1 == tabs.len()` now.
+        self.tabs.insert(to, tab);
+        self.active_index = self.active_index.map(|active| {
+            if active == from {
+                to
+            } else {
+                let mid = if active > from { active - 1 } else { active };
+                if mid >= to { mid + 1 } else { mid }
+            }
+        });
+        cx.notify();
+        self.persist(cx);
     }
 
     fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -1311,7 +1503,15 @@ impl ConsolePanel {
                         session_id: id,
                     });
                     let new_index = this.tabs.len() - 1;
-                    if this.active_index.is_none() {
+                    // Activate when this is the session the local user just
+                    // created (create-implies-open), or when the strip had
+                    // no active tab yet. A remotely-created session that the
+                    // desktop user didn't ask for lands without stealing the
+                    // active tab.
+                    if this.chat_tab_to_activate == Some(id) {
+                        this.active_index = Some(new_index);
+                        this.chat_tab_to_activate = None;
+                    } else if this.active_index.is_none() {
                         this.active_index = Some(new_index);
                     }
                     cx.notify();
@@ -1559,6 +1759,61 @@ mod tests {
                 p.active_index,
                 Some(1),
                 "active_index should clamp to the new last tab (was 1 with 3 tabs; 1 with 2 tabs)"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn reorder_tab_moves_tab_and_tracks_active(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (window_handle, panel) = bootstrap_panel(cx).await;
+
+        // Four terminal tabs: indices 0,1,2,3.
+        for _ in 0..4 {
+            window_handle
+                .update(cx, |_workspace, window, cx| {
+                    panel.update(cx, |p, cx| p.add_terminal_tab(None, window, cx));
+                })
+                .unwrap();
+            cx.run_until_parked();
+        }
+
+        // Capture per-tab entity ids so we can assert ordering after the move.
+        let ids = |p: &ConsolePanel| -> Vec<gpui::EntityId> {
+            p.tabs
+                .iter()
+                .map(|t| match t {
+                    ConsoleTab::Terminal { view } => view.entity_id(),
+                    ConsoleTab::Chat { view, .. } => view.entity_id(),
+                })
+                .collect()
+        };
+
+        let before = panel.read_with(cx, |p, _| ids(p));
+
+        // Activate tab 2, then drag tab 0 onto position 2.
+        window_handle
+            .update(cx, |_workspace, _window, cx| {
+                panel.update(cx, |p, cx| {
+                    p.activate_tab(2, cx);
+                    p.reorder_tab(0, 2, cx);
+                });
+            })
+            .unwrap();
+
+        panel.read_with(cx, |p, _| {
+            let after = ids(p);
+            // [0,1,2,3] with 0 moved to index 2 → [1,2,0,3].
+            assert_eq!(
+                after,
+                vec![before[1], before[2], before[0], before[3]],
+                "dragged tab lands at the target index, others shift"
+            );
+            // The active tab (originally index 2 = before[2]) is now at index 1.
+            assert_eq!(
+                p.active_index,
+                Some(1),
+                "active follows its content across the reorder"
             );
         });
     }
