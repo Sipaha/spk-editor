@@ -951,6 +951,24 @@ impl SolutionAgentStore {
                 anyhow::Ok(session_id)
             })??;
 
+            // Create implies open. Pin top-level sessions into their
+            // solution's tab strip (the open-set) so they surface on BOTH
+            // the desktop ConsolePanel and the mobile workspace mirror —
+            // both render the `tab_order` open-set, so a session left
+            // unpinned (tab_order NULL) is invisible everywhere despite
+            // living on disk. This is the single definition of "a new
+            // session is opened": every create path (desktop ChatProvider,
+            // the wire `solution_agent.create_session` tool, restart_agent)
+            // funnels here, so none of them can diverge into create-without-
+            // open again. Sub-agents (parent_session_id set) live in the
+            // subagent strip rather than as top-level tabs, so they are
+            // intentionally NOT pinned.
+            if parent_session_id.is_none() {
+                this.update(cx, |store, cx| {
+                    store.open_session_in_strip(session_id, cx);
+                })?;
+            }
+
             Ok(session_id)
         })
     }
@@ -2503,6 +2521,52 @@ impl SolutionAgentStore {
                 .log_err();
         })
         .detach();
+    }
+
+    /// Pin `session_id` into its solution's tab strip (the open-set) if it
+    /// is not already there, appending it at the end of the current order.
+    /// Routes through [`persist_tab_order`], so it emits the
+    /// `workspace.session_opened` wire delta + the local `TabsChanged`
+    /// fan-out and persists the new order — exactly what makes the session
+    /// appear on the desktop ConsolePanel strip and the mobile workspace
+    /// mirror. Idempotent: a no-op when the session is unknown or already
+    /// pinned.
+    ///
+    /// This is the one definition of "open a session". Both the
+    /// create-implies-open path ([`create_session_with_parent`]) and the
+    /// wire `workspace.open_session` RPC call it, so "create" and "open"
+    /// can no longer diverge into doing different things.
+    pub fn open_session_in_strip(
+        &mut self,
+        session_id: SolutionSessionId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entity) = self.sessions.get(&session_id) else {
+            return;
+        };
+        let (solution_id, already_pinned) = {
+            let s = entity.read(cx);
+            (s.solution_id.clone(), s.tab_order.is_some())
+        };
+        if already_pinned {
+            return;
+        }
+        let mut pinned: Vec<(SolutionSessionId, i64)> = self
+            .sessions
+            .values()
+            .filter_map(|entity| {
+                let s = entity.read(cx);
+                match s.tab_order {
+                    Some(order) if s.solution_id == solution_id => Some((s.id, order)),
+                    _ => None,
+                }
+            })
+            .collect();
+        pinned.sort_by_key(|(_, order)| *order);
+        let mut ordered: Vec<SolutionSessionId> =
+            pinned.into_iter().map(|(id, _)| id).collect();
+        ordered.push(session_id);
+        self.persist_tab_order(solution_id, ordered, cx);
     }
 
     /// Update the in-memory `tab_order` field on every session that belongs to

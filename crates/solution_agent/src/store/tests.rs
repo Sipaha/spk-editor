@@ -4386,3 +4386,120 @@ fn scan_parent_jsonl_flips_running_shell_to_exited(cx: &mut TestAppContext) {
         assert_eq!(session.read(cx).background_shells.len(), 1);
     });
 }
+
+// =====================================================================
+// Create-implies-open: a freshly-created top-level session must be
+// pinned into its solution's tab strip (tab_order set) so it surfaces
+// on every open-set surface (desktop ConsolePanel + mobile workspace
+// mirror). Regression coverage for the "session created on mobile is
+// invisible everywhere / appears to vanish" bug — the root cause was
+// `create_session` writing the row without ever opening it.
+// =====================================================================
+
+/// Read a session's `tab_order` out of the store.
+fn tab_order_of(cx: &mut TestAppContext, id: SolutionSessionId) -> Option<i64> {
+    cx.read(|cx| {
+        SolutionAgentStore::global(cx)
+            .read(cx)
+            .session(id)
+            .expect("session exists")
+            .read(cx)
+            .tab_order
+    })
+}
+
+#[gpui::test]
+async fn create_session_pins_top_level_into_strip(cx: &mut TestAppContext) {
+    let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+    assert_eq!(
+        tab_order_of(cx, session_id),
+        Some(0),
+        "a freshly-created top-level session must be pinned into the strip (create implies open)"
+    );
+}
+
+#[gpui::test]
+async fn create_session_appends_subsequent_sessions_in_order(cx: &mut TestAppContext) {
+    let (first, _thread, _tmp) = create_session_with_thread(cx).await;
+    // A second top-level session in the SAME solution, via the store.
+    let (solution_id, agent_id, project) = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(first).expect("first session");
+        let s = session.read(cx);
+        (
+            s.solution_id.clone(),
+            s.agent_id.clone(),
+            s.project.clone().expect("first session has project"),
+        )
+    });
+    let second = cx
+        .update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| {
+                store.create_session(solution_id, agent_id, project, cx)
+            })
+        })
+        .await
+        .expect("create second session");
+
+    assert_eq!(tab_order_of(cx, first), Some(0), "first stays at index 0");
+    assert_eq!(
+        tab_order_of(cx, second),
+        Some(1),
+        "second top-level session appends after the first"
+    );
+}
+
+#[gpui::test]
+async fn create_child_session_is_not_pinned(cx: &mut TestAppContext) {
+    let (parent, _thread, _tmp) = create_session_with_thread(cx).await;
+    let (solution_id, agent_id, project) = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        let session = store.read(cx).session(parent).expect("parent session");
+        let s = session.read(cx);
+        (
+            s.solution_id.clone(),
+            s.agent_id.clone(),
+            s.project.clone().expect("parent has project"),
+        )
+    });
+    let child = cx
+        .update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| {
+                store.create_session_with_parent(
+                    solution_id,
+                    agent_id,
+                    project,
+                    None,
+                    Some(parent),
+                    cx,
+                )
+            })
+        })
+        .await
+        .expect("create child session");
+
+    assert_eq!(tab_order_of(cx, parent), Some(0), "parent is pinned");
+    assert_eq!(
+        tab_order_of(cx, child),
+        None,
+        "a sub-agent (parent_session_id set) must NOT be pinned as a top-level tab"
+    );
+}
+
+#[gpui::test]
+async fn open_session_in_strip_is_idempotent(cx: &mut TestAppContext) {
+    let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+    // Already pinned at create. A second open must not bump or duplicate
+    // the order.
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| store.open_session_in_strip(session_id, cx));
+    });
+    assert_eq!(
+        tab_order_of(cx, session_id),
+        Some(0),
+        "re-opening an already-pinned session is a no-op"
+    );
+}

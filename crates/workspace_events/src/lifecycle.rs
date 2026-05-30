@@ -103,7 +103,7 @@ impl McpServerTool for OpenSolutionTool {
         input: Self::Input,
         cx: &mut AsyncApp,
     ) -> Result<ToolResponse<Self::Output>> {
-        let id = SolutionId(input.solution_id.into());
+        let id = SolutionId(input.solution_id);
         let seq = cx.update(|cx| open_solution_impl(cx, &id))?;
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text {
@@ -127,7 +127,7 @@ impl McpServerTool for CloseSolutionTool {
         input: Self::Input,
         cx: &mut AsyncApp,
     ) -> Result<ToolResponse<Self::Output>> {
-        let id = SolutionId(input.solution_id.into());
+        let id = SolutionId(input.solution_id);
         let seq = cx.update(|cx| close_solution_impl(cx, &id))?;
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text {
@@ -146,44 +146,20 @@ pub(crate) fn open_session_impl(cx: &mut App, session_id_str: &str) -> Result<u6
     let session_id = solution_agent::SolutionSessionId::parse(session_id_str)
         .map_err(|e| anyhow!("bad session_id: {e}"))?;
 
-    // Read current state of the session.
-    let (solution_id, already_in_strip) = agent.read_with(cx, |a, cx| {
-        let entity = a
-            .session(session_id)
-            .ok_or_else(|| anyhow!("session not found"))?;
-        let s = entity.read(cx);
-        Ok::<_, anyhow::Error>((s.solution_id.clone(), s.tab_order.is_some()))
+    // Validate the session exists before delegating: `open_session_in_strip`
+    // is a silent no-op on a missing id, but this RPC's contract wants an
+    // explicit "session not found" error for the caller.
+    agent.read_with(cx, |a, _| {
+        a.session(session_id)
+            .map(|_| ())
+            .ok_or_else(|| anyhow!("session not found"))
     })?;
-    if already_in_strip {
-        // No-op: return current seq without storing a borrow.
-        return Ok(WorkspaceEventCoordinator::global(cx).current_seq());
-    }
 
-    // Build new ordered list = current tab-strip ids + this one (appended at end).
-    let new_order: Vec<solution_agent::SolutionSessionId> = agent.read_with(cx, |a, cx| {
-        let mut current: Vec<_> = a
-            .all_sessions()
-            .filter_map(|entity| {
-                let s = entity.read(cx);
-                if s.solution_id == solution_id && s.tab_order.is_some() {
-                    Some((s.id, s.tab_order.unwrap()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        current.sort_by_key(|(_, ord)| *ord);
-        let mut ids: Vec<_> = current.into_iter().map(|(id, _)| id).collect();
-        ids.push(session_id);
-        ids
-    });
-
-    // persist_tab_order now emits workspace.session_opened internally
-    // via WorkspaceEventCoordinator::emit_sequenced (F5). No manual
-    // emit here — doing so would double-fire the notification.
-    agent.update(cx, |a, cx| {
-        a.persist_tab_order(solution_id.clone(), new_order, cx)
-    });
+    // Delegate to the shared "open a session" definition on the store.
+    // It appends to tab_order + emits workspace.session_opened (via
+    // persist_tab_order) and is idempotent if already pinned — so the
+    // wire `open_session` and the create-implies-open path stay identical.
+    agent.update(cx, |a, cx| a.open_session_in_strip(session_id, cx));
 
     // Return the seq that persist_tab_order just reserved.
     Ok(WorkspaceEventCoordinator::global(cx).current_seq())
@@ -212,13 +188,11 @@ pub(crate) fn close_session_impl(cx: &mut App, session_id_str: &str) -> Result<u
             .all_sessions()
             .filter_map(|entity| {
                 let s = entity.read(cx);
-                if s.solution_id == solution_id
-                    && s.tab_order.is_some()
-                    && s.id != session_id
-                {
-                    Some((s.id, s.tab_order.unwrap()))
-                } else {
-                    None
+                match s.tab_order {
+                    Some(order) if s.solution_id == solution_id && s.id != session_id => {
+                        Some((s.id, order))
+                    }
+                    _ => None,
                 }
             })
             .collect();
