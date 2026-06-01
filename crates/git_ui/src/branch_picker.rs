@@ -30,7 +30,6 @@ use workspace::{ModalView, Workspace};
 
 pub mod context_menu;
 pub mod favorites;
-pub mod tabs;
 pub mod tree;
 
 use crate::{branch_picker, git_panel::show_error_toast};
@@ -1464,6 +1463,17 @@ impl BranchStatusEntry {
     }
 }
 
+/// Section order for the IDEA-style single-list layout.
+/// Each entry is (stable key, display label).
+const SECTION_ORDER: [(&str, &str); 6] = [
+    ("recent", "Recent"),
+    ("favorites", "Favorites"),
+    ("local", "Local"),
+    ("remote", "Remote"),
+    ("tags", "Tags"),
+    ("backups", "Backups"),
+];
+
 #[derive(Debug, Clone)]
 enum PopupRow {
     Branch {
@@ -1486,13 +1496,19 @@ enum PopupRow {
     Empty {
         message: SharedString,
     },
+    Section {
+        key: &'static str,
+        label: SharedString,
+        collapsed: bool,
+    },
 }
 
 pub struct BranchesPopup {
     workspace: WeakEntity<Workspace>,
     repository: Option<Entity<Repository>>,
     work_dir: Option<Arc<Path>>,
-    tab: tabs::Tab,
+    /// Collapsed top-level section nodes by stable key. Absent ⇒ expanded.
+    collapsed_sections: std::collections::HashSet<&'static str>,
     query: Entity<Editor>,
     rows: Vec<PopupRow>,
     selected_index: usize,
@@ -1589,7 +1605,7 @@ impl BranchesPopup {
             workspace,
             repository: repository.clone(),
             work_dir,
-            tab: tabs::Tab::Recent,
+            collapsed_sections: std::collections::HashSet::new(),
             query,
             rows: Vec::new(),
             selected_index: 0,
@@ -1626,6 +1642,7 @@ impl BranchesPopup {
         }
 
         this.rebuild_rows(cx);
+        this.refresh_backups(cx);
         cx.focus_self(window);
         this
     }
@@ -1642,13 +1659,11 @@ impl BranchesPopup {
         }
     }
 
-    fn set_tab(&mut self, tab: tabs::Tab, cx: &mut Context<Self>) {
-        self.tab = tab;
-        self.selected_index = 0;
-        self.rebuild_rows(cx);
-        if matches!(tab, tabs::Tab::Backups) {
-            self.refresh_backups(cx);
+    fn toggle_section(&mut self, key: &'static str, cx: &mut Context<Self>) {
+        if !self.collapsed_sections.remove(key) {
+            self.collapsed_sections.insert(key);
         }
+        self.rebuild_rows(cx);
         cx.notify();
     }
 
@@ -1694,145 +1709,25 @@ impl BranchesPopup {
             .collect();
 
         self.rows.clear();
-        match self.tab {
-            tabs::Tab::Recent => {
-                let mut entries: Vec<&BranchStatusEntry> = self
-                    .branches
-                    .iter()
-                    .filter(|b| !b.is_remote)
-                    .filter(|b| recent_order.contains_key(b.name.as_ref()))
-                    .filter(|b| query.is_empty() || b.name.to_lowercase().contains(&lower_query))
-                    .collect();
-                entries.sort_by_key(|b| {
-                    *recent_order
-                        .get(b.name.as_ref())
-                        .unwrap_or(&usize::MAX)
-                });
-                if entries.is_empty() {
-                    self.rows.push(PopupRow::Empty {
-                        message: SharedString::from(
-                            "No recently checked-out branches yet — checkout one to populate.",
-                        ),
-                    });
-                } else {
-                    for entry in entries {
-                        self.rows.push(PopupRow::Branch {
-                            entry: entry.clone(),
-                            depth: 0,
-                        });
-                    }
-                }
-            }
-            tabs::Tab::Local | tabs::Tab::Remote => {
-                let want_remote = matches!(self.tab, tabs::Tab::Remote);
-                let mut entries: Vec<&BranchStatusEntry> = self
-                    .branches
-                    .iter()
-                    .filter(|b| b.is_remote == want_remote)
-                    .filter(|b| query.is_empty() || b.name.to_lowercase().contains(&lower_query))
-                    .collect();
-                entries.sort_by(|a, b| a.name.as_ref().cmp(b.name.as_ref()));
-                let names: Vec<String> =
-                    entries.iter().map(|e| e.name.to_string()).collect();
-                let tree = tree::BranchTree::build(&names, self.expanded_groups.clone());
-                let by_name: std::collections::HashMap<&str, &BranchStatusEntry> = entries
-                    .iter()
-                    .map(|e| (e.name.as_ref(), *e))
-                    .collect();
-                if names.is_empty() {
-                    self.rows.push(PopupRow::Empty {
-                        message: SharedString::from(if want_remote {
-                            "No remote branches"
-                        } else {
-                            "No local branches"
-                        }),
-                    });
-                } else {
-                    for row in tree.rows {
-                        match row {
-                            tree::TreeRow::Group { path, depth, expanded } => {
-                                self.rows.push(PopupRow::Group {
-                                    path: SharedString::from(path),
-                                    depth,
-                                    expanded,
-                                });
-                            }
-                            tree::TreeRow::Leaf {
-                                full_name, depth, ..
-                            } => {
-                                if let Some(entry) = by_name.get(full_name.as_str()) {
-                                    self.rows.push(PopupRow::Branch {
-                                        entry: (*entry).clone(),
-                                        depth,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            tabs::Tab::Tags => {
-                let mut tags: Vec<SharedString> = self
-                    .tags
-                    .iter()
-                    .filter(|t| query.is_empty() || t.to_lowercase().contains(&lower_query))
-                    .cloned()
-                    .collect();
-                tags.sort();
-                if tags.is_empty() {
-                    self.rows.push(PopupRow::Empty {
-                        message: SharedString::from("No tags"),
-                    });
-                } else {
-                    for tag in tags {
-                        self.rows.push(PopupRow::Tag { name: tag });
-                    }
-                }
-            }
-            tabs::Tab::Favorites => {
-                let mut entries: Vec<&BranchStatusEntry> = self
-                    .branches
-                    .iter()
-                    .filter(|b| favorites.contains(b.name.as_ref()))
-                    .filter(|b| query.is_empty() || b.name.to_lowercase().contains(&lower_query))
-                    .collect();
-                entries.sort_by(|a, b| a.name.as_ref().cmp(b.name.as_ref()));
-                if entries.is_empty() {
-                    self.rows.push(PopupRow::Empty {
-                        message: SharedString::from(
-                            "No favorites yet — star a branch to keep it here.",
-                        ),
-                    });
-                } else {
-                    for entry in entries {
-                        self.rows.push(PopupRow::Branch {
-                            entry: entry.clone(),
-                            depth: 0,
-                        });
-                    }
-                }
-            }
-            tabs::Tab::Backups => {
-                if self.backups.is_empty() {
-                    self.rows.push(PopupRow::Empty {
-                        message: SharedString::from("No backup refs."),
-                    });
-                } else {
-                    let mut backups = self.backups.clone();
-                    if !query.is_empty() {
-                        backups.retain(|b| {
-                            b.branch.to_lowercase().contains(&lower_query)
-                                || b.op.to_lowercase().contains(&lower_query)
-                        });
-                    }
-                    for backup in backups {
-                        self.rows.push(PopupRow::Backup {
-                            branch: SharedString::from(backup.branch),
-                            op: SharedString::from(backup.op),
-                            before_sha: SharedString::from(backup.before_sha),
-                        });
-                    }
-                }
+
+        for (key, label) in SECTION_ORDER {
+            let collapsed = self.collapsed_sections.contains(key);
+            self.rows.push(PopupRow::Section {
+                key,
+                label: SharedString::from(label),
+                collapsed,
+            });
+            if !collapsed {
+                let body = match key {
+                    "recent" => self.recent_rows(&lower_query, &recent_order),
+                    "favorites" => self.favorites_rows(&lower_query, &favorites),
+                    "local" => self.local_remote_rows(&lower_query, false),
+                    "remote" => self.local_remote_rows(&lower_query, true),
+                    "tags" => self.tag_rows(&lower_query),
+                    "backups" => self.backup_rows(&lower_query),
+                    _ => Vec::new(),
+                };
+                self.rows.extend(body);
             }
         }
 
@@ -1840,6 +1735,160 @@ impl BranchesPopup {
             self.selected_index = 0;
         }
         cx.notify();
+    }
+
+    fn recent_rows(
+        &self,
+        lower_query: &str,
+        recent_order: &std::collections::HashMap<String, usize>,
+    ) -> Vec<PopupRow> {
+        let query_empty = lower_query.is_empty();
+        let mut entries: Vec<&BranchStatusEntry> = self
+            .branches
+            .iter()
+            .filter(|b| !b.is_remote)
+            .filter(|b| recent_order.contains_key(b.name.as_ref()))
+            .filter(|b| query_empty || b.name.to_lowercase().contains(lower_query))
+            .collect();
+        entries.sort_by_key(|b| *recent_order.get(b.name.as_ref()).unwrap_or(&usize::MAX));
+        if entries.is_empty() {
+            vec![PopupRow::Empty {
+                message: SharedString::from(
+                    "No recently checked-out branches yet — checkout one to populate.",
+                ),
+            }]
+        } else {
+            entries
+                .into_iter()
+                .map(|entry| PopupRow::Branch {
+                    entry: entry.clone(),
+                    depth: 0,
+                })
+                .collect()
+        }
+    }
+
+    fn favorites_rows(
+        &self,
+        lower_query: &str,
+        favorites: &collections::HashSet<String>,
+    ) -> Vec<PopupRow> {
+        let query_empty = lower_query.is_empty();
+        let mut entries: Vec<&BranchStatusEntry> = self
+            .branches
+            .iter()
+            .filter(|b| favorites.contains(b.name.as_ref()))
+            .filter(|b| query_empty || b.name.to_lowercase().contains(lower_query))
+            .collect();
+        entries.sort_by(|a, b| a.name.as_ref().cmp(b.name.as_ref()));
+        if entries.is_empty() {
+            vec![PopupRow::Empty {
+                message: SharedString::from(
+                    "No favorites yet — star a branch to keep it here.",
+                ),
+            }]
+        } else {
+            entries
+                .into_iter()
+                .map(|entry| PopupRow::Branch {
+                    entry: entry.clone(),
+                    depth: 0,
+                })
+                .collect()
+        }
+    }
+
+    fn local_remote_rows(&self, lower_query: &str, want_remote: bool) -> Vec<PopupRow> {
+        let query_empty = lower_query.is_empty();
+        let mut entries: Vec<&BranchStatusEntry> = self
+            .branches
+            .iter()
+            .filter(|b| b.is_remote == want_remote)
+            .filter(|b| query_empty || b.name.to_lowercase().contains(lower_query))
+            .collect();
+        entries.sort_by(|a, b| a.name.as_ref().cmp(b.name.as_ref()));
+        let names: Vec<String> = entries.iter().map(|e| e.name.to_string()).collect();
+        let tree = tree::BranchTree::build(&names, self.expanded_groups.clone());
+        let by_name: std::collections::HashMap<&str, &BranchStatusEntry> =
+            entries.iter().map(|e| (e.name.as_ref(), *e)).collect();
+        if names.is_empty() {
+            vec![PopupRow::Empty {
+                message: SharedString::from(if want_remote {
+                    "No remote branches"
+                } else {
+                    "No local branches"
+                }),
+            }]
+        } else {
+            let mut rows = Vec::new();
+            for row in tree.rows {
+                match row {
+                    tree::TreeRow::Group { path, depth, expanded } => {
+                        rows.push(PopupRow::Group {
+                            path: SharedString::from(path),
+                            depth,
+                            expanded,
+                        });
+                    }
+                    tree::TreeRow::Leaf { full_name, depth, .. } => {
+                        if let Some(entry) = by_name.get(full_name.as_str()) {
+                            rows.push(PopupRow::Branch {
+                                entry: (*entry).clone(),
+                                depth,
+                            });
+                        }
+                    }
+                }
+            }
+            rows
+        }
+    }
+
+    fn tag_rows(&self, lower_query: &str) -> Vec<PopupRow> {
+        let query_empty = lower_query.is_empty();
+        let mut tags: Vec<SharedString> = self
+            .tags
+            .iter()
+            .filter(|t| query_empty || t.to_lowercase().contains(lower_query))
+            .cloned()
+            .collect();
+        tags.sort();
+        if tags.is_empty() {
+            vec![PopupRow::Empty {
+                message: SharedString::from("No tags"),
+            }]
+        } else {
+            tags.into_iter().map(|name| PopupRow::Tag { name }).collect()
+        }
+    }
+
+    fn backup_rows(&self, lower_query: &str) -> Vec<PopupRow> {
+        if self.backups.is_empty() {
+            return vec![PopupRow::Empty {
+                message: SharedString::from("No backup refs."),
+            }];
+        }
+        let mut backups = self.backups.clone();
+        if !lower_query.is_empty() {
+            backups.retain(|b| {
+                b.branch.to_lowercase().contains(lower_query)
+                    || b.op.to_lowercase().contains(lower_query)
+            });
+        }
+        if backups.is_empty() {
+            vec![PopupRow::Empty {
+                message: SharedString::from("No backup refs."),
+            }]
+        } else {
+            backups
+                .into_iter()
+                .map(|backup| PopupRow::Backup {
+                    branch: SharedString::from(backup.branch),
+                    op: SharedString::from(backup.op),
+                    before_sha: SharedString::from(backup.before_sha),
+                })
+                .collect()
+        }
     }
 
     fn is_favorite(&self, branch_name: &str) -> bool {
@@ -1884,6 +1933,9 @@ impl BranchesPopup {
             }
             PopupRow::Backup { branch, before_sha, .. } => {
                 self.restore_backup(branch, before_sha, window, cx);
+            }
+            PopupRow::Section { key, .. } => {
+                self.toggle_section(key, cx);
             }
             PopupRow::Empty { .. } => {}
         }
@@ -2038,28 +2090,6 @@ impl BranchesPopup {
         }
     }
 
-    fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let active = self.tab;
-        h_flex()
-            .px_2()
-            .pt_2()
-            .pb_1()
-            .gap_1()
-            .border_b_1()
-            .border_color(cx.theme().colors().border_variant)
-            .children(tabs::Tab::all().into_iter().enumerate().map(|(ix, tab)| {
-                let label = tab.label();
-                let is_active = tab == active;
-                Button::new(("branches-popup-tab", ix), label)
-                    .label_size(LabelSize::Small)
-                    .toggle_state(is_active)
-                    .start_icon(Icon::new(tab.icon()).size(IconSize::XSmall))
-                    .on_click(cx.listener(move |this, _, _window, cx| {
-                        this.set_tab(tab, cx);
-                    }))
-            }))
-    }
-
     fn render_row(
         &self,
         ix: usize,
@@ -2096,6 +2126,24 @@ impl BranchesPopup {
                             this.expanded_groups.insert(path.to_string());
                         }
                         this.rebuild_rows(cx);
+                    }))
+                    .into_any_element()
+            }
+            PopupRow::Section { key, label, collapsed } => {
+                let key = *key;
+                let chevron = if *collapsed {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                };
+                ListItem::new(("branches-popup-section", ix))
+                    .inset(true)
+                    .spacing(ListItemSpacing::Sparse)
+                    .toggle_state(selected)
+                    .start_slot(Icon::new(chevron).size(IconSize::Small))
+                    .child(Label::new(label.clone()).color(Color::Muted))
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.toggle_section(key, cx);
                     }))
                     .into_any_element()
             }
@@ -2403,7 +2451,6 @@ impl Render for BranchesPopup {
                     .pb_1()
                     .child(self.query.clone()),
             )
-            .child(self.render_tab_bar(cx))
             .child(div().h_px().bg(cx.theme().colors().border_variant))
             .child(
                 div()
@@ -3351,6 +3398,92 @@ mod tests {
             branch_list.picker.update(cx, |picker, _cx| {
                 assert_eq!(picker.delegate.matches.len(), branch_count as usize);
             })
+        });
+    }
+
+    /// Returns the section keys (in order) that appear as `PopupRow::Section` entries.
+    fn section_headers(rows: &[PopupRow]) -> Vec<&'static str> {
+        rows.iter()
+            .filter_map(|row| {
+                if let PopupRow::Section { key, .. } = row {
+                    Some(*key)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[gpui::test]
+    async fn test_branches_popup_section_order(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+        let popup = window_handle
+            .update(cx, |_mw, window, cx| {
+                cx.new(|cx| BranchesPopup::new(WeakEntity::<Workspace>::new_invalid(), None, window, cx))
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        popup.update(cx, |popup, _cx| {
+            let headers = section_headers(&popup.rows);
+            assert_eq!(
+                headers,
+                vec!["recent", "favorites", "local", "remote", "tags", "backups"],
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_branches_popup_toggle_section_collapses(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+        let popup = window_handle
+            .update(cx, |_mw, window, cx| {
+                cx.new(|cx| BranchesPopup::new(WeakEntity::<Workspace>::new_invalid(), None, window, cx))
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        // All sections present initially.
+        popup.update(cx, |popup, _cx| {
+            let headers = section_headers(&popup.rows);
+            assert_eq!(headers.len(), 6);
+        });
+
+        // Toggle "recent" section — it should become collapsed.
+        window_handle
+            .update(cx, |_mw, _window, cx| {
+                popup.update(cx, |popup, cx| {
+                    popup.toggle_section("recent", cx);
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        popup.update(cx, |popup, _cx| {
+            let collapsed = popup
+                .rows
+                .iter()
+                .find_map(|r| {
+                    if let PopupRow::Section { key: "recent", collapsed, .. } = r {
+                        Some(*collapsed)
+                    } else {
+                        None
+                    }
+                })
+                .expect("recent section header must exist");
+            assert!(collapsed, "recent section should be collapsed after toggle");
+            // All 6 section headers still present regardless of collapsed state.
+            assert_eq!(section_headers(&popup.rows).len(), 6);
         });
     }
 }
