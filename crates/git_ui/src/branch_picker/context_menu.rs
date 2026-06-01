@@ -1,15 +1,14 @@
 //! Per-branch context menu for the S-BRP Branches popup. Wires entries
-//! to existing infrastructure (S-CTM compare/checkout/copy, S-BAK
-//! atomic-op runner, S-PSH stubs). Entries that need a not-yet-landed
-//! sibling task (S-DST destructive ops, S-PSH push dialog) are kept in
-//! the menu shape but disabled with an explanatory tooltip — this keeps
-//! the menu shape stable across releases.
+//! to existing infrastructure: S-CTM compare/checkout/copy, S-BAK atomic-op
+//! runner, S-DST rebase/merge (via `handlers::{rebase,merge}` with backup +
+//! conflict-resolver routing), and S-PSH force push (`git::ForcePush` → the
+//! push preview dialog in force mode, i.e. `--force-with-lease`).
 
 use git::operations::{DeleteBranchOp, OpRunner, RunOutcome};
-use gpui::{App, ClipboardItem, Entity, IntoElement, SharedString, WeakEntity, Window};
+use gpui::{App, ClipboardItem, Entity, SharedString, WeakEntity, Window};
 use notifications::status_toast::StatusToast;
 use project::git_store::Repository;
-use ui::{ContextMenu, ContextMenuEntry, DocumentationSide, Icon, IconName, IconSize, prelude::*};
+use ui::{ContextMenu, Icon, IconName, IconSize, prelude::*};
 use util::ResultExt as _;
 use workspace::Workspace;
 
@@ -88,7 +87,12 @@ pub fn build_branch_menu(
             .entry("Push", None, |window, cx| {
                 window.dispatch_action(Box::new(git::Push), cx);
             })
-            .item(disabled_entry("Force Push", "Not yet implemented — S-PSH"));
+            // S-PSH — `git::ForcePush` opens the push preview dialog in force
+            // mode, which pushes with `--force-with-lease` (see
+            // `PushOptions::Force`). The dialog is the confirmation surface.
+            .entry("Force Push", None, |window, cx| {
+                window.dispatch_action(Box::new(git::ForcePush), cx);
+            });
 
         let upstream_ctx = ctx.clone();
         menu = menu.separator().entry("Set Upstream…", None, move |window, cx| {
@@ -444,13 +448,6 @@ fn run_merge(ctx: BranchContext, window: &mut Window, cx: &mut App) {
             .log_err();
         })
         .detach();
-}
-
-fn disabled_entry(label: &'static str, tooltip: &'static str) -> ContextMenuEntry {
-    ContextMenuEntry::new(label).disabled(true).documentation_aside(
-        DocumentationSide::Right,
-        move |_| Label::new(tooltip).into_any_element(),
-    )
 }
 
 #[cfg(test)]
