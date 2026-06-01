@@ -1384,16 +1384,16 @@ impl PickerDelegate for BranchListDelegate {
 }
 
 // =====================================================================
-//  S-BRP — IDEA-style tabbed branches popup.
+//  S-BRP — IDEA-style collapsible-sections branches popup.
 //
 //  Lives alongside the legacy `BranchList` so `git_picker.rs` and
-//  `commit_modal.rs` keep working unchanged. New surface, new keybinding.
+//  `commit_modal.rs` keep working unchanged.
 // =====================================================================
 
 actions!(
     git,
     [
-        /// Opens the IDEA-style tabbed branches popup (S-BRP).
+        /// Opens the collapsible-sections branches popup (S-BRP).
         BranchesPopupOpen,
         /// Toggle favorite-status for the currently-selected branch row.
         BranchesPopupToggleFavorite,
@@ -1523,19 +1523,6 @@ pub struct BranchesPopup {
 }
 
 impl BranchesPopup {
-    pub fn open_action(
-        workspace: &mut Workspace,
-        _: &BranchesPopupOpen,
-        window: &mut Window,
-        cx: &mut Context<Workspace>,
-    ) {
-        let repository = workspace.project().read(cx).active_repository(cx);
-        let workspace_handle = workspace.weak_handle();
-        workspace.toggle_modal(window, cx, |window, cx| {
-            BranchesPopup::new(workspace_handle, repository, window, cx)
-        });
-    }
-
     /// Public constructor for hosting inside a `PopoverMenu` (title-bar widget)
     /// or as a fallback modal (keyboard action). Mirrors `new`.
     pub fn build(
@@ -1643,7 +1630,7 @@ impl BranchesPopup {
 
         this.rebuild_rows(cx);
         this.refresh_backups(cx);
-        cx.focus_self(window);
+        this.query.focus_handle(cx).focus(window, cx);
         this
     }
 
@@ -1695,6 +1682,15 @@ impl BranchesPopup {
         .detach();
     }
 
+    /// Returns true for rows the user can act on (checkout, restore, etc.).
+    /// Section headers and empty placeholders are non-actionable.
+    fn is_actionable(row: &PopupRow) -> bool {
+        matches!(
+            row,
+            PopupRow::Branch { .. } | PopupRow::Tag { .. } | PopupRow::Backup { .. }
+        )
+    }
+
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
         let query = self.query.read(cx).text(cx);
         let lower_query = query.to_lowercase();
@@ -1731,9 +1727,13 @@ impl BranchesPopup {
             }
         }
 
-        if self.selected_index >= self.rows.len() {
-            self.selected_index = 0;
-        }
+        // Default selection to the first actionable row so Enter always acts
+        // on a branch/tag/backup rather than toggling a section header.
+        self.selected_index = self
+            .rows
+            .iter()
+            .position(Self::is_actionable)
+            .unwrap_or(0);
         cx.notify();
     }
 
@@ -2072,9 +2072,17 @@ impl BranchesPopup {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.selected_index > 0 {
-            self.selected_index -= 1;
-            cx.notify();
+        let mut index = self.selected_index;
+        loop {
+            if index == 0 {
+                break;
+            }
+            index -= 1;
+            if Self::is_actionable(&self.rows[index]) {
+                self.selected_index = index;
+                cx.notify();
+                break;
+            }
         }
     }
 
@@ -2084,9 +2092,17 @@ impl BranchesPopup {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.rows.is_empty() && self.selected_index + 1 < self.rows.len() {
-            self.selected_index += 1;
-            cx.notify();
+        let mut index = self.selected_index;
+        loop {
+            if index + 1 >= self.rows.len() {
+                break;
+            }
+            index += 1;
+            if Self::is_actionable(&self.rows[index]) {
+                self.selected_index = index;
+                cx.notify();
+                break;
+            }
         }
     }
 

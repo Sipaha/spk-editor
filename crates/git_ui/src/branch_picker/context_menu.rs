@@ -29,7 +29,7 @@ pub struct BranchContext {
 }
 
 /// Build the context menu for a regular branch row (Recent / Local /
-/// Remote / Favorites tabs). Tag rows use [`build_tag_menu`] instead.
+/// Remote / Favorites sections). Tag rows use [`build_tag_menu`] instead.
 pub fn build_branch_menu(
     ctx: BranchContext,
     window: &mut Window,
@@ -131,7 +131,7 @@ pub fn build_branch_menu(
     })
 }
 
-/// Per-tag row context menu (Tags tab).
+/// Per-tag row context menu (Tags section).
 #[derive(Clone)]
 pub struct TagContext {
     pub workspace: WeakEntity<Workspace>,
