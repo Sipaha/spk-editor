@@ -105,7 +105,10 @@ fn compiled_patterns() -> &'static [(&'static str, Regex)] {
                 "private_key",
                 Regex::new(r"-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----").expect("regex"),
             ),
-            ("github_pat", Regex::new(r"ghp_[A-Za-z0-9]{36}").expect("regex")),
+            (
+                "github_pat",
+                Regex::new(r"ghp_[A-Za-z0-9]{36}").expect("regex"),
+            ),
             (
                 "github_fine_grained",
                 Regex::new(r"github_pat_[A-Za-z0-9_]{82}").expect("regex"),
@@ -119,9 +122,7 @@ mod tests {
     use super::*;
 
     fn diff_with(added: &str) -> String {
-        format!(
-            "--- a/secrets.txt\n+++ b/secrets.txt\n@@ -0,0 +1,1 @@\n+{added}\n"
-        )
+        format!("--- a/secrets.txt\n+++ b/secrets.txt\n@@ -0,0 +1,1 @@\n+{added}\n")
     }
 
     #[test]
@@ -151,8 +152,7 @@ mod tests {
 
     #[test]
     fn ignores_removed_lines() {
-        let diff =
-            "--- a/x\n+++ b/x\n@@ -1,1 +1,0 @@\n-aws_key = AKIAIOSFODNN7EXAMPLE\n";
+        let diff = "--- a/x\n+++ b/x\n@@ -1,1 +1,0 @@\n-aws_key = AKIAIOSFODNN7EXAMPLE\n";
         let m = scan_diff(diff);
         assert!(m.is_empty(), "removed lines should not match");
     }

@@ -153,8 +153,8 @@ use util::{
 };
 use uuid::Uuid;
 pub use workspace_settings::{
-    AutosaveSetting, FocusFollowsMouse, RestoreOnStartupBehavior,
-    StatusBarSettings, TabBarSettings, WorkspaceSettings,
+    AutosaveSetting, FocusFollowsMouse, RestoreOnStartupBehavior, StatusBarSettings,
+    TabBarSettings, WorkspaceSettings,
 };
 use zed_actions::{Spawn, feedback::FileBugReport, theme::ToggleMode};
 
@@ -1706,9 +1706,8 @@ impl Workspace {
             .root::<MultiWorkspace>()
             .flatten()
             .map(|mw| mw.downgrade());
-        let status_bar = cx.new(|cx| {
-            StatusBar::new(&center_pane.clone(), multi_workspace.clone(), window, cx)
-        });
+        let status_bar =
+            cx.new(|cx| StatusBar::new(&center_pane.clone(), multi_workspace.clone(), window, cx));
 
         let session_id = app_state.session.read(cx).id().to_owned();
 
@@ -1845,7 +1844,14 @@ impl Workspace {
         cx: &mut App,
     ) -> Task<anyhow::Result<OpenResult>> {
         Self::new_local_with_visibility(
-            abs_paths, app_state, requesting_window, env, init, open_mode, true, cx,
+            abs_paths,
+            app_state,
+            requesting_window,
+            env,
+            init,
+            open_mode,
+            true,
+            cx,
         )
     }
 
@@ -2341,8 +2347,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
         let project = self.project.clone();
-        let target_set: std::collections::HashSet<PathBuf> =
-            target_paths.iter().cloned().collect();
+        let target_set: std::collections::HashSet<PathBuf> = target_paths.iter().cloned().collect();
         cx.spawn(async move |_, cx| {
             // `Entity::update` on `AsyncApp` returns `R` directly
             // (not `Result<R>`), so no `?` on the wrapping update

@@ -57,11 +57,7 @@ pub fn copy_patch_id(
 /// clipboard. Returns `Ok(false)` when no hosted remote is configured —
 /// the menu disables this entry in that case, but the handler is
 /// defensive.
-pub fn copy_permalink(
-    repository: &Repository,
-    sha: &str,
-    cx: &mut App,
-) -> Result<bool> {
+pub fn copy_permalink(repository: &Repository, sha: &str, cx: &mut App) -> Result<bool> {
     let Some(remote_url) = repository.default_remote_url() else {
         return Ok(false);
     };

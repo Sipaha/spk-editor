@@ -7,15 +7,15 @@ use client::proto;
 use db::kvp::KeyValueStore;
 
 use gpui::{
-    Action, Anchor, AnyView, App, Axis, AppContext as _, Context, Entity, EntityId, EventEmitter,
+    Action, Anchor, AnyView, App, AppContext as _, Axis, Context, Entity, EntityId, EventEmitter,
     FocusHandle, Focusable, IntoElement, KeyContext, MouseButton, MouseDownEvent, MouseUpEvent,
     ParentElement, Render, SharedString, StyleRefinement, Styled, Subscription, Task, WeakEntity,
     Window, deferred, div, px,
 };
-use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use settings::{Settings, SettingsStore};
 use std::sync::Arc;
+use std::time::Duration;
 use ui::{
     ContextMenu, CountBadge, Divider, DividerColor, IconButton, Tooltip, prelude::*,
     right_click_menu,
@@ -1243,9 +1243,7 @@ impl Render for PanelButtons {
                 // Right-strip menus pop out to the left of the button.
                 DockPosition::Right => (Anchor::TopRight, Anchor::TopLeft),
                 // Left-strip and bottom-on-left-strip menus pop out to the right.
-                DockPosition::Left | DockPosition::Bottom => {
-                    (Anchor::TopLeft, Anchor::TopRight)
-                }
+                DockPosition::Left | DockPosition::Bottom => (Anchor::TopLeft, Anchor::TopRight),
             }
         } else {
             match dock.position {

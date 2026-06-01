@@ -3,8 +3,8 @@
 use context_server::listener::{McpServerTool, ToolResponse};
 use context_server::types::ToolResponseContent;
 use gpui::{
-    App, AsyncApp, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, PlatformInput,
-    Pixels, Point, px,
+    App, AsyncApp, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
+    PlatformInput, Point, px,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -748,9 +748,10 @@ impl McpServerTool for ClickIdTool {
                     let window_id = window.window_handle().window_id();
                     let clickables =
                         super::clickables::enumerate_window_clickables(window_id, window);
-                    let matched = clickables.iter().find(|c| c.id == id).ok_or_else(|| {
-                        anyhow::anyhow!("clickable_not_found: id={id}")
-                    })?;
+                    let matched = clickables
+                        .iter()
+                        .find(|c| c.id == id)
+                        .ok_or_else(|| anyhow::anyhow!("clickable_not_found: id={id}"))?;
                     let center = super::clickables::clickable_center(matched);
                     let arr = matched.bounds;
                     dispatch_mouse_click(window, cx, center, button, modifiers);

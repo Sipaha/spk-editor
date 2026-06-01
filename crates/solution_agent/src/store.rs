@@ -2536,11 +2536,7 @@ impl SolutionAgentStore {
     /// create-implies-open path ([`create_session_with_parent`]) and the
     /// wire `workspace.open_session` RPC call it, so "create" and "open"
     /// can no longer diverge into doing different things.
-    pub fn open_session_in_strip(
-        &mut self,
-        session_id: SolutionSessionId,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn open_session_in_strip(&mut self, session_id: SolutionSessionId, cx: &mut Context<Self>) {
         let Some(entity) = self.sessions.get(&session_id) else {
             return;
         };
@@ -2563,8 +2559,7 @@ impl SolutionAgentStore {
             })
             .collect();
         pinned.sort_by_key(|(_, order)| *order);
-        let mut ordered: Vec<SolutionSessionId> =
-            pinned.into_iter().map(|(id, _)| id).collect();
+        let mut ordered: Vec<SolutionSessionId> = pinned.into_iter().map(|(id, _)| id).collect();
         ordered.push(session_id);
         self.persist_tab_order(solution_id, ordered, cx);
     }

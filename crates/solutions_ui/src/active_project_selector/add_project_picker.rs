@@ -11,7 +11,7 @@ use gpui::{
     IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window,
 };
 use solutions::{CatalogId, CatalogProject, SolutionId, SolutionStore, default_cache_root};
-use ui::{prelude::*, ListItem, ListItemSpacing};
+use ui::{ListItem, ListItemSpacing, prelude::*};
 
 pub struct AddProjectPicker {
     solution_id: SolutionId,
@@ -23,11 +23,7 @@ pub struct AddProjectPicker {
 }
 
 impl AddProjectPicker {
-    pub fn new(
-        solution_id: SolutionId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(solution_id: SolutionId, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let store = SolutionStore::global(cx);
         let catalog_entries = store.read_with(cx, |s, _| {
             let already_member: collections::HashSet<CatalogId> = s
@@ -96,7 +92,8 @@ impl AddProjectPicker {
         let task = store.update(cx, |s, cx| {
             s.add_member(solution_id, catalog_project.id, cache_root, cx)
         });
-        cx.spawn(async move |_, _| task.await).detach_and_log_err(cx);
+        cx.spawn(async move |_, _| task.await)
+            .detach_and_log_err(cx);
         cx.emit(DismissEvent);
     }
 }

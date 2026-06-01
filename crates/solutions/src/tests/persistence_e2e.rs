@@ -60,8 +60,10 @@ async fn create_and_remove_solution_persists(cx: &mut TestAppContext) {
     cx.update(|cx| {
         crate::store::SolutionStore::init_global_for_test(db_for_init, cx);
         let store = crate::store::SolutionStore::global(cx);
-        let id = store
-            .update(cx, |s, cx| s.create_solution("My Sol", tmp.path().to_path_buf(), cx).unwrap());
+        let id = store.update(cx, |s, cx| {
+            s.create_solution("My Sol", tmp.path().to_path_buf(), cx)
+                .unwrap()
+        });
         store.update(cx, |s, cx| s.touch_last_opened(&id, cx).unwrap());
         store.update(cx, |s, cx| s.delete_solution(&id, cx).unwrap());
     });
@@ -79,12 +81,17 @@ async fn touch_last_opened_persists_timestamp(cx: &mut TestAppContext) {
     cx.update(|cx| {
         crate::store::SolutionStore::init_global_for_test(db_for_init, cx);
         let store = crate::store::SolutionStore::global(cx);
-        let id = store
-            .update(cx, |s, cx| s.create_solution("S", tmp.path().to_path_buf(), cx).unwrap());
+        let id = store.update(cx, |s, cx| {
+            s.create_solution("S", tmp.path().to_path_buf(), cx)
+                .unwrap()
+        });
         store.update(cx, |s, cx| s.touch_last_opened(&id, cx).unwrap());
     });
     let rows = db.load_all_solutions_with_members().await.unwrap();
-    assert!(rows.iter().any(|r| r.3.is_some()), "last_opened_at should be set");
+    assert!(
+        rows.iter().any(|r| r.3.is_some()),
+        "last_opened_at should be set"
+    );
 }
 
 #[gpui::test]
@@ -96,7 +103,10 @@ async fn set_panel_selection_persists_and_emits(cx: &mut TestAppContext) {
     let id = cx.update(|cx| {
         crate::store::SolutionStore::init_global_for_test(db_for_init, cx);
         let store = crate::store::SolutionStore::global(cx);
-        store.update(cx, |s, cx| s.create_solution("S", tmp.path().to_path_buf(), cx).unwrap())
+        store.update(cx, |s, cx| {
+            s.create_solution("S", tmp.path().to_path_buf(), cx)
+                .unwrap()
+        })
     });
     cx.update(|cx| {
         let store = crate::store::SolutionStore::global(cx);
@@ -172,7 +182,8 @@ async fn panel_member_selections_persist_across_reinit(cx: &mut TestAppContext) 
         crate::store::SolutionStore::init_global_for_test(db_first, cx);
         let store = crate::store::SolutionStore::global(cx);
         let id = store.update(cx, |s, cx| {
-            s.create_solution("S", tmp.path().to_path_buf(), cx).unwrap()
+            s.create_solution("S", tmp.path().to_path_buf(), cx)
+                .unwrap()
         });
         store.update(cx, |s, cx| {
             s.set_panel_member_selection(

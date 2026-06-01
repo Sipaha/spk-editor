@@ -4,6 +4,7 @@ use crate::{
     tests::{start_debug_session, start_debug_session_with},
     *,
 };
+use console_panel::ConsolePanel;
 use dap::{
     ErrorResponse, Message, RunInTerminalRequestArguments, SourceBreakpoint,
     StartDebuggingRequestArguments, StartDebuggingRequestArgumentsRequest,
@@ -31,7 +32,6 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
-use console_panel::ConsolePanel;
 use tests::{active_debug_session_panel, init_test, init_test_workspace};
 use util::{path, rel_path::rel_path};
 use workspace::item::SaveOptions;

@@ -136,12 +136,10 @@ pub fn build_commit_context_menu(
         };
 
         // S-DST destructive section.
-        let menu = menu
-            .separator()
-            .entry("Cherry-pick", None, {
-                let ctx = destructive_ctx.clone();
-                move |window, cx| run_cherry_pick(ctx.clone(), window, cx)
-            });
+        let menu = menu.separator().entry("Cherry-pick", None, {
+            let ctx = destructive_ctx.clone();
+            move |window, cx| run_cherry_pick(ctx.clone(), window, cx)
+        });
 
         // S-SOL-CHP — show "Cherry-pick to Other Member…" only for rows
         // that came from the Solution-wide aggregated log (i.e.
@@ -209,8 +207,7 @@ pub fn build_commit_context_menu(
             move |menu, _window, _cx| build_patch_submenu(menu, ctx.clone())
         });
 
-        menu.separator()
-            .entry("Show in Terminal", None, |_, _| {})
+        menu.separator().entry("Show in Terminal", None, |_, _| {})
     })
 }
 
@@ -264,9 +261,7 @@ fn build_copy_submenu(menu: ContextMenu, ctx: CommitContext) -> ContextMenu {
 }
 
 fn build_compare_submenu(menu: ContextMenu, ctx: CommitContext) -> ContextMenu {
-    let CommitContext {
-        sha, workspace, ..
-    } = ctx;
+    let CommitContext { sha, workspace, .. } = ctx;
 
     let menu = menu.entry(
         "Compare with Local Working Tree",
@@ -275,9 +270,7 @@ fn build_compare_submenu(menu: ContextMenu, ctx: CommitContext) -> ContextMenu {
             let sha = sha.clone();
             workspace
                 .update(cx, |workspace, cx| {
-                    compare::compare_with_local_working_tree(
-                        workspace, &sha, window, cx,
-                    );
+                    compare::compare_with_local_working_tree(workspace, &sha, window, cx);
                 })
                 .ok();
         },
@@ -420,8 +413,7 @@ fn refs_at_commit(ctx: &CommitContext) -> RefsAtCommit {
         // as `<remote>/<branch>` — both are slash-bearing when the local
         // branch name itself contains a `/` (GitFlow-style). Disambiguate
         // against the repository's known local-branch set.
-        let is_local =
-            !name.contains('/') || ctx.local_branches.iter().any(|b| b.as_ref() == name);
+        let is_local = !name.contains('/') || ctx.local_branches.iter().any(|b| b.as_ref() == name);
         if !is_local {
             continue;
         }
@@ -455,9 +447,13 @@ fn build_branch_tag_section(menu: ContextMenu, ctx: CommitContext) -> ContextMen
         menu = menu.header("Tags at This Commit");
         for tag in tags {
             let entry_ctx = ctx.clone();
-            menu = menu.submenu_with_icon(tag.clone(), IconName::Hash, move |submenu, _window, _cx| {
-                build_tag_ref_submenu(submenu, entry_ctx.clone(), tag.clone())
-            });
+            menu = menu.submenu_with_icon(
+                tag.clone(),
+                IconName::Hash,
+                move |submenu, _window, _cx| {
+                    build_tag_ref_submenu(submenu, entry_ctx.clone(), tag.clone())
+                },
+            );
         }
     }
     menu
@@ -587,7 +583,9 @@ fn run_delete_tag(ctx: CommitContext, tag: SharedString, window: &mut Window, cx
             Err(_) => Err(anyhow::anyhow!("delete tag was canceled")),
         }
     });
-    task.detach_and_prompt_err("Delete tag failed", window, cx, |e, _, _| Some(format!("{e}")));
+    task.detach_and_prompt_err("Delete tag failed", window, cx, |e, _, _| {
+        Some(format!("{e}"))
+    });
 }
 
 /// IDEA-style: after a local tag is deleted, drop a toast offering to
@@ -694,19 +692,11 @@ fn open_new_branch_modal(ctx: CommitContext, window: &mut Window, cx: &mut App) 
                 window,
                 cx,
                 move |name, window, cx| {
-                    let task = branch::create_branch_at(
-                        repository,
-                        sha.to_string(),
-                        name,
-                        true,
-                        cx,
-                    );
-                    task.detach_and_prompt_err(
-                        "Failed to create branch",
-                        window,
-                        cx,
-                        |e, _, _| Some(format!("{e}")),
-                    );
+                    let task =
+                        branch::create_branch_at(repository, sha.to_string(), name, true, cx);
+                    task.detach_and_prompt_err("Failed to create branch", window, cx, |e, _, _| {
+                        Some(format!("{e}"))
+                    });
                 },
             )
         });
@@ -728,19 +718,10 @@ fn open_new_tag_modal(ctx: CommitContext, window: &mut Window, cx: &mut App) {
                 window,
                 cx,
                 move |name, window, cx| {
-                    let task = tag::create_tag_at(
-                        repository,
-                        sha.to_string(),
-                        name,
-                        None,
-                        cx,
-                    );
-                    task.detach_and_prompt_err(
-                        "Failed to create tag",
-                        window,
-                        cx,
-                        |e, _, _| Some(format!("{e}")),
-                    );
+                    let task = tag::create_tag_at(repository, sha.to_string(), name, None, cx);
+                    task.detach_and_prompt_err("Failed to create tag", window, cx, |e, _, _| {
+                        Some(format!("{e}"))
+                    });
                 },
             )
         });
@@ -773,14 +754,10 @@ fn open_checkout_confirmation(ctx: CommitContext, window: &mut Window, cx: &mut 
                 _ => return anyhow::Ok(()),
             };
             cx.update(|window, cx| {
-                let task =
-                    checkout::checkout_revision(repository, sha, force, cx);
-                task.detach_and_prompt_err(
-                    "Failed to checkout revision",
-                    window,
-                    cx,
-                    |e, _, _| Some(format!("{e}")),
-                );
+                let task = checkout::checkout_revision(repository, sha, force, cx);
+                task.detach_and_prompt_err("Failed to checkout revision", window, cx, |e, _, _| {
+                    Some(format!("{e}"))
+                });
             })?;
             anyhow::Ok(())
         })
@@ -942,12 +919,9 @@ fn run_drop_commit(ctx: CommitContext, window: &mut Window, cx: &mut App) {
                     git::operations::rebase::RebaseCallbacks::default(),
                     cx,
                 );
-                task.detach_and_prompt_err(
-                    "Drop commit failed",
-                    window,
-                    cx,
-                    |e, _, _| Some(format!("{e}")),
-                );
+                task.detach_and_prompt_err("Drop commit failed", window, cx, |e, _, _| {
+                    Some(format!("{e}"))
+                });
             })?;
             anyhow::Ok(())
         })
@@ -1087,8 +1061,7 @@ impl Render for EditMessageModal {
                     .gap_1p5()
                     .child(Icon::new(IconName::Pencil).size(IconSize::XSmall))
                     .child(
-                        Headline::new(format!("Edit Message ({short})"))
-                            .size(HeadlineSize::XSmall),
+                        Headline::new(format!("Edit Message ({short})")).size(HeadlineSize::XSmall),
                     ),
             )
             .child(div().px_3().pb_3().w_full().child(self.editor.clone()))
@@ -1202,16 +1175,15 @@ fn build_patch_submenu(menu: ContextMenu, ctx: CommitContext) -> ContextMenu {
     )
 }
 
-fn run_create_patch(
-    ctx: CommitContext,
-    range_to_head: bool,
-    window: &mut Window,
-    cx: &mut App,
-) {
+fn run_create_patch(ctx: CommitContext, range_to_head: bool, window: &mut Window, cx: &mut App) {
     let Some(work_dir) = repo_work_dir(&ctx, cx) else {
         return;
     };
     let sha = ctx.sha.to_string();
-    let sha_to = if range_to_head { Some("HEAD".to_string()) } else { None };
+    let sha_to = if range_to_head {
+        Some("HEAD".to_string())
+    } else {
+        None
+    };
     patch_handler::create_patch_action(ctx.workspace, work_dir, sha, sha_to, window, cx);
 }

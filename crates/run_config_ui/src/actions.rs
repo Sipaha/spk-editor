@@ -21,7 +21,11 @@ pub fn init(cx: &mut App) {
     cx.observe_new(register).detach();
 }
 
-fn register(workspace: &mut Workspace, _window: Option<&mut Window>, _cx: &mut gpui::Context<Workspace>) {
+fn register(
+    workspace: &mut Workspace,
+    _window: Option<&mut Window>,
+    _cx: &mut gpui::Context<Workspace>,
+) {
     workspace
         .register_action(|workspace, _: &Run, window, cx| {
             crate::toolbar_strip::with_controller(workspace, cx, |controller, cx| {
@@ -45,7 +49,9 @@ fn register(workspace: &mut Workspace, _window: Option<&mut Window>, _cx: &mut g
             });
         })
         .register_action(|workspace, _: &SelectNextConfig, _window, cx| {
-            crate::toolbar_strip::with_controller(workspace, cx, |controller, cx| controller.select_next(cx));
+            crate::toolbar_strip::with_controller(workspace, cx, |controller, cx| {
+                controller.select_next(cx)
+            });
         })
         .register_action(|workspace, _: &EditConfigurations, window, cx| {
             crate::edit_modal::EditConfigurationsModal::toggle(workspace, window, cx);

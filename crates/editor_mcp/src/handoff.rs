@@ -116,8 +116,8 @@ pub fn try_handoff_to_existing_instance(paths: Vec<PathBuf>) -> Result<HandoffOu
                             Err(err) => return Err(err.into()),
                         }
                     }
-                    let response: serde_json::Value = serde_json::from_slice(&buffer)
-                        .context("parse handoff response")?;
+                    let response: serde_json::Value =
+                        serde_json::from_slice(&buffer).context("parse handoff response")?;
                     let structured = response
                         .get("result")
                         .and_then(|r| r.get("structuredContent"))

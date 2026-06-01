@@ -11,8 +11,8 @@ pub use provider::*;
 pub use settings::RunConfigSettings;
 pub use store::{RunCommand, RunConfigStore, RunConfigStoreEvent, register_provider};
 
-use gpui::App;
 use ::settings::Settings as _;
+use gpui::App;
 
 pub fn init(cx: &mut App) {
     RunConfigSettings::register(cx);

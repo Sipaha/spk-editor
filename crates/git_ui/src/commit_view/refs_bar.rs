@@ -24,7 +24,11 @@ pub(crate) fn render_refs_bar(
             .strip_prefix("HEAD -> ")
             .unwrap_or(name.as_ref())
             .strip_prefix("tag: ")
-            .unwrap_or(name.as_ref().strip_prefix("HEAD -> ").unwrap_or(name.as_ref()))
+            .unwrap_or(
+                name.as_ref()
+                    .strip_prefix("HEAD -> ")
+                    .unwrap_or(name.as_ref()),
+            )
             .to_string();
         row = row.child(render_chip(ix, display, is_head, is_tag));
     }

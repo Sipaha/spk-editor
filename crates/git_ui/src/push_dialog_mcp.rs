@@ -18,9 +18,7 @@ use project::git_store::RepositoryId;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::push_dialog::{
-    build_preview, current_branch, run_force_with_lease, run_plain_push,
-};
+use crate::push_dialog::{build_preview, current_branch, run_force_with_lease, run_plain_push};
 
 pub(crate) fn register(cx: &mut App) {
     register_typed_tool_with_tier(cx, ToolTier::ReadOnly, PreviewPushTool);

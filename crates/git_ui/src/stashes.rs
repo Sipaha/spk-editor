@@ -21,7 +21,7 @@ use std::sync::Arc;
 use editor::{Editor, EditorEvent, MultiBuffer};
 use git::stash::StashEntry as GitStashEntry;
 use gpui::{
-    AnyElement, Anchor, App, AppContext as _, ClipboardItem, Context, DismissEvent, Entity,
+    Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, DismissEvent, Entity,
     EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, MouseDownEvent,
     ParentElement, Pixels, Point, PromptLevel, Render, SharedString, Styled, Subscription,
     WeakEntity, Window, anchored, deferred, uniform_list,
@@ -30,9 +30,7 @@ use language::{Buffer, Capability};
 use project::Project;
 use project::git_store::{Repository, RepositoryEvent};
 use time::{OffsetDateTime, UtcOffset};
-use ui::{
-    ContextMenu, Divider, IconButtonShape, ListItem, ListItemSpacing, Tooltip, prelude::*,
-};
+use ui::{ContextMenu, Divider, IconButtonShape, ListItem, ListItemSpacing, Tooltip, prelude::*};
 use workspace::item::{ItemEvent, TabContentParams};
 use workspace::notifications::DetachAndPromptErr;
 use workspace::{Item, ItemNavHistory, ModalView, Workspace};
@@ -120,8 +118,7 @@ impl StashesView {
             buffer.set_capability(Capability::ReadOnly, cx);
             buffer
         });
-        let multibuffer =
-            cx.new(|cx| MultiBuffer::singleton(detail_buffer.clone(), cx));
+        let multibuffer = cx.new(|cx| MultiBuffer::singleton(detail_buffer.clone(), cx));
         let detail_editor = cx.new(|cx| {
             let mut editor =
                 Editor::for_multibuffer(multibuffer, Some(project.clone()), window, cx);
@@ -225,8 +222,7 @@ impl StashesView {
                     };
                 }
                 cx.notify();
-                let needs_detail =
-                    this.selected.and_then(|ix| this.entries.get(ix).cloned());
+                let needs_detail = this.selected.and_then(|ix| this.entries.get(ix).cloned());
                 if let Some(entry) = needs_detail {
                     this.load_detail(entry, cx);
                 }
@@ -236,10 +232,7 @@ impl StashesView {
         .detach();
     }
 
-    fn entry_from_git(
-        entry: &GitStashEntry,
-        stat: Option<git::stash::StashStat>,
-    ) -> StashEntry {
+    fn entry_from_git(entry: &GitStashEntry, stat: Option<git::stash::StashStat>) -> StashEntry {
         let (file_count, has_untracked) = stat
             .map(|s| (s.file_count, s.has_untracked))
             .unwrap_or((0, false));
@@ -279,12 +272,7 @@ impl StashesView {
             .collect()
     }
 
-    fn select_entry(
-        &mut self,
-        entry_ix: usize,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn select_entry(&mut self, entry_ix: usize, _window: &mut Window, cx: &mut Context<Self>) {
         self.selected = Some(entry_ix);
         if let Some(entry) = self.entries.get(entry_ix).cloned() {
             self.load_detail(entry, cx);
@@ -350,12 +338,7 @@ impl StashesView {
         self.selected.and_then(|ix| self.entries.get(ix))
     }
 
-    fn dispatch_apply(
-        &mut self,
-        entry: StashEntry,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn dispatch_apply(&mut self, entry: StashEntry, window: &mut Window, cx: &mut Context<Self>) {
         let Some(repo) = self.repo.clone() else {
             return;
         };
@@ -370,12 +353,7 @@ impl StashesView {
         });
     }
 
-    fn dispatch_pop(
-        &mut self,
-        entry: StashEntry,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn dispatch_pop(&mut self, entry: StashEntry, window: &mut Window, cx: &mut Context<Self>) {
         let Some(repo) = self.repo.clone() else {
             return;
         };
@@ -390,12 +368,7 @@ impl StashesView {
         });
     }
 
-    fn dispatch_drop(
-        &mut self,
-        entry: StashEntry,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn dispatch_drop(&mut self, entry: StashEntry, window: &mut Window, cx: &mut Context<Self>) {
         let Some(repo) = self.repo.clone() else {
             return;
         };
@@ -466,12 +439,7 @@ impl StashesView {
         );
     }
 
-    fn dispatch_rename(
-        &mut self,
-        entry: StashEntry,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn dispatch_rename(&mut self, entry: StashEntry, window: &mut Window, cx: &mut Context<Self>) {
         let Some(repo) = self.repo.clone() else {
             return;
         };
@@ -555,10 +523,8 @@ impl StashesView {
                 let entry = entry.clone();
                 move |window, cx| {
                     let entry = entry.clone();
-                    view.update(cx, |view, cx| {
-                        view.dispatch_branch_from(entry, window, cx)
-                    })
-                    .ok();
+                    view.update(cx, |view, cx| view.dispatch_branch_from(entry, window, cx))
+                        .ok();
                 }
             })
             .entry("View Diff in Editor", None, {
@@ -566,10 +532,8 @@ impl StashesView {
                 let entry = entry.clone();
                 move |window, cx| {
                     let entry = entry.clone();
-                    view.update(cx, |view, cx| {
-                        view.dispatch_view_diff(entry, window, cx)
-                    })
-                    .ok();
+                    view.update(cx, |view, cx| view.dispatch_view_diff(entry, window, cx))
+                        .ok();
                 }
             })
             .separator()
@@ -585,21 +549,16 @@ impl StashesView {
             .entry(format!("Copy Stash Reference ({})", stash_ref), None, {
                 move |window, cx| {
                     let entry = entry.clone();
-                    view.update(cx, |view, cx| {
-                        view.dispatch_copy_ref(entry, window, cx)
-                    })
-                    .ok();
+                    view.update(cx, |view, cx| view.dispatch_copy_ref(entry, window, cx))
+                        .ok();
                 }
             })
         });
-        let subscription = cx.subscribe_in(
-            &menu,
-            window,
-            |this, _, _: &DismissEvent, _window, cx| {
+        let subscription =
+            cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, _window, cx| {
                 this.context_menu.take();
                 cx.notify();
-            },
-        );
+            });
         self.context_menu = Some((menu, position, subscription));
         self.selected = Some(entry_ix);
         cx.notify();
@@ -621,11 +580,7 @@ impl StashesView {
             timezone,
             time_format::TimestampFormat::Relative,
         );
-        let label = format!(
-            "stash@{{{}}}: {}",
-            entry.index,
-            entry.message
-        );
+        let label = format!("stash@{{{}}}: {}", entry.index, entry.message);
         let entry_for_click = entry.clone();
         ListItem::new(("stashes-row", entry_ix))
             .inset(true)
@@ -751,19 +706,21 @@ impl Render for StashesView {
                                 uniform_list(
                                     "stashes-list",
                                     row_count,
-                                    cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
-                                        let mut items = Vec::with_capacity(range.len());
-                                        for i in range {
-                                            let Some(&entry_ix) = visible.get(i) else {
-                                                continue;
-                                            };
-                                            let Some(entry) = entries.get(entry_ix) else {
-                                                continue;
-                                            };
-                                            items.push(this.render_row(entry_ix, entry, cx));
-                                        }
-                                        items
-                                    }),
+                                    cx.processor(
+                                        move |this, range: std::ops::Range<usize>, _window, cx| {
+                                            let mut items = Vec::with_capacity(range.len());
+                                            for i in range {
+                                                let Some(&entry_ix) = visible.get(i) else {
+                                                    continue;
+                                                };
+                                                let Some(entry) = entries.get(entry_ix) else {
+                                                    continue;
+                                                };
+                                                items.push(this.render_row(entry_ix, entry, cx));
+                                            }
+                                            items
+                                        },
+                                    ),
                                 )
                                 .h_full()
                             }),
@@ -775,12 +732,7 @@ impl Render for StashesView {
                             .h_full()
                             .child(self.render_detail_header(&selected_entry, cx))
                             .child(Divider::horizontal())
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_h_0()
-                                    .child(self.detail_editor.clone()),
-                            ),
+                            .child(div().flex_1().min_h_0().child(self.detail_editor.clone())),
                     ),
             )
             .child(self.render_bottom_toolbar(cx))
@@ -1023,21 +975,13 @@ impl Render for StashBranchModal {
                     .pb_1()
                     .w_full()
                     .gap_1p5()
-                    .child(
-                        Icon::new(IconName::GitBranch).size(IconSize::XSmall),
-                    )
+                    .child(Icon::new(IconName::GitBranch).size(IconSize::XSmall))
                     .child(
                         Headline::new(format!("Branch from {}", stash_ref))
                             .size(HeadlineSize::XSmall),
                     ),
             )
-            .child(
-                div()
-                    .px_3()
-                    .pb_3()
-                    .w_full()
-                    .child(self.name_editor.clone()),
-            )
+            .child(div().px_3().pb_3().w_full().child(self.name_editor.clone()))
     }
 }
 
@@ -1099,10 +1043,7 @@ impl Render for StashCurrentChangesModal {
                     .w_full()
                     .gap_1p5()
                     .child(Icon::new(IconName::BoxOpen).size(IconSize::XSmall))
-                    .child(
-                        Headline::new("Stash Current Changes")
-                            .size(HeadlineSize::XSmall),
-                    ),
+                    .child(Headline::new("Stash Current Changes").size(HeadlineSize::XSmall)),
             )
             .child(
                 div()
@@ -1122,21 +1063,20 @@ impl Render for StashCurrentChangesModal {
                             ui::ToggleState::from(include_untracked),
                         )
                         .label("Include untracked files")
-                        .on_click(cx.listener(|this, state: &ui::ToggleState, _, cx| {
-                            this.include_untracked = matches!(state, ui::ToggleState::Selected);
-                            cx.notify();
-                        })),
+                        .on_click(cx.listener(
+                            |this, state: &ui::ToggleState, _, cx| {
+                                this.include_untracked = matches!(state, ui::ToggleState::Selected);
+                                cx.notify();
+                            },
+                        )),
                     )
                     .child(
-                        ui::Checkbox::new(
-                            "stash-keep-index",
-                            ui::ToggleState::from(keep_index),
-                        )
-                        .label("Keep staged changes (--keep-index)")
-                        .on_click(cx.listener(|this, state: &ui::ToggleState, _, cx| {
-                            this.keep_index = matches!(state, ui::ToggleState::Selected);
-                            cx.notify();
-                        })),
+                        ui::Checkbox::new("stash-keep-index", ui::ToggleState::from(keep_index))
+                            .label("Keep staged changes (--keep-index)")
+                            .on_click(cx.listener(|this, state: &ui::ToggleState, _, cx| {
+                                this.keep_index = matches!(state, ui::ToggleState::Selected);
+                                cx.notify();
+                            })),
                     ),
             )
             .child(
@@ -1146,13 +1086,11 @@ impl Render for StashCurrentChangesModal {
                     .pb_3()
                     .gap_2()
                     .justify_end()
-                    .child(
-                        Button::new("stash-cancel", "Cancel").on_click(cx.listener(
-                            |_, _, _, cx| {
-                                cx.emit(DismissEvent);
-                            },
-                        )),
-                    )
+                    .child(Button::new("stash-cancel", "Cancel").on_click(cx.listener(
+                        |_, _, _, cx| {
+                            cx.emit(DismissEvent);
+                        },
+                    )))
                     .child(
                         Button::new("stash-confirm", "Stash")
                             .style(ButtonStyle::Filled)
@@ -1183,12 +1121,9 @@ impl StashCurrentChangesModal {
             .await??;
             anyhow::Ok(())
         })
-        .detach_and_prompt_err(
-            "Failed to stash changes",
-            window,
-            cx,
-            |e, _, _| Some(e.to_string()),
-        );
+        .detach_and_prompt_err("Failed to stash changes", window, cx, |e, _, _| {
+            Some(e.to_string())
+        });
         cx.emit(DismissEvent);
     }
 }
@@ -1255,8 +1190,7 @@ impl Render for StashRenameModal {
                     .gap_1p5()
                     .child(Icon::new(IconName::Pencil).size(IconSize::XSmall))
                     .child(
-                        Headline::new(format!("Rename {}", stash_ref))
-                            .size(HeadlineSize::XSmall),
+                        Headline::new(format!("Rename {}", stash_ref)).size(HeadlineSize::XSmall),
                     ),
             )
             .child(
@@ -1319,12 +1253,9 @@ impl StashRenameModal {
             .await??;
             anyhow::Ok(())
         })
-        .detach_and_prompt_err(
-            "Failed to rename stash",
-            window,
-            cx,
-            |e, _, _| Some(e.to_string()),
-        );
+        .detach_and_prompt_err("Failed to rename stash", window, cx, |e, _, _| {
+            Some(e.to_string())
+        });
         cx.emit(DismissEvent);
     }
 }

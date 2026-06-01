@@ -87,14 +87,11 @@ impl CommitContainsPanel {
             &self.tags[..]
         };
 
-        let mut row = h_flex()
-            .flex_wrap()
-            .gap_1()
-            .child(
-                Label::new("Contains")
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            );
+        let mut row = h_flex().flex_wrap().gap_1().child(
+            Label::new("Contains")
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+        );
 
         for (ix, branch) in visible_branches.iter().enumerate() {
             row = row.child(chip(
@@ -111,7 +108,10 @@ impl CommitContainsPanel {
 
         if total > COLLAPSE_THRESHOLD {
             let label = if collapsed {
-                format!("+{} more", total - visible_branches.len() - visible_tags.len())
+                format!(
+                    "+{} more",
+                    total - visible_branches.len() - visible_tags.len()
+                )
             } else {
                 "Show less".to_string()
             };

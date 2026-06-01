@@ -13,8 +13,8 @@ use crate::coordinator::WorkspaceEventCoordinator;
 use crate::dto::{SeqAck, SessionIdParam, SolutionIdParam};
 
 pub(crate) fn open_solution_impl(cx: &mut App, id: &SolutionId) -> Result<u64> {
-    let store = SolutionStore::try_global(cx)
-        .ok_or_else(|| anyhow!("SolutionStore not initialised"))?;
+    let store =
+        SolutionStore::try_global(cx).ok_or_else(|| anyhow!("SolutionStore not initialised"))?;
     let coord = WorkspaceEventCoordinator::global(cx);
 
     let was_open = store.read(cx).is_open(id);
@@ -70,8 +70,8 @@ pub(crate) fn open_solution_impl(cx: &mut App, id: &SolutionId) -> Result<u64> {
 }
 
 pub(crate) fn close_solution_impl(cx: &mut App, id: &SolutionId) -> Result<u64> {
-    let store = SolutionStore::try_global(cx)
-        .ok_or_else(|| anyhow!("SolutionStore not initialised"))?;
+    let store =
+        SolutionStore::try_global(cx).ok_or_else(|| anyhow!("SolutionStore not initialised"))?;
     let coord = WorkspaceEventCoordinator::global(cx);
 
     let was_open = store.read(cx).is_open(id);

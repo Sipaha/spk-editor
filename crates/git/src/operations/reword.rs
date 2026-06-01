@@ -17,16 +17,10 @@ pub struct RewordOp {
 }
 
 impl RewordOp {
-    pub async fn run(
-        self,
-        repo_path: &Path,
-        callbacks: RebaseCallbacks,
-    ) -> Result<RebaseHandle> {
+    pub async fn run(self, repo_path: &Path, callbacks: RebaseCallbacks) -> Result<RebaseHandle> {
         let RewordOp { sha, new_message } = self;
         if is_merge_commit(repo_path, &sha)? {
-            bail!(
-                "reword of merge commit {sha} requires --rebase-merges; not yet supported"
-            );
+            bail!("reword of merge commit {sha} requires --rebase-merges; not yet supported");
         }
         let parent = format!("{sha}^");
         let base_sha = rev_parse(repo_path, &parent)?;

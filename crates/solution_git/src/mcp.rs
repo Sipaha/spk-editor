@@ -112,10 +112,7 @@ impl AggregatedLogToolInput {
         }
 
         let paths: Vec<String> = self.filters.paths.clone();
-        let limit = self
-            .limit
-            .unwrap_or(DEFAULT_LIMIT)
-            .clamp(1, MAX_LIMIT);
+        let limit = self.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
         let members = self
             .members
             .map(|m| m.into_iter().map(SharedString::from).collect());
@@ -278,9 +275,7 @@ impl McpServerTool for BranchProtectionCheckTool {
         } else if let Some(member_id) = input.member_id.clone() {
             let solution_id = input.solution_id;
             cx.update(|cx| resolve_member_path(cx, solution_id.as_deref(), &member_id))
-                .ok_or_else(|| {
-                    anyhow!("member '{member_id}' not found in the active Solution")
-                })?
+                .ok_or_else(|| anyhow!("member '{member_id}' not found in the active Solution"))?
         } else {
             return Err(anyhow!("either repo_path or member_id is required"));
         };

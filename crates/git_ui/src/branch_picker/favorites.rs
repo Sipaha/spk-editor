@@ -119,9 +119,9 @@ pub mod test_override {
 }
 
 mod persistence {
+    use anyhow::Result;
     #[cfg(not(any(test, feature = "test-support")))]
     use anyhow::anyhow;
-    use anyhow::Result;
     use db::{
         query,
         sqlez::{domain::Domain, thread_safe_connection::ThreadSafeConnection},
@@ -170,17 +170,13 @@ mod persistence {
         use parking_lot::Mutex;
         use std::collections::HashMap;
         use std::thread::ThreadId;
-        static REGISTRY: OnceLock<Mutex<HashMap<ThreadId, BranchFavoritesDb>>> =
-            OnceLock::new();
+        static REGISTRY: OnceLock<Mutex<HashMap<ThreadId, BranchFavoritesDb>>> = OnceLock::new();
         let registry = REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
         let mut guard = registry.lock();
         if let Some(existing) = guard.get(&std::thread::current().id()) {
             return existing.clone();
         }
-        let name = format!(
-            "branch_favorites_test_db_{}",
-            uuid::Uuid::new_v4().simple()
-        );
+        let name = format!("branch_favorites_test_db_{}", uuid::Uuid::new_v4().simple());
         let leaked: &'static str = Box::leak(name.into_boxed_str());
         let db = gpui::block_on(BranchFavoritesDb::open_test_db(leaked));
         guard.insert(std::thread::current().id(), db.clone());

@@ -487,8 +487,13 @@ pub enum RepositoryEvent {
     TagListChanged,
     StashEntriesChanged,
     GitWorktreeListChanged,
-    PendingOpsChanged { pending_ops: SumTree<PendingOps> },
-    GraphEvent((LogSource, LogOrder, Vec<String>, Vec<String>), GitGraphEvent),
+    PendingOpsChanged {
+        pending_ops: SumTree<PendingOps>,
+    },
+    GraphEvent(
+        (LogSource, LogOrder, Vec<String>, Vec<String>),
+        GitGraphEvent,
+    ),
 }
 
 #[derive(Clone, Debug)]
@@ -4964,10 +4969,7 @@ impl Repository {
 
     /// Tags that contain the given commit. Drives the S-DET "Contains"
     /// panel. Returns an empty list for collab repos for now.
-    pub fn tags_containing(
-        &mut self,
-        sha: String,
-    ) -> oneshot::Receiver<Result<Vec<SharedString>>> {
+    pub fn tags_containing(&mut self, sha: String) -> oneshot::Receiver<Result<Vec<SharedString>>> {
         self.send_job(None, move |git_repo, _cx| async move {
             match git_repo {
                 RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
@@ -4994,7 +4996,9 @@ impl Repository {
         self.send_job(None, move |git_repo, cx| async move {
             match git_repo {
                 RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
-                    backend.load_commit_against_parent(commit, parent_index, cx).await
+                    backend
+                        .load_commit_against_parent(commit, parent_index, cx)
+                        .await
                 }
                 RepositoryState::Remote(RemoteRepositoryState {
                     client, project_id, ..
@@ -6137,9 +6141,9 @@ impl Repository {
                     }
                     result
                 }
-                RepositoryState::Remote(_) => {
-                    Err(anyhow::anyhow!("stash_push not supported on remote repository"))
-                }
+                RepositoryState::Remote(_) => Err(anyhow::anyhow!(
+                    "stash_push not supported on remote repository"
+                )),
             }
         })
     }
@@ -7321,11 +7325,7 @@ impl Repository {
 
     /// S-CTM "New Branch from Here…" — create `name` pointing at `sha`
     /// without checking it out. Errors if the branch already exists.
-    pub fn branch_at_sha(
-        &mut self,
-        name: String,
-        sha: String,
-    ) -> oneshot::Receiver<Result<()>> {
+    pub fn branch_at_sha(&mut self, name: String, sha: String) -> oneshot::Receiver<Result<()>> {
         self.send_job(
             Some(format!("git branch {name} {sha}").into()),
             move |repo, _cx| async move {
@@ -7333,9 +7333,9 @@ impl Repository {
                     RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
                         backend.branch_at_sha(name, sha).await
                     }
-                    RepositoryState::Remote(_) => {
-                        Err(anyhow!("branch_at_sha is not supported for remote projects"))
-                    }
+                    RepositoryState::Remote(_) => Err(anyhow!(
+                        "branch_at_sha is not supported for remote projects"
+                    )),
                 }
             },
         )
@@ -7493,11 +7493,7 @@ impl Repository {
     }
 
     /// S-BRP "Push Tag" — `git push <remote> <tag>`.
-    pub fn push_tag(
-        &mut self,
-        remote: String,
-        tag: String,
-    ) -> oneshot::Receiver<Result<()>> {
+    pub fn push_tag(&mut self, remote: String, tag: String) -> oneshot::Receiver<Result<()>> {
         self.send_job(
             Some(format!("git push {remote} {tag}").into()),
             move |repo, _cx| async move {

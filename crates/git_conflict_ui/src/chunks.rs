@@ -65,18 +65,15 @@ pub fn extract_conflict_chunks(text: &str) -> Vec<ConflictChunk> {
                     Some(end) => end,
                     None => break,
                 };
-                let base_text = String::from_utf8_lossy(
-                    &bytes[after_base_marker_line..separator],
-                )
-                .into_owned();
+                let base_text =
+                    String::from_utf8_lossy(&bytes[after_base_marker_line..separator]).into_owned();
                 (base_off, Some(base_text))
             }
             _ => (separator, None),
         };
 
         let ours = String::from_utf8_lossy(&bytes[after_start_marker_line..ours_end]).into_owned();
-        let theirs =
-            String::from_utf8_lossy(&bytes[after_separator_line..end_marker]).into_owned();
+        let theirs = String::from_utf8_lossy(&bytes[after_separator_line..end_marker]).into_owned();
 
         chunks.push(ConflictChunk {
             range: start_offset..after_end_marker_line,
@@ -118,7 +115,11 @@ fn end_of_line(bytes: &[u8], from: usize) -> Option<usize> {
         }
         i += 1;
     }
-    if from < bytes.len() { Some(bytes.len()) } else { None }
+    if from < bytes.len() {
+        Some(bytes.len())
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

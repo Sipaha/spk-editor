@@ -167,10 +167,7 @@ pub async fn list_conflicts_async(work_dir: &Path) -> Result<Vec<ConflictedFile>
 /// read from `work_dir.join(path)`; missing working file is an error
 /// because the resolver only opens for files Git has placed in the working
 /// tree.
-pub async fn load_three_way_async(
-    work_dir: &Path,
-    path: &RepoPath,
-) -> Result<ThreeWayContent> {
+pub async fn load_three_way_async(work_dir: &Path, path: &RepoPath) -> Result<ThreeWayContent> {
     let path_str = path.as_std_path().to_string_lossy().into_owned();
 
     let base = git_show_text(work_dir, 1, &path_str).await;

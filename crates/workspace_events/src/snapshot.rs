@@ -17,7 +17,12 @@ pub(crate) fn build_snapshot(cx: &App) -> WorkspaceSnapshot {
     // that didn't wire it), return an empty snapshot — never panic.
     let solution_store = match solutions::SolutionStore::try_global(cx) {
         Some(s) => s,
-        None => return WorkspaceSnapshot { seq, solutions: Vec::new() },
+        None => {
+            return WorkspaceSnapshot {
+                seq,
+                solutions: Vec::new(),
+            };
+        }
     };
 
     let agent_store = solution_agent::store::SolutionAgentStore::try_global(cx);

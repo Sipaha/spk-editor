@@ -13,11 +13,7 @@ pub struct FixupOp {
 }
 
 impl FixupOp {
-    pub async fn run(
-        self,
-        repo_path: &Path,
-        callbacks: RebaseCallbacks,
-    ) -> Result<RebaseHandle> {
+    pub async fn run(self, repo_path: &Path, callbacks: RebaseCallbacks) -> Result<RebaseHandle> {
         let FixupOp { shas } = self;
         if shas.is_empty() {
             bail!("fixup: no commits supplied");
@@ -35,7 +31,8 @@ impl FixupOp {
             .first()
             .ok_or_else(|| anyhow!("fixup: no commits"))?
             .clone();
-        let mut squash_targets: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut squash_targets: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for s in shas.iter().skip(1) {
             squash_targets.insert(s.to_lowercase());
         }
@@ -55,15 +52,15 @@ impl FixupOp {
             if squash_targets.iter().any(|s| shas_equal(&commit, s)) {
                 builder = builder.fixup(commit);
                 emitted_any_target = true;
-            } else if shas
-                .iter()
-                .skip(1)
-                .any(|s| shas_equal(&commit, s))
-            {
+            } else if shas.iter().skip(1).any(|s| shas_equal(&commit, s)) {
                 // already covered above; redundancy guard
                 builder = builder.fixup(commit);
                 emitted_any_target = true;
-            } else if shas.iter().skip(1).any(|s| s.to_lowercase() == commit.to_lowercase()) {
+            } else if shas
+                .iter()
+                .skip(1)
+                .any(|s| s.to_lowercase() == commit.to_lowercase())
+            {
                 builder = builder.fixup(commit);
                 emitted_any_target = true;
             } else {

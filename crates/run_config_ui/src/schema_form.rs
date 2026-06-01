@@ -1,6 +1,8 @@
 use collections::HashMap;
 use editor::Editor;
-use gpui::{App, Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled, Window};
+use gpui::{
+    App, Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled, Window,
+};
 use schemars::Schema;
 use serde_json::Value;
 use ui::{Checkbox, Label, LabelSize, ToggleState, prelude::*};
@@ -49,8 +51,7 @@ impl SchemaForm {
                     }
                 } else {
                     let text = initial_text(&kind, current_value);
-                    let is_multiline =
-                        matches!(kind, FieldKind::StringArray | FieldKind::RawJson);
+                    let is_multiline = matches!(kind, FieldKind::StringArray | FieldKind::RawJson);
                     let editor = cx.new(|cx| {
                         let mut editor = if is_multiline {
                             Editor::auto_height(2, 8, window, cx)
@@ -151,9 +152,7 @@ impl Render for SchemaForm {
 /// Inspect the top-level object schema's `properties` and return `(property_name, kind)`
 /// pairs. Returns an empty vec if the schema is not an object or has no properties.
 pub fn field_kinds(schema: &Schema) -> Vec<(String, FieldKind)> {
-    let properties = schema
-        .get("properties")
-        .and_then(|value| value.as_object());
+    let properties = schema.get("properties").and_then(|value| value.as_object());
 
     let Some(properties) = properties else {
         return Vec::new();
@@ -180,10 +179,7 @@ fn classify_property(property: &Value) -> FieldKind {
     // "type" can be a string ("string") or an array (["string", "null"]).
     let types: Vec<&str> = match type_value {
         Value::String(single) => vec![single.as_str()],
-        Value::Array(array) => array
-            .iter()
-            .filter_map(|item| item.as_str())
-            .collect(),
+        Value::Array(array) => array.iter().filter_map(|item| item.as_str()).collect(),
         _ => return FieldKind::RawJson,
     };
 
@@ -223,9 +219,7 @@ pub fn initial_text(kind: &FieldKind, current: Option<&Value>) -> String {
             .and_then(|value| value.as_str())
             .unwrap_or_default()
             .to_string(),
-        FieldKind::Number => current
-            .map(|value| value.to_string())
-            .unwrap_or_default(),
+        FieldKind::Number => current.map(|value| value.to_string()).unwrap_or_default(),
         FieldKind::StringArray => current
             .and_then(|value| value.as_array())
             .map(|array| {
@@ -237,9 +231,7 @@ pub fn initial_text(kind: &FieldKind, current: Option<&Value>) -> String {
             })
             .unwrap_or_default(),
         FieldKind::RawJson => current
-            .map(|value| {
-                serde_json::to_string_pretty(value).unwrap_or_default()
-            })
+            .map(|value| serde_json::to_string_pretty(value).unwrap_or_default())
             .unwrap_or_default(),
         FieldKind::Bool => String::new(),
     }
@@ -293,8 +285,7 @@ pub fn assemble(
             }
             FieldKind::RawJson => {
                 let text = texts.get(name).map(String::as_str).unwrap_or_default();
-                serde_json::from_str(text)
-                    .unwrap_or_else(|_| Value::String(text.to_string()))
+                serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_string()))
             }
         };
         map.insert(name.clone(), value);
@@ -326,7 +317,12 @@ mod tests {
     fn detects_field_kinds() {
         let schema = schemars::schema_for!(T);
         let kinds = field_kinds(&schema);
-        let by_name = |n: &str| kinds.iter().find(|(key, _)| key == n).map(|(_, kind)| kind.clone());
+        let by_name = |n: &str| {
+            kinds
+                .iter()
+                .find(|(key, _)| key == n)
+                .map(|(_, kind)| kind.clone())
+        };
         assert_eq!(by_name("command"), Some(FieldKind::Text));
         assert_eq!(by_name("args"), Some(FieldKind::StringArray));
         assert_eq!(by_name("count"), Some(FieldKind::Number));
@@ -355,7 +351,13 @@ mod tests {
     #[test]
     fn round_trips_via_initial_text() {
         let current = serde_json::json!({ "command": "echo", "args": ["a", "b"] });
-        assert_eq!(initial_text(&FieldKind::Text, current.get("command")), "echo");
-        assert_eq!(initial_text(&FieldKind::StringArray, current.get("args")), "a\nb");
+        assert_eq!(
+            initial_text(&FieldKind::Text, current.get("command")),
+            "echo"
+        );
+        assert_eq!(
+            initial_text(&FieldKind::StringArray, current.get("args")),
+            "a\nb"
+        );
     }
 }

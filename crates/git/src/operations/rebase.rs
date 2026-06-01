@@ -43,7 +43,10 @@ enum TodoStep {
     Drop(String),
     Edit(String),
     /// `reword` is pre-translated to `pick` + `exec <helper> <token>`.
-    Reword { sha: String, token: String },
+    Reword {
+        sha: String,
+        token: String,
+    },
     Exec(String),
 }
 
@@ -213,11 +216,8 @@ impl RebaseHandle {
     }
 
     pub fn abort(&self) -> Result<()> {
-        let output = run_git_with_helper_env(
-            &self.repo_path,
-            &["rebase", "--abort"],
-            &self.session_id,
-        )?;
+        let output =
+            run_git_with_helper_env(&self.repo_path, &["rebase", "--abort"], &self.session_id)?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             self.set_state(RebaseState::Failed(stderr.clone()));
@@ -328,8 +328,8 @@ pub async fn run_rebase_with_op_name(
         bail!("External rebase in progress in this repository");
     }
 
-    let lock = repo_lock::acquire(&repo_path, op_name)
-        .map_err(|err| anyhow!("repo busy: {}", err))?;
+    let lock =
+        repo_lock::acquire(&repo_path, op_name).map_err(|err| anyhow!("repo busy: {}", err))?;
 
     let branch = current_branch(&repo_path)?;
     let backup_ref = backup::create(&repo_path, &branch, op_name)?;
@@ -497,8 +497,8 @@ fn rebase_already_in_progress(repo_path: &Path) -> Result<bool> {
 
 fn dot_git_dir(repo_path: &Path) -> Result<PathBuf> {
     let candidate = repo_path.join(crate::DOT_GIT);
-    let metadata = std::fs::metadata(&candidate)
-        .with_context(|| format!("stat {}", candidate.display()))?;
+    let metadata =
+        std::fs::metadata(&candidate).with_context(|| format!("stat {}", candidate.display()))?;
     if metadata.is_dir() {
         return Ok(candidate);
     }
@@ -669,9 +669,9 @@ fn current_exe_path() -> Result<PathBuf> {
 /// single quotes with embedded `'` escaped as `'\''`.
 fn shell_quote(input: &str) -> String {
     if !input.is_empty()
-        && input
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b'+' | b':'))
+        && input.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b'+' | b':')
+        })
     {
         return input.to_string();
     }
@@ -793,7 +793,11 @@ mod tests {
             .strip_prefix("exec /path/spk-editor --git-message-set ")
             .expect("exec prefix");
         assert_eq!(token.len(), 32);
-        assert!(token.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
+        assert!(
+            token
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+        );
         assert_eq!(
             todo.messages.get(token).map(|s| s.as_str()),
             Some("new message")
@@ -832,8 +836,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::ffi::OsStrExt as _;
-            let path_c =
-                std::ffi::CString::new(stale.as_os_str().as_bytes()).expect("cstring");
+            let path_c = std::ffi::CString::new(stale.as_os_str().as_bytes()).expect("cstring");
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("epoch");
@@ -844,15 +847,14 @@ mod tests {
                 tv_nsec: 0,
             };
             let times = [ts, ts];
-            let ret = unsafe {
-                libc::utimensat(
-                    libc::AT_FDCWD,
-                    path_c.as_ptr(),
-                    times.as_ptr(),
-                    0,
-                )
-            };
-            assert_eq!(ret, 0, "utimensat failed: {}", std::io::Error::last_os_error());
+            let ret =
+                unsafe { libc::utimensat(libc::AT_FDCWD, path_c.as_ptr(), times.as_ptr(), 0) };
+            assert_eq!(
+                ret,
+                0,
+                "utimensat failed: {}",
+                std::io::Error::last_os_error()
+            );
         }
         cleanup_orphan_sessions_in(&helper_root);
         #[cfg(unix)]

@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use collections::{HashMap, HashSet};
+use console_panel::ConsolePanel;
 use dap::client::SessionId;
 use gpui::{Action as _, Context, Entity, EventEmitter, Subscription, Task, WeakEntity, Window};
 use project::Project;
@@ -13,7 +14,6 @@ use run_config::{
     RunResolveContext,
 };
 use terminal::Terminal;
-use console_panel::ConsolePanel;
 use workspace::Workspace;
 
 /// How long a debug run may sit in `active` with no started session before we
@@ -106,7 +106,11 @@ impl RunController {
 
         let mut selected = None;
         if let Some(store) = RunConfigStore::try_global(cx) {
-            selected = store.read(cx).configs().first().map(|config| config.id.clone());
+            selected = store
+                .read(cx)
+                .configs()
+                .first()
+                .map(|config| config.id.clone());
             subscriptions.push(cx.subscribe(&store, Self::on_store_event));
         }
 
@@ -156,7 +160,11 @@ impl RunController {
                     cx.emit(RunControllerEvent::SelectedChanged);
                 }
                 if self.selected.is_none() {
-                    let first = store.read(cx).configs().first().map(|config| config.id.clone());
+                    let first = store
+                        .read(cx)
+                        .configs()
+                        .first()
+                        .map(|config| config.id.clone());
                     if let Some(first) = first {
                         self.selected = Some(first);
                         cx.emit(RunControllerEvent::SelectedChanged);
@@ -293,7 +301,10 @@ impl RunController {
             return;
         };
         let Some(provider) = store.read(cx).provider(&config.provider_type) else {
-            self.notify_error(format!("No provider for type `{}`", config.provider_type), cx);
+            self.notify_error(
+                format!("No provider for type `{}`", config.provider_type),
+                cx,
+            );
             return;
         };
         if !config.executors.contains(&executor) {
@@ -368,65 +379,110 @@ impl RunController {
                     return;
                 };
 
-                let poller = if let Some(terminal_panel) =
-                    workspace.read(cx).panel::<ConsolePanel>(cx)
-                {
-                    // Real path: the terminal panel hands back the task
-                    // terminal so Stop can kill it.
-                    let spawn_task = terminal_panel.update(cx, |terminal_panel, cx| {
-                        terminal_panel.spawn_task(&spawn, window, cx)
-                    });
-                    let poller_config_id = config_id.clone();
-                    cx.spawn(async move |this, cx| {
-                        match spawn_task.await {
-                            Ok(terminal) => {
-                                // If Stop was pressed while the handle was in
-                                // flight, kill the terminal now and don't track
-                                // it (the `ActiveRun` was already removed by
-                                // `stop()`).
-                                let killed = this
-                                    .update(cx, |this, cx| {
-                                        if !this
-                                            .terminal_launches_pending_kill
-                                            .remove(&launch_token)
-                                        {
-                                            return false;
-                                        }
-                                        if let Some(terminal) = terminal.upgrade() {
-                                            terminal.update(cx, |terminal, _| {
-                                                terminal.kill_active_task()
-                                            });
-                                        }
-                                        true
-                                    })
-                                    .unwrap_or(false);
-                                if killed {
-                                    return;
-                                }
-                                this.update(cx, |this, _| {
-                                    if let Some(ActiveRun {
-                                        kind: ActiveRunKind::Terminal { terminal: slot, .. },
-                                        ..
-                                    }) = this.active.get_mut(&poller_config_id)
-                                    {
-                                        *slot = Some(terminal.clone());
+                let poller =
+                    if let Some(terminal_panel) = workspace.read(cx).panel::<ConsolePanel>(cx) {
+                        // Real path: the terminal panel hands back the task
+                        // terminal so Stop can kill it.
+                        let spawn_task = terminal_panel.update(cx, |terminal_panel, cx| {
+                            terminal_panel.spawn_task(&spawn, window, cx)
+                        });
+                        let poller_config_id = config_id.clone();
+                        cx.spawn(async move |this, cx| {
+                            match spawn_task.await {
+                                Ok(terminal) => {
+                                    // If Stop was pressed while the handle was in
+                                    // flight, kill the terminal now and don't track
+                                    // it (the `ActiveRun` was already removed by
+                                    // `stop()`).
+                                    let killed = this
+                                        .update(cx, |this, cx| {
+                                            if !this
+                                                .terminal_launches_pending_kill
+                                                .remove(&launch_token)
+                                            {
+                                                return false;
+                                            }
+                                            if let Some(terminal) = terminal.upgrade() {
+                                                terminal.update(cx, |terminal, _| {
+                                                    terminal.kill_active_task()
+                                                });
+                                            }
+                                            true
+                                        })
+                                        .unwrap_or(false);
+                                    if killed {
+                                        return;
                                     }
-                                })
-                                .ok();
-                                let completion = terminal
-                                    .read_with(cx, |terminal, cx| {
-                                        terminal.wait_for_completed_task(cx)
+                                    this.update(cx, |this, _| {
+                                        if let Some(ActiveRun {
+                                            kind: ActiveRunKind::Terminal { terminal: slot, .. },
+                                            ..
+                                        }) = this.active.get_mut(&poller_config_id)
+                                        {
+                                            *slot = Some(terminal.clone());
+                                        }
                                     })
                                     .ok();
-                                if let Some(completion) = completion {
-                                    completion.await;
+                                    let completion = terminal
+                                        .read_with(cx, |terminal, cx| {
+                                            terminal.wait_for_completed_task(cx)
+                                        })
+                                        .ok();
+                                    if let Some(completion) = completion {
+                                        completion.await;
+                                    }
+                                }
+                                Err(err) => {
+                                    this.update(cx, |this, _| {
+                                        this.terminal_launches_pending_kill.remove(&launch_token);
+                                    })
+                                    .ok();
+                                    log::warn!(
+                                        "run_config: terminal task `{}` failed to launch: {err:#}",
+                                        poller_config_id.as_str()
+                                    );
+                                    this.update(cx, |this, cx| {
+                                        this.notify_error(
+                                            format!("Failed to launch run configuration: {err:#}"),
+                                            cx,
+                                        );
+                                    })
+                                    .ok();
                                 }
                             }
-                            Err(err) => {
-                                this.update(cx, |this, _| {
-                                    this.terminal_launches_pending_kill.remove(&launch_token);
-                                })
-                                .ok();
+                            this.update(cx, |this, cx| {
+                                if this.active.remove(&poller_config_id).is_some() {
+                                    cx.emit(RunControllerEvent::ActiveRunsChanged);
+                                    this.publish_running(cx);
+                                    cx.notify();
+                                }
+                            })
+                            .ok();
+                        })
+                    } else {
+                        // Fallback (no terminal panel, e.g. headless tests): we get
+                        // only an exit-status future, no killable handle.
+                        let spawn_task = workspace.update(cx, |workspace, cx| {
+                            workspace.spawn_in_terminal(spawn, window, cx)
+                        });
+                        let poller_config_id = config_id.clone();
+                        cx.spawn(async move |this, cx| {
+                            // `Some(_)` => the process actually exited or failed to
+                            // launch; `None` => the spawn was cancelled / no
+                            // terminal provider — leave the run tracked so the user
+                            // can Stop it explicitly.
+                            let result = spawn_task.await;
+                            // Drain any pending-kill token recorded by `stop()`;
+                            // there's no killable handle on this path, so this just
+                            // keeps the set from growing.
+                            this.update(cx, |this, _| {
+                                this.terminal_launches_pending_kill.remove(&launch_token);
+                            })
+                            .ok();
+                            let Some(result) = result else {
+                                return;
+                            };
+                            if let Err(err) = &result {
                                 log::warn!(
                                     "run_config: terminal task `{}` failed to launch: {err:#}",
                                     poller_config_id.as_str()
@@ -439,62 +495,16 @@ impl RunController {
                                 })
                                 .ok();
                             }
-                        }
-                        this.update(cx, |this, cx| {
-                            if this.active.remove(&poller_config_id).is_some() {
-                                cx.emit(RunControllerEvent::ActiveRunsChanged);
-                                this.publish_running(cx);
-                                cx.notify();
-                            }
-                        })
-                        .ok();
-                    })
-                } else {
-                    // Fallback (no terminal panel, e.g. headless tests): we get
-                    // only an exit-status future, no killable handle.
-                    let spawn_task = workspace.update(cx, |workspace, cx| {
-                        workspace.spawn_in_terminal(spawn, window, cx)
-                    });
-                    let poller_config_id = config_id.clone();
-                    cx.spawn(async move |this, cx| {
-                        // `Some(_)` => the process actually exited or failed to
-                        // launch; `None` => the spawn was cancelled / no
-                        // terminal provider — leave the run tracked so the user
-                        // can Stop it explicitly.
-                        let result = spawn_task.await;
-                        // Drain any pending-kill token recorded by `stop()`;
-                        // there's no killable handle on this path, so this just
-                        // keeps the set from growing.
-                        this.update(cx, |this, _| {
-                            this.terminal_launches_pending_kill.remove(&launch_token);
-                        })
-                        .ok();
-                        let Some(result) = result else {
-                            return;
-                        };
-                        if let Err(err) = &result {
-                            log::warn!(
-                                "run_config: terminal task `{}` failed to launch: {err:#}",
-                                poller_config_id.as_str()
-                            );
                             this.update(cx, |this, cx| {
-                                this.notify_error(
-                                    format!("Failed to launch run configuration: {err:#}"),
-                                    cx,
-                                );
+                                if this.active.remove(&poller_config_id).is_some() {
+                                    cx.emit(RunControllerEvent::ActiveRunsChanged);
+                                    this.publish_running(cx);
+                                    cx.notify();
+                                }
                             })
                             .ok();
-                        }
-                        this.update(cx, |this, cx| {
-                            if this.active.remove(&poller_config_id).is_some() {
-                                cx.emit(RunControllerEvent::ActiveRunsChanged);
-                                this.publish_running(cx);
-                                cx.notify();
-                            }
                         })
-                        .ok();
-                    })
-                };
+                    };
 
                 self.active.insert(
                     config_id.clone(),
@@ -634,7 +644,9 @@ impl RunController {
                 if let Some(session_id) = session_id {
                     let dap_store = self.project.read(cx).dap_store();
                     dap_store
-                        .update(cx, |dap_store, cx| dap_store.shutdown_session(session_id, cx))
+                        .update(cx, |dap_store, cx| {
+                            dap_store.shutdown_session(session_id, cx)
+                        })
                         .detach_and_log_err(cx);
                 }
             }
@@ -849,8 +861,9 @@ mod tests {
     #[gpui::test]
     async fn select_next_cycles(cx: &mut TestAppContext) {
         let workspace = setup(cx, &["a", "b"]).await;
-        let controller = workspace
-            .update(cx, |workspace, cx| cx.new(|cx| RunController::new(workspace, cx)));
+        let controller = workspace.update(cx, |workspace, cx| {
+            cx.new(|cx| RunController::new(workspace, cx))
+        });
         cx.run_until_parked();
 
         controller.read_with(cx, |controller, _| {
@@ -863,12 +876,18 @@ mod tests {
 
         controller.update(cx, |controller, cx| controller.select_next(cx));
         controller.read_with(cx, |controller, _| {
-            assert_eq!(controller.selected_id().map(RunConfigId::as_str), Some("mock:b"));
+            assert_eq!(
+                controller.selected_id().map(RunConfigId::as_str),
+                Some("mock:b")
+            );
         });
 
         controller.update(cx, |controller, cx| controller.select_next(cx));
         controller.read_with(cx, |controller, _| {
-            assert_eq!(controller.selected_id().map(RunConfigId::as_str), Some("mock:a"));
+            assert_eq!(
+                controller.selected_id().map(RunConfigId::as_str),
+                Some("mock:a")
+            );
         });
     }
 
@@ -878,8 +897,9 @@ mod tests {
         workspace.update(cx, |workspace, _| {
             workspace.set_terminal_provider(PendingTerminalProvider)
         });
-        let controller = workspace
-            .update(cx, |workspace, cx| cx.new(|cx| RunController::new(workspace, cx)));
+        let controller = workspace.update(cx, |workspace, cx| {
+            cx.new(|cx| RunController::new(workspace, cx))
+        });
         cx.run_until_parked();
 
         let id = RunConfigId::from_raw("mock:a");
@@ -897,12 +917,18 @@ mod tests {
         cx.run_until_parked();
 
         controller.read_with(cx, |controller, _| {
-            assert!(controller.is_running(&id), "run should be tracked as active");
+            assert!(
+                controller.is_running(&id),
+                "run should be tracked as active"
+            );
         });
 
         controller.update(cx, |controller, cx| controller.stop(&id, cx));
         controller.read_with(cx, |controller, _| {
-            assert!(!controller.is_running(&id), "stop should clear the active run");
+            assert!(
+                !controller.is_running(&id),
+                "stop should clear the active run"
+            );
         });
     }
 
@@ -917,8 +943,9 @@ mod tests {
         workspace.update(cx, |workspace, _| {
             workspace.set_terminal_provider(PendingTerminalProvider)
         });
-        let controller = workspace
-            .update(cx, |workspace, cx| cx.new(|cx| RunController::new(workspace, cx)));
+        let controller = workspace.update(cx, |workspace, cx| {
+            cx.new(|cx| RunController::new(workspace, cx))
+        });
         cx.run_until_parked();
 
         let id = RunConfigId::from_raw("mock:a");
@@ -962,8 +989,9 @@ mod tests {
         let workspace = setup(cx, &[]).await;
         let store = cx.update(|cx| RunConfigStore::global(cx));
         store.update(cx, |store, cx| store.upsert(mock_debug_config("d"), cx));
-        let controller = workspace
-            .update(cx, |workspace, cx| cx.new(|cx| RunController::new(workspace, cx)));
+        let controller = workspace.update(cx, |workspace, cx| {
+            cx.new(|cx| RunController::new(workspace, cx))
+        });
         cx.run_until_parked();
 
         let id = RunConfigId::from_raw("mock_debug:d");
@@ -979,7 +1007,10 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
         controller.read_with(cx, |controller, _| {
-            assert!(controller.is_running(&id), "debug run is tracked while it launches");
+            assert!(
+                controller.is_running(&id),
+                "debug run is tracked while it launches"
+            );
         });
 
         cx.executor()
@@ -1039,10 +1070,18 @@ mod tests {
                 kind: ActiveRunKind::Debug { session_id: None },
             },
         );
-        assert!(!debug_launch_timed_out(&active, &VecDeque::new(), &debug_id));
+        assert!(!debug_launch_timed_out(
+            &active,
+            &VecDeque::new(),
+            &debug_id
+        ));
 
         // Not even tracked any more => not timed out.
-        assert!(!debug_launch_timed_out(&HashMap::default(), &pending, &debug_id));
+        assert!(!debug_launch_timed_out(
+            &HashMap::default(),
+            &pending,
+            &debug_id
+        ));
 
         // A terminal run with the same id shape is never "timed out" by this.
         let mut terminal_active: HashMap<RunConfigId, ActiveRun> = HashMap::default();
@@ -1073,8 +1112,9 @@ mod tests {
         workspace.update(cx, |workspace, _| {
             workspace.set_terminal_provider(PendingTerminalProvider)
         });
-        let controller = workspace
-            .update(cx, |workspace, cx| cx.new(|cx| RunController::new(workspace, cx)));
+        let controller = workspace.update(cx, |workspace, cx| {
+            cx.new(|cx| RunController::new(workspace, cx))
+        });
         cx.run_until_parked();
 
         let id = RunConfigId::from_raw("mock:a");
@@ -1092,7 +1132,10 @@ mod tests {
 
         let store = cx.update(|cx| RunConfigStore::global(cx));
         store.read_with(cx, |store, _| {
-            assert!(store.is_running(&id), "run is published to the global store");
+            assert!(
+                store.is_running(&id),
+                "run is published to the global store"
+            );
         });
 
         drop(controller);
@@ -1125,10 +1168,16 @@ mod tests {
         // Session 1 started: it's new only relative to `alpha`'s snapshot, so
         // `alpha` claims it (even though `beta` is also pending, and even
         // though both share a label).
-        assert_eq!(claim_started_session(&mut pending, SessionId(1)), Some(alpha));
+        assert_eq!(
+            claim_started_session(&mut pending, SessionId(1)),
+            Some(alpha)
+        );
         // Session 2 started: now `beta` is the only pending launch, and 2 is
         // new relative to its snapshot, so `beta` claims it.
-        assert_eq!(claim_started_session(&mut pending, SessionId(2)), Some(beta));
+        assert_eq!(
+            claim_started_session(&mut pending, SessionId(2)),
+            Some(beta)
+        );
         assert!(pending.is_empty());
     }
 

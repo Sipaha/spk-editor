@@ -117,9 +117,7 @@ impl OpRunner {
             match backup::create(repo_path, branch, op_name) {
                 Ok(b) => backups.push(b),
                 Err(err) => {
-                    log::warn!(
-                        "git::operations: failed to back up {branch} for {op_name}: {err}"
-                    );
+                    log::warn!("git::operations: failed to back up {branch} for {op_name}: {err}");
                 }
             }
         }
@@ -156,7 +154,9 @@ impl OpRunner {
                     undo_registry::mark_failed(id).log_err();
                 }
                 if let Err(hook_err) = op.on_failure(repo_path, err) {
-                    log::warn!("git::operations: on_failure hook for {op_name} errored: {hook_err}");
+                    log::warn!(
+                        "git::operations: on_failure hook for {op_name} errored: {hook_err}"
+                    );
                 }
             }
         }
@@ -317,7 +317,18 @@ mod tests {
         git(dir.path(), &["init", "-q", "-b", "main"]);
         std::fs::write(dir.path().join("README.md"), "x").expect("write");
         git(dir.path(), &["add", "README.md"]);
-        git(dir.path(), &["-c", "user.name=T", "-c", "user.email=t@x", "commit", "-qm", "init"]);
+        git(
+            dir.path(),
+            &[
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@x",
+                "commit",
+                "-qm",
+                "init",
+            ],
+        );
         dir
     }
 

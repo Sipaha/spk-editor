@@ -8,12 +8,12 @@ use gpui::{
     Point, Render, Subscription, Task, WeakEntity, Window, anchored, deferred,
 };
 use settings::Settings as _;
+use solution_agent::SolutionSessionId;
 use solution_agent::claude_adapter::CLAUDE_ACP_AGENT_ID;
 use solution_agent::rename_session_modal::RenameSessionModal;
 use solution_agent::reopen_session_modal::{ReopenSessionModal, ReopenableSession};
 use solution_agent::session_view::SolutionSessionView;
 use solution_agent::store::SolutionAgentStore;
-use solution_agent::SolutionSessionId;
 use solutions::{SolutionId, SolutionStore};
 use std::path::PathBuf;
 use task::{RevealStrategy, RevealTarget, Shell, SpawnInTerminal, TaskId};
@@ -23,9 +23,8 @@ use terminal_view::terminal_panel::prepare_task_for_spawn;
 use ui::{ContextMenu, PopoverMenu, Tooltip, prelude::*};
 use util::ResultExt as _;
 use workspace::{
-    Item, WorkspaceDb,
+    Item, Workspace, WorkspaceDb,
     dock::{DockPosition, Panel, PanelEvent},
-    Workspace,
 };
 
 use crate::actions::{NewChat, NewTerminal, ToggleFocus};
@@ -41,10 +40,7 @@ const CONSOLE_PANEL_KEY: &str = "ConsolePanel";
 /// on its `Entity<Workspace>` — re-reading the workspace while a
 /// `workspace.register_action` handler holds `&mut Workspace` triggers
 /// GPUI's double-lease panic.
-pub fn active_solution_id_for_workspace(
-    workspace: &Workspace,
-    cx: &App,
-) -> Option<SolutionId> {
+pub fn active_solution_id_for_workspace(workspace: &Workspace, cx: &App) -> Option<SolutionId> {
     let store = SolutionStore::try_global(cx)?;
     let store = store.read(cx);
     let project = workspace.project().read(cx);
@@ -280,8 +276,9 @@ impl ConsolePanel {
                 .flatten();
             if let Some(solution_id) = solution_id {
                 let hydrate = cx.update(|_, cx| {
-                    SolutionAgentStore::global(cx)
-                        .update(cx, |store, cx| store.hydrate_all_for_solution(solution_id, cx))
+                    SolutionAgentStore::global(cx).update(cx, |store, cx| {
+                        store.hydrate_all_for_solution(solution_id, cx)
+                    })
                 });
                 if let Ok(task) = hydrate {
                     task.await.log_err();
@@ -305,9 +302,7 @@ impl ConsolePanel {
                         // `update` gives the closure `&mut TerminalProvider`,
                         // which sidesteps the `read(cx).method(cx)` borrow
                         // conflict on the outer `cx`.
-                        provider.update(cx, |provider, cx| {
-                            provider.new_tab(cwd_path, window, cx)
-                        })
+                        provider.update(cx, |provider, cx| provider.new_tab(cwd_path, window, cx))
                     });
                     match task {
                         Ok(task) => match task.await {
@@ -562,18 +557,15 @@ impl Focusable for ConsolePanel {
 
 impl Render for ConsolePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let menu_overlay = self
-            .tab_context_menu
-            .as_ref()
-            .map(|(menu, position, _)| {
-                deferred(
-                    anchored()
-                        .position(*position)
-                        .anchor(Anchor::TopLeft)
-                        .child(menu.clone()),
-                )
-                .with_priority(1)
-            });
+        let menu_overlay = self.tab_context_menu.as_ref().map(|(menu, position, _)| {
+            deferred(
+                anchored()
+                    .position(*position)
+                    .anchor(Anchor::TopLeft)
+                    .child(menu.clone()),
+            )
+            .with_priority(1)
+        });
         v_flex()
             .size_full()
             .key_context("ConsolePanel")
@@ -599,11 +591,13 @@ impl ConsolePanel {
             .overflow_x_scroll();
         for (ix, tab) in self.tabs.iter().enumerate() {
             let (icon, title): (IconName, SharedString) = match tab {
-                ConsoleTab::Terminal { view } => (
-                    IconName::Terminal,
-                    view.read(cx).tab_content_text(0, cx),
-                ),
-                ConsoleTab::Chat { view: _, session_id } => {
+                ConsoleTab::Terminal { view } => {
+                    (IconName::Terminal, view.read(cx).tab_content_text(0, cx))
+                }
+                ConsoleTab::Chat {
+                    view: _,
+                    session_id,
+                } => {
                     let title = SolutionAgentStore::global(cx)
                         .read_with(cx, |s, _| s.session(*session_id))
                         .map(|entity| entity.read(cx).title.clone())
@@ -676,9 +670,11 @@ impl ConsolePanel {
                 .drag_over::<DraggedConsoleTab>(|style, _dragged, _window, cx| {
                     style.bg(cx.theme().colors().drop_target_background)
                 })
-                .on_drop(cx.listener(move |this, dragged: &DraggedConsoleTab, _window, cx| {
-                    this.reorder_tab(dragged.ix, ix, cx);
-                }));
+                .on_drop(
+                    cx.listener(move |this, dragged: &DraggedConsoleTab, _window, cx| {
+                        this.reorder_tab(dragged.ix, ix, cx);
+                    }),
+                );
             strip = strip.child(tab_el);
         }
         strip.child(self.render_plus_popover(cx))
@@ -768,15 +764,17 @@ impl ConsolePanel {
                         // there's no active solution to reopen within.
                         let menu = {
                             let weak_self = weak_self.clone();
-                            menu.item(ui::ContextMenuEntry::new("Reopen Closed Chat…").disabled(!has_active_solution).handler(
-                                move |window, cx| {
-                                    if let Some(panel) = weak_self.upgrade() {
-                                        panel.update(cx, |panel, cx| {
-                                            panel.open_reopen_session_modal(window, cx);
-                                        });
-                                    }
-                                },
-                            ))
+                            menu.item(
+                                ui::ContextMenuEntry::new("Reopen Closed Chat…")
+                                    .disabled(!has_active_solution)
+                                    .handler(move |window, cx| {
+                                        if let Some(panel) = weak_self.upgrade() {
+                                            panel.update(cx, |panel, cx| {
+                                                panel.open_reopen_session_modal(window, cx);
+                                            });
+                                        }
+                                    }),
+                            )
                         };
                         menu.action("Spawn Task…", zed_actions::Spawn::modal().boxed_clone())
                     }))
@@ -829,8 +827,7 @@ impl ConsolePanel {
             .is_some_and(|item| item.downcast::<TerminalView>().is_some());
 
         if center_pane_has_focus && active_center_item_is_terminal {
-            let working_directory =
-                terminal_view::default_working_directory(workspace, cx);
+            let working_directory = terminal_view::default_working_directory(workspace, cx);
             let local = action.local;
             terminal_view::add_center_terminal(workspace, window, cx, move |project, cx| {
                 if local {
@@ -899,10 +896,11 @@ impl ConsolePanel {
                 view
             })?;
             this.update(cx, |this, cx| {
-                this.tabs.push(ConsoleTab::Terminal { view: terminal_view });
+                this.tabs.push(ConsoleTab::Terminal {
+                    view: terminal_view,
+                });
                 this.active_index = Some(this.tabs.len() - 1);
-                this.pending_terminals_to_add =
-                    this.pending_terminals_to_add.saturating_sub(1);
+                this.pending_terminals_to_add = this.pending_terminals_to_add.saturating_sub(1);
                 cx.notify();
                 this.persist(cx);
             })?;
@@ -1026,7 +1024,9 @@ impl ConsolePanel {
         cx.spawn_in(window, async move |this, cx| {
             let project = workspace.read_with(cx, |workspace, _| workspace.project().clone())?;
             let new_terminal = project
-                .update(cx, |project, cx| project.create_terminal_task(spawn_task, cx))
+                .update(cx, |project, cx| {
+                    project.create_terminal_task(spawn_task, cx)
+                })
                 .await?;
             terminal_to_replace.update_in(cx, |terminal_to_replace, window, cx| {
                 terminal_to_replace.set_terminal(new_terminal.clone(), window, cx);
@@ -1060,11 +1060,7 @@ impl ConsolePanel {
         })
     }
 
-    fn terminals_for_task(
-        &self,
-        label: &str,
-        cx: &App,
-    ) -> Vec<(usize, Entity<TerminalView>)> {
+    fn terminals_for_task(&self, label: &str, cx: &App) -> Vec<(usize, Entity<TerminalView>)> {
         self.tabs
             .iter()
             .enumerate()
@@ -1184,9 +1180,9 @@ impl ConsolePanel {
         session_id: SolutionSessionId,
         cx: &mut Context<Self>,
     ) {
-        let Some(ix) = self.tabs.iter().position(|tab| {
-            matches!(tab, ConsoleTab::Chat { session_id: sid, .. } if *sid == session_id)
-        }) else {
+        let Some(ix) = self.tabs.iter().position(
+            |tab| matches!(tab, ConsoleTab::Chat { session_id: sid, .. } if *sid == session_id),
+        ) else {
             return;
         };
         self.active_index = Some(ix);
@@ -1235,13 +1231,17 @@ impl ConsolePanel {
                             });
                         }
                     })
-                    .entry("Reveal CWD in Project Panel", None, move |window, cx| {
-                        if let Some(this) = weak_reveal.upgrade() {
-                            this.update(cx, |this, cx| {
-                                this.reveal_terminal_cwd(&view_reveal, window, cx);
-                            });
-                        }
-                    })
+                    .entry(
+                        "Reveal CWD in Project Panel",
+                        None,
+                        move |window, cx| {
+                            if let Some(this) = weak_reveal.upgrade() {
+                                this.update(cx, |this, cx| {
+                                    this.reveal_terminal_cwd(&view_reveal, window, cx);
+                                });
+                            }
+                        },
+                    )
                 })
             }
             ConsoleTab::Chat { session_id, .. } => {
@@ -1485,11 +1485,9 @@ impl ConsolePanel {
             }
             // Spawn the tab. `new_tab_from_existing` returns a Task that
             // resolves once the SessionSessionView is wired up.
-            let task = self
-                .chat_provider
-                .update(cx, |provider, cx| {
-                    provider.new_tab_from_existing(id, window, cx)
-                });
+            let task = self.chat_provider.update(cx, |provider, cx| {
+                provider.new_tab_from_existing(id, window, cx)
+            });
             cx.spawn(async move |this, cx| {
                 let view = task.await.log_err()?;
                 this.update(cx, |this, cx| {
@@ -1528,9 +1526,9 @@ impl ConsolePanel {
     /// [`session_id`]. Used by the external-mutation path to dedupe
     /// against tabs the user (or a previous handler) already opened.
     fn has_chat_tab_for(&self, session_id: SolutionSessionId) -> bool {
-        self.tabs.iter().any(|tab| {
-            matches!(tab, ConsoleTab::Chat { session_id: sid, .. } if *sid == session_id)
-        })
+        self.tabs.iter().any(
+            |tab| matches!(tab, ConsoleTab::Chat { session_id: sid, .. } if *sid == session_id),
+        )
     }
 
     /// Close the Chat tab (if any) hosting [`session_id`]. No-op when
@@ -1542,9 +1540,9 @@ impl ConsolePanel {
         session_id: SolutionSessionId,
         cx: &mut Context<Self>,
     ) {
-        let index = self.tabs.iter().position(|tab| {
-            matches!(tab, ConsoleTab::Chat { session_id: sid, .. } if *sid == session_id)
-        });
+        let index = self.tabs.iter().position(
+            |tab| matches!(tab, ConsoleTab::Chat { session_id: sid, .. } if *sid == session_id),
+        );
         if let Some(index) = index {
             self.close_tab(index, cx);
         }
@@ -1648,10 +1646,7 @@ mod tests {
     /// not by these unit tests.
     async fn bootstrap_panel(
         cx: &mut TestAppContext,
-    ) -> (
-        gpui::WindowHandle<Workspace>,
-        Entity<ConsolePanel>,
-    ) {
+    ) -> (gpui::WindowHandle<Workspace>, Entity<ConsolePanel>) {
         init_test(cx);
 
         let fs = FakeFs::new(cx.executor());
@@ -1665,20 +1660,17 @@ mod tests {
             let agent_store = SolutionAgentStore::global(cx);
             agent_store.update(cx, |s, _| {
                 s.register_agent_server(
-                    gpui::SharedString::from(
-                        solution_agent::claude_adapter::CLAUDE_ACP_AGENT_ID,
-                    ),
-                    std::rc::Rc::new(
-                        solution_agent::test_support::MockAgentServer::new(connect_count),
-                    ),
+                    gpui::SharedString::from(solution_agent::claude_adapter::CLAUDE_ACP_AGENT_ID),
+                    std::rc::Rc::new(solution_agent::test_support::MockAgentServer::new(
+                        connect_count,
+                    )),
                 );
             });
         });
 
         let store = cx.read(|cx| SolutionAgentStore::global(cx));
 
-        let window_handle =
-            cx.add_window(|window, cx| Workspace::test_new(project, window, cx));
+        let window_handle = cx.add_window(|window, cx| Workspace::test_new(project, window, cx));
 
         let panel = window_handle
             .update(cx, |workspace, window, cx| {
@@ -1717,12 +1709,11 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
 
-        panel
-            .read_with(cx, |p, _| {
-                assert_eq!(p.tabs.len(), 1, "one tab after one NewTerminal");
-                assert!(matches!(p.tabs[0], ConsoleTab::Terminal { .. }));
-                assert_eq!(p.active_index, Some(0));
-            });
+        panel.read_with(cx, |p, _| {
+            assert_eq!(p.tabs.len(), 1, "one tab after one NewTerminal");
+            assert!(matches!(p.tabs[0], ConsoleTab::Terminal { .. }));
+            assert_eq!(p.active_index, Some(0));
+        });
     }
 
     #[gpui::test]
@@ -1840,7 +1831,10 @@ mod tests {
             .unwrap();
 
         panel.read_with(cx, |p, _| {
-            assert!(p.tabs.is_empty(), "tabs should be empty after closing the last one");
+            assert!(
+                p.tabs.is_empty(),
+                "tabs should be empty after closing the last one"
+            );
             assert_eq!(p.active_index, None);
         });
     }

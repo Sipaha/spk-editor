@@ -100,7 +100,10 @@ mod tests {
 
     #[test]
     fn run_config_id_formats() {
-        assert_eq!(RunConfigId::from_raw("shell:build-release").as_str(), "shell:build-release");
+        assert_eq!(
+            RunConfigId::from_raw("shell:build-release").as_str(),
+            "shell:build-release"
+        );
         assert_eq!(
             RunConfigId::discovered("task-ref", "cargo run").as_str(),
             "task-ref:discovered:cargo run"

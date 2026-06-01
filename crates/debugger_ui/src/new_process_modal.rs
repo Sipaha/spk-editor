@@ -19,6 +19,7 @@ use gpui::{
     KeyContext, Render, Subscription, Task, WeakEntity, actions,
 };
 use itertools::Itertools as _;
+use paths::local_settings_folder_name;
 use picker::{Picker, PickerDelegate, highlighted_match_with_paths::HighlightedMatch};
 use project::{DebugScenarioContext, Project, TaskContexts, TaskSourceKind, task_store::TaskStore};
 use task::{DebugScenario, RevealTarget, SharedTaskContext, VariableName, ZedDebugConfig};
@@ -28,7 +29,6 @@ use ui::{
     prelude::*,
 };
 use ui_input::InputField;
-use paths::local_settings_folder_name;
 use util::{ResultExt, debug_panic, rel_path::RelPath, shell::ShellKind};
 use workspace::{ModalView, Workspace, notifications::DetachAndPromptErr, pane};
 

@@ -203,8 +203,7 @@ pub fn reload_icon_theme(cx: &mut App) {
 /// reads the appearance see the default Light value and pick the
 /// wrong theme on a dark system.
 pub fn apply_window_appearance(window: &gpui::Window, cx: &mut App) {
-    *theme::SystemAppearance::global_mut(cx) =
-        theme::SystemAppearance(window.appearance().into());
+    *theme::SystemAppearance::global_mut(cx) = theme::SystemAppearance(window.appearance().into());
     reload_theme(cx);
     reload_icon_theme(cx);
 }

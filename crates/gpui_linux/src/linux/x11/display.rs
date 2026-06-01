@@ -1,8 +1,7 @@
 use anyhow::Context as _;
 use uuid::Uuid;
 use x11rb::{
-    connection::Connection as _, protocol::randr::ConnectionExt as _,
-    xcb_ffi::XCBConnection,
+    connection::Connection as _, protocol::randr::ConnectionExt as _, xcb_ffi::XCBConnection,
 };
 
 use gpui::{Bounds, DisplayId, Pixels, PlatformDisplay, Point, Size, px};
@@ -32,15 +31,14 @@ impl X11Display {
         // info — query it and prefer the primary monitor's bounds; fall
         // back to the screen bounds when XRandr is unavailable (nested X
         // server, screen with no active output, etc.).
-        let bounds = primary_monitor_bounds(xcb, screen.root, scale_factor).unwrap_or_else(
-            || Bounds {
+        let bounds =
+            primary_monitor_bounds(xcb, screen.root, scale_factor).unwrap_or_else(|| Bounds {
                 origin: Default::default(),
                 size: Size {
                     width: px(screen.width_in_pixels as f32 / scale_factor),
                     height: px(screen.height_in_pixels as f32 / scale_factor),
                 },
-            },
-        );
+            });
         Ok(Self {
             x_screen_index,
             bounds,

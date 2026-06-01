@@ -60,10 +60,10 @@ use std::{
 };
 use theme_settings::ThemeSettings;
 use ui::{
-    Color, ContextMenu, ContextMenuEntry, DecoratedIcon, Icon, IconDecoration,
-    IconDecorationKind, IndentGuideColors, IndentGuideLayout, Indicator, Label,
-    LabelSize, ListItem, ListItemSpacing, ScrollAxes, ScrollableHandle, Scrollbars,
-    StickyCandidate, Tooltip, WithScrollbar, prelude::*, v_flex,
+    Color, ContextMenu, ContextMenuEntry, DecoratedIcon, Icon, IconDecoration, IconDecorationKind,
+    IndentGuideColors, IndentGuideLayout, Indicator, Label, LabelSize, ListItem, ListItemSpacing,
+    ScrollAxes, ScrollableHandle, Scrollbars, StickyCandidate, Tooltip, WithScrollbar, prelude::*,
+    v_flex,
 };
 use util::{
     ResultExt, TakeUntilExt, TryFutureExt, maybe,
@@ -808,10 +808,11 @@ impl ProjectPanel {
                     cx,
                 )
             });
-            let selector_subscription = cx.observe_in(&solution_selector, window, |this, _, window, cx| {
-                this.update_visible_entries(None, false, false, window, cx);
-                cx.notify();
-            });
+            let selector_subscription =
+                cx.observe_in(&solution_selector, window, |this, _, window, cx| {
+                    this.update_visible_entries(None, false, false, window, cx);
+                    cx.notify();
+                });
 
             let mut this = Self {
                 project: project.clone(),
@@ -5393,25 +5394,23 @@ impl ProjectPanel {
         // double-click. Drop the `!self.mouse_down` guard; the
         // remaining `contains_focused` check still hides the border
         // automatically when the click does steal focus.
-        let border_color =
-            if is_active && self.focus_handle.contains_focused(window, cx) {
-                match validation_color_and_message {
-                    Some((color, _)) => color,
-                    None => item_colors.focused,
-                }
-            } else {
-                bg_color
-            };
+        let border_color = if is_active && self.focus_handle.contains_focused(window, cx) {
+            match validation_color_and_message {
+                Some((color, _)) => color,
+                None => item_colors.focused,
+            }
+        } else {
+            bg_color
+        };
 
-        let border_hover_color =
-            if is_active && self.focus_handle.contains_focused(window, cx) {
-                match validation_color_and_message {
-                    Some((color, _)) => color,
-                    None => item_colors.focused,
-                }
-            } else {
-                bg_hover_color
-            };
+        let border_hover_color = if is_active && self.focus_handle.contains_focused(window, cx) {
+            match validation_color_and_message {
+                Some((color, _)) => color,
+                None => item_colors.focused,
+            }
+        } else {
+            bg_hover_color
+        };
 
         let folded_directory_drag_target = self.folded_directory_drag_target;
         let is_highlighted = {
@@ -5919,9 +5918,7 @@ impl ProjectPanel {
                             )
                     } else {
                         h_flex()
-                            .id(SharedString::from(format!(
-                                "chevron-spacer-{entry_id:?}"
-                            )))
+                            .id(SharedString::from(format!("chevron-spacer-{entry_id:?}")))
                             .size(IconSize::Small.rems())
                             .flex_none()
                             .invisible()

@@ -87,10 +87,7 @@ impl McpServerTool for LogTool {
         input: Self::Input,
         cx: &mut AsyncApp,
     ) -> Result<ToolResponse<Self::Output>> {
-        let limit = input
-            .limit
-            .unwrap_or(DEFAULT_LIMIT)
-            .clamp(1, MAX_LIMIT);
+        let limit = input.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
 
         let work_dir =
             cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
@@ -214,7 +211,10 @@ async fn run_git_log(work_dir: &Path, args: &[String]) -> Result<Vec<LogCommit>>
     let mut line = String::new();
     loop {
         line.clear();
-        let n = reader.read_line(&mut line).await.context("reading git log")?;
+        let n = reader
+            .read_line(&mut line)
+            .await
+            .context("reading git log")?;
         if n == 0 {
             break;
         }
@@ -230,9 +230,12 @@ async fn run_git_log(work_dir: &Path, args: &[String]) -> Result<Vec<LogCommit>>
     let status = child.status().await.context("waiting for `git log`")?;
     if !status.success() {
         let mut err_out = String::new();
-        futures::io::AsyncReadExt::read_to_string(&mut futures::io::BufReader::new(stderr), &mut err_out)
-            .await
-            .ok();
+        futures::io::AsyncReadExt::read_to_string(
+            &mut futures::io::BufReader::new(stderr),
+            &mut err_out,
+        )
+        .await
+        .ok();
         if err_out.is_empty() {
             return Err(anyhow!("`git log` failed with status {status}"));
         }

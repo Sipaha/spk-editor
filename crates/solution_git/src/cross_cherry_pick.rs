@@ -32,9 +32,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use ui::prelude::*;
-use ui::{
-    Checkbox, Icon, IconName, IconSize, Label, LabelCommon, LabelSize, ToggleState, Tooltip,
-};
+use ui::{Checkbox, Icon, IconName, IconSize, Label, LabelCommon, LabelSize, ToggleState, Tooltip};
 use util::ResultExt as _;
 use util::command::new_command;
 use workspace::{ModalView, Workspace};
@@ -107,7 +105,12 @@ fn member_work_dir(solution: &Solution, member_id: &str) -> Result<PathBuf> {
         .members
         .iter()
         .find(|m| m.catalog_id.0 == member_id)
-        .ok_or_else(|| anyhow!("`{member_id}` is not a member of solution `{}`", solution.name))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "`{member_id}` is not a member of solution `{}`",
+                solution.name
+            )
+        })?;
     if !member.local_path.join(".git").exists() {
         return Err(anyhow!(
             "`{member_id}` is not a git repository (path: {})",
@@ -318,7 +321,11 @@ pub fn transform_patch_paths(patch_bytes: &[u8], mapping: &[(String, String)]) -
 
 fn transform_header_line(line: &str, mapping: &BTreeMap<&str, &str>) -> Option<String> {
     let trimmed = line.trim_end_matches('\r');
-    let cr_suffix = if trimmed.len() != line.len() { "\r" } else { "" };
+    let cr_suffix = if trimmed.len() != line.len() {
+        "\r"
+    } else {
+        ""
+    };
 
     if let Some(rest) = trimmed.strip_prefix("diff --git ") {
         let rewritten = rewrite_diff_git_paths(rest, mapping)?;
@@ -733,10 +740,7 @@ impl CrossCherryPickModal {
             .map(|m| SharedString::from(m.catalog_id.0.clone()))
             .filter(|id| id != &source_member)
             .collect();
-        let target_member = target_options
-            .first()
-            .cloned()
-            .unwrap_or_default();
+        let target_member = target_options.first().cloned().unwrap_or_default();
         let focus_handle = cx.focus_handle();
 
         let mut this = Self {
@@ -843,9 +847,8 @@ impl CrossCherryPickModal {
         };
         let solution = self.solution.clone();
         let workspace = self.workspace.clone();
-        let task = cx.background_spawn(async move {
-            cross_cherry_pick_inner(&solution, request).await
-        });
+        let task =
+            cx.background_spawn(async move { cross_cherry_pick_inner(&solution, request).await });
         cx.spawn(async move |this, cx| {
             let outcome = task.await;
             this.update(cx, |this, cx| {
@@ -866,17 +869,11 @@ impl CrossCherryPickModal {
                             cx.emit(DismissEvent);
                         }
                         Status::PausedForConflict => {
-                            let count = o
-                                .conflicted_files
-                                .as_ref()
-                                .map(|v| v.len())
-                                .unwrap_or(0);
+                            let count = o.conflicted_files.as_ref().map(|v| v.len()).unwrap_or(0);
                             if let Some(workspace) = workspace.upgrade() {
                                 show_status_toast(
                                     &workspace,
-                                    format!(
-                                        "Cherry-pick paused: {count} file(s) need resolution"
-                                    ),
+                                    format!("Cherry-pick paused: {count} file(s) need resolution"),
                                     true,
                                     cx,
                                 );
@@ -1069,10 +1066,11 @@ impl Render for CrossCherryPickModal {
             )
             .when_some(self.error.clone(), |this, err| {
                 this.child(
-                    ui::div()
-                        .px_3()
-                        .pb_2()
-                        .child(Label::new(err).size(LabelSize::Small).color(ui::Color::Error)),
+                    ui::div().px_3().pb_2().child(
+                        Label::new(err)
+                            .size(LabelSize::Small)
+                            .color(ui::Color::Error),
+                    ),
                 )
             })
             .child(
@@ -1081,11 +1079,9 @@ impl Render for CrossCherryPickModal {
                     .pb_3()
                     .gap_2()
                     .justify_end()
-                    .child(
-                        ui::Button::new("ccp-cancel", "Cancel").on_click(cx.listener(
-                            |this, _, window, cx| this.cancel(&Cancel, window, cx),
-                        )),
-                    )
+                    .child(ui::Button::new("ccp-cancel", "Cancel").on_click(
+                        cx.listener(|this, _, window, cx| this.cancel(&Cancel, window, cx)),
+                    ))
                     .child({
                         let label = if self.in_flight {
                             "Cherry-picking…"
@@ -1577,10 +1573,7 @@ mod tests {
         };
         let outcome = smol::block_on(cross_cherry_pick_inner(&sol, request)).expect("run");
         assert_eq!(outcome.status, Status::PausedForConflict);
-        let conflicted = outcome
-            .conflicted_files
-            .as_ref()
-            .expect("conflicted_files");
+        let conflicted = outcome.conflicted_files.as_ref().expect("conflicted_files");
         assert!(
             conflicted
                 .iter()

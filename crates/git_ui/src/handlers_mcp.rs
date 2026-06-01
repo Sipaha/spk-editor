@@ -70,18 +70,8 @@ pub(crate) fn register(cx: &mut App) {
     register_typed_tool_with_tier(cx, ToolTier::Destructive, FixupTool);
     register_typed_tool_with_tier(cx, ToolTier::Destructive, EditCommitMessageTool);
     register_typed_tool_with_tier(cx, ToolTier::Destructive, MoveCommitTool);
-    register_typed_tool_with_protection(
-        cx,
-        ToolTier::Write,
-        MergeTool,
-        merge_extractor,
-    );
-    register_typed_tool_with_protection(
-        cx,
-        ToolTier::Destructive,
-        RebaseTool,
-        rebase_extractor,
-    );
+    register_typed_tool_with_protection(cx, ToolTier::Write, MergeTool, merge_extractor);
+    register_typed_tool_with_protection(cx, ToolTier::Destructive, RebaseTool, rebase_extractor);
     // S-IRB — Interactive rebase + state-machine continuation tools.
     register_typed_tool_with_tier(cx, ToolTier::Destructive, InteractiveRebaseTool);
     register_typed_tool_with_tier(cx, ToolTier::Write, RebaseContinueTool);
@@ -228,11 +218,7 @@ impl McpServerTool for TagCreateTool {
             input.sha.as_str()
         };
         if let Some(message) = &input.message {
-            run_git_void(
-                &work_dir,
-                &["tag", "-a", "-m", message, &input.name, sha],
-            )
-            .await?;
+            run_git_void(&work_dir, &["tag", "-a", "-m", message, &input.name, sha]).await?;
         } else {
             run_git_void(&work_dir, &["tag", &input.name, sha]).await?;
         }
@@ -378,8 +364,10 @@ impl McpServerTool for CompareRevisionsTool {
     ) -> Result<ToolResponse<Self::Output>> {
         let work_dir =
             cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
-        let mut numstat_args: Vec<&str> = vec!["diff", "--numstat", "-z", &input.rev_a, &input.rev_b];
-        let mut namestatus_args: Vec<&str> = vec!["diff", "--name-status", "-z", &input.rev_a, &input.rev_b];
+        let mut numstat_args: Vec<&str> =
+            vec!["diff", "--numstat", "-z", &input.rev_a, &input.rev_b];
+        let mut namestatus_args: Vec<&str> =
+            vec!["diff", "--name-status", "-z", &input.rev_a, &input.rev_b];
         if !input.paths.is_empty() {
             numstat_args.push("--");
             for p in &input.paths {
@@ -521,9 +509,7 @@ pub fn resolve_repo_path_by_id(repo_id: u64, cx: &mut App) -> Option<std::path::
                     let git_store = project.read(cx).git_store().clone();
                     let repo = git_store.read(cx).repositories().get(&want).cloned();
                     if let Some(repo) = repo {
-                        return Some(
-                            repo.read(cx).work_directory_abs_path.to_path_buf(),
-                        );
+                        return Some(repo.read(cx).work_directory_abs_path.to_path_buf());
                     }
                 }
                 None
@@ -554,7 +540,11 @@ fn delete_branch_extractor(input: &DeleteBranchInput) -> Option<BranchProtection
         repo_path: None,
         repo_id: input.repo_id,
         branch: input.name.clone(),
-        op_name: if input.force { "delete_branch_force" } else { "delete_branch" },
+        op_name: if input.force {
+            "delete_branch_force"
+        } else {
+            "delete_branch"
+        },
         confirmed: false,
     })
 }
@@ -713,10 +703,7 @@ impl McpServerTool for ListBranchesTool {
             args.push("refs/remotes");
         }
         let raw = run_git(&work_dir, &args).await?;
-        let pattern_lower = input
-            .pattern
-            .as_deref()
-            .map(|p| p.to_lowercase());
+        let pattern_lower = input.pattern.as_deref().map(|p| p.to_lowercase());
         let mut branches = Vec::new();
         for line in raw.lines() {
             let cols: Vec<&str> = line.splitn(7, '\t').collect();
@@ -731,10 +718,22 @@ impl McpServerTool for ListBranchesTool {
                     continue;
                 }
             }
-            let upstream = cols.get(3).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-            let upstream_track = cols.get(4).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-            let date = cols.get(5).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-            let subject = cols.get(6).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            let upstream = cols
+                .get(3)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let upstream_track = cols
+                .get(4)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let date = cols
+                .get(5)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let subject = cols
+                .get(6)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
             branches.push(BranchEntry {
                 name: short,
                 is_remote: full_ref.starts_with("refs/remotes/"),
@@ -791,10 +790,7 @@ impl McpServerTool for DeleteBranchTool {
         let name = input.name.clone();
         cx.background_spawn(async move {
             git::operations::OpRunner::run(
-                git::operations::DeleteBranchOp {
-                    name,
-                    force,
-                },
+                git::operations::DeleteBranchOp { name, force },
                 &work_dir_buf,
             )
         })
@@ -903,10 +899,7 @@ impl McpServerTool for SetUpstreamTool {
             &["branch", "-u", &input.upstream_ref, &input.branch],
         )
         .await?;
-        let summary = format!(
-            "set upstream of {} to {}",
-            input.branch, input.upstream_ref
-        );
+        let summary = format!("set upstream of {} to {}", input.branch, input.upstream_ref);
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text { text: summary }],
             structured_content: SetUpstreamOutput {
@@ -1137,7 +1130,12 @@ impl McpServerTool for TagDeleteRemoteTool {
             cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
         run_git_void(
             &work_dir,
-            &["push", &remote, "--delete", &format!("refs/tags/{}", input.name)],
+            &[
+                "push",
+                &remote,
+                "--delete",
+                &format!("refs/tags/{}", input.name),
+            ],
         )
         .await?;
         Ok(ToolResponse {
@@ -1203,9 +1201,7 @@ impl McpServerTool for BranchCheckoutTool {
                     format!("switched to {}", input.name)
                 },
             }],
-            structured_content: BranchNameOutput {
-                branch: input.name,
-            },
+            structured_content: BranchNameOutput { branch: input.name },
         })
     }
 }
@@ -1243,10 +1239,12 @@ fn outcome_payload(outcome: git::operations::RunOutcome) -> DestructiveOutcome {
                     .collect(),
             ),
         },
-        git::operations::RunOutcome::PausedForExecFailure { command, stderr } => DestructiveOutcome {
-            outcome: "paused_for_exec_failure".into(),
-            conflicted_files: Some(vec![format!("exec {command} failed: {stderr}")]),
-        },
+        git::operations::RunOutcome::PausedForExecFailure { command, stderr } => {
+            DestructiveOutcome {
+                outcome: "paused_for_exec_failure".into(),
+                conflicted_files: Some(vec![format!("exec {command} failed: {stderr}")]),
+            }
+        }
     }
 }
 
@@ -1300,7 +1298,10 @@ impl McpServerTool for CherryPickTool {
             })
             .await?;
         let payload = outcome_payload(outcome);
-        let summary = format!("cherry-pick {} commit(s) → {}", payload.outcome, payload.outcome);
+        let summary = format!(
+            "cherry-pick {} commit(s) → {}",
+            payload.outcome, payload.outcome
+        );
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text { text: summary }],
             structured_content: payload,
@@ -1409,7 +1410,9 @@ fn parse_reset_mode(mode: &str) -> Result<git::operations::reset::ResetMode> {
         "mixed" | "" => Ok(ResetMode::Mixed),
         "hard" => Ok(ResetMode::Hard),
         "keep" => Ok(ResetMode::Keep),
-        other => Err(anyhow!("unknown reset mode {other:?}; expected soft|mixed|hard|keep")),
+        other => Err(anyhow!(
+            "unknown reset mode {other:?}; expected soft|mixed|hard|keep"
+        )),
     }
 }
 
@@ -1525,7 +1528,10 @@ impl McpServerTool for SquashRangeTool {
             shas: input.shas.clone(),
             final_message: input.message.clone(),
         }
-        .run(&work_dir_buf, git::operations::rebase::RebaseCallbacks::default())
+        .run(
+            &work_dir_buf,
+            git::operations::rebase::RebaseCallbacks::default(),
+        )
         .await?;
         let payload = rebase_outcome_payload(&handle);
         let summary = format!("squash {} commits → {}", input.shas.len(), payload.outcome);
@@ -1565,7 +1571,10 @@ impl McpServerTool for FixupTool {
         let handle = git::operations::fixup::FixupOp {
             shas: input.shas.clone(),
         }
-        .run(&work_dir_buf, git::operations::rebase::RebaseCallbacks::default())
+        .run(
+            &work_dir_buf,
+            git::operations::rebase::RebaseCallbacks::default(),
+        )
         .await?;
         let payload = rebase_outcome_payload(&handle);
         let summary = format!("fixup {} commits → {}", input.shas.len(), payload.outcome);
@@ -1607,7 +1616,10 @@ impl McpServerTool for EditCommitMessageTool {
             sha: input.sha.clone(),
             new_message: input.new_message.clone(),
         }
-        .run(&work_dir_buf, git::operations::rebase::RebaseCallbacks::default())
+        .run(
+            &work_dir_buf,
+            git::operations::rebase::RebaseCallbacks::default(),
+        )
         .await?;
         let payload = match outcome {
             git::operations::edit_commit_message::EditMessageOutcome::Direct(out) => {
@@ -1664,7 +1676,10 @@ impl McpServerTool for MoveCommitTool {
             target_sha: input.target_sha.clone(),
             position,
         }
-        .run(&work_dir_buf, git::operations::rebase::RebaseCallbacks::default())
+        .run(
+            &work_dir_buf,
+            git::operations::rebase::RebaseCallbacks::default(),
+        )
         .await?;
         let payload = rebase_outcome_payload(&handle);
         let summary = format!(
@@ -1883,9 +1898,10 @@ pub(crate) fn build_mcp_todo(
             }
             "reword" => {
                 require_sha(&action.sha, "reword")?;
-                let message = action.new_message.clone().ok_or_else(|| {
-                    anyhow!("reword action requires new_message in payload")
-                })?;
+                let message = action
+                    .new_message
+                    .clone()
+                    .ok_or_else(|| anyhow!("reword action requires new_message in payload"))?;
                 builder = builder.reword(action.sha.clone(), message);
             }
             "edit" => {
@@ -1910,9 +1926,10 @@ pub(crate) fn build_mcp_todo(
                         "exec actions are blocked via MCP; enable git_panel.interactive_rebase.allow_exec_via_mcp to permit them"
                     ));
                 }
-                let cmd = action.exec_command.clone().ok_or_else(|| {
-                    anyhow!("exec action requires exec_command in payload")
-                })?;
+                let cmd = action
+                    .exec_command
+                    .clone()
+                    .ok_or_else(|| anyhow!("exec action requires exec_command in payload"))?;
                 if cmd.trim().is_empty() {
                     return Err(anyhow!("exec_command must be non-empty"));
                 }
@@ -2017,7 +2034,10 @@ async fn run_rebase_state_command(
     let summary = format!("git rebase {arg} → ok");
     Ok(ToolResponse {
         content: vec![ToolResponseContent::Text { text: summary }],
-        structured_content: RebaseContinuationOutput { op, completed: true },
+        structured_content: RebaseContinuationOutput {
+            op,
+            completed: true,
+        },
     })
 }
 
@@ -2076,8 +2096,8 @@ impl McpServerTool for CreatePatchTool {
         let sha_to = input.sha_to.clone();
         let patches = cx
             .background_spawn(async move {
-                let temp = tempfile::tempdir()
-                    .map_err(|err| anyhow!("create_patch tempdir: {err}"))?;
+                let temp =
+                    tempfile::tempdir().map_err(|err| anyhow!("create_patch tempdir: {err}"))?;
                 let paths = git::operations::patch::create_patch(
                     &work_dir_buf,
                     &sha_from,
@@ -2162,10 +2182,7 @@ impl McpServerTool for ApplyPatchTool {
             git::operations::patch::PatchFormat::UnifiedWithIndex
                 | git::operations::patch::PatchFormat::Mbox
         );
-        let keep_cr_default = matches!(
-            format,
-            git::operations::patch::PatchFormat::Mbox
-        );
+        let keep_cr_default = matches!(format, git::operations::patch::PatchFormat::Mbox);
         let three_way = input.three_way.unwrap_or(three_way_default);
         let keep_cr = input.keep_cr.unwrap_or(keep_cr_default);
         let apply_with_reject = input.apply_with_reject.unwrap_or(false);
@@ -2351,18 +2368,19 @@ impl McpServerTool for ShowAtRevisionTool {
         let new_window: gpui::WindowHandle<workspace::MultiWorkspace> = task.await?;
 
         let path_str: String = cx.update(|cx| {
-            let path: Option<std::path::PathBuf> = new_window
-                .read(cx)
-                .ok()
-                .and_then(|multi: &workspace::MultiWorkspace| {
-                    let ws = multi.workspace().clone();
-                    let project = ws.read(cx).project().clone();
-                    project
-                        .read(cx)
-                        .visible_worktrees(cx)
-                        .next()
-                        .map(|w| w.read(cx).abs_path().to_path_buf())
-                });
+            let path: Option<std::path::PathBuf> =
+                new_window
+                    .read(cx)
+                    .ok()
+                    .and_then(|multi: &workspace::MultiWorkspace| {
+                        let ws = multi.workspace().clone();
+                        let project = ws.read(cx).project().clone();
+                        project
+                            .read(cx)
+                            .visible_worktrees(cx)
+                            .next()
+                            .map(|w| w.read(cx).abs_path().to_path_buf())
+                    });
             path.map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default()
         });
@@ -2605,11 +2623,7 @@ impl McpServerTool for StashListTool {
             cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
         let raw = run_git(
             &work_dir,
-            &[
-                "stash",
-                "list",
-                "--pretty=format:%gd%x00%H%x00%ct%x00%s",
-            ],
+            &["stash", "list", "--pretty=format:%gd%x00%H%x00%ct%x00%s"],
         )
         .await?;
         let parsed: git::stash::GitStash = raw.parse().unwrap_or_default();
@@ -2625,7 +2639,11 @@ impl McpServerTool for StashListTool {
                 branch: entry.branch.clone(),
             })
             .collect();
-        let summary = format!("{} stash entr{}", entries.len(), if entries.len() == 1 { "y" } else { "ies" });
+        let summary = format!(
+            "{} stash entr{}",
+            entries.len(),
+            if entries.len() == 1 { "y" } else { "ies" }
+        );
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text { text: summary }],
             structured_content: StashListOutput { entries },
@@ -3122,9 +3140,9 @@ impl McpServerTool for ShelfDropTool {
         let name = input.name.clone();
         let work_dir_inner = work_dir.clone();
         let name_inner = name.clone();
-        cx.background_spawn(async move {
-            git::operations::shelf::drop(&work_dir_inner, &name_inner)
-        })
+        cx.background_spawn(
+            async move { git::operations::shelf::drop(&work_dir_inner, &name_inner) },
+        )
         .await?;
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text {
@@ -3209,11 +3227,7 @@ impl McpServerTool for BlameTool {
         args.push(&input.path);
         let raw = run_git(&work_dir, &args).await?;
         let entries = parse_line_porcelain(&raw);
-        let summary = format!(
-            "blame {} returned {} entries",
-            input.path,
-            entries.len()
-        );
+        let summary = format!("blame {} returned {} entries", input.path, entries.len());
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text { text: summary }],
             structured_content: BlameOutput { entries },

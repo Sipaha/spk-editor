@@ -763,9 +763,9 @@ fn main() {
         // frame; the closure parses the 16-byte upload header + writes
         // to UploadManager. See remote_control::BinaryFrameHandler and
         // docs/plans/2026-05-19-chunked-upload-binary-frames.md.
-        remote_control::set_binary_frame_handler(std::sync::Arc::new(
-            |bytes: &[u8]| solution_agent::upload::dispatch_binary_frame(bytes),
-        ));
+        remote_control::set_binary_frame_handler(std::sync::Arc::new(|bytes: &[u8]| {
+            solution_agent::upload::dispatch_binary_frame(bytes)
+        }));
         remote_control_ui::init(cx);
         git_conflict_ui::init(cx);
         let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
@@ -1580,9 +1580,8 @@ async fn open_solution_by_name_or_id(
 
     let mut options = workspace::OpenOptions::default();
     options.open_mode = workspace::OpenMode::NewWindow;
-    let task = cx.update(|cx| {
-        workspace::open_paths(&resolved.paths, app_state.clone(), options, cx)
-    });
+    let task =
+        cx.update(|cx| workspace::open_paths(&resolved.paths, app_state.clone(), options, cx));
     let opened = task.await?;
 
     if resolved.is_empty {

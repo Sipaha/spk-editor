@@ -16,16 +16,15 @@ use editor::Editor;
 use git::repository::RepoPath;
 use gpui::{
     AnyElement, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity, Window,
-    rems,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity, Window, rems,
 };
 use project::git_store::Repository;
 use ui::{Divider, ListItem, ListItemSpacing, PopoverMenu, TintColor, Tooltip, prelude::*};
 
 use crate::GitGraph;
+use crate::GraphMode;
 use crate::file_history::FileHistoryOptions;
 use crate::filters::DateRange;
-use crate::GraphMode;
 use branch_popover::BranchFilterPopover;
 use path_popover::PathFilterPopover;
 use user_popover::UserFilterPopover;
@@ -76,9 +75,9 @@ impl DatePreset {
             }
             DatePreset::ThisWeek => {
                 let weekday_idx = now.weekday().num_days_from_monday() as i64;
-                let monday = now.date_naive().checked_sub_days(chrono::Days::new(
-                    u64::try_from(weekday_idx).unwrap_or(0),
-                ))?;
+                let monday = now
+                    .date_naive()
+                    .checked_sub_days(chrono::Days::new(u64::try_from(weekday_idx).unwrap_or(0)))?;
                 local_naive_at_midnight(monday).map(DateRange::Since)
             }
             DatePreset::Last30Days => Some(DateRange::Since(now.timestamp() - 30 * 86_400)),
@@ -399,9 +398,7 @@ impl LogToolbar {
                 .icon_size(IconSize::Small)
                 .style(toggle_style(follow_renames))
                 .toggle_state(follow_renames)
-                .tooltip(Tooltip::text(
-                    "Follow file across renames (--follow)",
-                ))
+                .tooltip(Tooltip::text("Follow file across renames (--follow)"))
                 .on_click(move |_, _, cx| {
                     let weak = weak.clone();
                     if let Some(graph) = weak.upgrade() {
@@ -418,9 +415,7 @@ impl LogToolbar {
                 .icon_size(IconSize::Small)
                 .style(toggle_style(with_local_changes))
                 .toggle_state(with_local_changes)
-                .tooltip(Tooltip::text(
-                    "Show uncommitted changes as a synthetic row",
-                ))
+                .tooltip(Tooltip::text("Show uncommitted changes as a synthetic row"))
                 .on_click(move |_, _, cx| {
                     let weak = weak.clone();
                     if let Some(graph) = weak.upgrade() {
@@ -439,9 +434,7 @@ impl LogToolbar {
                 .icon_size(IconSize::Small)
                 .style(toggle_style(show_inline_diff))
                 .toggle_state(show_inline_diff)
-                .tooltip(Tooltip::text(
-                    "Show inline diff per row (coming soon)",
-                ))
+                .tooltip(Tooltip::text("Show inline diff per row (coming soon)"))
                 .on_click(move |_, _, cx| {
                     let weak = weak.clone();
                     if let Some(graph) = weak.upgrade() {
@@ -699,9 +692,9 @@ impl DateFilterPopover {
         });
 
         let clear_error = |this: &mut DateFilterPopover,
-                            _,
-                            event: &editor::EditorEvent,
-                            cx: &mut Context<DateFilterPopover>| {
+                           _,
+                           event: &editor::EditorEvent,
+                           cx: &mut Context<DateFilterPopover>| {
             if matches!(
                 event,
                 editor::EditorEvent::BufferEdited | editor::EditorEvent::Edited { .. }
@@ -740,10 +733,7 @@ impl DateFilterPopover {
         let since = parse_iso_date(&since_text);
         let until = parse_iso_date(&until_text);
         let range = match (since, until) {
-            (Some(s), Some(u)) if u >= s => DateRange::Between {
-                since: s,
-                until: u,
-            },
+            (Some(s), Some(u)) if u >= s => DateRange::Between { since: s, until: u },
             (Some(_), Some(_)) => {
                 self.custom_error = Some(SharedString::from("End date is before start date"));
                 cx.notify();
@@ -752,9 +742,8 @@ impl DateFilterPopover {
             (Some(s), None) => DateRange::Since(s),
             (None, Some(u)) => DateRange::Until(u),
             (None, None) => {
-                self.custom_error = Some(SharedString::from(
-                    "Enter at least one date as YYYY-MM-DD",
-                ));
+                self.custom_error =
+                    Some(SharedString::from("Enter at least one date as YYYY-MM-DD"));
                 cx.notify();
                 return;
             }
@@ -808,15 +797,13 @@ impl DateFilterPopover {
             .on_click(cx.listener(move |this, _, _, cx| this.apply_preset(preset, cx)));
             list = list.child(row);
         }
-        list = list
-            .child(Divider::horizontal())
-            .child(
-                ListItem::new("git-graph-date-custom")
-                    .inset(true)
-                    .spacing(ListItemSpacing::Sparse)
-                    .child(Label::new("Custom range…").color(Color::Accent))
-                    .on_click(cx.listener(|this, _, _, cx| this.switch_to_custom(cx))),
-            );
+        list = list.child(Divider::horizontal()).child(
+            ListItem::new("git-graph-date-custom")
+                .inset(true)
+                .spacing(ListItemSpacing::Sparse)
+                .child(Label::new("Custom range…").color(Color::Accent))
+                .on_click(cx.listener(|this, _, _, cx| this.switch_to_custom(cx))),
+        );
         list
     }
 
@@ -890,4 +877,3 @@ impl Render for DateFilterPopover {
             .child(body)
     }
 }
-

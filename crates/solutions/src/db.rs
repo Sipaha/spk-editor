@@ -205,10 +205,10 @@ mod tests {
         db.write(|conn| {
             conn.exec("INSERT INTO catalog_projects (id, name, remote_url) VALUES ('x', 'X', 'u')")
                 .unwrap()()
-                .unwrap();
+            .unwrap();
             conn.exec("DELETE FROM catalog_projects WHERE id = 'x'")
                 .unwrap()()
-                .unwrap();
+            .unwrap();
         })
         .await;
     }
@@ -225,9 +225,14 @@ mod tests {
     #[gpui::test]
     async fn catalog_save_and_load_roundtrips() {
         let db = SolutionsDb::open_test_db("solutions_db_catalog_roundtrip").await;
-        db.save_catalog_project("a".into(), "Alpha".into(), "git@a:a.git".into(), Some("main".into()))
-            .await
-            .unwrap();
+        db.save_catalog_project(
+            "a".into(),
+            "Alpha".into(),
+            "git@a:a.git".into(),
+            Some("main".into()),
+        )
+        .await
+        .unwrap();
         db.save_catalog_project("b".into(), "Beta".into(), "git@b:b.git".into(), None)
             .await
             .unwrap();
@@ -237,7 +242,12 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                ("a".into(), "Alpha".into(), "git@a:a.git".into(), Some("main".into())),
+                (
+                    "a".into(),
+                    "Alpha".into(),
+                    "git@a:a.git".into(),
+                    Some("main".into())
+                ),
                 ("b".into(), "Beta".into(), "git@b:b.git".into(), None),
             ]
         );

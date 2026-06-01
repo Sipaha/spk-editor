@@ -41,7 +41,11 @@ async fn run_config_create_list_delete(cx: &mut TestAppContext) {
     });
 
     let start_result = cx.update(|cx| editor_mcp::start_server(cx));
-    assert!(start_result.is_ok(), "start_server: {:?}", start_result.err());
+    assert!(
+        start_result.is_ok(),
+        "start_server: {:?}",
+        start_result.err()
+    );
 
     let socket_path = runtime_dir.path().join("mcp.sock");
     let mut waited = Duration::ZERO;
@@ -125,18 +129,15 @@ async fn run_config_create_list_delete(cx: &mut TestAppContext) {
     );
 
     // 4. run_config.run returns ok:false when no run controller window is open.
-    let resp = call_tool(
-        &mut stream,
-        4,
-        "run_config.run",
-        json!({ "id": config_id }),
-    )
-    .await;
+    let resp = call_tool(&mut stream, 4, "run_config.run", json!({ "id": config_id })).await;
     let ok = resp
         .pointer("/result/structuredContent/ok")
         .and_then(|v| v.as_bool())
         .unwrap_or_else(|| panic!("run_config.run returned: {resp}"));
-    assert!(!ok, "expected ok:false without a run controller, got: {resp}");
+    assert!(
+        !ok,
+        "expected ok:false without a run controller, got: {resp}"
+    );
 
     // 5. Delete the config.
     let resp = call_tool(

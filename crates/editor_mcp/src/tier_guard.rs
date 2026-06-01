@@ -262,9 +262,7 @@ pub fn set_branch_protection_checker(checker: Option<BranchProtectionChecker>) {
 /// `solutions::init`). Holds the inner mutex only for the duration of
 /// the synchronous decision call — callers must not hold any other
 /// lock while invoking this.
-fn evaluate_branch_protection(
-    target: &BranchProtectionTarget,
-) -> Option<BranchProtectionDecision> {
+fn evaluate_branch_protection(target: &BranchProtectionTarget) -> Option<BranchProtectionDecision> {
     let guard = BRANCH_PROTECTION_CHECKER.lock().ok()?;
     let checker = guard.as_ref()?;
     Some(checker(target))
@@ -278,9 +276,7 @@ fn apply_branch_protection_decision(
     match decision {
         BranchProtectionDecision::Allowed => Ok(()),
         BranchProtectionDecision::Forbidden { reason } => {
-            anyhow::bail!(
-                "tool {tool_name} refused by branch protection: {reason} [code=-32402]"
-            );
+            anyhow::bail!("tool {tool_name} refused by branch protection: {reason} [code=-32402]");
         }
         BranchProtectionDecision::RequiresConfirmation { reason } => {
             // Subagent payloads must include `confirmed: true` for ops

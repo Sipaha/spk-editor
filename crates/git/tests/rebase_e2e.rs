@@ -137,10 +137,7 @@ fn rebase_with_drop_completes() {
     let third = rev(repo.path(), "HEAD");
 
     // pick "second" then drop "third": result should be `first <- second`.
-    let todo = RebaseTodoBuilder::new()
-        .pick(&second)
-        .drop(third)
-        .build();
+    let todo = RebaseTodoBuilder::new().pick(&second).drop(third).build();
     let callbacks = RebaseCallbacks::default();
     let handle = smol::block_on(run_rebase_with_op_name(
         repo.path(),
@@ -175,10 +172,7 @@ fn rebase_with_conflict_pauses() {
 
     // Re-applying "third" on top of "first" while skipping "second" produces
     // a conflict (both touched the same lines starting from the same base).
-    let todo = RebaseTodoBuilder::new()
-        .drop(second)
-        .pick(third)
-        .build();
+    let todo = RebaseTodoBuilder::new().drop(second).pick(third).build();
     let callbacks = RebaseCallbacks::default();
     let handle = smol::block_on(run_rebase_with_op_name(
         dir.path(),
@@ -253,10 +247,7 @@ fn parallel_rebase_returns_busy() {
     let pid = std::process::id();
     std::fs::write(&lock_path, format!("competing_op\n{pid}\n0\n")).expect("write lock");
 
-    let todo = RebaseTodoBuilder::new()
-        .pick(second)
-        .pick(third)
-        .build();
+    let todo = RebaseTodoBuilder::new().pick(second).pick(third).build();
     let callbacks = RebaseCallbacks::default();
     let result = smol::block_on(run_rebase_with_op_name(
         repo.path(),
@@ -268,7 +259,9 @@ fn parallel_rebase_returns_busy() {
     let err = result.expect_err("must fail with busy");
     let msg = format!("{err}");
     assert!(
-        msg.contains("repo busy") || msg.contains("Repository busy") || msg.contains("competing_op"),
+        msg.contains("repo busy")
+            || msg.contains("Repository busy")
+            || msg.contains("competing_op"),
         "expected busy error, got: {msg}"
     );
     std::fs::remove_file(&lock_path).ok();

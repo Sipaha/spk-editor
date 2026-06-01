@@ -86,11 +86,7 @@ pub(crate) fn parse_message_tokens(text: &str, parse_issue_refs: bool) -> Vec<Me
 }
 
 fn next_char_len(text: &str, i: usize) -> usize {
-    text[i..]
-        .chars()
-        .next()
-        .map(|c| c.len_utf8())
-        .unwrap_or(1)
+    text[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1)
 }
 
 fn is_word_boundary_before(text: &str, i: usize) -> bool {
@@ -113,9 +109,7 @@ fn match_url_at(text: &str, i: usize) -> Option<(String, usize)> {
             // delimiters that almost certainly isn't part of the URL.
             let rest = &text[i..];
             let end = rest
-                .find(|c: char| {
-                    c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | '\u{0}')
-                })
+                .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | '\u{0}'))
                 .unwrap_or(rest.len());
             // Don't include trailing punctuation that almost always
             // belongs to the surrounding sentence.
@@ -139,10 +133,7 @@ fn match_url_at(text: &str, i: usize) -> Option<(String, usize)> {
 fn match_issue_ref_at(text: &str, i: usize) -> Option<(String, usize)> {
     debug_assert_eq!(text.as_bytes()[i], b'#');
     let rest = &text.as_bytes()[i + 1..];
-    let digits = rest
-        .iter()
-        .take_while(|&&b| b.is_ascii_digit())
-        .count();
+    let digits = rest.iter().take_while(|&&b| b.is_ascii_digit()).count();
     if digits == 0 {
         return None;
     }

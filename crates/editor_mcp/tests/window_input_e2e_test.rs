@@ -50,7 +50,8 @@ async fn keystroke_triggers_bound_action(cx: &mut TestAppContext) {
     // once it bubbles to the root.
     let window = cx.add_window(|_, _| EmptyView);
 
-    cx.update(|cx| editor_mcp::start_server(cx)).expect("start_server");
+    cx.update(|cx| editor_mcp::start_server(cx))
+        .expect("start_server");
 
     let socket_path = runtime_dir.path().join("mcp.sock");
     let mut waited = Duration::ZERO;

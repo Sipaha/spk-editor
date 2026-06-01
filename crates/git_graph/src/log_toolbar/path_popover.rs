@@ -26,9 +26,7 @@ use gpui::{
     rems, uniform_list,
 };
 use project::git_store::Repository;
-use ui::{
-    Checkbox, Divider, HighlightedLabel, ListItem, ListItemSpacing, ToggleState, prelude::*,
-};
+use ui::{Checkbox, Divider, HighlightedLabel, ListItem, ListItemSpacing, ToggleState, prelude::*};
 
 use crate::GitGraph;
 
@@ -46,10 +44,7 @@ struct PathRow {
 #[derive(Clone)]
 enum Row {
     Header(SharedString),
-    Path {
-        index: usize,
-        positions: Vec<usize>,
-    },
+    Path { index: usize, positions: Vec<usize> },
 }
 
 pub struct PathFilterPopover {
@@ -80,17 +75,18 @@ impl PathFilterPopover {
             editor
         });
 
-        let on_query_changed = |this: &mut PathFilterPopover,
-                                _,
-                                event: &editor::EditorEvent,
-                                cx: &mut Context<PathFilterPopover>| {
-            if matches!(
-                event,
-                editor::EditorEvent::BufferEdited | editor::EditorEvent::Edited { .. }
-            ) {
-                this.refresh_matches(cx);
-            }
-        };
+        let on_query_changed =
+            |this: &mut PathFilterPopover,
+             _,
+             event: &editor::EditorEvent,
+             cx: &mut Context<PathFilterPopover>| {
+                if matches!(
+                    event,
+                    editor::EditorEvent::BufferEdited | editor::EditorEvent::Edited { .. }
+                ) {
+                    this.refresh_matches(cx);
+                }
+            };
         let subscriptions = vec![cx.subscribe(&query, on_query_changed)];
 
         let focus_handle = cx.focus_handle();
@@ -182,8 +178,16 @@ impl PathFilterPopover {
         let user_typed_query = sorted.iter().any(|(_, positions)| !positions.is_empty());
         if !user_typed_query {
             sorted.sort_by(|a, b| {
-                let ad = self.paths.get(a.0).map(|p| p.display.as_ref()).unwrap_or("");
-                let bd = self.paths.get(b.0).map(|p| p.display.as_ref()).unwrap_or("");
+                let ad = self
+                    .paths
+                    .get(a.0)
+                    .map(|p| p.display.as_ref())
+                    .unwrap_or("");
+                let bd = self
+                    .paths
+                    .get(b.0)
+                    .map(|p| p.display.as_ref())
+                    .unwrap_or("");
                 ad.cmp(bd)
             });
         }
@@ -325,73 +329,75 @@ impl Render for PathFilterPopover {
             uniform_list(
                 "git-graph-path-filter-list",
                 row_count,
-                cx.processor(move |this: &mut Self, range: std::ops::Range<usize>, _, cx| {
-                    range
-                        .filter_map(|ix| this.rows.get(ix).cloned().map(|row| (ix, row)))
-                        .map(|(ix, row)| match row {
-                            Row::Header(label) => h_flex()
-                                .h(rems(ROW_HEIGHT_REMS))
-                                .px_2()
-                                .items_end()
-                                .child(
-                                    Label::new(label)
-                                        .size(LabelSize::XSmall)
-                                        .color(Color::Muted),
-                                )
-                                .into_any_element(),
-                            Row::Path { index, positions } => {
-                                let Some(entry) = this.paths.get(index).cloned() else {
-                                    return gpui::Empty.into_any_element();
-                                };
-                                let is_selected = this.selected.contains(&entry.repo_path);
-                                let toggle_state = if is_selected {
-                                    ToggleState::Selected
-                                } else {
-                                    ToggleState::Unselected
-                                };
-                                let row_id =
-                                    SharedString::from(format!("git-graph-path-row-{ix}"));
-                                let path_for_click = entry.repo_path.clone();
-                                let icon = if entry.is_dir {
-                                    IconName::Folder
-                                } else {
-                                    IconName::FileGeneric
-                                };
-                                ListItem::new(row_id)
-                                    .inset(true)
-                                    .spacing(ListItemSpacing::Sparse)
-                                    .toggle_state(is_selected)
-                                    .start_slot(
-                                        Checkbox::new(
-                                            SharedString::from(format!(
-                                                "git-graph-path-check-{ix}"
-                                            )),
-                                            toggle_state,
-                                        )
-                                        .into_any_element(),
-                                    )
+                cx.processor(
+                    move |this: &mut Self, range: std::ops::Range<usize>, _, cx| {
+                        range
+                            .filter_map(|ix| this.rows.get(ix).cloned().map(|row| (ix, row)))
+                            .map(|(ix, row)| match row {
+                                Row::Header(label) => h_flex()
+                                    .h(rems(ROW_HEIGHT_REMS))
+                                    .px_2()
+                                    .items_end()
                                     .child(
-                                        h_flex()
-                                            .gap_2()
-                                            .flex_1()
-                                            .child(
-                                                Icon::new(icon)
-                                                    .color(Color::Muted)
-                                                    .size(IconSize::Small),
-                                            )
-                                            .child(HighlightedLabel::new(
-                                                entry.display,
-                                                positions,
-                                            )),
+                                        Label::new(label)
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
                                     )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.toggle_path(path_for_click.clone(), cx);
-                                    }))
-                                    .into_any_element()
-                            }
-                        })
-                        .collect()
-                }),
+                                    .into_any_element(),
+                                Row::Path { index, positions } => {
+                                    let Some(entry) = this.paths.get(index).cloned() else {
+                                        return gpui::Empty.into_any_element();
+                                    };
+                                    let is_selected = this.selected.contains(&entry.repo_path);
+                                    let toggle_state = if is_selected {
+                                        ToggleState::Selected
+                                    } else {
+                                        ToggleState::Unselected
+                                    };
+                                    let row_id =
+                                        SharedString::from(format!("git-graph-path-row-{ix}"));
+                                    let path_for_click = entry.repo_path.clone();
+                                    let icon = if entry.is_dir {
+                                        IconName::Folder
+                                    } else {
+                                        IconName::FileGeneric
+                                    };
+                                    ListItem::new(row_id)
+                                        .inset(true)
+                                        .spacing(ListItemSpacing::Sparse)
+                                        .toggle_state(is_selected)
+                                        .start_slot(
+                                            Checkbox::new(
+                                                SharedString::from(format!(
+                                                    "git-graph-path-check-{ix}"
+                                                )),
+                                                toggle_state,
+                                            )
+                                            .into_any_element(),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .gap_2()
+                                                .flex_1()
+                                                .child(
+                                                    Icon::new(icon)
+                                                        .color(Color::Muted)
+                                                        .size(IconSize::Small),
+                                                )
+                                                .child(HighlightedLabel::new(
+                                                    entry.display,
+                                                    positions,
+                                                )),
+                                        )
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.toggle_path(path_for_click.clone(), cx);
+                                        }))
+                                        .into_any_element()
+                                }
+                            })
+                            .collect()
+                    },
+                ),
             )
             // See user_popover: `uniform_list` needs a concrete height in this
             // unbounded popover column or it collapses.

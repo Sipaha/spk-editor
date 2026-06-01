@@ -5952,9 +5952,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_thought_chunk_with_subagent_meta_sets_subagent_id(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    async fn test_thought_chunk_with_subagent_meta_sets_subagent_id(cx: &mut gpui::TestAppContext) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
         let project = Project::test(fs, [], cx).await;
@@ -5984,9 +5982,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_parent_to_subagent_boundary_starts_new_entry(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    async fn test_parent_to_subagent_boundary_starts_new_entry(cx: &mut gpui::TestAppContext) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
         let project = Project::test(fs, [], cx).await;
@@ -6026,9 +6022,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_assistant_chunks_with_same_subagent_id_coalesce(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    async fn test_assistant_chunks_with_same_subagent_id_coalesce(cx: &mut gpui::TestAppContext) {
         init_test(cx);
         let fs = FakeFs::new(cx.executor());
         let project = Project::test(fs, [], cx).await;

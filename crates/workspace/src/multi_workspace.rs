@@ -27,8 +27,8 @@ const SIDEBAR_RESIZE_HANDLE_SIZE: Pixels = px(6.0);
 
 use crate::open_remote_project_with_existing_connection;
 use crate::{
-    CloseIntent, CloseWindow, DockPosition, Event as WorkspaceEvent, Item, ModalView,
-    OpenMode, Panel, Workspace, WorkspaceId, client_side_decorations,
+    CloseIntent, CloseWindow, DockPosition, Event as WorkspaceEvent, Item, ModalView, OpenMode,
+    Panel, Workspace, WorkspaceId, client_side_decorations,
     persistence::model::MultiWorkspaceState,
 };
 

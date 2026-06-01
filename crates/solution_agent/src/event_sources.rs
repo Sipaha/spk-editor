@@ -656,10 +656,8 @@ mod tests {
         cx.update(|cx| SolutionAgentStore::init_global(cx, registry));
 
         cx.update(|cx| {
-            let payload = build_background_shells_changed_payload(
-                crate::model::SolutionSessionId::new(),
-                cx,
-            );
+            let payload =
+                build_background_shells_changed_payload(crate::model::SolutionSessionId::new(), cx);
             let obj = payload.as_object().expect("object");
             let shells = obj
                 .get("background_shells")
@@ -763,10 +761,8 @@ mod tests {
         cx.update(|cx| SolutionAgentStore::init_global(cx, registry));
 
         cx.update(|cx| {
-            let payload = build_background_agents_changed_payload(
-                crate::model::SolutionSessionId::new(),
-                cx,
-            );
+            let payload =
+                build_background_agents_changed_payload(crate::model::SolutionSessionId::new(), cx);
             let obj = payload.as_object().expect("object");
             let agents = obj
                 .get("background_agents")

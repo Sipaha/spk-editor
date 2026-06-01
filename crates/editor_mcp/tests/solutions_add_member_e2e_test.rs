@@ -68,7 +68,11 @@ async fn add_member_clones_from_local_bare_repo(cx: &mut TestAppContext) {
     });
 
     let start_result = cx.update(|cx| editor_mcp::start_server(cx));
-    assert!(start_result.is_ok(), "start_server: {:?}", start_result.err());
+    assert!(
+        start_result.is_ok(),
+        "start_server: {:?}",
+        start_result.err()
+    );
 
     let socket_path = runtime_dir.path().join("mcp.sock");
     let mut waited = Duration::ZERO;
@@ -182,7 +186,10 @@ async fn add_member_clones_from_local_bare_repo(cx: &mut TestAppContext) {
         .expect("local_path");
     let local = std::path::Path::new(local_path);
     assert!(local.exists(), "local_path {local_path} does not exist");
-    assert!(local.join(".git").exists(), ".git not found at {local_path}");
+    assert!(
+        local.join(".git").exists(),
+        ".git not found at {local_path}"
+    );
     assert!(
         local.join("README").exists(),
         "seed README missing at {local_path}",
@@ -267,7 +274,11 @@ async fn add_member_clones_from_local_bare_repo(cx: &mut TestAppContext) {
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_else(|| panic!("clear_cache returned: {resp}"));
-    assert_eq!(removed.len(), 1, "expected one cache dir removed: {removed:?}");
+    assert_eq!(
+        removed.len(),
+        1,
+        "expected one cache dir removed: {removed:?}"
+    );
     let removed_path = removed[0].as_str().expect("path string");
     assert!(
         !std::path::Path::new(removed_path).exists(),

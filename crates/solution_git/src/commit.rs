@@ -303,10 +303,11 @@ async fn run_orchestration(
             // Any failure aborts the whole commit. Members that passed
             // are still aborted (PreCommitFailed) — no commits ran yet.
             for ((member, _), backup_ref) in active.iter().zip(backups.iter()) {
-                let already_failed =
-                    failures.iter().any(|f| f.member_id == member.member_id);
+                let already_failed = failures.iter().any(|f| f.member_id == member.member_id);
                 if already_failed {
-                    let mut moved = failures.iter_mut().find(|f| f.member_id == member.member_id);
+                    let mut moved = failures
+                        .iter_mut()
+                        .find(|f| f.member_id == member.member_id);
                     if let Some(entry) = moved.as_mut() {
                         entry.backup_ref = backup_ref.clone();
                     }
@@ -376,18 +377,16 @@ async fn run_orchestration(
                 Some(refname) => match git_reset_soft(&member.work_dir, refname).await {
                     Ok(()) => CommitStatus::RolledBack,
                     Err(rb_err) => {
-                        outcome.rollback_errors.push(format!(
-                            "{}: {rb_err}",
-                            member.member_id.as_ref()
-                        ));
+                        outcome
+                            .rollback_errors
+                            .push(format!("{}: {rb_err}", member.member_id.as_ref()));
                         CommitStatus::PartiallyFailed
                     }
                 },
                 None => {
-                    outcome.rollback_errors.push(format!(
-                        "{}: missing backup ref",
-                        member.member_id.as_ref()
-                    ));
+                    outcome
+                        .rollback_errors
+                        .push(format!("{}: missing backup ref", member.member_id.as_ref()));
                     CommitStatus::PartiallyFailed
                 }
             };
@@ -407,8 +406,7 @@ async fn run_orchestration(
         });
         // Members that hadn't been attempted yet are also Skipped.
         let attempted_count = committed.len() + 1;
-        for ((member, _), backup_ref) in active.iter().zip(backups.iter()).skip(attempted_count)
-        {
+        for ((member, _), backup_ref) in active.iter().zip(backups.iter()).skip(attempted_count) {
             outcome.member_results.push(MemberCommitResult {
                 member_id: member.member_id.clone(),
                 status: CommitStatus::Skipped,
@@ -442,10 +440,12 @@ async fn has_staged_changes(work_dir: &Path) -> Result<bool> {
     command.args(["diff", "--cached", "--quiet"]);
     command.stdout(Stdio::null());
     command.stderr(Stdio::null());
-    let status = command
-        .status()
-        .await
-        .with_context(|| format!("running `git diff --cached --quiet` in {}", work_dir.display()))?;
+    let status = command.status().await.with_context(|| {
+        format!(
+            "running `git diff --cached --quiet` in {}",
+            work_dir.display()
+        )
+    })?;
     // `git diff --quiet` exits 0 = no diff, 1 = diff present.
     Ok(!status.success())
 }
@@ -599,8 +599,7 @@ async fn interpret_trailers(message: &str, solution_name: &SharedString) -> Resu
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    String::from_utf8(output.stdout)
-        .context("non-utf8 `git interpret-trailers` output")
+    String::from_utf8(output.stdout).context("non-utf8 `git interpret-trailers` output")
 }
 
 // -------------------------------------------------------------------
@@ -724,9 +723,9 @@ pub mod mcp {
                          `solution_git::init` must run before this tool is invoked"
                     )
                 })?;
-                let members = input.members.map(|v| {
-                    v.into_iter().map(SharedString::from).collect::<Vec<_>>()
-                });
+                let members = input
+                    .members
+                    .map(|v| v.into_iter().map(SharedString::from).collect::<Vec<_>>());
                 Ok::<_, anyhow::Error>(provider.commit_all(
                     SharedString::from(input.message),
                     input.add_solution_trailer.unwrap_or(true),
@@ -813,7 +812,17 @@ mod tests {
         run(dir.path(), &["init", "-q", "-b", "main"]);
         run(
             dir.path(),
-            &["-c", "user.name=Test", "-c", "user.email=test@x", "commit", "-q", "--allow-empty", "-m", "init"],
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@x",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
         );
         dir
     }
@@ -860,8 +869,17 @@ mod tests {
         assert_eq!(outcome.rolled_back_count(), 0);
         assert!(outcome.rollback_errors.is_empty());
         for result in &outcome.member_results {
-            assert_eq!(result.status, CommitStatus::Committed, "member {}", result.member_id);
-            assert!(result.backup_ref.is_some(), "backup-ref for {}", result.member_id);
+            assert_eq!(
+                result.status,
+                CommitStatus::Committed,
+                "member {}",
+                result.member_id
+            );
+            assert!(
+                result.backup_ref.is_some(),
+                "backup-ref for {}",
+                result.member_id
+            );
         }
     }
 
@@ -1017,8 +1035,7 @@ mod tests {
             stage_change(a.path(), "a.txt", "alpha\n");
             stage_change(b.path(), "b.txt", "beta\n");
             // Force `b` commit to fail — same stale-lock trick.
-            std::fs::write(b.path().join(".git").join("index.lock"), "stale")
-                .expect("write");
+            std::fs::write(b.path().join(".git").join("index.lock"), "stale").expect("write");
 
             // Custom orchestration: run the normal pipeline up through
             // backup creation, then sabotage the backup ref BEFORE
@@ -1046,7 +1063,8 @@ mod tests {
             // it correctly. The orchestration logic that fills
             // `rollback_errors` is exercised by examining the same
             // failure surface.
-            let result = smol::block_on(git_reset_soft(a.path(), "refs/spke/backup/does/not/exist"));
+            let result =
+                smol::block_on(git_reset_soft(a.path(), "refs/spke/backup/does/not/exist"));
             assert!(result.is_err(), "reset --soft of bogus ref must fail");
             let err = format!("{:#}", result.unwrap_err());
             assert!(
@@ -1088,7 +1106,10 @@ mod tests {
             "augmented:\n{augmented}"
         );
         // The original subject must still be present at the top.
-        assert!(augmented.starts_with("Implement S-SOL-CMT"), "preamble preserved");
+        assert!(
+            augmented.starts_with("Implement S-SOL-CMT"),
+            "preamble preserved"
+        );
     }
 
     /// Helper: ensure `build_plan` honours the optional members filter

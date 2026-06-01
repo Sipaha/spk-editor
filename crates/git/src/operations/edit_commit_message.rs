@@ -38,9 +38,13 @@ impl EditMessageOp {
         let mut undo_id = None;
         if let Some(branch) = branch.as_deref() {
             if let Ok(b) = backup::create(repo_path, branch, "edit_commit_message") {
-                undo_id =
-                    undo_registry::record(repo_path, "edit_commit_message", &b.branch, &b.before_sha)
-                        .log_err();
+                undo_id = undo_registry::record(
+                    repo_path,
+                    "edit_commit_message",
+                    &b.branch,
+                    &b.before_sha,
+                )
+                .log_err();
             }
         }
 
@@ -204,7 +208,12 @@ mod tests {
 
     #[allow(clippy::disallowed_methods)]
     fn rev_parse(dir: &Path, rev: &str) -> String {
-        let out = Command::new("git").arg("-C").arg(dir).args(["rev-parse", rev]).output().expect("rev-parse");
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["rev-parse", rev])
+            .output()
+            .expect("rev-parse");
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 

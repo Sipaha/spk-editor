@@ -1,5 +1,8 @@
 use anyhow::{Result, anyhow};
-use gpui::{App, AppContext as _, AsyncWindowContext, Context, Entity, EventEmitter, Subscription, Task, WeakEntity, Window};
+use gpui::{
+    App, AppContext as _, AsyncWindowContext, Context, Entity, EventEmitter, Subscription, Task,
+    WeakEntity, Window,
+};
 use solution_agent::session_view::SolutionSessionView;
 use solution_agent::store::{SolutionAgentStore, SolutionAgentStoreEvent};
 use solution_agent::{AgentServerId, SolutionSession, SolutionSessionId};
@@ -111,10 +114,9 @@ impl ChatProvider {
                 .await?;
 
             let session: Entity<SolutionSession> = cx.update(|_window, cx| {
-                store
-                    .read(cx)
-                    .session(session_id)
-                    .ok_or_else(|| anyhow!("session {session_id:?} missing from store immediately after creation"))
+                store.read(cx).session(session_id).ok_or_else(|| {
+                    anyhow!("session {session_id:?} missing from store immediately after creation")
+                })
             })??;
 
             let view = workspace.update_in(cx, |_ws, window, cx| {
@@ -181,7 +183,9 @@ mod tests {
 
     /// Bootstrap: one Solution + Project + SolutionAgentStore with a MockAgentServer.
     /// Returns `(solution_id, _tmpdir, project)`. Hold `_tmpdir` for the test's lifetime.
-    async fn setup(cx: &mut TestAppContext) -> (
+    async fn setup(
+        cx: &mut TestAppContext,
+    ) -> (
         solutions::SolutionId,
         tempfile::TempDir,
         gpui::Entity<project::Project>,
@@ -198,7 +202,9 @@ mod tests {
             sol_store
         });
         let solution_id = store
-            .update(cx, |s, cx| s.create_solution("Sol", solutions_root.clone(), cx))
+            .update(cx, |s, cx| {
+                s.create_solution("Sol", solutions_root.clone(), cx)
+            })
             .expect("create_solution");
         let solution_root: std::path::PathBuf = store.read_with(cx, |s, _| {
             s.solutions()
@@ -244,8 +250,7 @@ mod tests {
 
         let store = cx.read(|cx| SolutionAgentStore::global(cx));
 
-        let window_handle =
-            cx.add_window(|window, cx| Workspace::test_new(project, window, cx));
+        let window_handle = cx.add_window(|window, cx| Workspace::test_new(project, window, cx));
 
         let task = window_handle
             .update(cx, |workspace, window, cx| {
@@ -269,11 +274,7 @@ mod tests {
             .unwrap();
 
         let result = task.await;
-        assert!(
-            result.is_ok(),
-            "new_tab should succeed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "new_tab should succeed: {:?}", result.err());
         let (session_id, _view) = result.unwrap();
         cx.read(|cx| {
             let store = SolutionAgentStore::global(cx);

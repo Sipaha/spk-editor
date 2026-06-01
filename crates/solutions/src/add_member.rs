@@ -357,7 +357,8 @@ impl SolutionStore {
         });
         let position = (sol.members.len() - 1) as i32;
         let new_member = sol.members.last().expect("just pushed").clone();
-        self.db_set_member(solution_id, &new_member, position).log_err();
+        self.db_set_member(solution_id, &new_member, position)
+            .log_err();
         cx.emit(SolutionStoreEvent::Changed);
         cx.notify();
         Ok(cat_id)
@@ -612,7 +613,9 @@ mod tests {
 
         let store = cx.update(|cx| SolutionStore::for_test(cfg_path, cx));
         let sol_id = store
-            .update(cx, |s, cx| s.create_solution("S", solutions_root.clone(), cx))
+            .update(cx, |s, cx| {
+                s.create_solution("S", solutions_root.clone(), cx)
+            })
             .expect("create solution");
 
         let cat_id = store
@@ -620,14 +623,21 @@ mod tests {
             .expect("add_empty_member");
 
         let (member_path, member_cat_id) = store.read_with(cx, |s, _| {
-            let sol = s.solutions().iter().find(|x| x.id == sol_id).expect("solution");
+            let sol = s
+                .solutions()
+                .iter()
+                .find(|x| x.id == sol_id)
+                .expect("solution");
             let m = sol.members.first().expect("member");
             (m.local_path.clone(), m.catalog_id.clone())
         });
 
         assert_eq!(member_cat_id, cat_id);
         assert!(member_path.is_dir(), "directory must exist on disk");
-        assert!(member_path.starts_with(&solutions_root), "must live inside solution.root");
+        assert!(
+            member_path.starts_with(&solutions_root),
+            "must live inside solution.root"
+        );
         assert_eq!(
             member_path.file_name().and_then(|n| n.to_str()),
             Some("frontend"),
@@ -657,7 +667,10 @@ mod tests {
         let id2 = store
             .update(cx, |s, cx| s.add_empty_member(&sol_id, "Frontend", cx))
             .expect("second add — must not collide");
-        assert_ne!(id1, id2, "two empty members from the same name must get distinct slugs");
+        assert_ne!(
+            id1, id2,
+            "two empty members from the same name must get distinct slugs"
+        );
     }
 
     #[gpui::test]
@@ -676,7 +689,10 @@ mod tests {
             .update(cx, |s, cx| s.add_empty_member(&sol_id, "Frontend", cx))
             .expect("add empty");
         store.read_with(cx, |s, _| {
-            assert!(s.catalog().is_empty(), "empty members must not pollute the catalog");
+            assert!(
+                s.catalog().is_empty(),
+                "empty members must not pollute the catalog"
+            );
         });
     }
 

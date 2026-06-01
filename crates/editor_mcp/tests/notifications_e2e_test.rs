@@ -71,12 +71,8 @@ async fn subscribe_and_receive_notification(cx: &mut TestAppContext) {
 
     // Next line should be the notification frame.
     let line = read_line(&mut stream).await;
-    let parsed: serde_json::Value =
-        serde_json::from_slice(&line).expect("parse notification");
-    assert_eq!(
-        parsed.get("jsonrpc").and_then(|v| v.as_str()),
-        Some("2.0")
-    );
+    let parsed: serde_json::Value = serde_json::from_slice(&line).expect("parse notification");
+    assert_eq!(parsed.get("jsonrpc").and_then(|v| v.as_str()), Some("2.0"));
     // A JSON-RPC notification has no `id` field.
     assert!(
         parsed.get("id").is_none() || parsed.get("id").map_or(false, |v| v.is_null()),

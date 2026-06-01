@@ -21,13 +21,13 @@ use editor::Editor;
 use feature_flags::{
     AgentThreadWorktreeLabel, AgentThreadWorktreeLabelFlag, FeatureFlag, FeatureFlagAppExt as _,
 };
+#[cfg(test)]
+use gpui::Action as _;
 use gpui::{
     AnyElement, App, ClickEvent, Context, DismissEvent, Entity, EntityId, FocusHandle, Focusable,
     KeyContext, ListState, Modifiers, Pixels, Render, SharedString, Task, WeakEntity, Window,
     WindowHandle, linear_color_stop, linear_gradient, list, prelude::*, px,
 };
-#[cfg(test)]
-use gpui::Action as _;
 use menu::{
     Cancel, Confirm, SelectChild, SelectFirst, SelectLast, SelectNext, SelectParent, SelectPrevious,
 };

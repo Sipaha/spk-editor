@@ -52,11 +52,7 @@ impl Focusable for ConflictSidebar {
 }
 
 impl Render for ConflictSidebar {
-    fn render(
-        &mut self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors().clone();
         let count = self.files.len();
         let summary = format!("{count} unresolved");
@@ -74,7 +70,11 @@ impl Render for ConflictSidebar {
                     .border_b_1()
                     .border_color(colors.border)
                     .child(Label::new("Conflicted Files").size(LabelSize::Small))
-                    .child(Label::new(summary).color(Color::Muted).size(LabelSize::XSmall)),
+                    .child(
+                        Label::new(summary)
+                            .color(Color::Muted)
+                            .size(LabelSize::XSmall),
+                    ),
             );
 
         for (idx, file) in self.files.iter().enumerate() {

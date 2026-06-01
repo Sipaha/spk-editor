@@ -66,28 +66,23 @@ impl SolutionPickerDropdown {
         // Re-render whenever the search query changes — the filter is
         // applied in-place on the `closed_solutions` snapshot so the
         // store subscription doesn't have to rerun for every keystroke.
-        let search_subscription = cx.subscribe(
-            &search_editor,
-            |_, _, event: &EditorEvent, cx| {
-                if matches!(
-                    event,
-                    EditorEvent::Edited { .. } | EditorEvent::BufferEdited
-                ) {
-                    cx.notify();
-                }
-            },
-        );
+        let search_subscription = cx.subscribe(&search_editor, |_, _, event: &EditorEvent, cx| {
+            if matches!(
+                event,
+                EditorEvent::Edited { .. } | EditorEvent::BufferEdited
+            ) {
+                cx.notify();
+            }
+        });
 
         // Refresh the closed-solutions list whenever the store mutates
         // (solutions added / removed / renamed, or members changing in a
         // way that flips a solution's open-anywhere status).
         let store = SolutionStore::global(cx);
-        let store_subscription = cx.subscribe(
-            &store,
-            |this, _, _event: &SolutionStoreEvent, cx| {
+        let store_subscription =
+            cx.subscribe(&store, |this, _, _event: &SolutionStoreEvent, cx| {
                 this.refresh(cx);
-            },
-        );
+            });
 
         let focus_handle = search_editor.focus_handle(cx);
         let mut this = Self {
@@ -167,11 +162,7 @@ impl SolutionPickerDropdown {
     }
 
     fn filter_query(&self, cx: &App) -> String {
-        self.search_editor
-            .read(cx)
-            .text(cx)
-            .trim()
-            .to_lowercase()
+        self.search_editor.read(cx).text(cx).trim().to_lowercase()
     }
 
     fn filtered_rows<'a>(&'a self, cx: &App) -> Vec<&'a ClosedSolutionRow> {
@@ -212,12 +203,7 @@ impl SolutionPickerDropdown {
         open_solution(id, source, OpenIntent::SameWindow, cx);
     }
 
-    fn ask_delete(
-        &mut self,
-        row: ClosedSolutionRow,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn ask_delete(&mut self, row: ClosedSolutionRow, window: &mut Window, cx: &mut Context<Self>) {
         // Dismiss the dropdown first — the confirm modal toggles on the
         // workspace's modal layer, and leaving this picker mounted while
         // a confirm modal opens above it stacks two modals on the same
@@ -276,25 +262,17 @@ impl Focusable for SolutionPickerDropdown {
 
 impl Render for SolutionPickerDropdown {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows: Vec<ClosedSolutionRow> =
-            self.filtered_rows(cx).into_iter().cloned().collect();
+        let rows: Vec<ClosedSolutionRow> = self.filtered_rows(cx).into_iter().cloned().collect();
         let row_count = rows.len();
 
         let row_elements: Vec<gpui::AnyElement> = rows
             .into_iter()
             .map(|row| {
-                let row_id = SharedString::from(format!(
-                    "solution-picker-row-{}",
-                    row.id.as_str()
-                ));
-                let group_id = SharedString::from(format!(
-                    "solution-picker-group-{}",
-                    row.id.as_str()
-                ));
-                let trash_id = SharedString::from(format!(
-                    "solution-picker-delete-{}",
-                    row.id.as_str()
-                ));
+                let row_id = SharedString::from(format!("solution-picker-row-{}", row.id.as_str()));
+                let group_id =
+                    SharedString::from(format!("solution-picker-group-{}", row.id.as_str()));
+                let trash_id =
+                    SharedString::from(format!("solution-picker-delete-{}", row.id.as_str()));
                 let id_for_open = row.id.clone();
                 let label = row.name.clone();
                 h_flex()
@@ -310,12 +288,7 @@ impl Render for SolutionPickerDropdown {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_row(id_for_open.clone(), window, cx);
                     }))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(Label::new(label).truncate()),
-                    )
+                    .child(div().flex_1().min_w_0().child(Label::new(label).truncate()))
                     .child(
                         IconButton::new(trash_id, IconName::Trash)
                             .shape(IconButtonShape::Square)
@@ -380,23 +353,14 @@ impl Render for SolutionPickerDropdown {
                     .bg(cx.theme().colors().editor_background)
                     .border_1()
                     .border_color(cx.theme().colors().border_variant)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(self.search_editor.clone()),
-                    )
+                    .child(div().flex_1().min_w_0().child(self.search_editor.clone()))
                     .child(
                         Icon::new(IconName::MagnifyingGlass)
                             .size(IconSize::Small)
                             .color(Color::Muted),
                     ),
             )
-            .child(
-                div()
-                    .h_px()
-                    .bg(cx.theme().colors().border),
-            )
+            .child(div().h_px().bg(cx.theme().colors().border))
             .child(
                 h_flex()
                     .id("solution-picker-create")
@@ -412,18 +376,12 @@ impl Render for SolutionPickerDropdown {
                             .size(IconSize::Small)
                             .color(Color::Accent),
                     )
-                    .child(
-                        Label::new("Create new solution…").color(Color::Accent),
-                    )
+                    .child(Label::new("Create new solution…").color(Color::Accent))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_create(window, cx);
                     })),
             )
-            .child(
-                div()
-                    .h_px()
-                    .bg(cx.theme().colors().border),
-            )
+            .child(div().h_px().bg(cx.theme().colors().border))
             .child(
                 div()
                     .id("solution-picker-list")
@@ -444,7 +402,9 @@ mod tests {
     /// Mirrors the sort logic inside `refresh()` so we can validate it in
     /// isolation. `(last_opened, name)` pairs in / `name`s in expected
     /// order out.
-    fn sort_rows(mut rows: Vec<(Option<chrono::DateTime<chrono::Utc>>, &'static str)>) -> Vec<&'static str> {
+    fn sort_rows(
+        mut rows: Vec<(Option<chrono::DateTime<chrono::Utc>>, &'static str)>,
+    ) -> Vec<&'static str> {
         rows.sort_by(|a, b| match (a.0, b.0) {
             (Some(ts_a), Some(ts_b)) => ts_b.cmp(&ts_a),
             (Some(_), None) => std::cmp::Ordering::Less,

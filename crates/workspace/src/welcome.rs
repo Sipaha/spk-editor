@@ -18,9 +18,9 @@
 
 use crate::AppState;
 use gpui::{
-    AnyElement, AnyWindowHandle, App, Context, FocusHandle, Focusable, Global,
-    InteractiveElement, ParentElement, Render, Styled, Window, WindowDecorations, WindowHandle,
-    WindowKind, actions, px,
+    AnyElement, AnyWindowHandle, App, Context, FocusHandle, Focusable, Global, InteractiveElement,
+    ParentElement, Render, Styled, Window, WindowDecorations, WindowHandle, WindowKind, actions,
+    px,
 };
 use std::cell::RefCell;
 use std::rc::Rc;

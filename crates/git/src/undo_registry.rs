@@ -97,9 +97,9 @@ fn current_unix_seconds() -> i64 {
 }
 
 mod persistence {
+    use anyhow::Result;
     #[cfg(not(any(test, feature = "test-support")))]
     use anyhow::anyhow;
-    use anyhow::Result;
     use db::{
         query,
         sqlez::{domain::Domain, thread_safe_connection::ThreadSafeConnection},
@@ -153,10 +153,7 @@ mod persistence {
         if let Some(existing) = guard.get(&std::thread::current().id()) {
             return existing.clone();
         }
-        let name = format!(
-            "undo_registry_test_db_{}",
-            uuid::Uuid::new_v4().simple()
-        );
+        let name = format!("undo_registry_test_db_{}", uuid::Uuid::new_v4().simple());
         // Leak the name to obtain a `&'static str` — this is test-only,
         // and the leak is bounded by `RUST_TEST_THREADS` (typically the
         // CPU count), so total memory growth is trivial.
@@ -233,7 +230,6 @@ mod persistence {
             }
         }
     }
-
 }
 
 /// Test scaffolding kept under the original `test_override` name so existing
@@ -265,10 +261,9 @@ mod tests {
     /// other tests sharing the in-memory DB don't collide on filtering.
     #[gpui::test]
     async fn record_and_list_round_trips() {
-        let id1 =
-            record(Path::new("/repo/r1"), "drop_test_a", "main", "deadbeef").expect("record");
-        let id2 = record(Path::new("/repo/r1"), "squash_test_a", "main", "feedface")
-            .expect("record");
+        let id1 = record(Path::new("/repo/r1"), "drop_test_a", "main", "deadbeef").expect("record");
+        let id2 =
+            record(Path::new("/repo/r1"), "squash_test_a", "main", "feedface").expect("record");
         assert!(id2 > id1);
 
         let entries = list(0).expect("list");
@@ -281,28 +276,20 @@ mod tests {
 
     #[gpui::test]
     async fn complete_sets_after_sha() {
-        let id = record(Path::new("/r/complete"), "rebase_test_b", "main", "aaaa")
-            .expect("record");
+        let id = record(Path::new("/r/complete"), "rebase_test_b", "main", "aaaa").expect("record");
         complete(id, "bbbb").expect("complete");
         let entries = list(0).expect("list");
-        let entry = entries
-            .iter()
-            .find(|e| e.id == id)
-            .expect("entry exists");
+        let entry = entries.iter().find(|e| e.id == id).expect("entry exists");
         assert_eq!(entry.after_sha.as_deref(), Some("bbbb"));
         assert!(!entry.failed);
     }
 
     #[gpui::test]
     async fn mark_failed_flips_flag() {
-        let id =
-            record(Path::new("/r/failed"), "drop_test_c", "main", "ccc").expect("record");
+        let id = record(Path::new("/r/failed"), "drop_test_c", "main", "ccc").expect("record");
         mark_failed(id).expect("mark_failed");
         let entries = list(0).expect("list");
-        let entry = entries
-            .iter()
-            .find(|e| e.id == id)
-            .expect("entry exists");
+        let entry = entries.iter().find(|e| e.id == id).expect("entry exists");
         assert!(entry.failed);
     }
 
@@ -319,8 +306,7 @@ mod tests {
 
     #[gpui::test]
     async fn forget_removes_entry() {
-        let id =
-            record(Path::new("/r/forget"), "drop_test_e", "main", "aa").expect("record");
+        let id = record(Path::new("/r/forget"), "drop_test_e", "main", "aa").expect("record");
         forget(id).expect("forget");
         let entries = list(0).expect("list");
         assert!(entries.iter().all(|e| e.id != id));

@@ -222,10 +222,13 @@ fn gc(cx: &App) {
     let now = Utc::now();
     let cutoff = chrono::Duration::from_std(OPERATION_RETENTION)
         .unwrap_or_else(|_| chrono::Duration::seconds(300));
-    tracker.operations.borrow_mut().retain(|_, op| match op.completed_at {
-        Some(completed) => now - completed < cutoff,
-        None => true,
-    });
+    tracker
+        .operations
+        .borrow_mut()
+        .retain(|_, op| match op.completed_at {
+            Some(completed) => now - completed < cutoff,
+            None => true,
+        });
 }
 
 #[cfg(test)]

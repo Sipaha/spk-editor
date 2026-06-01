@@ -155,11 +155,7 @@ pub fn slugify(name: &str) -> String {
     while out.ends_with('-') {
         out.pop();
     }
-    if out.is_empty() {
-        "config".into()
-    } else {
-        out
-    }
+    if out.is_empty() { "config".into() } else { out }
 }
 
 #[cfg(test)]
@@ -205,7 +201,10 @@ mod tests {
         assert_eq!(entry["id"], serde_json::json!("the-id"));
         assert_eq!(entry["command"], serde_json::json!("cargo"));
         assert_eq!(entry["future_field"], serde_json::json!({ "x": 1 }));
-        assert_eq!(entry["before_launch"], serde_json::json!(["save_all_files"]));
+        assert_eq!(
+            entry["before_launch"],
+            serde_json::json!(["save_all_files"])
+        );
     }
 
     #[test]
@@ -222,18 +221,26 @@ mod tests {
         assert_eq!(configs[0].id.as_str(), "shell:build-release");
 
         let doc = build_document(&configs);
-        assert_eq!(doc["configurations"][0]["id"], serde_json::json!("shell:build-release"));
+        assert_eq!(
+            doc["configurations"][0]["id"],
+            serde_json::json!("shell:build-release")
+        );
     }
 
     #[test]
     fn empty_and_missing_are_ok() {
         assert!(parse_document("", ConfigScope::Global).unwrap().is_empty());
-        assert!(parse_document("{}", ConfigScope::Global).unwrap().is_empty());
+        assert!(
+            parse_document("{}", ConfigScope::Global)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
     fn invalid_entries_are_skipped() {
-        let src = r#"{ "configurations": [ { "type": "shell" }, { "name": "ok", "type": "shell" } ] }"#;
+        let src =
+            r#"{ "configurations": [ { "type": "shell" }, { "name": "ok", "type": "shell" } ] }"#;
         let configs = parse_document(src, ConfigScope::Global).unwrap();
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].name.as_ref(), "ok");

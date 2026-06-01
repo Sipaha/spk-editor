@@ -1,11 +1,11 @@
 use crate::{CompositorGpuHint, WgpuAtlas, WgpuContext};
 use bytemuck::{Pod, Zeroable};
-use image::RgbaImage;
 use gpui::{
     AtlasTextureId, Background, Bounds, DevicePixels, GpuSpecs, MonochromeSprite, Path, Point,
     PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size, SubpixelSprite,
     Underline, get_gamma_correction_ratios,
 };
+use image::RgbaImage;
 use log::warn;
 #[cfg(not(target_family = "wasm"))]
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -1503,9 +1503,11 @@ impl WgpuRenderer {
         };
         {
             let resources = self.resources();
-            resources
-                .queue
-                .write_buffer(&resources.globals_buffer, 0, bytemuck::bytes_of(&globals));
+            resources.queue.write_buffer(
+                &resources.globals_buffer,
+                0,
+                bytemuck::bytes_of(&globals),
+            );
             resources.queue.write_buffer(
                 &resources.globals_buffer,
                 self.path_globals_offset,
@@ -1590,8 +1592,9 @@ impl WgpuRenderer {
             }
         }
 
-        RgbaImage::from_raw(width, height, pixels)
-            .ok_or_else(|| anyhow::anyhow!("render_to_image: failed to build RgbaImage from readback"))
+        RgbaImage::from_raw(width, height, pixels).ok_or_else(|| {
+            anyhow::anyhow!("render_to_image: failed to build RgbaImage from readback")
+        })
     }
 
     fn draw_quads(

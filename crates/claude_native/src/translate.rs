@@ -96,18 +96,18 @@ fn translate_stream_event(ev: &StreamEvent) -> Vec<acp::SessionUpdate> {
             .get("text")
             .and_then(|t| t.as_str())
             .map(|text| {
-                vec![acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
-                    text_block(text),
-                ))]
+                vec![acp::SessionUpdate::AgentMessageChunk(
+                    acp::ContentChunk::new(text_block(text)),
+                )]
             })
             .unwrap_or_default(),
         Some("thinking_delta") => delta
             .get("thinking")
             .and_then(|t| t.as_str())
             .map(|text| {
-                vec![acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(
-                    text_block(text),
-                ))]
+                vec![acp::SessionUpdate::AgentThoughtChunk(
+                    acp::ContentChunk::new(text_block(text)),
+                )]
             })
             .unwrap_or_default(),
         _ => Vec::new(),
@@ -167,8 +167,8 @@ fn tool_kind_for(name: &str) -> acp::ToolKind {
         "Bash" | "BashOutput" | "KillShell" => acp::ToolKind::Execute,
         "Glob" | "Grep" => acp::ToolKind::Search,
         "WebFetch" | "WebSearch" => acp::ToolKind::Fetch,
-        "TodoWrite" | "Think" | "Task" | "Agent" | "TaskCreate" | "TaskUpdate"
-        | "TaskList" | "TaskGet" => acp::ToolKind::Think,
+        "TodoWrite" | "Think" | "Task" | "Agent" | "TaskCreate" | "TaskUpdate" | "TaskList"
+        | "TaskGet" => acp::ToolKind::Think,
         "ExitPlanMode" => acp::ToolKind::SwitchMode,
         _ => acp::ToolKind::Other,
     }
@@ -178,10 +178,7 @@ fn tool_kind_for(name: &str) -> acp::ToolKind {
 /// `ToolCallLocation`s so the desktop UI can render clickable file
 /// links above the tool body. Empty vec when no path field is found
 /// or the tool is non-file (Bash, WebFetch, etc.).
-fn tool_locations_from_input(
-    name: &str,
-    input: &serde_json::Value,
-) -> Vec<acp::ToolCallLocation> {
+fn tool_locations_from_input(name: &str, input: &serde_json::Value) -> Vec<acp::ToolCallLocation> {
     let path_field = match name {
         "Read" | "Edit" | "Write" | "NotebookRead" | "NotebookEdit" | "MultiEdit" => "file_path",
         "Glob" => "path",
@@ -471,10 +468,7 @@ pub fn apply_stream_usage(
             snapshot_message_start_usage(&ev.event),
             extract_message_start_model(&ev.event),
         ),
-        Some("message_delta") => (
-            merge_stream_usage(prev_usage, ev.event.get("usage")),
-            None,
-        ),
+        Some("message_delta") => (merge_stream_usage(prev_usage, ev.event.get("usage")), None),
         _ => {
             return StreamUsageOutcome {
                 new_usage: None,
@@ -553,7 +547,8 @@ pub fn apply_usage(
 /// not a meaningful limit, so it is treated identically to "missing" — the
 /// sticky fallback applies instead of overwriting a known window with 0.
 fn real_window(r: &ResultMessage) -> Option<u64> {
-    r.context_window_for_active_model().filter(|window| *window > 0)
+    r.context_window_for_active_model()
+        .filter(|window| *window > 0)
 }
 
 fn text_block(text: &str) -> acp::ContentBlock {
@@ -689,7 +684,10 @@ pub(crate) fn image_block_from_anthropic(block: &serde_json::Value) -> Option<ac
 fn format_bash_result(block: &serde_json::Value) -> String {
     let stdout = block.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
     let stderr = block.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
-    let return_code = block.get("return_code").and_then(|v| v.as_i64()).unwrap_or(0);
+    let return_code = block
+        .get("return_code")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
     let mut output = String::new();
     if !stdout.is_empty() {
         output.push_str(stdout);
@@ -798,7 +796,10 @@ mod tests {
     fn thinking_delta_becomes_thought_chunk() {
         let msg = OutputMessage::parse(r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hmm"}},"uuid":"u","session_id":"s"}"#).unwrap();
         let ups = translate(&msg);
-        assert!(matches!(ups.as_slice(), [acp::SessionUpdate::AgentThoughtChunk(_)]));
+        assert!(matches!(
+            ups.as_slice(),
+            [acp::SessionUpdate::AgentThoughtChunk(_)]
+        ));
     }
 
     #[test]
@@ -881,12 +882,18 @@ mod tests {
             r#"{"subtype":"success","stop_reason":"max_tokens"}"#,
         )
         .unwrap();
-        assert_eq!(classify_result(&mt), TurnEnd::Stop(acp::StopReason::MaxTokens));
+        assert_eq!(
+            classify_result(&mt),
+            TurnEnd::Stop(acp::StopReason::MaxTokens)
+        );
         let c = serde_json::from_str::<ResultMessage>(
             r#"{"subtype":"success","stop_reason":"cancelled"}"#,
         )
         .unwrap();
-        assert_eq!(classify_result(&c), TurnEnd::Stop(acp::StopReason::Cancelled));
+        assert_eq!(
+            classify_result(&c),
+            TurnEnd::Stop(acp::StopReason::Cancelled)
+        );
     }
 
     #[test]
@@ -971,8 +978,7 @@ mod tests {
             Some(acp::SessionUpdate::UsageUpdate(u)) => assert_eq!(u.size, 1_000_000),
             other => panic!("{other:?}"),
         }
-        let nothing =
-            serde_json::from_str::<ResultMessage>(r#"{"subtype":"success"}"#).unwrap();
+        let nothing = serde_json::from_str::<ResultMessage>(r#"{"subtype":"success"}"#).unwrap();
         assert!(usage_update(&nothing, None, None).is_none());
     }
 
@@ -1039,7 +1045,10 @@ mod tests {
         .unwrap();
         match usage_update(&r, None, Some(920_000)) {
             Some(acp::SessionUpdate::UsageUpdate(u)) => {
-                assert_eq!(u.used, 920_000, "must use latest_used, not the inflated result.usage");
+                assert_eq!(
+                    u.used, 920_000,
+                    "must use latest_used, not the inflated result.usage"
+                );
                 assert_eq!(u.size, 1_000_000);
             }
             other => panic!("{other:?}"),
@@ -1157,11 +1166,7 @@ mod tests {
                     acp::ToolCallContent::Content(c) => match &c.content {
                         acp::ContentBlock::Text(t) => {
                             assert!(t.text.contains("hello"), "stdout preserved: {}", t.text);
-                            assert!(
-                                t.text.contains("exit: 2"),
-                                "exit code rendered: {}",
-                                t.text
-                            );
+                            assert!(t.text.contains("exit: 2"), "exit code rendered: {}", t.text);
                             assert!(
                                 t.text.contains("```console"),
                                 "fenced as console block: {}",
@@ -1291,7 +1296,12 @@ mod tests {
             }),
             parent_tool_use_id: None,
         };
-        let dedup = apply_stream_usage(&same_delta, first.new_usage.as_ref(), Some(51_000), Some(200_000));
+        let dedup = apply_stream_usage(
+            &same_delta,
+            first.new_usage.as_ref(),
+            Some(51_000),
+            Some(200_000),
+        );
         assert!(
             dedup.update.is_none(),
             "no UsageUpdate when total unchanged"
@@ -1386,9 +1396,10 @@ mod tests {
 
     #[test]
     fn stamp_subagent_meta_writes_nested_claude_code_key() {
-        let mut update = acp::SessionUpdate::ToolCall(
-            acp::ToolCall::new(acp::ToolCallId::new("toolu_child"), "Read"),
-        );
+        let mut update = acp::SessionUpdate::ToolCall(acp::ToolCall::new(
+            acp::ToolCallId::new("toolu_child"),
+            "Read",
+        ));
         stamp_subagent_meta(&mut update, "toolu_parent");
         let meta = match &update {
             acp::SessionUpdate::ToolCall(t) => t.meta.as_ref().expect("meta set"),

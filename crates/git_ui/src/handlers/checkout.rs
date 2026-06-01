@@ -17,10 +17,7 @@ pub fn checkout_revision(
 ) -> Task<Result<()>> {
     cx.spawn(async move |cx| {
         if !force_dirty {
-            let is_dirty = match repository
-                .update(cx, |repo, _| repo.is_dirty())
-                .await
-            {
+            let is_dirty = match repository.update(cx, |repo, _| repo.is_dirty()).await {
                 Ok(Ok(dirty)) => dirty,
                 Ok(Err(error)) => return Err(error),
                 Err(_) => return Err(anyhow!("is_dirty was canceled")),

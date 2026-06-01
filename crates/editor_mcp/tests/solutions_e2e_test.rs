@@ -113,14 +113,8 @@ async fn solutions_flow_over_socket(cx: &mut TestAppContext) {
         .and_then(|v| v.as_array())
         .expect("solutions array");
     assert_eq!(arr.len(), 1);
-    assert_eq!(
-        arr[0].get("name").and_then(|v| v.as_str()),
-        Some("Demo")
-    );
-    assert_eq!(
-        arr[0].get("member_count").and_then(|v| v.as_u64()),
-        Some(0)
-    );
+    assert_eq!(arr[0].get("name").and_then(|v| v.as_str()), Some("Demo"));
+    assert_eq!(arr[0].get("member_count").and_then(|v| v.as_u64()), Some(0));
 
     // 4. catalog.list
     let resp = call_tool(&mut stream, 4, "catalog.list", json!({})).await;

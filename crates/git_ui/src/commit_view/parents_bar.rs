@@ -17,11 +17,10 @@ pub(crate) fn render_parents_bar(parents: &[SharedString]) -> Option<AnyElement>
         "Parents"
     };
 
-    let row = h_flex().gap_1p5().items_center().child(
-        Label::new(label)
-            .size(LabelSize::Small)
-            .color(Color::Muted),
-    );
+    let row = h_flex()
+        .gap_1p5()
+        .items_center()
+        .child(Label::new(label).size(LabelSize::Small).color(Color::Muted));
 
     let row = parents.iter().enumerate().fold(row, |row, (ix, parent)| {
         let short = parent.get(0..7).unwrap_or(parent.as_ref()).to_string();
@@ -34,10 +33,7 @@ pub(crate) fn render_parents_bar(parents: &[SharedString]) -> Option<AnyElement>
                 .color(Color::Accent)
                 .tooltip(move |_, cx| Tooltip::simple(tooltip_full.clone(), cx))
                 .on_click(move |_, window: &mut Window, cx| {
-                    window.dispatch_action(
-                        Box::new(OpenAtCommit { sha: full.clone() }),
-                        cx,
-                    );
+                    window.dispatch_action(Box::new(OpenAtCommit { sha: full.clone() }), cx);
                 }),
         )
     });

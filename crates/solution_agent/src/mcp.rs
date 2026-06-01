@@ -594,7 +594,10 @@ pub struct BackgroundShellDto {
 /// (always lite, `include_output = false`) so both wire paths agree on
 /// the shape. Pure (no `cx`), so it lives here and event_sources reaches
 /// it via `crate::mcp::` exactly like `build_active_subagents_vec`.
-pub(crate) fn background_shell_dto(shell: &BackgroundShell, include_output: bool) -> BackgroundShellDto {
+pub(crate) fn background_shell_dto(
+    shell: &BackgroundShell,
+    include_output: bool,
+) -> BackgroundShellDto {
     let mtime_ms = shell.latest.as_ref().and_then(|snapshot| {
         snapshot
             .mtime
@@ -704,7 +707,10 @@ impl McpServerTool for GetSessionBackgroundShellsTool {
                 let session = store
                     .session(session_id)
                     .ok_or_else(|| anyhow!("session_not_found: {session_id}"))?;
-                Ok(build_background_shells_vec(session.read(cx), include_output))
+                Ok(build_background_shells_vec(
+                    session.read(cx),
+                    include_output,
+                ))
             })
         })?;
 
@@ -4715,12 +4721,8 @@ mod tests {
                     last_offset: 13,
                     state: ShellRuntimeState::Exited(Some(0)),
                 };
-                session
-                    .background_shell_order
-                    .push(first.id.clone());
-                session
-                    .background_shell_order
-                    .push(second.id.clone());
+                session.background_shell_order.push(first.id.clone());
+                session.background_shell_order.push(second.id.clone());
                 session.background_shells.insert(first.id.clone(), first);
                 session.background_shells.insert(second.id.clone(), second);
             });

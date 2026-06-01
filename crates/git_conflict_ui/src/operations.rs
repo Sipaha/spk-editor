@@ -10,8 +10,8 @@ use anyhow::{Context as _, Result, anyhow};
 use git::operations::{AtomicGitOp, OpRunner};
 use gpui::{AppContext as _, Context, Task};
 use std::path::{Path, PathBuf};
-use util::command::{Stdio, new_command};
 use util::ResultExt as _;
+use util::command::{Stdio, new_command};
 
 use crate::conflict_parser::{InProgressOp, detect_in_progress_op};
 use crate::resolver_view::ConflictResolverView;
@@ -122,7 +122,10 @@ impl AtomicGitOp for SkipRebaseOp {
 
     fn run(&mut self, repo_path: &Path) -> Result<()> {
         if !self.op.supports_skip() {
-            return Err(anyhow!("git {} does not support --skip", self.op.cli_subcommand()));
+            return Err(anyhow!(
+                "git {} does not support --skip",
+                self.op.cli_subcommand()
+            ));
         }
         run_git_blocking(repo_path, &[self.op.cli_subcommand(), "--skip"])
     }
@@ -133,9 +136,7 @@ fn run_git_blocking(repo_path: &Path, args: &[&str]) -> Result<()> {
     use std::process::Command;
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(repo_path).args(args);
-    let output = cmd
-        .output()
-        .map_err(|err| anyhow!("spawn git: {err}"))?;
+    let output = cmd.output().map_err(|err| anyhow!("spawn git: {err}"))?;
     if !output.status.success() {
         return Err(anyhow!(
             "git {} failed: {}",
@@ -233,11 +234,9 @@ pub(crate) fn abort_op(this: &mut ConflictResolverView, cx: &mut Context<Conflic
     };
     let work_dir = this.work_dir().to_path_buf();
     cx.spawn(async move |this, cx| {
-        cx.background_spawn(async move {
-            OpRunner::run(AbortMergeOp { op }, &work_dir)
-        })
-        .await
-        .log_err();
+        cx.background_spawn(async move { OpRunner::run(AbortMergeOp { op }, &work_dir) })
+            .await
+            .log_err();
         this.update(cx, |this, cx| {
             this.refresh_conflict_list(cx);
         })
@@ -255,11 +254,9 @@ pub(crate) fn skip_op(this: &mut ConflictResolverView, cx: &mut Context<Conflict
     }
     let work_dir = this.work_dir().to_path_buf();
     cx.spawn(async move |this, cx| {
-        cx.background_spawn(async move {
-            OpRunner::run(SkipRebaseOp { op }, &work_dir)
-        })
-        .await
-        .log_err();
+        cx.background_spawn(async move { OpRunner::run(SkipRebaseOp { op }, &work_dir) })
+            .await
+            .log_err();
         this.update(cx, |this, cx| {
             this.refresh_conflict_list(cx);
         })

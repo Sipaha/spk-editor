@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
+use console_panel::ConsolePanel;
 use dap::adapters::DebugTaskDefinition;
 use dap::client::DebugAdapterClient;
 use gpui::{Entity, TestAppContext, WindowHandle};
 use project::{Project, debugger::session::Session};
 use settings::SettingsStore;
 use task::SharedTaskContext;
-use console_panel::ConsolePanel;
 use workspace::MultiWorkspace;
 
 use crate::{debugger_panel::DebugPanel, session::DebugSession};

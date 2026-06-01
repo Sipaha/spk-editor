@@ -231,10 +231,8 @@ impl McpServerTool for ContinueMergeTool {
         let op = op_for_dir(&work_dir).ok_or_else(|| anyhow!("no in-progress op"))?;
         let cli = op.cli_subcommand().to_string();
         let work_buf = work_dir.to_path_buf();
-        cx.background_spawn(async move {
-            OpRunner::run(ContinueMergeOp { op }, &work_buf)
-        })
-        .await?;
+        cx.background_spawn(async move { OpRunner::run(ContinueMergeOp { op }, &work_buf) })
+            .await?;
         let summary = format!("git {cli} --continue");
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text { text: summary }],
@@ -286,10 +284,7 @@ impl McpServerTool for AbortMergeTool {
     }
 }
 
-fn resolve_work_directory(
-    repo_id: Option<RepositoryId>,
-    cx: &mut App,
-) -> Result<Arc<Path>> {
+fn resolve_work_directory(repo_id: Option<RepositoryId>, cx: &mut App) -> Result<Arc<Path>> {
     let active_window_id = cx.active_window().map(|h| h.window_id());
 
     if let Some(want) = repo_id {

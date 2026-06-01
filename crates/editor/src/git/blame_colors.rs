@@ -119,8 +119,14 @@ mod tests {
 
     #[test]
     fn stable_hash_is_deterministic() {
-        assert_eq!(stable_hash(b"alice@example.com"), stable_hash(b"alice@example.com"));
-        assert_ne!(stable_hash(b"alice@example.com"), stable_hash(b"bob@example.com"));
+        assert_eq!(
+            stable_hash(b"alice@example.com"),
+            stable_hash(b"alice@example.com")
+        );
+        assert_ne!(
+            stable_hash(b"alice@example.com"),
+            stable_hash(b"bob@example.com")
+        );
     }
 
     #[test]

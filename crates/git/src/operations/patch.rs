@@ -58,8 +58,8 @@ pub fn detect_patch_format(bytes: &[u8]) -> Result<PatchFormat> {
     let scan_limit = bytes.len().min(4096);
     let head = &bytes[..scan_limit];
 
-    let head_str = std::str::from_utf8(head)
-        .map_err(|err| anyhow!("patch is not valid UTF-8: {err}"))?;
+    let head_str =
+        std::str::from_utf8(head).map_err(|err| anyhow!("patch is not valid UTF-8: {err}"))?;
     let head_str = head_str.strip_prefix('\u{feff}').unwrap_or(head_str);
 
     let first_non_empty = head_str
@@ -193,9 +193,8 @@ pub fn create_patch(
     };
 
     if let Some(out_dir) = out_dir {
-        std::fs::create_dir_all(out_dir).map_err(|err| {
-            anyhow!("create_patch: mkdir {}: {err}", out_dir.display())
-        })?;
+        std::fs::create_dir_all(out_dir)
+            .map_err(|err| anyhow!("create_patch: mkdir {}: {err}", out_dir.display()))?;
         let out_str = out_dir.to_string_lossy().to_string();
         let mut args: Vec<&str> = vec!["format-patch"];
         if sha_to.is_none() || sha_to.map(str::trim).unwrap_or("").is_empty() {
@@ -242,12 +241,8 @@ pub fn create_patch(
     }
 
     let scratch_dir = repo_path.join(".git").join("spke-patches");
-    std::fs::create_dir_all(&scratch_dir).map_err(|err| {
-        anyhow!(
-            "create_patch: mkdir {}: {err}",
-            scratch_dir.display()
-        )
-    })?;
+    std::fs::create_dir_all(&scratch_dir)
+        .map_err(|err| anyhow!("create_patch: mkdir {}: {err}", scratch_dir.display()))?;
     let short = sha_from.chars().take(12).collect::<String>();
     let filename = match sha_to {
         Some(to) if !to.trim().is_empty() => {
@@ -276,19 +271,19 @@ pub fn apply_patch(
     match format {
         PatchFormat::Mbox => apply_mbox(repo_path, patch_path, &options),
         PatchFormat::UnifiedWithIndex => {
-            apply_unified(repo_path, patch_path, &options, /*three_way_default*/ true)
+            apply_unified(
+                repo_path, patch_path, &options, /*three_way_default*/ true,
+            )
         }
         PatchFormat::UnifiedNoIndex => {
-            apply_unified(repo_path, patch_path, &options, /*three_way_default*/ false)
+            apply_unified(
+                repo_path, patch_path, &options, /*three_way_default*/ false,
+            )
         }
     }
 }
 
-fn apply_mbox(
-    repo_path: &Path,
-    patch_path: &Path,
-    options: &ApplyOptions,
-) -> Result<ApplyOutcome> {
+fn apply_mbox(repo_path: &Path, patch_path: &Path, options: &ApplyOptions) -> Result<ApplyOutcome> {
     let path_arg = patch_path.to_string_lossy().to_string();
     let mut args: Vec<&str> = vec!["am"];
     if options.three_way {
@@ -319,10 +314,7 @@ fn apply_mbox(
     let stderr = String::from_utf8_lossy(&output.stderr);
     let abort_envs = super::direct::no_editor_envs();
     let _ = run_git_with_envs(repo_path, &["am", "--abort"], &abort_envs);
-    Err(anyhow!(
-        "git am failed: {}",
-        stderr.trim()
-    ))
+    Err(anyhow!("git am failed: {}", stderr.trim()))
 }
 
 fn apply_unified(
@@ -385,8 +377,7 @@ fn apply_unified_reject(repo_path: &Path, patch_path: &Path) -> Result<ApplyOutc
 }
 
 fn list_reject_files(repo_path: &Path) -> Result<Vec<PathBuf>> {
-    let repo = Repository::discover(repo_path)
-        .map_err(|err| anyhow!("discover repo: {err}"))?;
+    let repo = Repository::discover(repo_path).map_err(|err| anyhow!("discover repo: {err}"))?;
     let mut opts = git2::StatusOptions::new();
     opts.include_untracked(true).recurse_untracked_dirs(true);
     let statuses = repo
@@ -525,7 +516,8 @@ mod tests {
 
     #[test]
     fn detect_format_skips_leading_blank_lines() {
-        let body = b"\n\n\nFrom cafef00dcafef00dcafef00dcafef00dcafef00d Mon Sep 17 00:00:00 2001\n";
+        let body =
+            b"\n\n\nFrom cafef00dcafef00dcafef00dcafef00dcafef00d Mon Sep 17 00:00:00 2001\n";
         assert_eq!(
             detect_patch_format(body).expect("detect"),
             PatchFormat::Mbox

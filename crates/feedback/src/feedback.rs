@@ -34,7 +34,6 @@ fn email_zed_url(_specs: &SystemSpecs) -> String {
     "https://github.com/Sipaha/spk-editor/issues/new".to_string()
 }
 
-
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace

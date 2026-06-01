@@ -1089,8 +1089,7 @@ impl EditPredictionButton {
             // Edit prediction (Zeta) disabled in spk-editor; the upsell only ran when the
             // active provider was Zed (now hidden) so the sign-in branch is now unreachable
             // in practice. Keep the structure so future provider work is easy to re-enable.
-            let needs_sign_in = user.is_none()
-                && matches!(provider, EditPredictionProvider::Zed);
+            let needs_sign_in = user.is_none() && matches!(provider, EditPredictionProvider::Zed);
 
             if needs_sign_in {
                 menu = menu

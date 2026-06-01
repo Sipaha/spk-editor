@@ -62,7 +62,11 @@ async fn add_empty_member_creates_git_member(cx: &mut gpui::TestAppContext) {
     });
 
     let start_result = cx.update(|cx| editor_mcp::start_server(cx));
-    assert!(start_result.is_ok(), "start_server: {:?}", start_result.err());
+    assert!(
+        start_result.is_ok(),
+        "start_server: {:?}",
+        start_result.err()
+    );
 
     let socket_path = runtime_dir.path().join("mcp.sock");
     let mut waited = Duration::ZERO;
@@ -75,7 +79,13 @@ async fn add_empty_member_creates_git_member(cx: &mut gpui::TestAppContext) {
     let mut stream = UnixStream::connect(&socket_path).await.expect("connect");
 
     // --- 1. Create a Solution ---
-    let resp = call_tool(&mut stream, 1, "solutions.create", json!({"name": "Empty Demo"})).await;
+    let resp = call_tool(
+        &mut stream,
+        1,
+        "solutions.create",
+        json!({"name": "Empty Demo"}),
+    )
+    .await;
     let solution_id = resp
         .pointer("/result/structuredContent/solution_id")
         .and_then(|v| v.as_str())
@@ -96,7 +106,10 @@ async fn add_empty_member_creates_git_member(cx: &mut gpui::TestAppContext) {
         .and_then(|v| v.as_str())
         .unwrap_or_else(|| panic!("add_empty_member returned: {resp}"))
         .to_string();
-    assert!(!catalog_id.is_empty(), "catalog_id should be a non-empty slug");
+    assert!(
+        !catalog_id.is_empty(),
+        "catalog_id should be a non-empty slug"
+    );
 
     // --- 3. solutions.get reports the member, on disk, git-init'ed ---
     let resp = call_tool(

@@ -64,10 +64,7 @@ pub fn acquire(repo_path: &Path, op_name: &'static str) -> Result<RepoLock, Repo
     let spke_dir = dot_git.join(SPKE_DIR);
     if let Err(err) = std::fs::create_dir_all(&spke_dir) {
         return Err(RepoBusyError {
-            reason: BusyReason::OtherOp(format!(
-                "creating {}: {err}",
-                spke_dir.display()
-            )),
+            reason: BusyReason::OtherOp(format!("creating {}: {err}", spke_dir.display())),
         });
     }
     let lock_path = spke_dir.join(OP_LOCK_FILE);
@@ -170,8 +167,8 @@ fn current_unix_seconds() -> i64 {
 /// a worktree where `<repo>/.git` is a file pointing at `<main>/.git/worktrees/<name>`.
 fn dot_git_dir(repo_path: &Path) -> Result<PathBuf> {
     let candidate = repo_path.join(crate::DOT_GIT);
-    let metadata = std::fs::metadata(&candidate)
-        .with_context(|| format!("stat {}", candidate.display()))?;
+    let metadata =
+        std::fs::metadata(&candidate).with_context(|| format!("stat {}", candidate.display()))?;
     if metadata.is_dir() {
         return Ok(candidate);
     }
@@ -205,10 +202,22 @@ mod tests {
         init_repo(dir.path());
         {
             let lock = acquire(dir.path(), "test_op").expect("acquire");
-            assert!(dir.path().join(".git").join(SPKE_DIR).join(OP_LOCK_FILE).exists());
+            assert!(
+                dir.path()
+                    .join(".git")
+                    .join(SPKE_DIR)
+                    .join(OP_LOCK_FILE)
+                    .exists()
+            );
             drop(lock);
         }
-        assert!(!dir.path().join(".git").join(SPKE_DIR).join(OP_LOCK_FILE).exists());
+        assert!(
+            !dir.path()
+                .join(".git")
+                .join(SPKE_DIR)
+                .join(OP_LOCK_FILE)
+                .exists()
+        );
     }
 
     #[test]

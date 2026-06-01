@@ -17,7 +17,9 @@ pub(crate) fn render_footer(
     let clipboard_has_sha = cx
         .read_from_clipboard()
         .and_then(|entry| entry.text())
-        .map_or(false, |clipboard_text| clipboard_text.trim() == sha.as_ref());
+        .map_or(false, |clipboard_text| {
+            clipboard_text.trim() == sha.as_ref()
+        });
 
     let (copy_icon, copy_color) = if clipboard_has_sha {
         (IconName::Check, Color::Success)
@@ -50,9 +52,7 @@ pub(crate) fn render_footer(
                         .icon_color(copy_color)
                         .tooltip(Tooltip::text("Copy Commit SHA"))
                         .on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                sha_for_copy.clone(),
-                            ));
+                            cx.write_to_clipboard(ClipboardItem::new_string(sha_for_copy.clone()));
                         }),
                 ),
         )

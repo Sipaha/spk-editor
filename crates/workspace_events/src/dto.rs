@@ -3,8 +3,8 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use solutions::mcp::SolutionSummary;
 use solution_agent::mcp::SessionSummary;
+use solutions::mcp::SolutionSummary;
 
 //  Output-only types: SolutionSummary / SessionSummary only derive Serialize,
 //  so these container types cannot derive Deserialize either.

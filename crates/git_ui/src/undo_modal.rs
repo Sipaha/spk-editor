@@ -14,8 +14,8 @@ use gpui::{
 use project::git_store::Repository;
 use ui::{
     App, Button, Clickable, Color, Context, Headline, HeadlineSize, Icon, IconName, IconSize,
-    IntoElement, Label, LabelCommon, LabelSize, ListItem, ListItemSpacing, StyledExt, h_flex,
-    rems, v_flex,
+    IntoElement, Label, LabelCommon, LabelSize, ListItem, ListItemSpacing, StyledExt, h_flex, rems,
+    v_flex,
 };
 use util::ResultExt as _;
 use workspace::{ModalView, Workspace};
@@ -84,11 +84,7 @@ impl UndoModal {
 
     fn restore(&mut self, entry: ModalEntry, cx: &mut Context<Self>) {
         let work_dir = self.repo.read(cx).work_directory_abs_path.clone();
-        match crate::backup_mcp::create_restore_ref(
-            &work_dir,
-            &entry.branch,
-            &entry.before_sha,
-        ) {
+        match crate::backup_mcp::create_restore_ref(&work_dir, &entry.branch, &entry.before_sha) {
             Ok(ref_name) => {
                 log::info!(
                     "git::undo_modal: created restore ref {ref_name} for entry {}",
@@ -196,19 +192,14 @@ fn render_entry(
                             )
                             .on_click(cx.listener({
                                 let entry = entry_for_restore;
-                                move |this, _: &ClickEvent, _, cx| {
-                                    this.restore(entry.clone(), cx)
-                                }
+                                move |this, _: &ClickEvent, _, cx| this.restore(entry.clone(), cx)
                             })),
                         )
                         .child(
-                            Button::new(
-                                SharedString::from(format!("forget-{ix}")),
-                                "Forget",
-                            )
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.forget(entry_for_forget, cx)
-                            })),
+                            Button::new(SharedString::from(format!("forget-{ix}")), "Forget")
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.forget(entry_for_forget, cx)
+                                })),
                         ),
                 ),
         )
@@ -238,31 +229,27 @@ fn format_relative(seconds_ago: i64) -> String {
 }
 
 pub fn register(workspace: &mut Workspace) {
-    workspace.register_action(
-        |workspace, _: &git::UndoLast, window, cx| {
-            let Some(repo) = workspace.project().read(cx).active_repository(cx) else {
-                log::info!("git::UndoLast: no active repository");
-                return;
-            };
-            workspace.toggle_modal(window, cx, |window, cx| UndoModal::new(repo, window, cx));
-        },
-    );
-    workspace.register_action(
-        |workspace, action: &git::CleanupBackups, _window, cx| {
-            let Some(repo) = workspace.project().read(cx).active_repository(cx) else {
-                return;
-            };
-            let work_dir = repo.read(cx).work_directory_abs_path.clone();
-            let days = action.older_than_days;
-            cx.background_spawn(async move {
-                match git::backup::cleanup(&work_dir, days) {
-                    Ok(n) => log::info!("git::CleanupBackups: removed {n} backup-refs"),
-                    Err(err) => log::warn!("git::CleanupBackups: {err}"),
-                }
-            })
-            .detach();
-        },
-    );
+    workspace.register_action(|workspace, _: &git::UndoLast, window, cx| {
+        let Some(repo) = workspace.project().read(cx).active_repository(cx) else {
+            log::info!("git::UndoLast: no active repository");
+            return;
+        };
+        workspace.toggle_modal(window, cx, |window, cx| UndoModal::new(repo, window, cx));
+    });
+    workspace.register_action(|workspace, action: &git::CleanupBackups, _window, cx| {
+        let Some(repo) = workspace.project().read(cx).active_repository(cx) else {
+            return;
+        };
+        let work_dir = repo.read(cx).work_directory_abs_path.clone();
+        let days = action.older_than_days;
+        cx.background_spawn(async move {
+            match git::backup::cleanup(&work_dir, days) {
+                Ok(n) => log::info!("git::CleanupBackups: removed {n} backup-refs"),
+                Err(err) => log::warn!("git::CleanupBackups: {err}"),
+            }
+        })
+        .detach();
+    });
 }
 
 #[cfg(test)]

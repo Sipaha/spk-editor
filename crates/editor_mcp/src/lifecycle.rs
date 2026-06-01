@@ -49,7 +49,9 @@ pub enum LockError {
 impl std::fmt::Display for LockError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LockError::Busy { holder_pid: Some(pid) } => {
+            LockError::Busy {
+                holder_pid: Some(pid),
+            } => {
                 write!(f, "another spk-editor instance holds the lock (PID {pid})")
             }
             LockError::Busy { holder_pid: None } => {
@@ -158,11 +160,7 @@ pub fn start_server(cx: &mut App) -> Result<()> {
             #[cfg(unix)]
             {
                 std::os::unix::fs::symlink(&actual_socket, &sock).with_context(|| {
-                    format!(
-                        "linking {} to {}",
-                        actual_socket.display(),
-                        sock.display()
-                    )
+                    format!("linking {} to {}", actual_socket.display(), sock.display())
                 })?;
             }
         }

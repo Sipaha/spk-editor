@@ -116,11 +116,7 @@ pub fn op_in_progress(repo_path: &Path, marker: &str) -> Result<bool> {
 /// pausable ops. If git exited 0 → Completed. If git exited non-zero
 /// AND the working tree shows unmerged paths → PausedForConflict.
 /// Otherwise the original error is propagated.
-pub fn outcome_from_output(
-    repo_path: &Path,
-    args: &[&str],
-    output: &Output,
-) -> Result<RunOutcome> {
+pub fn outcome_from_output(repo_path: &Path, args: &[&str], output: &Output) -> Result<RunOutcome> {
     if output.status.success() {
         return Ok(RunOutcome::Completed);
     }

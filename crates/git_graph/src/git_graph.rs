@@ -53,10 +53,10 @@ use theme::AccentColors;
 use time::{OffsetDateTime, UtcOffset, format_description::BorrowedFormatItem};
 use ui::{
     ButtonLike, Chip, ColumnWidthConfig, CommonAnimationExt as _, ContextMenu, DiffStat, Divider,
-    HeaderResizeInfo, RedistributableColumnsState, ScrollableHandle, Table,
-    TableInteractionState, TableRenderContext, TableResizeBehavior, Tooltip, WithScrollbar,
-    bind_redistributable_columns, prelude::*, render_redistributable_columns_resize_handles,
-    render_table_header, table_row::TableRow,
+    HeaderResizeInfo, RedistributableColumnsState, ScrollableHandle, Table, TableInteractionState,
+    TableRenderContext, TableResizeBehavior, Tooltip, WithScrollbar, bind_redistributable_columns,
+    prelude::*, render_redistributable_columns_resize_handles, render_table_header,
+    table_row::TableRow,
 };
 use workspace::{
     Workspace,
@@ -292,7 +292,9 @@ actions!(
 /// "Show Affected Paths in Log" entry is invoked. The handler in
 /// `GitGraph::on_action` calls `set_path_filter(paths, cx)`, scoping the
 /// log to commits that touch one of the listed paths.
-#[derive(Clone, PartialEq, Debug, Default, serde::Deserialize, schemars::JsonSchema, gpui::Action)]
+#[derive(
+    Clone, PartialEq, Debug, Default, serde::Deserialize, schemars::JsonSchema, gpui::Action,
+)]
 #[action(namespace = git_graph)]
 pub struct ShowAffectedPathsInLog {
     pub paths: Vec<String>,
@@ -1082,11 +1084,7 @@ impl GitGraph {
         cx.notify();
     }
 
-    pub fn set_date_filter(
-        &mut self,
-        range: Option<filters::DateRange>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_date_filter(&mut self, range: Option<filters::DateRange>, cx: &mut Context<Self>) {
         if self.filters.date_range == range {
             return;
         }
@@ -1095,11 +1093,7 @@ impl GitGraph {
         self.fetch_initial_graph_data(cx);
     }
 
-    pub fn set_branch_filter(
-        &mut self,
-        branches: Vec<SharedString>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_branch_filter(&mut self, branches: Vec<SharedString>, cx: &mut Context<Self>) {
         if self.filters.branches == branches {
             return;
         }
@@ -1108,11 +1102,7 @@ impl GitGraph {
         self.fetch_initial_graph_data(cx);
     }
 
-    pub fn set_user_filter(
-        &mut self,
-        authors: Vec<SharedString>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_user_filter(&mut self, authors: Vec<SharedString>, cx: &mut Context<Self>) {
         if self.filters.authors == authors {
             return;
         }
@@ -1210,11 +1200,7 @@ impl GitGraph {
         // anchor get the decoration. Anchor is in-memory only — clearing
         // the toggle resets it so re-enabling re-anchors at HEAD.
         if on {
-            self.highlights.last_seen_sha = self
-                .graph_data
-                .commits
-                .first()
-                .map(|c| c.data.sha);
+            self.highlights.last_seen_sha = self.graph_data.commits.first().map(|c| c.data.sha);
         } else {
             self.highlights.last_seen_sha = None;
         }
@@ -1362,7 +1348,13 @@ impl GitGraph {
         // The four text columns (Description / Date / Author / Commit) live in
         // `column_widths`; the graph column is rendered separately at a fixed
         // width to the left of the table, so it's no longer a table column.
-        ColumnWidthConfig::explicit(self.column_widths.read(cx).preview_widths().as_slice().to_vec())
+        ColumnWidthConfig::explicit(
+            self.column_widths
+                .read(cx)
+                .preview_widths()
+                .as_slice()
+                .to_vec(),
+        )
     }
 
     pub fn new(
@@ -1781,10 +1773,7 @@ impl GitGraph {
                                 h_flex()
                                     .gap_1()
                                     .child(Icon::new(IconName::Pencil).size(IconSize::Small))
-                                    .child(
-                                        Label::new("Local Changes")
-                                            .color(Color::Accent),
-                                    ),
+                                    .child(Label::new("Local Changes").color(Color::Accent)),
                             )
                             .into_any_element(),
                         div().h(row_height).into_any_element(),
@@ -1797,7 +1786,11 @@ impl GitGraph {
                 // `graph_data.commits` (shifted by 1 when the synthetic
                 // local-changes row is at view 0).
                 let view_idx = idx;
-                let data_idx = if has_local_row { idx.saturating_sub(1) } else { idx };
+                let data_idx = if has_local_row {
+                    idx.saturating_sub(1)
+                } else {
+                    idx
+                };
                 let Some((commit, repository)) = self
                     .graph_data
                     .commits
@@ -1848,21 +1841,18 @@ impl GitGraph {
                 let is_new_commit = new_anchor_idx.is_some_and(|anchor| idx < anchor);
                 let date_header_label: Option<SharedString> = if group_by_date {
                     let current_day = local_day_label(commit_timestamp);
-                    let prev_day: Option<String> =
-                        idx.checked_sub(1).and_then(|prev_idx| {
-                            let prev_commit = self.graph_data.commits.get(prev_idx)?;
-                            let prev_state = repository.update(cx, |repository, cx| {
-                                repository
-                                    .fetch_commit_data(prev_commit.data.sha, false, cx)
-                                    .clone()
-                            });
-                            match prev_state {
-                                CommitDataState::Loaded(prev) => {
-                                    local_day_label(prev.commit_timestamp)
-                                }
-                                _ => None,
-                            }
+                    let prev_day: Option<String> = idx.checked_sub(1).and_then(|prev_idx| {
+                        let prev_commit = self.graph_data.commits.get(prev_idx)?;
+                        let prev_state = repository.update(cx, |repository, cx| {
+                            repository
+                                .fetch_commit_data(prev_commit.data.sha, false, cx)
+                                .clone()
                         });
+                        match prev_state {
+                            CommitDataState::Loaded(prev) => local_day_label(prev.commit_timestamp),
+                            _ => None,
+                        }
+                    });
                     match (current_day, prev_day) {
                         (Some(today), Some(prev)) if today == prev => None,
                         (Some(today), _) => Some(SharedString::from(today)),
@@ -2244,21 +2234,19 @@ impl GitGraph {
         let refs: Vec<SharedString> = commit_entry.data.ref_names.clone();
         let subject: SharedString = {
             let data = repository.update(cx, |repo, cx| {
-                repo.fetch_commit_data(commit_entry.data.sha, false, cx).clone()
+                repo.fetch_commit_data(commit_entry.data.sha, false, cx)
+                    .clone()
             });
             match data {
                 CommitDataState::Loaded(data) => data.subject.clone(),
                 _ => SharedString::default(),
             }
         };
-        let provider = repository
-            .read(cx)
-            .default_remote_url()
-            .and_then(|url| {
-                let registry = GitHostingProviderRegistry::default_global(cx);
-                parse_git_remote_url(registry, &url)
-                    .map(|(provider, _)| (provider.name(), provider.base_url().to_string()))
-            });
+        let provider = repository.read(cx).default_remote_url().and_then(|url| {
+            let registry = GitHostingProviderRegistry::default_global(cx);
+            parse_git_remote_url(registry, &url)
+                .map(|(provider, _)| (provider.name(), provider.base_url().to_string()))
+        });
         let work_dir = Some(
             repository
                 .read(cx)
@@ -2302,9 +2290,11 @@ impl GitGraph {
             &menu,
             window,
             |this, _menu, _: &DismissEvent, window, cx| {
-                if this.context_menu.as_ref().is_some_and(|cm| {
-                    cm.0.focus_handle(cx).contains_focused(window, cx)
-                }) {
+                if this
+                    .context_menu
+                    .as_ref()
+                    .is_some_and(|cm| cm.0.focus_handle(cx).contains_focused(window, cx))
+                {
                     this.focus_handle.focus(window, cx);
                 }
                 this.context_menu.take();
@@ -2529,12 +2519,7 @@ impl GitGraph {
                                         "Commit SHA Copied!",
                                     )
                                 } else {
-                                    (
-                                        short_sha,
-                                        IconName::Hash,
-                                        Color::Muted,
-                                        "Copy Commit SHA",
-                                    )
+                                    (short_sha, IconName::Hash, Color::Muted, "Copy Commit SHA")
                                 };
 
                                 Button::new("sha-button", label_text)
@@ -2642,10 +2627,18 @@ impl GitGraph {
                     )
                     // Ref decorations.
                     .children((!ref_names.is_empty()).then(|| {
-                        h_flex().gap_1().flex_wrap().children(ref_names.iter().map(|name| {
-                            let is_head = Self::is_head_ref(name.as_ref(), &head_branch_name);
-                            self.render_chip(name, accent_color, is_head, Some(work_dir.as_path()))
-                        }))
+                        h_flex()
+                            .gap_1()
+                            .flex_wrap()
+                            .children(ref_names.iter().map(|name| {
+                                let is_head = Self::is_head_ref(name.as_ref(), &head_branch_name);
+                                self.render_chip(
+                                    name,
+                                    accent_color,
+                                    is_head,
+                                    Some(work_dir.as_path()),
+                                )
+                            }))
                     }))
                     .when_some(remote.clone(), |this, remote| {
                         let provider_name = remote.host.name();
@@ -3253,16 +3246,13 @@ impl Render for GitGraph {
                                             .px_1()
                                             .py_0p5()
                                             .child(
-                                                Label::new("Graph")
-                                                    .color(Color::Muted)
-                                                    .truncate(),
+                                                Label::new("Graph").color(Color::Muted).truncate(),
                                             ),
                                     )
                                 })
-                                .child(
-                                    div().flex_1().min_w_0().child(render_table_header(
-                                        TableRow::from_vec(
-                                            vec![
+                                .child(div().flex_1().min_w_0().child(render_table_header(
+                                    TableRow::from_vec(
+                                        vec![
                                                 Label::new("Description")
                                                     .color(Color::Muted)
                                                     .into_any_element(),
@@ -3276,14 +3266,13 @@ impl Render for GitGraph {
                                                     .color(Color::Muted)
                                                     .into_any_element(),
                                             ],
-                                            4,
-                                        ),
-                                        header_context,
-                                        Some(header_resize_info),
-                                        Some(self.column_widths.entity_id()),
-                                        cx,
-                                    )),
-                                ),
+                                        4,
+                                    ),
+                                    header_context,
+                                    Some(header_resize_info),
+                                    Some(self.column_widths.entity_id()),
+                                    cx,
+                                ))),
                         )
                         .child({
                             let row_height = Self::row_height(window, cx);
@@ -3477,16 +3466,16 @@ impl Render for GitGraph {
                 this.update_query_filter(cx);
                 cx.notify();
             }))
-            .on_action(cx.listener(
-                |this, action: &ShowAffectedPathsInLog, _window, cx| {
+            .on_action(
+                cx.listener(|this, action: &ShowAffectedPathsInLog, _window, cx| {
                     let paths: Vec<git::repository::RepoPath> = action
                         .paths
                         .iter()
                         .filter_map(|p| git::repository::RepoPath::new(p).ok())
                         .collect();
                     this.set_path_filter(paths, cx);
-                },
-            ))
+                }),
+            )
             .child(
                 v_flex()
                     .size_full()
@@ -3702,14 +3691,16 @@ impl workspace::SerializableItem for GitGraph {
                 let search_in_diffs = state.search_in_diffs.unwrap_or(false);
                 let mut filters = filters;
                 filters.query =
-                    state.search_query.as_deref().filter(|q| !q.is_empty()).map(
-                        |text| filters::QueryFilter {
+                    state
+                        .search_query
+                        .as_deref()
+                        .filter(|q| !q.is_empty())
+                        .map(|text| filters::QueryFilter {
                             text: text.to_string().into(),
                             regex,
                             case_sensitive,
                             search_in_diffs,
-                        },
-                    );
+                        });
 
                 let git_graph = cx.new(|cx| {
                     let mut graph =
@@ -3743,9 +3734,10 @@ impl workspace::SerializableItem for GitGraph {
 
                 if let Some(query_text) = state.search_query.as_deref().filter(|q| !q.is_empty()) {
                     git_graph.update(cx, |graph, cx| {
-                        graph.search_state.editor.update(cx, |editor, cx| {
-                            editor.set_text(query_text, window, cx)
-                        });
+                        graph
+                            .search_state
+                            .editor
+                            .update(cx, |editor, cx| editor.set_text(query_text, window, cx));
                         // The text-edit subscription would otherwise schedule
                         // a redundant 250ms-debounced refetch with the exact
                         // same query we already hydrated into filters.query.
@@ -4139,24 +4131,29 @@ mod persistence {
     pub fn serialize_highlights(h: &HighlightSet) -> SerializedHighlightColumns {
         SerializedHighlightColumns {
             my_commits: if h.my_commits { Some(true) } else { None },
-            new_since_refresh: if h.new_since_refresh { Some(true) } else { None },
+            new_since_refresh: if h.new_since_refresh {
+                Some(true)
+            } else {
+                None
+            },
             last_seen_sha: h.last_seen_sha.map(|oid| oid.to_string()),
         }
     }
 
     pub fn deserialize_highlights(state: &SerializedGitGraphState) -> HighlightSet {
-        let last_seen_sha = state
-            .highlight_last_seen_sha
-            .as_deref()
-            .and_then(|s| match Oid::from_str(s) {
-                Ok(oid) => Some(oid),
-                Err(err) => {
-                    log::warn!(
-                        "git_graph: dropping invalid persisted last_seen_sha {s:?}: {err}"
-                    );
-                    None
-                }
-            });
+        let last_seen_sha =
+            state
+                .highlight_last_seen_sha
+                .as_deref()
+                .and_then(|s| match Oid::from_str(s) {
+                    Ok(oid) => Some(oid),
+                    Err(err) => {
+                        log::warn!(
+                            "git_graph: dropping invalid persisted last_seen_sha {s:?}: {err}"
+                        );
+                        None
+                    }
+                });
         HighlightSet {
             my_commits: state.highlight_my_commits.unwrap_or(false),
             new_since_refresh: state.highlight_new_since_refresh.unwrap_or(false),
@@ -6457,7 +6454,7 @@ mod tests {
         });
     }
 
-#[gpui::test]
+    #[gpui::test]
     fn test_file_history_options_persistence_roundtrip(_cx: &mut TestAppContext) {
         use file_history::FileHistoryOptions;
         use persistence::SerializedGitGraphState;

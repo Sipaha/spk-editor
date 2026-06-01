@@ -62,8 +62,7 @@ fn install_solution_open_observer(cx: &mut App) {
                 return;
             };
             let id = id.clone();
-            let Some(agent) = solution_agent::store::SolutionAgentStore::try_global(cx)
-            else {
+            let Some(agent) = solution_agent::store::SolutionAgentStore::try_global(cx) else {
                 return;
             };
             let summaries = agent.read_with(cx, |a, cx| {
@@ -136,19 +135,13 @@ pub fn current_seq_for_test(cx: &App) -> u64 {
 }
 
 /// Test-only direct invocation of `workspace.open_session`.
-pub fn open_session_for_test(
-    cx: &mut App,
-    id: &solution_agent::SolutionSessionId,
-) -> dto::SeqAck {
+pub fn open_session_for_test(cx: &mut App, id: &solution_agent::SolutionSessionId) -> dto::SeqAck {
     let seq = lifecycle::open_session_impl(cx, id.as_str()).expect("open_session");
     dto::SeqAck { seq }
 }
 
 /// Test-only direct invocation of `workspace.close_session`.
-pub fn close_session_for_test(
-    cx: &mut App,
-    id: &solution_agent::SolutionSessionId,
-) -> dto::SeqAck {
+pub fn close_session_for_test(cx: &mut App, id: &solution_agent::SolutionSessionId) -> dto::SeqAck {
     let seq = lifecycle::close_session_impl(cx, id.as_str()).expect("close_session");
     dto::SeqAck { seq }
 }

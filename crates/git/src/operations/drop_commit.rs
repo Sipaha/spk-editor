@@ -29,8 +29,8 @@ pub async fn run_drop(
         );
     }
     let parent = format!("{sha}^");
-    let base_sha = rev_parse(repo_path, &parent)
-        .with_context(|| format!("resolving parent of {sha}"))?;
+    let base_sha =
+        rev_parse(repo_path, &parent).with_context(|| format!("resolving parent of {sha}"))?;
     let commits = list_commits_to_pick(repo_path, &base_sha)?;
     if commits.is_empty() {
         bail!("nothing to drop: HEAD has no commits since {base_sha}");

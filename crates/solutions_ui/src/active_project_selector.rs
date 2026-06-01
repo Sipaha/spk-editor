@@ -125,11 +125,7 @@ impl ActiveProjectSelector {
     /// render `[● N]` badges. Called by `git_panel` after each git status
     /// refresh; ignored by `project_panel`. Guarded so an unchanged map
     /// doesn't trigger a re-render.
-    pub fn set_change_counts(
-        &mut self,
-        counts: HashMap<CatalogId, usize>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_change_counts(&mut self, counts: HashMap<CatalogId, usize>, cx: &mut Context<Self>) {
         if self.change_counts != counts {
             self.change_counts = counts;
             cx.notify();
@@ -153,9 +149,7 @@ impl ActiveProjectSelector {
                         .find(|sol| sol.id == *sol_id)
                         .map(|sol| sol.members.clone())
                         .unwrap_or_default();
-                    let persisted = s
-                        .panel_member_selection(sol_id, self.panel_kind)
-                        .cloned();
+                    let persisted = s.panel_member_selection(sol_id, self.panel_kind).cloned();
                     (members, persisted)
                 })
             } else {
@@ -163,8 +157,8 @@ impl ActiveProjectSelector {
             };
 
         self.members = members;
-        self.selected_catalog_id = persisted
-            .or_else(|| self.members.first().map(|m| m.catalog_id.clone()));
+        self.selected_catalog_id =
+            persisted.or_else(|| self.members.first().map(|m| m.catalog_id.clone()));
 
         // Persist initial-selection default: per spec, "first time a
         // solution is loaded for a given panel … select the first

@@ -281,7 +281,8 @@ mod tests {
 
     #[test]
     fn test_stash_stat_summary_line() {
-        let raw = " a.txt | 2 +-\n b.txt | 4 ++--\n 2 files changed, 3 insertions(+), 3 deletions(-)\n";
+        let raw =
+            " a.txt | 2 +-\n b.txt | 4 ++--\n 2 files changed, 3 insertions(+), 3 deletions(-)\n";
         let stat = StashStat::from_stat_output(raw);
         assert_eq!(stat.file_count, 2);
         assert!(!stat.has_untracked);

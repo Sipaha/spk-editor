@@ -152,14 +152,7 @@ pub async fn analyze_solution(
     config: AnalyzeConfig,
     cx: &mut AsyncApp,
 ) -> Result<AnalyzeOutcome> {
-    analyze_solution_with(
-        solution,
-        project,
-        config,
-        cx,
-        EphemeralRunner::Production,
-    )
-    .await
+    analyze_solution_with(solution, project, config, cx, EphemeralRunner::Production).await
 }
 
 /// Test seam — the production path goes through [`EphemeralRunner::Production`].
@@ -245,8 +238,9 @@ pub(crate) async fn analyze_solution_with(
                 let cache_file =
                     pair_cache_path(&solution_hash, &commit.sha, target.member_id.as_ref());
                 if !config.include_already_tried
-                    && let Some(entry) =
-                        read_cached_if_fresh(&cache_file, CACHE_TTL_DAYS).log_err().flatten()
+                    && let Some(entry) = read_cached_if_fresh(&cache_file, CACHE_TTL_DAYS)
+                        .log_err()
+                        .flatten()
                 {
                     if entry.verdict {
                         suggestions.push(Suggestion {
@@ -331,7 +325,11 @@ pub(crate) async fn analyze_solution_with(
 /// back on the next analyze pass. Reasoning is fixed to `"user-dismissed"`
 /// so the source of the negative is clear if we ever surface cache
 /// contents in the UI.
-pub fn dismiss_suggestion(solution: &Solution, source_sha: &str, target_member: &str) -> Result<()> {
+pub fn dismiss_suggestion(
+    solution: &Solution,
+    source_sha: &str,
+    target_member: &str,
+) -> Result<()> {
     let solution_hash = solution_hash(solution);
     let cache_file = pair_cache_path(&solution_hash, source_sha, target_member);
     let entry = CacheEntry {
@@ -424,9 +422,7 @@ pub(crate) fn parse_yes_no(raw: &str) -> ParsedReply {
             // prompt asks for "yes or no" up front; bare reasoning
             // without either is treated as no.
             let lower = trimmed.to_ascii_lowercase();
-            lower.contains("yes")
-                && !lower.starts_with("no")
-                && !lower.starts_with("not ")
+            lower.contains("yes") && !lower.starts_with("no") && !lower.starts_with("not ")
         }
     };
     // Skip past the first word + any single trailing punctuation/whitespace.
@@ -434,7 +430,9 @@ pub(crate) fn parse_yes_no(raw: &str) -> ParsedReply {
     let rest = trimmed[first_break..]
         .trim_start_matches(|c: char| c.is_whitespace() || matches!(c, ',' | '.' | '-' | ':' | ';'))
         .trim();
-    let reasoning = rest.trim_end_matches(|c: char| c == '.' || c.is_whitespace()).to_string();
+    let reasoning = rest
+        .trim_end_matches(|c: char| c == '.' || c.is_whitespace())
+        .to_string();
     ParsedReply { verdict, reasoning }
 }
 
@@ -450,18 +448,13 @@ async fn list_commits(work_dir: &Path, days_back: u32) -> Result<Vec<CommitInfo>
     let since = format!("{days_back} days ago");
     let mut command = new_command("git");
     command.current_dir(work_dir);
-    command.args([
-        "log",
-        "--no-merges",
-        "--since",
-        &since,
-        "--format=%H%x00%s",
-    ]);
+    command.args(["log", "--no-merges", "--since", &since, "--format=%H%x00%s"]);
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
-    let output = command.output().await.with_context(|| {
-        format!("running `git log --since` in {}", work_dir.display())
-    })?;
+    let output = command
+        .output()
+        .await
+        .with_context(|| format!("running `git log --since` in {}", work_dir.display()))?;
     if !output.status.success() {
         return Err(anyhow!(
             "`git log` failed in {}: {}",
@@ -495,9 +488,10 @@ async fn list_commit_paths(work_dir: &Path, sha: &str) -> Result<Vec<String>> {
     command.args(["show", "--name-only", "--format=", sha]);
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
-    let output = command.output().await.with_context(|| {
-        format!("running `git show --name-only` in {}", work_dir.display())
-    })?;
+    let output = command
+        .output()
+        .await
+        .with_context(|| format!("running `git show --name-only` in {}", work_dir.display()))?;
     if !output.status.success() {
         return Err(anyhow!(
             "`git show` failed for {sha} in {}",
@@ -521,9 +515,10 @@ async fn list_head_paths(work_dir: &Path) -> Result<HashSet<String>> {
     command.args(["ls-tree", "-r", "--name-only", "HEAD"]);
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
-    let output = command.output().await.with_context(|| {
-        format!("running `git ls-tree HEAD` in {}", work_dir.display())
-    })?;
+    let output = command
+        .output()
+        .await
+        .with_context(|| format!("running `git ls-tree HEAD` in {}", work_dir.display()))?;
     if !output.status.success() {
         return Err(anyhow!(
             "`git ls-tree` failed in {}: {}",
@@ -569,9 +564,11 @@ fn cache_root() -> PathBuf {
 }
 
 fn pair_cache_path(solution_hash: &str, source_sha: &str, target_member: &str) -> PathBuf {
-    cache_root()
-        .join(solution_hash)
-        .join(format!("{}-{}.json", source_sha, target_member_hash(target_member)))
+    cache_root().join(solution_hash).join(format!(
+        "{}-{}.json",
+        source_sha,
+        target_member_hash(target_member)
+    ))
 }
 
 fn read_cached_if_fresh(path: &Path, cache_ttl_days: u32) -> Result<Option<CacheEntry>> {
@@ -593,10 +590,10 @@ fn read_cached_if_fresh(path: &Path, cache_ttl_days: u32) -> Result<Option<Cache
     {
         return Ok(None);
     }
-    let body = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let entry: CacheEntry = serde_json::from_str(&body)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let body =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let entry: CacheEntry =
+        serde_json::from_str(&body).with_context(|| format!("parsing {}", path.display()))?;
     Ok(Some(entry))
 }
 
@@ -605,8 +602,8 @@ fn write_cache(path: &Path, entry: &CacheEntry) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    let body = serde_json::to_string(entry)
-        .context("serialising ai_cherry_pick_suggest cache entry")?;
+    let body =
+        serde_json::to_string(entry).context("serialising ai_cherry_pick_suggest cache entry")?;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -701,10 +698,9 @@ mod tests {
     #[test]
     fn prefilter_keeps_pairs_with_path_overlap() {
         let source_paths = vec!["src/foo.rs".to_string(), "Cargo.toml".to_string()];
-        let target_paths: HashSet<String> =
-            ["src/foo.rs".to_string(), "README.md".to_string()]
-                .into_iter()
-                .collect();
+        let target_paths: HashSet<String> = ["src/foo.rs".to_string(), "README.md".to_string()]
+            .into_iter()
+            .collect();
         assert!(path_overlap(&source_paths, &target_paths));
     }
 

@@ -14,8 +14,7 @@ fn get_operation_params_round_trip() {
 
 #[test]
 fn get_operation_params_accepts_null() {
-    let p: GetOperationParams =
-        serde_json::from_value(serde_json::Value::Null).expect("null");
+    let p: GetOperationParams = serde_json::from_value(serde_json::Value::Null).expect("null");
     assert!(p.operation_id.is_empty());
 }
 
@@ -57,6 +56,5 @@ fn unsubscribe_params_round_trip() {
 
 #[test]
 fn list_subscriptions_params_accepts_null() {
-    let _: ListSubscriptionsParams =
-        serde_json::from_value(serde_json::Value::Null).expect("null");
+    let _: ListSubscriptionsParams = serde_json::from_value(serde_json::Value::Null).expect("null");
 }

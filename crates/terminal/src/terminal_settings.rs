@@ -10,8 +10,7 @@ pub use settings::AlternateScroll;
 
 use settings::{
     IntoGpui, PathHyperlinkRegex, RegisterSetting, ShowScrollbar, TerminalBell, TerminalBlink,
-    TerminalLineHeight, VenvSettings, WorkingDirectory,
-    merge_from::MergeFrom,
+    TerminalLineHeight, VenvSettings, WorkingDirectory, merge_from::MergeFrom,
 };
 use task::Shell;
 use theme_settings::FontFamilyName;

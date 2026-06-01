@@ -1,7 +1,9 @@
 use gpui::{Context, Entity, IntoElement, Render, SharedString, Subscription, Window};
 use run_config::{RunConfigId, RunConfigStore};
-use ui::{Button, ButtonStyle, ContextMenu, Icon, IconName, IconSize, PopoverMenu, PopoverMenuHandle,
-    prelude::*};
+use ui::{
+    Button, ButtonStyle, ContextMenu, Icon, IconName, IconSize, PopoverMenu, PopoverMenuHandle,
+    prelude::*,
+};
 use workspace::{StatusItemView, item::ItemHandle};
 
 use crate::run_controller::{ActiveRunKind, RunController, RunControllerEvent};
@@ -14,7 +16,8 @@ pub struct RunStatusItem {
 
 impl RunStatusItem {
     pub fn new(controller: Entity<RunController>, cx: &mut Context<Self>) -> Self {
-        let subscription = cx.subscribe(&controller, |_, _, _: &RunControllerEvent, cx| cx.notify());
+        let subscription =
+            cx.subscribe(&controller, |_, _, _: &RunControllerEvent, cx| cx.notify());
         Self {
             controller,
             menu_handle: PopoverMenuHandle::default(),
@@ -69,22 +72,22 @@ impl Render for RunStatusItem {
             .menu(move |window, cx| {
                 let controller_entity = controller_entity.clone();
                 let active_entries = active_entries.clone();
-                Some(ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
-                    for (id, name) in &active_entries {
-                        let controller_entity = controller_entity.clone();
-                        let id = id.clone();
-                        menu = menu.entry(
-                            format!("Stop {name}"),
-                            None,
-                            move |_window, cx| {
+                Some(ContextMenu::build(
+                    window,
+                    cx,
+                    move |mut menu, _window, _cx| {
+                        for (id, name) in &active_entries {
+                            let controller_entity = controller_entity.clone();
+                            let id = id.clone();
+                            menu = menu.entry(format!("Stop {name}"), None, move |_window, cx| {
                                 controller_entity.update(cx, |controller, cx| {
                                     controller.stop(&id, cx);
                                 });
-                            },
-                        );
-                    }
-                    menu
-                }))
+                            });
+                        }
+                        menu
+                    },
+                ))
             })
             .into_any_element()
     }
@@ -107,8 +110,8 @@ mod tests {
     use gpui::{App, TestAppContext};
     use project::Project;
     use run_config::{
-        ConfigScope, Executor, RunConfigProvider, RunConfiguration, RunConfigSettings,
-        RunConfigStore, RunRequest, RunResolveContext,
+        ConfigScope, Executor, RunConfigProvider, RunConfigSettings, RunConfigStore,
+        RunConfiguration, RunRequest, RunResolveContext,
     };
     use settings::Settings as _;
     use ui::IconName;
@@ -178,15 +181,13 @@ mod tests {
         let project = Project::test(app_state.fs.clone(), [], cx).await;
         let (workspace, _cx) =
             cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
-        let controller = workspace
-            .update(cx, |workspace, cx| {
-                cx.new(|cx| crate::run_controller::RunController::new(workspace, cx))
-            });
+        let controller = workspace.update(cx, |workspace, cx| {
+            cx.new(|cx| crate::run_controller::RunController::new(workspace, cx))
+        });
         cx.run_until_parked();
 
         // Construct the status item — just verify it doesn't panic and starts hidden.
-        let status_item =
-            cx.update(|cx| cx.new(|cx| RunStatusItem::new(controller.clone(), cx)));
+        let status_item = cx.update(|cx| cx.new(|cx| RunStatusItem::new(controller.clone(), cx)));
         cx.run_until_parked();
 
         // With no active runs the controller reports zero.

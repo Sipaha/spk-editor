@@ -325,7 +325,9 @@ pub async fn open_remote_project(
                                     "Failed to connect to mock server"
                                 }
                                 #[cfg(not(any(test, feature = "test-support")))]
-                                _ => unreachable!("Mock variant is only available in test/test-support"),
+                                _ => unreachable!(
+                                    "Mock variant is only available in test/test-support"
+                                ),
                             },
                             Some(&format!("{e:#}")),
                             &["Retry", "Cancel"],
@@ -388,7 +390,9 @@ pub async fn open_remote_project(
                                     "Failed to connect to mock server"
                                 }
                                 #[cfg(not(any(test, feature = "test-support")))]
-                                _ => unreachable!("Mock variant is only available in test/test-support"),
+                                _ => unreachable!(
+                                    "Mock variant is only available in test/test-support"
+                                ),
                             },
                             Some(&format!("{e:#}")),
                             &["Retry", "Cancel"],

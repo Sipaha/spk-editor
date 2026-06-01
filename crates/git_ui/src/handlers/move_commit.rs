@@ -17,7 +17,9 @@ pub fn run(
     callbacks: RebaseCallbacks,
     cx: &mut App,
 ) -> Task<Result<RebaseHandle>> {
-    run_with_confirmation(repo_path, source_sha, target_sha, position, callbacks, false, cx)
+    run_with_confirmation(
+        repo_path, source_sha, target_sha, position, callbacks, false, cx,
+    )
 }
 
 pub fn run_with_confirmation(

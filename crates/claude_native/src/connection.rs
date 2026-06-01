@@ -649,7 +649,10 @@ impl ClaudeNativeConnection {
         // message ("опять в Done ушел втихую" bug). Stamping `now()` here
         // tells the watchdog "this turn just started; wait the full
         // window before second-guessing it".
-        session.shared.last_output.set(cx.background_executor().now());
+        session
+            .shared
+            .last_output
+            .set(cx.background_executor().now());
 
         let last_output = session.shared.last_output.clone();
         let process_id = session.process.process_id();
@@ -670,11 +673,12 @@ impl ClaudeNativeConnection {
 
         let connection = Rc::downgrade(self);
         let session_id_for_recovery = session_id.clone();
-        let recovery: crate::watchdog::RecoveryCallback = Rc::new(move |cx: &mut gpui::AsyncApp| {
-            if let Some(connection) = connection.upgrade() {
-                connection.recover_session(session_id_for_recovery.clone(), cx);
-            }
-        });
+        let recovery: crate::watchdog::RecoveryCallback =
+            Rc::new(move |cx: &mut gpui::AsyncApp| {
+                if let Some(connection) = connection.upgrade() {
+                    connection.recover_session(session_id_for_recovery.clone(), cx);
+                }
+            });
 
         let mut async_cx = cx.to_async();
         let watchdog = Watchdog::arm(
@@ -750,10 +754,7 @@ impl ClaudeNativeConnection {
                 binary: self.binary.clone(),
                 work_dir,
                 session: SessionArg::Resume(session_id.0.to_string()),
-                mcp_servers_json: mcp_config_json(&mcp_servers_for_project(
-                    &blueprint.project,
-                    cx,
-                )),
+                mcp_servers_json: mcp_config_json(&mcp_servers_for_project(&blueprint.project, cx)),
                 append_system_prompt: blueprint.append_system_prompt.clone(),
                 extra_env: self.extra_env.clone(),
             });
@@ -857,9 +858,7 @@ struct TurnStats {
 /// rather than hanging.
 async fn run_update_pump(
     mut incoming: futures::channel::mpsc::UnboundedReceiver<OutputMessage>,
-    mut critical_stderr: futures::channel::mpsc::UnboundedReceiver<
-        crate::process::CriticalStderr,
-    >,
+    mut critical_stderr: futures::channel::mpsc::UnboundedReceiver<crate::process::CriticalStderr>,
     exited: impl std::future::Future<Output = Option<std::process::ExitStatus>>,
     outgoing: futures::channel::mpsc::UnboundedSender<InputMessage>,
     thread: WeakEntity<AcpThread>,
@@ -954,7 +953,9 @@ async fn run_update_pump(
                     target: "claude_native::prompt_tx",
                     "stdout EOF took prompt_tx and failed it"
                 );
-                sender.send(Err(anyhow!("claude output stream closed"))).ok();
+                sender
+                    .send(Err(anyhow!("claude output stream closed")))
+                    .ok();
             }
             return;
         };
@@ -968,7 +969,11 @@ async fn run_update_pump(
             // `apply_usage` doesn't overwrite the meter with `result.usage`,
             // which the SDK aggregates across all sub-calls in a multi-step
             // turn (drives the meter past 100 % — observed 1.8M/1.0M).
-            let update = apply_usage(result, &shared.sticky_window, shared.stream_used_total.get());
+            let update = apply_usage(
+                result,
+                &shared.sticky_window,
+                shared.stream_used_total.get(),
+            );
             if let Some(update) = update {
                 thread
                     .update(cx, |thread, cx| {
@@ -1101,8 +1106,7 @@ async fn run_update_pump(
                     // as `additionalContext` (or, for Stop, also as `reason` with
                     // `decision: "block"`). No pending → empty success no-op.
                     let pending = shared.pending_inject.borrow_mut().take();
-                    let response =
-                        build_hook_response(&envelope.request_id, callback_id, pending);
+                    let response = build_hook_response(&envelope.request_id, callback_id, pending);
                     outgoing
                         .unbounded_send(InputMessage::ControlResponse {
                             request_id: envelope.request_id.clone(),
@@ -1334,12 +1338,11 @@ async fn run_update_pump(
                         // in the thought stream so the user sees that
                         // SOMETHING was reasoned about, instead of a
                         // mysterious gap in the timeline.
-                        let chunk = acp::ContentChunk::new(acp::ContentBlock::Text(
-                            acp::TextContent::new(
+                        let chunk =
+                            acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
                                 "[encrypted reasoning hidden by Anthropic safety layer]"
                                     .to_string(),
-                            ),
-                        ));
+                            )));
                         let mut update = acp::SessionUpdate::AgentThoughtChunk(chunk);
                         if let Some(parent) = parent_id.as_deref() {
                             stamp_subagent_meta(&mut update, parent);
@@ -1407,10 +1410,7 @@ async fn run_update_pump(
                             format!("thinking({chars}ch)")
                         }
                         "tool_use" => {
-                            let name = b
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("?");
+                            let name = b.get("name").and_then(|v| v.as_str()).unwrap_or("?");
                             turn_stats.tool_calls_emitted += 1;
                             format!("tool_use({name})")
                         }

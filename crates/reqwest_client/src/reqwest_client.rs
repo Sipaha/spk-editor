@@ -91,8 +91,7 @@ impl ReqwestClient {
 /// through untouched; a re-parse failure falls back to the original.
 fn normalize_proxy_scheme(proxy_url: &Url) -> Url {
     if proxy_url.scheme() == "socks" {
-        if let Ok(rewritten) =
-            Url::parse(&proxy_url.as_str().replacen("socks://", "socks5://", 1))
+        if let Ok(rewritten) = Url::parse(&proxy_url.as_str().replacen("socks://", "socks5://", 1))
         {
             return rewritten;
         }

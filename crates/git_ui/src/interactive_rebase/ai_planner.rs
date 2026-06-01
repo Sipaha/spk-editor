@@ -67,7 +67,14 @@ pub async fn plan_rebase(
     repo_work_dir: &Path,
     cx: &mut AsyncApp,
 ) -> Result<Vec<PlannedAction>> {
-    plan_rebase_with(rows, project, repo_work_dir, cx, EphemeralRunner::Production).await
+    plan_rebase_with(
+        rows,
+        project,
+        repo_work_dir,
+        cx,
+        EphemeralRunner::Production,
+    )
+    .await
 }
 
 /// Test seam — production code goes through [`EphemeralRunner::Production`].
@@ -188,7 +195,8 @@ fn is_valid_short_or_full_sha(sha: &str) -> bool {
     if !(7..=40).contains(&len) {
         return false;
     }
-    sha.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+    sha.chars()
+        .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
 fn sha_in_input(sha: &str, rows: &[CommitInfo]) -> bool {
@@ -267,9 +275,7 @@ pub(crate) fn sanitize_response(raw: &str, rows: &[CommitInfo]) -> Result<Vec<Pl
             action,
             sha: resolve_full_sha(&entry.sha, rows),
             new_message: entry.new_message,
-            insert_after: entry
-                .insert_after
-                .map(|s| resolve_full_sha(&s, rows)),
+            insert_after: entry.insert_after.map(|s| resolve_full_sha(&s, rows)),
         });
     }
 
@@ -354,7 +360,9 @@ mod tests {
     #[test]
     fn is_valid_short_or_full_sha_accepts_7_to_40_hex() {
         assert!(is_valid_short_or_full_sha("aaaaaaa"));
-        assert!(is_valid_short_or_full_sha("aaaaaaa1111111111111111111111111111111aa"));
+        assert!(is_valid_short_or_full_sha(
+            "aaaaaaa1111111111111111111111111111111aa"
+        ));
         assert!(!is_valid_short_or_full_sha("aaaa"));
         assert!(!is_valid_short_or_full_sha("AAAAAAA"));
         assert!(!is_valid_short_or_full_sha("xyzxyzx"));
@@ -387,7 +395,11 @@ mod tests {
             {"action": "EXEC", "sha": "ccccccc"}
         ]"#;
         let actions = sanitize_response(raw, &rows).expect("parse");
-        assert_eq!(actions.len(), 1, "only the pick should survive: {actions:?}");
+        assert_eq!(
+            actions.len(),
+            1,
+            "only the pick should survive: {actions:?}"
+        );
         assert_eq!(actions[0].action, TodoAction::Pick);
         // Defense in depth: regardless of how the JSON expressed the
         // action, no exec must end up in the planner output. There's no
@@ -444,7 +456,10 @@ mod tests {
         let err = sanitize_response(raw, &rows).expect_err("must error");
         let msg = format!("{err:#}");
         assert!(msg.contains("malformed JSON"), "got: {msg}");
-        assert!(msg.contains("not json at all"), "raw text in diagnostic: {msg}");
+        assert!(
+            msg.contains("not json at all"),
+            "raw text in diagnostic: {msg}"
+        );
     }
 
     #[test]

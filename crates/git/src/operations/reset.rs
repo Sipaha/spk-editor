@@ -61,11 +61,7 @@ impl AtomicGitOp for ResetOp {
 
     fn run(&mut self, repo_path: &Path) -> Result<RunOutcome> {
         let envs: HashMap<String, String> = HashMap::new();
-        let output = run_git_with_envs(
-            repo_path,
-            &["reset", self.mode.flag(), &self.sha],
-            &envs,
-        )?;
+        let output = run_git_with_envs(repo_path, &["reset", self.mode.flag(), &self.sha], &envs)?;
         if !output.status.success() {
             return Err(anyhow!(
                 "git reset {} {} failed: {}",
@@ -100,7 +96,12 @@ mod tests {
 
     #[allow(clippy::disallowed_methods)]
     fn rev_parse(dir: &Path, rev: &str) -> String {
-        let out = Command::new("git").arg("-C").arg(dir).args(["rev-parse", rev]).output().expect("rev-parse");
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["rev-parse", rev])
+            .output()
+            .expect("rev-parse");
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 

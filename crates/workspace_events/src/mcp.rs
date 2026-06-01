@@ -22,7 +22,11 @@ impl McpServerTool for SnapshotTool {
         let snap = cx.update(|cx| build_snapshot(cx));
         Ok(ToolResponse {
             content: vec![ToolResponseContent::Text {
-                text: format!("snapshot seq={} solutions={}", snap.seq, snap.solutions.len()),
+                text: format!(
+                    "snapshot seq={} solutions={}",
+                    snap.seq,
+                    snap.solutions.len()
+                ),
             }],
             structured_content: snap,
         })

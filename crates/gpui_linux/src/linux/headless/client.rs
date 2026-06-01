@@ -247,8 +247,9 @@ impl LinuxClient for HeadlessClient {
             None
         };
 
-        let window =
-            HeadlessWindow::new(handle, params, display, /* scale_factor */ 1.0, renderer);
+        let window = HeadlessWindow::new(
+            handle, params, display, /* scale_factor */ 1.0, renderer,
+        );
 
         // Track the window (not just the handle) so the refresh timer can
         // call `refresh()` on it directly — `AnyWindowHandle` alone won't

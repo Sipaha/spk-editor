@@ -225,18 +225,14 @@ impl Render for QrPopover {
 impl QrPopover {
     fn render_qr_body(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let url = self.url.clone().unwrap_or_else(|| SharedString::from(""));
-        let mut body = v_flex()
-            .id("qr-popover-body")
-            .p_3()
-            .gap_3()
-            .child(
-                Label::new(format!(
-                    "Scan with the SPK Remote app to pair {}.",
-                    self.client_name
-                ))
-                .size(LabelSize::Small)
-                .color(Color::Muted),
-            );
+        let mut body = v_flex().id("qr-popover-body").p_3().gap_3().child(
+            Label::new(format!(
+                "Scan with the SPK Remote app to pair {}.",
+                self.client_name
+            ))
+            .size(LabelSize::Small)
+            .color(Color::Muted),
+        );
 
         if let Some(code) = self.code.as_ref() {
             body = body.child(h_flex().justify_center().child(render_qr(code)));
@@ -253,11 +249,7 @@ impl QrPopover {
                         .border_color(cx.theme().colors().border)
                         .px_2()
                         .py_1()
-                        .child(
-                            Label::new(url)
-                                .size(LabelSize::XSmall)
-                                .buffer_font(cx),
-                        ),
+                        .child(Label::new(url).size(LabelSize::XSmall).buffer_font(cx)),
                 ),
         )
     }
@@ -293,11 +285,7 @@ fn render_qr(code: &QrCode) -> gpui::Div {
         .flex_col();
 
     for y in -QUIET_ZONE_MODULES..(module_count + QUIET_ZONE_MODULES) {
-        let mut row = div()
-            .w(total_px)
-            .h(px(MODULE_PX))
-            .flex()
-            .flex_row();
+        let mut row = div().w(total_px).h(px(MODULE_PX)).flex().flex_row();
         for x in -QUIET_ZONE_MODULES..(module_count + QUIET_ZONE_MODULES) {
             let cell = div().w(px(MODULE_PX)).h(px(MODULE_PX));
             // `get_module` is bounds-checked at the type level: out-of-range
@@ -344,7 +332,10 @@ mod tests {
             Some(fixture_fingerprint()),
         )
         .expect("build_url");
-        assert!(url.starts_with("spk-editor-remote://203.0.113.1:7777"), "got {url}");
+        assert!(
+            url.starts_with("spk-editor-remote://203.0.113.1:7777"),
+            "got {url}"
+        );
         assert!(url.contains("client=Phone"), "got {url}");
         // The URL-safe alphabet must not contain `+` or `/` (those are
         // reserved in standard base64 and would break URL parsing on
@@ -364,8 +355,14 @@ mod tests {
     fn url_safe_secret_round_trips_back_to_original_bytes() {
         let raw = [0xABu8; 32];
         let standard = base64::engine::general_purpose::STANDARD.encode(raw);
-        let url = build_url("X", &standard, Some("1.2.3.4"), 7777, Some(fixture_fingerprint()))
-            .expect("build_url");
+        let url = build_url(
+            "X",
+            &standard,
+            Some("1.2.3.4"),
+            7777,
+            Some(fixture_fingerprint()),
+        )
+        .expect("build_url");
 
         let secret_param = url
             .split('?')
@@ -424,7 +421,10 @@ mod tests {
         let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(fp_param.as_bytes())
             .expect("decode url-safe");
-        assert_eq!(decoded, fp, "fingerprint round-trips back to original 32 bytes");
+        assert_eq!(
+            decoded, fp,
+            "fingerprint round-trips back to original 32 bytes"
+        );
     }
 
     #[test]
@@ -433,29 +433,56 @@ mod tests {
         // `build_url` itself stays composable: no fingerprint → no
         // server_fp param (callers above this layer guard the
         // user-facing flow).
-        let url = build_url(
-            "Phone",
-            &fixture_secret(),
-            Some("203.0.113.1"),
-            7777,
-            None,
-        )
-        .expect("build_url");
+        let url = build_url("Phone", &fixture_secret(), Some("203.0.113.1"), 7777, None)
+            .expect("build_url");
         assert!(!url.contains("server_fp="), "got {url}");
     }
 
     #[test]
     fn build_url_rejects_missing_address() {
-        assert!(build_url("Phone", &fixture_secret(), None, 7777, Some(fixture_fingerprint())).is_err());
-        assert!(build_url("Phone", &fixture_secret(), Some(""), 7777, Some(fixture_fingerprint())).is_err());
-        assert!(build_url("Phone", &fixture_secret(), Some("   "), 7777, Some(fixture_fingerprint())).is_err());
+        assert!(
+            build_url(
+                "Phone",
+                &fixture_secret(),
+                None,
+                7777,
+                Some(fixture_fingerprint())
+            )
+            .is_err()
+        );
+        assert!(
+            build_url(
+                "Phone",
+                &fixture_secret(),
+                Some(""),
+                7777,
+                Some(fixture_fingerprint())
+            )
+            .is_err()
+        );
+        assert!(
+            build_url(
+                "Phone",
+                &fixture_secret(),
+                Some("   "),
+                7777,
+                Some(fixture_fingerprint())
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn build_url_rejects_zero_port() {
         assert!(
-            build_url("Phone", &fixture_secret(), Some("203.0.113.1"), 0, Some(fixture_fingerprint()))
-                .is_err()
+            build_url(
+                "Phone",
+                &fixture_secret(),
+                Some("203.0.113.1"),
+                0,
+                Some(fixture_fingerprint())
+            )
+            .is_err()
         );
     }
 

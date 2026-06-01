@@ -593,7 +593,10 @@ mod tests {
             Some(LATEST_PROTOCOL_VERSION),
         );
         assert!(
-            result.get("capabilities").and_then(|c| c.get("tools")).is_some(),
+            result
+                .get("capabilities")
+                .and_then(|c| c.get("tools"))
+                .is_some(),
             "tools capability missing: {result}"
         );
         assert!(result.get("serverInfo").is_some(), "serverInfo missing");

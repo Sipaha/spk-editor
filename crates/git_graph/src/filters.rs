@@ -252,9 +252,7 @@ mod tests {
                 search_in_diffs: false,
             }),
             all_refs: true,
-            sha: Some(
-                Oid::from_str("0123456789abcdef0123456789abcdef01234567").expect("oid"),
-            ),
+            sha: Some(Oid::from_str("0123456789abcdef0123456789abcdef01234567").expect("oid")),
         };
         let json = serde_json::to_string(&original).expect("serialize");
         let parsed: LogFilters = serde_json::from_str(&json).expect("deserialize");

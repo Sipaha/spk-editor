@@ -117,9 +117,7 @@ impl Settings for GitPanelSettings {
                 let raw = git_panel.commit_view.unwrap();
                 CommitViewSettings {
                     fetch_avatars: raw.fetch_avatars.unwrap_or(false),
-                    affected_files_lazy_threshold: raw
-                        .affected_files_lazy_threshold
-                        .unwrap_or(500),
+                    affected_files_lazy_threshold: raw.affected_files_lazy_threshold.unwrap_or(500),
                     parse_issue_references: raw.parse_issue_references.unwrap_or(true),
                 }
             },
@@ -132,14 +130,12 @@ impl Settings for GitPanelSettings {
             show_at_revision: {
                 let raw = git_panel.show_at_revision.unwrap_or_default();
                 ShowAtRevisionSettings {
-                    cleanup_orphans_older_than_h: raw
-                        .cleanup_orphans_older_than_h
-                        .unwrap_or(crate::handlers::show_at_revision::DEFAULT_CLEANUP_ORPHANS_OLDER_THAN_H),
+                    cleanup_orphans_older_than_h: raw.cleanup_orphans_older_than_h.unwrap_or(
+                        crate::handlers::show_at_revision::DEFAULT_CLEANUP_ORPHANS_OLDER_THAN_H,
+                    ),
                 }
             },
-            run_pre_commit_hooks_in_panel: git_panel
-                .run_pre_commit_hooks_in_panel
-                .unwrap_or(true),
+            run_pre_commit_hooks_in_panel: git_panel.run_pre_commit_hooks_in_panel.unwrap_or(true),
             commit_explanations: {
                 let raw = git_panel.commit_explanations.unwrap_or_default();
                 CommitExplanationsSettings {

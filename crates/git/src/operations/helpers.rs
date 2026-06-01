@@ -78,11 +78,10 @@ pub fn rebase_helper_main(todo_path: &Path) -> Result<(), HelperError> {
 
     // The output path must be a regular file (git creates it before invoking
     // the editor). Symlinks would let an attacker redirect overwrites.
-    let metadata =
-        fs::symlink_metadata(todo_path).map_err(|err| HelperError::Io {
-            path: todo_path.to_path_buf(),
-            err,
-        })?;
+    let metadata = fs::symlink_metadata(todo_path).map_err(|err| HelperError::Io {
+        path: todo_path.to_path_buf(),
+        err,
+    })?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(HelperError::InvalidOutputPath(todo_path.to_path_buf()));
     }
@@ -133,8 +132,7 @@ pub fn message_set_main(token: &str) -> Result<(), HelperError> {
 }
 
 fn read_session_id() -> Result<String, HelperError> {
-    let raw = std::env::var(SESSION_ENV)
-        .map_err(|_| HelperError::MissingEnv(SESSION_ENV))?;
+    let raw = std::env::var(SESSION_ENV).map_err(|_| HelperError::MissingEnv(SESSION_ENV))?;
     if !is_valid_session_id(&raw) {
         return Err(HelperError::InvalidSessionId(raw));
     }
@@ -194,10 +192,11 @@ fn read_to_string(path: &Path) -> Result<String, HelperError> {
         err,
     })?;
     let mut body = String::new();
-    file.read_to_string(&mut body).map_err(|err| HelperError::Io {
-        path: path.to_path_buf(),
-        err,
-    })?;
+    file.read_to_string(&mut body)
+        .map_err(|err| HelperError::Io {
+            path: path.to_path_buf(),
+            err,
+        })?;
     Ok(body)
 }
 
@@ -226,7 +225,10 @@ pub(crate) fn validate_todo_body(body: &str) -> Result<(), HelperError> {
         // `exec`/`x` can carry arbitrary commands; everything else needs a
         // sha-shaped argument (we don't enforce hex length — git accepts any
         // commit-ish that resolves; minimal check that something follows).
-        if matches!(verb, "exec" | "x" | "label" | "l" | "reset" | "t" | "merge" | "m") {
+        if matches!(
+            verb,
+            "exec" | "x" | "label" | "l" | "reset" | "t" | "merge" | "m"
+        ) {
             continue;
         }
         let rest = parts.next().unwrap_or("").trim();
@@ -276,7 +278,11 @@ fn is_valid_verb(verb: &str) -> bool {
 #[allow(clippy::disallowed_methods)]
 fn run_git_amend(message_path: &Path) -> Result<std::process::Output, HelperError> {
     Command::new("git")
-        .args([OsStr::new("commit"), OsStr::new("--amend"), OsStr::new("-F")])
+        .args([
+            OsStr::new("commit"),
+            OsStr::new("--amend"),
+            OsStr::new("-F"),
+        ])
         .arg(message_path)
         .output()
         .map_err(HelperError::Spawn)
@@ -381,10 +387,7 @@ drop bbbbbbbb
     fn rebase_helper_rejects_missing_session_dir() {
         let _guard = ENV_GUARD.lock().expect("env guard");
         unsafe {
-            std::env::set_var(
-                SESSION_ENV,
-                "00000000000000000000000000000000",
-            );
+            std::env::set_var(SESSION_ENV, "00000000000000000000000000000000");
         }
         let result = rebase_helper_main(Path::new("/dev/null"));
         unsafe {

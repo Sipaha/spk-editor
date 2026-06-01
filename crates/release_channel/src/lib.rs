@@ -267,4 +267,3 @@ mod rebrand_tests {
         }
     }
 }
-

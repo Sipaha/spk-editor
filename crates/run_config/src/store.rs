@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use collections::HashMap;
 use futures::StreamExt as _;
-use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global, Subscription, Task, WeakEntity};
+use gpui::{
+    App, AppContext as _, Context, Entity, EventEmitter, Global, Subscription, Task, WeakEntity,
+};
 use project::{Project, Worktree, WorktreeId};
 use settings::watch_config_file;
 use util::ResultExt as _;
@@ -239,7 +241,8 @@ impl RunConfigStore {
         };
         // Remove any existing config with this id from every bucket (its scope
         // may have changed), then push it into the target bucket.
-        self.global_configs.retain(|existing| existing.id != config.id);
+        self.global_configs
+            .retain(|existing| existing.id != config.id);
         for bucket in self.worktree_configs.values_mut() {
             bucket.retain(|existing| existing.id != config.id);
         }
@@ -254,13 +257,13 @@ impl RunConfigStore {
         self.rebuild_persisted(cx);
     }
 
-    pub fn remove(
-        &mut self,
-        id: &RunConfigId,
-        cx: &mut Context<Self>,
-    ) -> Option<RunConfiguration> {
+    pub fn remove(&mut self, id: &RunConfigId, cx: &mut Context<Self>) -> Option<RunConfiguration> {
         let mut removed: Option<RunConfiguration> = None;
-        if let Some(position) = self.global_configs.iter().position(|config| &config.id == id) {
+        if let Some(position) = self
+            .global_configs
+            .iter()
+            .position(|config| &config.id == id)
+        {
             removed = Some(self.global_configs.remove(position));
         }
         for bucket in self.worktree_configs.values_mut() {
@@ -326,8 +329,7 @@ impl RunConfigStore {
         };
         let path = paths::run_configurations_file().clone();
         let task = cx.spawn(async move |this, cx| {
-            let (mut contents_rx, _watcher) =
-                watch_config_file(cx.background_executor(), fs, path);
+            let (mut contents_rx, _watcher) = watch_config_file(cx.background_executor(), fs, path);
             while let Some(text) = contents_rx.next().await {
                 let parsed = parse_text(&text, ConfigScope::Global);
                 if this
@@ -354,10 +356,14 @@ impl RunConfigStore {
             .abs_path()
             .join(paths::local_run_configurations_file_relative_path().as_std_path());
         let task = cx.spawn(async move |this, cx| {
-            let (mut contents_rx, _watcher) =
-                watch_config_file(cx.background_executor(), fs, path);
+            let (mut contents_rx, _watcher) = watch_config_file(cx.background_executor(), fs, path);
             while let Some(text) = contents_rx.next().await {
-                let parsed = parse_text(&text, ConfigScope::Project { worktree: worktree_id });
+                let parsed = parse_text(
+                    &text,
+                    ConfigScope::Project {
+                        worktree: worktree_id,
+                    },
+                );
                 if this
                     .update(cx, |this, cx| {
                         this.worktree_configs.insert(worktree_id, parsed);
@@ -508,7 +514,9 @@ fn parse_text(text: &str, scope: ConfigScope) -> Vec<RunConfiguration> {
     if text.trim().is_empty() {
         return Vec::new();
     }
-    file_format::parse_document(text, scope).log_err().unwrap_or_default()
+    file_format::parse_document(text, scope)
+        .log_err()
+        .unwrap_or_default()
 }
 
 fn document_text(configs: &[RunConfiguration]) -> String {
@@ -631,8 +639,14 @@ mod tests {
             s.set_running(1u64, collections::HashSet::default(), cx);
         });
         store.read_with(cx, |s, _| {
-            assert!(!s.is_running(&id_a), "source 1's config should no longer be running");
-            assert!(s.is_running(&id_b), "source 2's config should still be running");
+            assert!(
+                !s.is_running(&id_a),
+                "source 1's config should no longer be running"
+            );
+            assert!(
+                s.is_running(&id_b),
+                "source 2's config should still be running"
+            );
         });
     }
 
@@ -646,7 +660,10 @@ mod tests {
         store.read_with(cx, |s, _| assert!(s.is_running(&id)));
         store.update(cx, |s, cx| s.clear_running_source(1u64, cx));
         store.read_with(cx, |s, _| {
-            assert!(!s.is_running(&id), "clearing the source removes its running set");
+            assert!(
+                !s.is_running(&id),
+                "clearing the source removes its running set"
+            );
             assert_eq!(s.running_ids().count(), 0);
         });
         // Clearing an unknown source is a harmless no-op.
@@ -686,7 +703,9 @@ mod tests {
                     executors: vec![Executor::Run],
                     before_launch: vec![],
                     folder: None,
-                    scope: ConfigScope::Project { worktree: worktree_id },
+                    scope: ConfigScope::Project {
+                        worktree: worktree_id,
+                    },
                 },
                 cx,
             );
@@ -711,8 +730,14 @@ mod tests {
             .load(Path::new("/proj/.spke/run-configurations.json"))
             .await
             .expect("project run-configurations.json was written");
-        assert!(project_text.contains("\"Echo\""), "project file: {project_text}");
-        assert!(project_text.contains("\"echo\""), "project file: {project_text}");
+        assert!(
+            project_text.contains("\"Echo\""),
+            "project file: {project_text}"
+        );
+        assert!(
+            project_text.contains("\"echo\""),
+            "project file: {project_text}"
+        );
         assert!(
             !project_text.contains("\"GlobalOne\""),
             "global config leaked into project file: {project_text}"
@@ -771,7 +796,9 @@ mod tests {
                     executors: vec![Executor::Run],
                     before_launch: vec![],
                     folder: None,
-                    scope: ConfigScope::Project { worktree: worktree_id },
+                    scope: ConfigScope::Project {
+                        worktree: worktree_id,
+                    },
                 },
                 cx,
             );
@@ -847,7 +874,10 @@ mod tests {
         store.read_with(cx, |s, _| {
             let names: Vec<_> = s.configs().iter().map(|c| c.name.to_string()).collect();
             assert!(names.contains(&"Y".to_string()), "got {names:?}");
-            assert!(!names.contains(&"X".to_string()), "X should be gone, got {names:?}");
+            assert!(
+                !names.contains(&"X".to_string()),
+                "X should be gone, got {names:?}"
+            );
         });
     }
 }

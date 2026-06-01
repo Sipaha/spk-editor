@@ -130,8 +130,7 @@ fn register_member_sync_observer(
             .visible_worktrees(cx)
             .map(|wt| wt.read(cx).abs_path().to_path_buf())
             .collect();
-        let target: std::collections::HashSet<std::path::PathBuf> =
-            paths.iter().cloned().collect();
+        let target: std::collections::HashSet<std::path::PathBuf> = paths.iter().cloned().collect();
         if visible == target {
             return;
         }
@@ -501,12 +500,7 @@ fn close_solution(
 /// solution by `dir` steps (`+1` = next, `-1` = previous), wrapping at
 /// both ends. No-op if the workspace has no active solution, the
 /// solution has no members, or the panel kind isn't recognised.
-fn cycle_project_in_panel(
-    workspace: &Workspace,
-    panel_kind: &str,
-    dir: isize,
-    cx: &mut gpui::App,
-) {
+fn cycle_project_in_panel(workspace: &Workspace, panel_kind: &str, dir: isize, cx: &mut gpui::App) {
     use util::ResultExt as _;
 
     let panel = match panel_kind {

@@ -187,9 +187,7 @@ pub fn install(cx: &mut App) {
                                 let has_match = project_entity
                                     .read(_cx)
                                     .visible_worktrees(_cx)
-                                    .any(|tree| {
-                                        tree.read(_cx).abs_path().starts_with(&sol.root)
-                                    });
+                                    .any(|tree| tree.read(_cx).abs_path().starts_with(&sol.root));
                                 if has_match {
                                     ids.push(sol.id.clone());
                                     break 'ws;

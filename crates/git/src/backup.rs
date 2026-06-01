@@ -50,11 +50,8 @@ pub fn create(repo_path: &Path, branch: &str, op: &str) -> Result<BackupRef> {
         before_sha: before_sha.clone(),
     };
     let ref_name = backup.ref_name();
-    run_git_void(
-        repo_path,
-        &["update-ref", &ref_name, &before_sha],
-    )
-    .with_context(|| format!("creating backup ref {ref_name}"))?;
+    run_git_void(repo_path, &["update-ref", &ref_name, &before_sha])
+        .with_context(|| format!("creating backup ref {ref_name}"))?;
     Ok(backup)
 }
 
@@ -225,7 +222,18 @@ mod tests {
         git(dir.path(), &["init", "-q", "-b", "main"]);
         std::fs::write(dir.path().join("README.md"), "x").expect("write");
         git(dir.path(), &["add", "README.md"]);
-        git(dir.path(), &["-c", "user.name=Test", "-c", "user.email=test@x", "commit", "-qm", "init"]);
+        git(
+            dir.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@x",
+                "commit",
+                "-qm",
+                "init",
+            ],
+        );
         dir
     }
 

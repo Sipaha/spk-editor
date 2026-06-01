@@ -132,8 +132,10 @@ pub(crate) fn render_affected_files(
                 .label_size(LabelSize::Small)
                 .full_width()
                 .on_click(cx.listener(|view, _, _, cx| {
-                    view.affected_files.visible_count =
-                        view.affected_files.visible_count.saturating_add(LOAD_MORE_PAGE);
+                    view.affected_files.visible_count = view
+                        .affected_files
+                        .visible_count
+                        .saturating_add(LOAD_MORE_PAGE);
                     cx.notify();
                 })),
             )

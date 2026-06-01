@@ -3071,8 +3071,8 @@ fn spk_editor_mcp_bridge_server() -> Option<acp::McpServer> {
     // `nc` mode picks it up on the connection. When the env is unset we
     // explicitly stamp `write` so missing env vars don't accidentally
     // inherit the editor's own (potentially `destructive`) value.
-    let caps_value = std::env::var(editor_mcp::BRIDGE_CAPS_ENV_VAR)
-        .unwrap_or_else(|_| "write".to_string());
+    let caps_value =
+        std::env::var(editor_mcp::BRIDGE_CAPS_ENV_VAR).unwrap_or_else(|_| "write".to_string());
 
     Some(acp::McpServer::Stdio(
         acp::McpServerStdio::new("spk-editor", exe.to_string_lossy().as_ref())

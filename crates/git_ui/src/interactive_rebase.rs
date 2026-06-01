@@ -24,8 +24,8 @@ use git::operations::rebase::{
 use git_conflict_ui::ConflictResolverView;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Task,
-    WeakEntity, Window, div,
+    InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Task, WeakEntity,
+    Window, div,
 };
 use notifications::status_toast::StatusToast;
 use project::Project;
@@ -179,9 +179,9 @@ impl InteractiveRebaseView {
 
         window.spawn(cx, async move |cx| {
             let load = cx
-                .background_spawn(async move {
-                    load_rows_to_pick(&repo_path_for_load, &base_for_load)
-                })
+                .background_spawn(
+                    async move { load_rows_to_pick(&repo_path_for_load, &base_for_load) },
+                )
                 .await?;
             let branch_name = cx
                 .background_spawn({
@@ -204,13 +204,7 @@ impl InteractiveRebaseView {
                         cx,
                     )
                 });
-                workspace.add_item_to_active_pane(
-                    Box::new(view.clone()),
-                    None,
-                    true,
-                    window,
-                    cx,
-                );
+                workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
                 view
             })
         })
@@ -321,11 +315,7 @@ impl InteractiveRebaseView {
         if self.ai_pending || self.pending {
             return Some("AI auto-organize already in progress");
         }
-        let commit_rows = self
-            .rows
-            .iter()
-            .filter(|r| !r.sha.is_empty())
-            .count();
+        let commit_rows = self.rows.iter().filter(|r| !r.sha.is_empty()).count();
         if commit_rows == 0 {
             return Some("No commits to plan");
         }
@@ -414,8 +404,8 @@ impl InteractiveRebaseView {
                     async move {
                         let mut filled = commits;
                         for commit in filled.iter_mut() {
-                            commit.diff_stat = git_diff_stat(&repo_work_dir, &commit.sha)
-                                .unwrap_or_default();
+                            commit.diff_stat =
+                                git_diff_stat(&repo_work_dir, &commit.sha).unwrap_or_default();
                         }
                         filled
                     }
@@ -440,11 +430,7 @@ impl InteractiveRebaseView {
         .detach();
     }
 
-    fn apply_planned_actions(
-        &mut self,
-        actions: Vec<PlannedAction>,
-        cx: &mut Context<Self>,
-    ) {
+    fn apply_planned_actions(&mut self, actions: Vec<PlannedAction>, cx: &mut Context<Self>) {
         let original_by_sha: std::collections::HashMap<String, TodoRow> = self
             .rows
             .iter()
@@ -461,10 +447,7 @@ impl InteractiveRebaseView {
         while i < ordered.len() {
             let target = ordered[i].insert_after.clone();
             if let Some(target_sha) = target {
-                let anchor = ordered
-                    .iter()
-                    .take(i)
-                    .position(|a| a.sha == target_sha);
+                let anchor = ordered.iter().take(i).position(|a| a.sha == target_sha);
                 if let Some(anchor_idx) = anchor
                     && anchor_idx + 1 != i
                 {
@@ -499,10 +482,7 @@ impl InteractiveRebaseView {
         }
 
         if new_rows.is_empty() {
-            self.show_ai_failure_toast(
-                "AI auto-organize returned no commits to replay".into(),
-                cx,
-            );
+            self.show_ai_failure_toast("AI auto-organize returned no commits to replay".into(), cx);
             return;
         }
         self.rows = new_rows;
@@ -640,9 +620,9 @@ impl InteractiveRebaseView {
 
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
-                .background_spawn(async move {
-                    run_rebase(&repo_path, &base, todo, callbacks).await
-                })
+                .background_spawn(
+                    async move { run_rebase(&repo_path, &base, todo, callbacks).await },
+                )
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.pending = false;
@@ -651,8 +631,7 @@ impl InteractiveRebaseView {
                         let handle = Arc::new(handle);
                         this.handle = Some(handle);
                         this.refresh_state_from_handle(window, cx);
-                        let conflict =
-                            conflict_signal.lock().map(|g| *g).unwrap_or(false);
+                        let conflict = conflict_signal.lock().map(|g| *g).unwrap_or(false);
                         if conflict {
                             this.open_conflict_resolver(window, cx);
                         }
@@ -675,9 +654,7 @@ impl InteractiveRebaseView {
         self.state = match handle.state() {
             RebaseState::Running => ViewState::Running,
             RebaseState::PausedForConflict { .. } => ViewState::PausedForConflict,
-            RebaseState::PausedForEdit { current_sha } => {
-                ViewState::PausedForEdit { current_sha }
-            }
+            RebaseState::PausedForEdit { current_sha } => ViewState::PausedForEdit { current_sha },
             RebaseState::PausedForExecFailure { command, stderr } => {
                 ViewState::PausedForExecFailure { command, stderr }
             }
@@ -693,11 +670,9 @@ impl InteractiveRebaseView {
             return;
         };
         let project = self.project.clone();
-        let work_dir: Arc<std::path::Path> =
-            self.repo.read(cx).work_directory_abs_path.clone();
+        let work_dir: Arc<std::path::Path> = self.repo.read(cx).work_directory_abs_path.clone();
         let weak = workspace.downgrade();
-        ConflictResolverView::open(project, weak, work_dir, window, cx)
-            .detach_and_log_err(cx);
+        ConflictResolverView::open(project, weak, work_dir, window, cx).detach_and_log_err(cx);
     }
 
     fn run_continuation_command(
@@ -739,8 +714,7 @@ impl InteractiveRebaseView {
 
     fn render_header(&self, cx: &Context<Self>) -> AnyElement {
         let short: String = self.base_sha.chars().take(7).collect();
-        let detail: SharedString =
-            format!("from {short}… onto {}", self.branch_name).into();
+        let detail: SharedString = format!("from {short}… onto {}", self.branch_name).into();
         h_flex()
             .px_3()
             .py_2()
@@ -827,15 +801,12 @@ impl InteractiveRebaseView {
             let selected = action == row.action;
             let label = action.label();
             let disabled = !is_editable || (row.sha.is_empty() && action != TodoAction::Exec);
-            let btn = Button::new(
-                SharedString::from(format!("irb-act-{idx}-{label}")),
-                label,
-            )
-            .toggle_state(selected)
-            .disabled(disabled)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.set_action(idx, action, cx);
-            }));
+            let btn = Button::new(SharedString::from(format!("irb-act-{idx}-{label}")), label)
+                .toggle_state(selected)
+                .disabled(disabled)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_action(idx, action, cx);
+                }));
             action_buttons = action_buttons.child(btn);
         }
 
@@ -951,22 +922,21 @@ impl InteractiveRebaseView {
                         h_flex()
                             .gap_2()
                             .child(
-                                Button::new(
-                                    SharedString::from(format!("irb-save-{idx}")),
-                                    "Save",
-                                )
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.save_editing_field(cx);
-                                })),
+                                Button::new(SharedString::from(format!("irb-save-{idx}")), "Save")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.save_editing_field(cx);
+                                    })),
                             )
                             .child(
                                 Button::new(
                                     SharedString::from(format!("irb-cancel-{idx}")),
                                     "Cancel",
                                 )
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.cancel_editing_field(cx);
-                                })),
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.cancel_editing_field(cx);
+                                    },
+                                )),
                             ),
                     ),
             )
@@ -992,8 +962,7 @@ impl InteractiveRebaseView {
                 | ViewState::PausedForEdit { .. }
                 | ViewState::PausedForExecFailure { .. }
         );
-        let shell_paused =
-            matches!(self.state, ViewState::PausedForExecFailure { .. });
+        let shell_paused = matches!(self.state, ViewState::PausedForExecFailure { .. });
         let terminal = matches!(
             self.state,
             ViewState::Completed | ViewState::Aborted | ViewState::Failed(_)
@@ -1041,10 +1010,7 @@ impl InteractiveRebaseView {
                 Button::new("irb-preview", "Show preview")
                     .disabled(!editing)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        log::info!(
-                            "interactive rebase preview:\n{}",
-                            this.preview_todo_text()
-                        );
+                        log::info!("interactive rebase preview:\n{}", this.preview_todo_text());
                         cx.notify();
                     })),
             )
@@ -1057,10 +1023,11 @@ impl InteractiveRebaseView {
                     })),
             )
             .child(
-                Button::new("irb-cancel-editing", "Cancel")
-                    .on_click(cx.listener(|this, _, window, cx| {
+                Button::new("irb-cancel-editing", "Cancel").on_click(cx.listener(
+                    |this, _, window, cx| {
                         this.close_view(window, cx);
-                    })),
+                    },
+                )),
             );
 
         let running_buttons = h_flex()
@@ -1095,11 +1062,10 @@ impl InteractiveRebaseView {
                     })),
             );
 
-        let close_button = Button::new("irb-close", "Close").on_click(cx.listener(
-            |this, _, window, cx| {
+        let close_button =
+            Button::new("irb-close", "Close").on_click(cx.listener(|this, _, window, cx| {
                 this.close_view(window, cx);
-            },
-        ));
+            }));
 
         if editing {
             editing_buttons.into_any_element()
@@ -1260,10 +1226,7 @@ fn run_git(repo_path: &std::path::Path, args: &[&str]) -> Result<std::process::O
 /// Returns commits between `base` (exclusive) and HEAD, oldest first —
 /// i.e. the order `git rebase -i` writes them in the todo. `base` must
 /// be reachable from HEAD or the load fails.
-pub(crate) fn load_rows_to_pick(
-    repo_path: &std::path::Path,
-    base: &str,
-) -> Result<Vec<TodoRow>> {
+pub(crate) fn load_rows_to_pick(repo_path: &std::path::Path, base: &str) -> Result<Vec<TodoRow>> {
     let ancestor = run_git(repo_path, &["merge-base", "--is-ancestor", base, "HEAD"])?;
     if !ancestor.status.success() {
         return Err(anyhow!(
@@ -1412,7 +1375,11 @@ mod tests {
         let todo = build_todo_from_rows(&rows);
         let body = todo.serialize_with_helper("/helper --git-message-set");
         let lines: Vec<&str> = body.lines().collect();
-        assert_eq!(lines.len(), 4, "expected pick + drop + pick+exec, got {body:?}");
+        assert_eq!(
+            lines.len(),
+            4,
+            "expected pick + drop + pick+exec, got {body:?}"
+        );
         assert!(
             lines[0].starts_with("pick aaaa"),
             "expected pick first, got {body:?}"
@@ -1448,11 +1415,7 @@ mod tests {
 
     #[test]
     fn drop_middle_row_yields_pick_drop_pick() {
-        let mut rows = vec![
-            row("1111", "a"),
-            row("2222", "b"),
-            row("3333", "c"),
-        ];
+        let mut rows = vec![row("1111", "a"), row("2222", "b"), row("3333", "c")];
         rows[1].action = TodoAction::Drop;
         let todo = build_todo_from_rows(&rows);
         let body = todo.serialize_with_helper("/x");

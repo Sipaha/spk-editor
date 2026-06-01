@@ -197,13 +197,7 @@ impl ConflictResolverView {
                         cx,
                     )
                 });
-                workspace.add_item_to_active_pane(
-                    Box::new(view.clone()),
-                    None,
-                    true,
-                    window,
-                    cx,
-                );
+                workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
                 view
             })?;
 
@@ -311,9 +305,9 @@ impl ConflictResolverView {
         if entry.is_binary {
             self.text_state = None;
             self.last_three_way_content = None;
-            self.binary_view = Some(cx.new(|_| {
-                BinaryConflictView::new(entry.path.clone(), self.work_dir.clone())
-            }));
+            self.binary_view = Some(
+                cx.new(|_| BinaryConflictView::new(entry.path.clone(), self.work_dir.clone())),
+            );
             cx.notify();
             return;
         }
@@ -322,17 +316,13 @@ impl ConflictResolverView {
         self.last_three_way_content = None;
         let work_dir = self.work_dir.clone();
         let path = entry.path.clone();
-        let task = cx.background_spawn(async move {
-            load_three_way_async(&work_dir, &path).await
-        });
+        let task = cx.background_spawn(async move { load_three_way_async(&work_dir, &path).await });
 
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
-            this.update_in(cx, |this, window, cx| {
-                match result {
-                    Ok(content) => this.populate_text_state(entry.path.clone(), content, window, cx),
-                    Err(err) => log::warn!("conflict resolver: load three-way failed: {err:?}"),
-                }
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(content) => this.populate_text_state(entry.path.clone(), content, window, cx),
+                Err(err) => log::warn!("conflict resolver: load three-way failed: {err:?}"),
             })
             .log_err();
         })
@@ -415,7 +405,11 @@ impl ConflictResolverView {
         });
 
         self.chunks = extract_conflict_chunks(&working_text);
-        self.current_chunk = if self.chunks.is_empty() { None } else { Some(0) };
+        self.current_chunk = if self.chunks.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
         cx.notify();
     }
 
@@ -456,7 +450,9 @@ impl ConflictResolverView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(idx) = self.current_chunk else { return };
+        let Some(idx) = self.current_chunk else {
+            return;
+        };
         let Some(state) = self.text_state.as_ref() else {
             return;
         };
@@ -480,7 +476,9 @@ impl ConflictResolverView {
     }
 
     pub fn accept_yours(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(idx) = self.current_chunk else { return };
+        let Some(idx) = self.current_chunk else {
+            return;
+        };
         let Some(chunk) = self.chunks.get(idx).cloned() else {
             return;
         };
@@ -488,7 +486,9 @@ impl ConflictResolverView {
     }
 
     pub fn accept_theirs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(idx) = self.current_chunk else { return };
+        let Some(idx) = self.current_chunk else {
+            return;
+        };
         let Some(chunk) = self.chunks.get(idx).cloned() else {
             return;
         };
@@ -496,7 +496,9 @@ impl ConflictResolverView {
     }
 
     pub fn accept_both(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(idx) = self.current_chunk else { return };
+        let Some(idx) = self.current_chunk else {
+            return;
+        };
         let Some(chunk) = self.chunks.get(idx).cloned() else {
             return;
         };
@@ -509,7 +511,9 @@ impl ConflictResolverView {
     }
 
     pub fn accept_base(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(idx) = self.current_chunk else { return };
+        let Some(idx) = self.current_chunk else {
+            return;
+        };
         let Some(chunk) = self.chunks.get(idx).cloned() else {
             return;
         };
@@ -555,11 +559,7 @@ impl ConflictResolverView {
     /// chunk that has identical ours/theirs (i.e. trivially auto-merged
     /// regions). The remaining chunks stay marker-delimited so the user
     /// resolves them explicitly.
-    pub fn apply_non_conflicting_hunks(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn apply_non_conflicting_hunks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(state) = self.text_state.as_ref() else {
             return;
         };
@@ -609,7 +609,11 @@ impl ConflictResolverView {
 
     /// Save the result buffer to disk + `git add <path>`. Marks the file
     /// as resolved in the sidebar.
-    pub fn mark_resolved(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Task<Result<()>> {
+    pub fn mark_resolved(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
         let Some(state) = self.text_state.as_ref() else {
             return Task::ready(Err(anyhow::anyhow!("no active file")));
         };
@@ -650,15 +654,14 @@ impl ConflictResolverView {
         let work_dir = self.work_dir.clone();
         cx.spawn(async move |this, cx| {
             let conflicts = cx
-                .background_spawn(async move {
-                    list_conflicts_async(&work_dir).await
-                })
+                .background_spawn(async move { list_conflicts_async(&work_dir).await })
                 .await
                 .log_err()
                 .unwrap_or_default();
             this.update(cx, |this, cx| {
                 this.conflicts = conflicts.clone();
-                this.sidebar.update(cx, |sidebar, _| sidebar.set_files(conflicts));
+                this.sidebar
+                    .update(cx, |sidebar, _| sidebar.set_files(conflicts));
                 cx.notify();
             })
             .ok();
@@ -714,17 +717,13 @@ impl ConflictResolverView {
     /// an active Solution to host the ephemeral session. The toolbar
     /// uses this for the button's `disabled` state.
     pub fn ai_suggest_eligible(&self, cx: &App) -> bool {
-        let Some(entry) = self
-            .active_file
-            .and_then(|i| self.conflicts.get(i))
-        else {
+        let Some(entry) = self.active_file.and_then(|i| self.conflicts.get(i)) else {
             return false;
         };
         let Some(content) = self.last_three_way_content.as_ref() else {
             return false;
         };
-        crate::ai_suggest::is_eligible(content, entry.is_binary)
-            && has_active_solution(cx)
+        crate::ai_suggest::is_eligible(content, entry.is_binary) && has_active_solution(cx)
     }
 
     /// Tooltip text explaining why the AI merge button is disabled, or
@@ -738,12 +737,7 @@ impl ConflictResolverView {
     /// Replace the entire Result buffer with `text`. Called by the AI
     /// suggest modal when the user clicks Apply. Does NOT save to disk
     /// — `mark_resolved` still has to be triggered explicitly.
-    pub fn replace_result_with(
-        &mut self,
-        text: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn replace_result_with(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(state) = self.text_state.as_ref() else {
             return;
         };
@@ -861,11 +855,7 @@ impl ConflictResolverView {
         self.workspace.clone()
     }
 
-    fn render_resize_handle(
-        &self,
-        boundary: Boundary,
-        cx: &Context<Self>,
-    ) -> AnyElement {
+    fn render_resize_handle(&self, boundary: Boundary, cx: &Context<Self>) -> AnyElement {
         let separator_color = cx.theme().colors().border_variant;
         let id = match boundary {
             Boundary::LocalResult => "cfl-handle-lr",
@@ -887,17 +877,14 @@ impl ConflictResolverView {
                     .w(px(RESIZE_HANDLE_WIDTH))
                     .h_full()
                     .cursor_col_resize()
-                    .on_drag(DraggedHandle { boundary }, |_, _, _, cx| cx.new(|_| gpui::Empty)),
+                    .on_drag(DraggedHandle { boundary }, |_, _, _, cx| {
+                        cx.new(|_| gpui::Empty)
+                    }),
             )
             .into_any_element()
     }
 
-    fn pane(
-        editor: Entity<Editor>,
-        flex: f32,
-        label: &'static str,
-        cx: &App,
-    ) -> AnyElement {
+    fn pane(editor: Entity<Editor>, flex: f32, label: &'static str, cx: &App) -> AnyElement {
         v_flex()
             .h_full()
             .flex_shrink()
@@ -909,7 +896,11 @@ impl ConflictResolverView {
                     .px_2()
                     .py_1()
                     .bg(cx.theme().colors().elevated_surface_background)
-                    .child(Label::new(label).size(ui::LabelSize::XSmall).color(Color::Muted)),
+                    .child(
+                        Label::new(label)
+                            .size(ui::LabelSize::XSmall)
+                            .color(Color::Muted),
+                    ),
             )
             .child(div().flex_1().min_h_0().child(editor))
             .into_any_element()
@@ -986,11 +977,7 @@ fn compute_git_dir(work_dir: &Path) -> PathBuf {
 }
 
 impl Render for ConflictResolverView {
-    fn render(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let main = if let Some(state) = &self.text_state {
             let local = state.local_editor.clone().into_any_element();
             let result = state.result_editor.clone().into_any_element();
@@ -1116,7 +1103,11 @@ fn render_header(
         .border_color(cx.theme().colors().border)
         .child(Icon::new(IconName::Warning).color(Color::Warning))
         .child(Label::new(title.clone()))
-        .child(Label::new(detail).color(Color::Muted).size(ui::LabelSize::Small))
+        .child(
+            Label::new(detail)
+                .color(Color::Muted)
+                .size(ui::LabelSize::Small),
+        )
         .into_any_element()
 }
 
@@ -1143,10 +1134,7 @@ impl Focusable for ConflictResolverView {
                 ResolverPane::Local => &state.local_editor,
                 ResolverPane::Result => &state.result_editor,
                 ResolverPane::Their => &state.their_editor,
-                ResolverPane::Base => state
-                    .base_editor
-                    .as_ref()
-                    .unwrap_or(&state.result_editor),
+                ResolverPane::Base => state.base_editor.as_ref().unwrap_or(&state.result_editor),
             };
             editor.read(cx).focus_handle(cx)
         } else {

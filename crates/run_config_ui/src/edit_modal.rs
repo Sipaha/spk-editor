@@ -44,11 +44,7 @@ pub struct EditConfigurationsModal {
 }
 
 impl EditConfigurationsModal {
-    pub fn toggle(
-        workspace: &mut Workspace,
-        window: &mut Window,
-        cx: &mut Context<Workspace>,
-    ) {
+    pub fn toggle(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
         let weak = workspace.weak_handle();
         workspace.toggle_modal(window, cx, move |window, cx| {
             EditConfigurationsModal::new(weak, window, cx)
@@ -87,18 +83,15 @@ impl EditConfigurationsModal {
 
     /// The first worktree id of the project, if any.
     fn first_worktree_scope(&self, cx: &App) -> ConfigScope {
-        let worktree_id = self
-            .workspace
-            .upgrade()
-            .and_then(|workspace| {
-                workspace
-                    .read(cx)
-                    .project()
-                    .read(cx)
-                    .worktrees(cx)
-                    .next()
-                    .map(|worktree| worktree.read(cx).id())
-            });
+        let worktree_id = self.workspace.upgrade().and_then(|workspace| {
+            workspace
+                .read(cx)
+                .project()
+                .read(cx)
+                .worktrees(cx)
+                .next()
+                .map(|worktree| worktree.read(cx).id())
+        });
         match worktree_id {
             Some(worktree) => ConfigScope::Project { worktree },
             None => ConfigScope::Global,
@@ -164,7 +157,11 @@ impl EditConfigurationsModal {
         let project_scope = self.first_worktree_scope(cx);
         let settings = self.form.as_ref().map(|form| form.read(cx).value(cx));
         let provider_default_executor = RunConfigStore::try_global(cx)
-            .and_then(|store| store.read(cx).provider(&self.drafts[index].config.provider_type))
+            .and_then(|store| {
+                store
+                    .read(cx)
+                    .provider(&self.drafts[index].config.provider_type)
+            })
             .and_then(|provider| provider.supported_executors().first().copied());
 
         let draft = &mut self.drafts[index].config;
@@ -360,34 +357,32 @@ impl EditConfigurationsModal {
             .unwrap_or(false);
         let drafts_empty = self.drafts.is_empty();
 
-        let entries = self
-            .drafts
-            .iter()
-            .enumerate()
-            .map(|(index, draft)| {
-                let icon = self.provider_icon(&draft.config.provider_type, cx);
-                let name = draft.config.name.clone();
-                let is_ephemeral = draft.is_ephemeral;
-                ui::ListItem::new(("draft", index))
-                    .toggle_state(index == self.selected)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.select_draft(index, window, cx);
-                    }))
-                    .start_slot(Icon::new(icon).size(IconSize::Small))
-                    .child(
-                        h_flex()
-                            .gap_1p5()
-                            .child(Label::new(name))
-                            .when(is_ephemeral, |this| {
+        let entries =
+            self.drafts
+                .iter()
+                .enumerate()
+                .map(|(index, draft)| {
+                    let icon = self.provider_icon(&draft.config.provider_type, cx);
+                    let name = draft.config.name.clone();
+                    let is_ephemeral = draft.is_ephemeral;
+                    ui::ListItem::new(("draft", index))
+                        .toggle_state(index == self.selected)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.select_draft(index, window, cx);
+                        }))
+                        .start_slot(Icon::new(icon).size(IconSize::Small))
+                        .child(h_flex().gap_1p5().child(Label::new(name)).when(
+                            is_ephemeral,
+                            |this| {
                                 this.child(
                                     Label::new("detected")
                                         .size(LabelSize::XSmall)
                                         .color(Color::Muted),
                                 )
-                            }),
-                    )
-            })
-            .collect::<Vec<_>>();
+                            },
+                        ))
+                })
+                .collect::<Vec<_>>();
 
         v_flex()
             .w(px(240.))
@@ -425,22 +420,26 @@ impl EditConfigurationsModal {
                                                 .collect()
                                         })
                                         .unwrap_or_default();
-                                Some(ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
-                                    for (display_name, type_id) in &providers {
-                                        let type_id = *type_id;
-                                        let modal = modal.clone();
-                                        menu = menu.entry(display_name.clone(), None, {
-                                            move |window, cx| {
-                                                modal
-                                                    .update(cx, |modal, cx| {
-                                                        modal.add_config(type_id, window, cx);
-                                                    })
-                                                    .ok();
-                                            }
-                                        });
-                                    }
-                                    menu
-                                }))
+                                Some(ContextMenu::build(
+                                    window,
+                                    cx,
+                                    move |mut menu, _window, _cx| {
+                                        for (display_name, type_id) in &providers {
+                                            let type_id = *type_id;
+                                            let modal = modal.clone();
+                                            menu = menu.entry(display_name.clone(), None, {
+                                                move |window, cx| {
+                                                    modal
+                                                        .update(cx, |modal, cx| {
+                                                            modal.add_config(type_id, window, cx);
+                                                        })
+                                                        .ok();
+                                                }
+                                            });
+                                        }
+                                        menu
+                                    },
+                                ))
                             })
                     })
                     .child(
@@ -473,9 +472,8 @@ impl EditConfigurationsModal {
     fn render_detail_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let detail = v_flex().flex_1().p_3().gap_3();
         if self.drafts.is_empty() {
-            return detail.child(
-                Label::new("No configurations. Click + to add one.").color(Color::Muted),
-            );
+            return detail
+                .child(Label::new("No configurations. Click + to add one.").color(Color::Muted));
         }
         let index = self.selected.min(self.drafts.len() - 1);
         let draft = &self.drafts[index];
@@ -493,20 +491,17 @@ impl EditConfigurationsModal {
                 .unwrap_or_else(|| provider_type.clone());
             return detail
                 .child(
-                    v_flex()
-                        .gap_1()
-                        .child(Label::new("Name"))
-                        .child(
-                            div()
-                                .w_full()
-                                .px_2()
-                                .py_1()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(cx.theme().colors().border_variant)
-                                .bg(cx.theme().colors().editor_background)
-                                .child(self.name_editor.clone()),
-                        ),
+                    v_flex().gap_1().child(Label::new("Name")).child(
+                        div()
+                            .w_full()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(cx.theme().colors().border_variant)
+                            .bg(cx.theme().colors().editor_background)
+                            .child(self.name_editor.clone()),
+                    ),
                 )
                 .child(
                     v_flex()
@@ -519,30 +514,30 @@ impl EditConfigurationsModal {
                         .color(Color::Muted),
                 )
                 .child(
-                    Button::new("edit-config-save-ephemeral", "Save as project configuration")
-                        .style(ButtonStyle::Filled)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.promote_ephemeral(window, cx);
-                        })),
+                    Button::new(
+                        "edit-config-save-ephemeral",
+                        "Save as project configuration",
+                    )
+                    .style(ButtonStyle::Filled)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.promote_ephemeral(window, cx);
+                    })),
                 );
         }
 
         let mut detail = detail
             .child(
-                v_flex()
-                    .gap_1()
-                    .child(Label::new("Name"))
-                    .child(
-                        div()
-                            .w_full()
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(cx.theme().colors().border_variant)
-                            .bg(cx.theme().colors().editor_background)
-                            .child(self.name_editor.clone()),
-                    ),
+                v_flex().gap_1().child(Label::new("Name")).child(
+                    div()
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(cx.theme().colors().border_variant)
+                        .bg(cx.theme().colors().editor_background)
+                        .child(self.name_editor.clone()),
+                ),
             )
             .child(
                 h_flex()
@@ -606,9 +601,11 @@ impl EditConfigurationsModal {
                         },
                     )
                     .label(label)
-                    .on_click(cx.listener(move |this, _state: &ToggleState, _window, cx| {
-                        this.toggle_executor(executor, cx);
-                    })),
+                    .on_click(cx.listener(
+                        move |this, _state: &ToggleState, _window, cx| {
+                            this.toggle_executor(executor, cx);
+                        },
+                    )),
                 );
             }
             detail = detail.child(v_flex().gap_1().child(executor_row));
@@ -841,7 +838,11 @@ mod tests {
         });
 
         modal.update(cx, |modal, _| {
-            assert_eq!(modal.drafts.len(), 2, "original ephemeral draft is preserved");
+            assert_eq!(
+                modal.drafts.len(),
+                2,
+                "original ephemeral draft is preserved"
+            );
             assert!(modal.drafts[0].is_ephemeral, "original is still ephemeral");
             assert!(!modal.drafts[1].is_ephemeral, "promoted draft is persisted");
             assert_eq!(modal.selected, 1, "promoted draft is selected");
@@ -850,10 +851,7 @@ mod tests {
                 !matches!(promoted.scope, ConfigScope::Ephemeral),
                 "promoted draft has a non-ephemeral scope"
             );
-            assert_eq!(
-                promoted.provider_type, "mock",
-                "provider type is preserved"
-            );
+            assert_eq!(promoted.provider_type, "mock", "provider type is preserved");
         });
 
         // apply should write only the promoted (non-ephemeral) draft to the store.

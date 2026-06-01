@@ -92,27 +92,21 @@ impl Render for EmptySolutionPage {
             .gap_4()
             .bg(cx.theme().colors().editor_background)
             .child(
-                h_flex()
-                    .max_w_full()
-                    .px_4()
-                    .child(
-                        Label::new(format!("Solution \"{name}\" is empty"))
-                            .size(LabelSize::Large)
-                            .truncate(),
-                    ),
+                h_flex().max_w_full().px_4().child(
+                    Label::new(format!("Solution \"{name}\" is empty"))
+                        .size(LabelSize::Large)
+                        .truncate(),
+                ),
             )
             .child(
-                h_flex()
-                    .max_w_full()
-                    .px_4()
-                    .child(
-                        Label::new(
-                            "Add a project from your catalog to start working in this solution.",
-                        )
-                        .color(Color::Muted)
-                        .size(LabelSize::Small)
-                        .truncate(),
-                    ),
+                h_flex().max_w_full().px_4().child(
+                    Label::new(
+                        "Add a project from your catalog to start working in this solution.",
+                    )
+                    .color(Color::Muted)
+                    .size(LabelSize::Small)
+                    .truncate(),
+                ),
             )
             .child(
                 ButtonLike::new("empty-solution-add-member")

@@ -21,11 +21,7 @@ pub struct MoveCommitOp {
 }
 
 impl MoveCommitOp {
-    pub async fn run(
-        self,
-        repo_path: &Path,
-        callbacks: RebaseCallbacks,
-    ) -> Result<RebaseHandle> {
+    pub async fn run(self, repo_path: &Path, callbacks: RebaseCallbacks) -> Result<RebaseHandle> {
         let MoveCommitOp {
             source_sha,
             target_sha,

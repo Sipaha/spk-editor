@@ -151,16 +151,18 @@ impl Render for MemberPicker {
                             )
                             .size(ui::ButtonSize::Compact)
                             .icon_color(Color::Muted)
-                            .on_click(cx.listener(move |_this, _, window, cx| {
-                                cx.emit(DismissEvent);
-                                window.dispatch_action(
-                                    Box::new(crate::actions::RemoveMember {
-                                        solution_id: sol.0.clone(),
-                                        catalog_id: cat.0.clone(),
-                                    }),
-                                    cx,
-                                );
-                            })),
+                            .on_click(cx.listener(
+                                move |_this, _, window, cx| {
+                                    cx.emit(DismissEvent);
+                                    window.dispatch_action(
+                                        Box::new(crate::actions::RemoveMember {
+                                            solution_id: sol.0.clone(),
+                                            catalog_id: cat.0.clone(),
+                                        }),
+                                        cx,
+                                    );
+                                },
+                            )),
                         ),
                 )
                 .on_click(cx.listener(move |this, _, window, cx| {

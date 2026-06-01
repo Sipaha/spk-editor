@@ -84,9 +84,8 @@ pub fn switch_active_solution_in_place(
             // breath as its tabs. Both are per-Solution state that would
             // otherwise be SHARED, because the in-place switch keeps the
             // one Workspace (and its three Docks) alive across switches.
-            let dock_snapshot = workspace.update(cx, |workspace, cx| {
-                capture_dock_snapshot(workspace, cx)
-            });
+            let dock_snapshot =
+                workspace.update(cx, |workspace, cx| capture_dock_snapshot(workspace, cx));
             cx.update(|_, cx| {
                 if let Some(store) = SolutionStore::try_global(cx) {
                     store.update(cx, |store, cx| {
@@ -327,16 +326,12 @@ impl McpServerTool for SwitchSolutionTool {
         // Resolve the window + active workspace, then schedule the
         // switch on that window's foreground tick. Orchestrator
         // returns `Task<Result<()>>` which we await.
-        let task: Task<anyhow::Result<()>> = cx
-            .update(|cx| -> anyhow::Result<Task<anyhow::Result<()>>> {
+        let task: Task<anyhow::Result<()>> =
+            cx.update(|cx| -> anyhow::Result<Task<anyhow::Result<()>>> {
                 anyhow::ensure!(
                     SolutionStore::try_global(cx)
                         .map(|store| {
-                            store
-                                .read(cx)
-                                .solutions()
-                                .iter()
-                                .any(|s| s.id == target_id)
+                            store.read(cx).solutions().iter().any(|s| s.id == target_id)
                         })
                         .unwrap_or(false),
                     "solution_not_found: {}",
@@ -467,10 +462,7 @@ fn active_solution_id_in(mw: &MultiWorkspace, cx: &App) -> Option<SolutionId> {
 /// once even if it happens to be open in multiple workspaces — the
 /// first workspace mapping to a solution wins, mirroring the dedupe
 /// in `SolutionTabStrip::render`.
-fn solution_workspace_pairs(
-    mw: &MultiWorkspace,
-    cx: &App,
-) -> Vec<(SolutionId, Entity<Workspace>)> {
+fn solution_workspace_pairs(mw: &MultiWorkspace, cx: &App) -> Vec<(SolutionId, Entity<Workspace>)> {
     let store = SolutionStore::global(cx);
     let store_read = store.read(cx);
     let mut pairs: Vec<(SolutionId, Entity<Workspace>)> = Vec::new();

@@ -16,9 +16,21 @@ async fn capabilities_returns_protocol_version(cx: &mut TestAppContext) {
     assert_eq!(caps.protocol_version, "2024-11-05");
     assert!(!caps.editor_mcp_version.is_empty());
     assert!(!caps.supported_event_kinds.is_empty());
-    assert!(caps.supported_event_kinds.iter().any(|k| k == "operation_progress"));
-    assert!(caps.supported_event_kinds.iter().any(|k| k == "buffer_saved"));
-    assert!(caps.supported_event_kinds.iter().any(|k| k == "cli_args_received"));
+    assert!(
+        caps.supported_event_kinds
+            .iter()
+            .any(|k| k == "operation_progress")
+    );
+    assert!(
+        caps.supported_event_kinds
+            .iter()
+            .any(|k| k == "buffer_saved")
+    );
+    assert!(
+        caps.supported_event_kinds
+            .iter()
+            .any(|k| k == "cli_args_received")
+    );
 }
 
 #[test]

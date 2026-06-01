@@ -384,7 +384,18 @@ mod tests {
         git(&path, &["init", "-q", "-b", "main"]);
         std::fs::write(path.join("a.txt"), "x").unwrap();
         git(&path, &["add", "."]);
-        git(&path, &["-c", "user.name=T", "-c", "user.email=t@x", "commit", "-qm", "init"]);
+        git(
+            &path,
+            &[
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@x",
+                "commit",
+                "-qm",
+                "init",
+            ],
+        );
         let head = String::from_utf8(
             Command::new("git")
                 .arg("-C")

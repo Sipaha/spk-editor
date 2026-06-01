@@ -318,6 +318,9 @@ mod tests {
     fn console_variant_converts_to_snake_case() {
         let icon = IconName::Console;
         let path: &'static str = icon.into();
-        assert_eq!(path, "console", "Console variant should convert to 'console'");
+        assert_eq!(
+            path, "console",
+            "Console variant should convert to 'console'"
+        );
     }
 }

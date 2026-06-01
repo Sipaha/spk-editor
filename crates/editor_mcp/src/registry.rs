@@ -53,12 +53,8 @@ where
 ///
 /// `name` must be the same wire-protocol name the tool registers itself
 /// under (e.g. `"editor.git.log"`).
-pub fn register_tool_with_tier<F>(
-    cx: &mut App,
-    name: &'static str,
-    tier: ToolTier,
-    registration: F,
-) where
+pub fn register_tool_with_tier<F>(cx: &mut App, name: &'static str, tier: ToolTier, registration: F)
+where
     F: FnOnce(&mut McpServer) + 'static,
 {
     init(cx);
@@ -72,9 +68,7 @@ pub fn register_tool_with_tier<F>(
     }
     if let Some(prev) = registry.tool_tiers.borrow_mut().insert(name, tier) {
         debug_assert!(false, "duplicate tier registration for tool \"{name}\"");
-        log::warn!(
-            "editor_mcp: tool \"{name}\" tier overwritten ({prev:?} -> {tier:?})",
-        );
+        log::warn!("editor_mcp: tool \"{name}\" tier overwritten ({prev:?} -> {tier:?})",);
     }
     registry.pending.borrow_mut().push(Box::new(registration));
 }
@@ -103,7 +97,11 @@ where
         return;
     }
     if let Some(prev) = registry.tool_tiers.borrow_mut().insert(T::NAME, tier) {
-        debug_assert!(false, "duplicate tier registration for tool \"{}\"", T::NAME);
+        debug_assert!(
+            false,
+            "duplicate tier registration for tool \"{}\"",
+            T::NAME
+        );
         log::warn!(
             "editor_mcp: tool \"{}\" tier overwritten ({prev:?} -> {tier:?})",
             T::NAME,
@@ -146,7 +144,11 @@ pub fn register_typed_tool_with_protection<T, F>(
         return;
     }
     if let Some(prev) = registry.tool_tiers.borrow_mut().insert(T::NAME, tier) {
-        debug_assert!(false, "duplicate tier registration for tool \"{}\"", T::NAME);
+        debug_assert!(
+            false,
+            "duplicate tier registration for tool \"{}\"",
+            T::NAME
+        );
         log::warn!(
             "editor_mcp: tool \"{}\" tier overwritten ({prev:?} -> {tier:?})",
             T::NAME,

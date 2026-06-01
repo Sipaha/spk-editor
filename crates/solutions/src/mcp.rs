@@ -753,11 +753,10 @@ impl McpServerTool for OpenSolutionTool {
         // a NewWindow path no-ops.
         cx.update(|cx| {
             let store = SolutionStore::global(cx);
-            store
-                .update(cx, |s, cx| {
-                    s.touch_last_opened(&sol_id, cx).log_err();
-                    s.mark_open(sol_id.clone(), cx);
-                });
+            store.update(cx, |s, cx| {
+                s.touch_last_opened(&sol_id, cx).log_err();
+                s.mark_open(sol_id.clone(), cx);
+            });
             if let Some(welcome) = welcome_window {
                 welcome
                     .update(cx, |_, window, _| window.remove_window())
@@ -2452,9 +2451,8 @@ impl McpServerTool for DumpWindowStructureTool {
                     .into_iter()
                     .find(|h| editor_mcp::format_window_id(h.window_id()) == input.window_id)
                     .with_context(|| format!("window_not_found: {}", input.window_id))?;
-                build_visual_tree_for_window(handle, cx).with_context(|| {
-                    format!("window_not_multi_workspace: {}", input.window_id)
-                })
+                build_visual_tree_for_window(handle, cx)
+                    .with_context(|| format!("window_not_multi_workspace: {}", input.window_id))
             },
         )?;
         Ok(ToolResponse {

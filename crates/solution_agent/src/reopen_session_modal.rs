@@ -32,7 +32,11 @@ pub struct ReopenSessionModal {
 }
 
 impl ReopenSessionModal {
-    pub fn new(sessions: Vec<ReopenableSession>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        sessions: Vec<ReopenableSession>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             sessions,
             focus_handle: cx.focus_handle(),

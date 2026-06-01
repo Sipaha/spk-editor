@@ -17,8 +17,7 @@
 //! events that change them and pass fresh values down on each rerender.
 
 use gpui::{
-    App, ClickEvent, Hsla, IntoElement, RenderOnce, SharedString, WeakEntity, Window, div, hsla,
-    px,
+    App, ClickEvent, Hsla, IntoElement, RenderOnce, SharedString, WeakEntity, Window, div, hsla, px,
 };
 use solutions::SolutionId;
 use std::cell::RefCell;
@@ -98,11 +97,13 @@ impl RenderOnce for SolutionTab {
             .cursor_pointer()
             .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(dot))
             .child(
-                Label::new(self.name.clone()).truncate().color(if self.is_active {
-                    Color::Default
-                } else {
-                    Color::Muted
-                }),
+                Label::new(self.name.clone())
+                    .truncate()
+                    .color(if self.is_active {
+                        Color::Default
+                    } else {
+                        Color::Muted
+                    }),
             )
             .when(self.ai_session_count > 0, |this| {
                 this.child(
@@ -121,9 +122,7 @@ impl RenderOnce for SolutionTab {
                 )
             })
             .when(self.clone_in_flight, |this| {
-                this.child(
-                    Indicator::icon(Icon::new(IconName::ArrowCircle)).color(Color::Accent),
-                )
+                this.child(Indicator::icon(Icon::new(IconName::ArrowCircle)).color(Color::Accent))
             })
             .on_click({
                 move |_event: &ClickEvent, window, cx| {
@@ -154,22 +153,16 @@ impl RenderOnce for SolutionTab {
                 ContextMenu::build(window, cx, move |menu, _, _| {
                     menu.action(
                         "Close",
-                        Box::new(CloseSolutionFromTabBar {
-                            id: id_str.clone(),
-                        }),
+                        Box::new(CloseSolutionFromTabBar { id: id_str.clone() }),
                     )
                     .action(
                         "Delete…",
-                        Box::new(DeleteSolutionFromTabBar {
-                            id: id_str.clone(),
-                        }),
+                        Box::new(DeleteSolutionFromTabBar { id: id_str.clone() }),
                     )
                     .separator()
                     .action(
                         "Reveal Solution Folder",
-                        Box::new(RevealSolutionFolder {
-                            id: id_str.clone(),
-                        }),
+                        Box::new(RevealSolutionFolder { id: id_str.clone() }),
                     )
                     .action("Rename…", Box::new(RenameSolution { id: id_str }))
                 })

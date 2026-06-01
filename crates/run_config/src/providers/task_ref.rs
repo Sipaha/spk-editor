@@ -74,8 +74,8 @@ impl RunConfigProvider for TaskRefProvider {
         cx: &mut RunResolveContext,
         app: &App,
     ) -> Result<RunRequest> {
-        let settings: TaskRefSettings = serde_json::from_value(config.settings.clone())
-            .context("invalid task-ref settings")?;
+        let settings: TaskRefSettings =
+            serde_json::from_value(config.settings.clone()).context("invalid task-ref settings")?;
         anyhow::ensure!(
             !settings.task_label.is_empty(),
             "task-ref config has no task_label"
@@ -106,9 +106,7 @@ fn collect_task_templates(
         .visible_worktrees(cx)
         .next()
         .map(|worktree| worktree.read(cx).id());
-    inventory
-        .read(cx)
-        .task_templates_from_settings(worktree_id)
+    inventory.read(cx).task_templates_from_settings(worktree_id)
 }
 
 fn find_task_template(
@@ -166,10 +164,7 @@ mod tests {
             Some(DETECTED_TASKS_FOLDER)
         );
         assert_eq!(build.provider_type.as_ref(), "task-ref");
-        assert_eq!(
-            build.settings,
-            serde_json::json!({ "task_label": "build" })
-        );
+        assert_eq!(build.settings, serde_json::json!({ "task_label": "build" }));
     }
 
     #[gpui::test]

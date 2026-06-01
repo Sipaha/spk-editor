@@ -100,10 +100,7 @@ async fn solution_changed_notification_e2e(cx: &mut TestAppContext) {
 
     let line = read_line(&mut stream).await;
     let parsed: serde_json::Value = serde_json::from_slice(&line).expect("parse notification");
-    assert_eq!(
-        parsed.get("jsonrpc").and_then(|v| v.as_str()),
-        Some("2.0")
-    );
+    assert_eq!(parsed.get("jsonrpc").and_then(|v| v.as_str()), Some("2.0"));
     assert!(
         parsed.get("id").is_none() || parsed.get("id").is_some_and(|v| v.is_null()),
         "notification should not carry an id, got: {parsed:?}"

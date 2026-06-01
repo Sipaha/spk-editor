@@ -67,12 +67,7 @@ pub fn create_patch_action(
                     let sha = sha.clone();
                     let sha_to_clone = sha_to.clone();
                     async move {
-                        create_patch(
-                            &repo_path,
-                            &sha,
-                            sha_to_clone.as_deref(),
-                            Some(&out_dir),
-                        )
+                        create_patch(&repo_path, &sha, sha_to_clone.as_deref(), Some(&out_dir))
                     }
                 });
                 let result = task.await;
@@ -261,10 +256,7 @@ pub fn apply_patch_from_clipboard_action(
         );
         return;
     };
-    let Some(text) = cx
-        .read_from_clipboard()
-        .and_then(|item| item.text())
-    else {
+    let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
         notify(
             workspace,
             "Clipboard does not contain text",
@@ -332,10 +324,7 @@ pub fn is_patchlike_extension(path: &Path) -> bool {
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
         return false;
     };
-    matches!(
-        ext.to_ascii_lowercase().as_str(),
-        "patch" | "diff" | "mbox"
-    )
+    matches!(ext.to_ascii_lowercase().as_str(), "patch" | "diff" | "mbox")
 }
 
 /// Open the apply-patch preview modal against the supplied patch. Used
@@ -499,10 +488,7 @@ impl PatchPreviewModal {
         cx: &mut Context<Self>,
     ) -> Self {
         let summary = parse_patch_summary(&patch_bytes);
-        let three_way_default = matches!(
-            format,
-            PatchFormat::UnifiedWithIndex | PatchFormat::Mbox
-        );
+        let three_way_default = matches!(format, PatchFormat::UnifiedWithIndex | PatchFormat::Mbox);
         let keep_cr_default = matches!(format, PatchFormat::Mbox);
         Self {
             workspace,
@@ -564,14 +550,8 @@ impl PatchPreviewModal {
                         if let Some(ws) = workspace.upgrade() {
                             let work_dir: Arc<Path> = Arc::from(work_dir_path.as_path());
                             let weak = ws.downgrade();
-                            ConflictResolverView::open(
-                                project.clone(),
-                                weak,
-                                work_dir,
-                                window,
-                                cx,
-                            )
-                            .detach_and_log_err(cx);
+                            ConflictResolverView::open(project.clone(), weak, work_dir, window, cx)
+                                .detach_and_log_err(cx);
                         }
                         notify_via_handle(
                             &workspace,
@@ -663,8 +643,7 @@ impl Render for PatchPreviewModal {
         }
         if summary_count > 40 {
             path_rows = path_rows.child(
-                Label::new(format!("… and {} more", summary_count - 40))
-                    .color(ui::Color::Muted),
+                Label::new(format!("… and {} more", summary_count - 40)).color(ui::Color::Muted),
             );
         }
 
@@ -688,9 +667,7 @@ impl Render for PatchPreviewModal {
                     .px_3()
                     .pb_2()
                     .gap_1()
-                    .child(
-                        Label::new(format!("Format: {format_label}")).color(ui::Color::Muted),
-                    )
+                    .child(Label::new(format!("Format: {format_label}")).color(ui::Color::Muted))
                     .child(
                         Label::new(format!("Patch: {}", self.patch_path.display()))
                             .color(ui::Color::Muted),
@@ -706,18 +683,14 @@ impl Render for PatchPreviewModal {
                         this.child(
                             Button::new("toggle-three-way", "--3way")
                                 .toggle_state(three_way)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.toggle_three_way(cx)
-                                })),
+                                .on_click(cx.listener(|this, _, _, cx| this.toggle_three_way(cx))),
                         )
                     })
                     .when(allow_keep_cr, |this| {
                         this.child(
                             Button::new("toggle-keep-cr", "--keep-cr")
                                 .toggle_state(keep_cr)
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.toggle_keep_cr(cx)
-                                })),
+                                .on_click(cx.listener(|this, _, _, cx| this.toggle_keep_cr(cx))),
                         )
                     }),
             )

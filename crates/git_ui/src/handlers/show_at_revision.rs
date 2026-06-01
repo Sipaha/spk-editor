@@ -38,7 +38,7 @@ use project::git_store::Repository;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use util::ResultExt as _;
-use workspace::{MultiWorkspace, OpenMode, OpenOptions, WorkspaceMatching, Workspace};
+use workspace::{MultiWorkspace, OpenMode, OpenOptions, Workspace, WorkspaceMatching};
 
 const WORKTREES_SUBDIR: &str = "worktrees";
 const SHORT_SHA_LEN: usize = 7;
@@ -115,13 +115,14 @@ pub fn show_at_revision(
         let dir_name = format!("{repo_name}-at-{short_sha}-{random_suffix}");
         let target = paths::temp_dir().join(WORKTREES_SUBDIR).join(&dir_name);
 
-        std::fs::create_dir_all(target.parent().unwrap_or(target.as_path()))
-            .with_context(|| {
+        std::fs::create_dir_all(target.parent().unwrap_or(target.as_path())).with_context(
+            || {
                 format!(
                     "creating snapshot worktree parent {}",
                     target.parent().unwrap_or(target.as_path()).display()
                 )
-            })?;
+            },
+        )?;
 
         // Run `git worktree add --detach <target> <sha>`. We invoke
         // `git` directly (rather than going through
@@ -229,9 +230,7 @@ pub fn cleanup_for_worktree_path(worktree_path: PathBuf, cx: &mut App) {
                 return;
             }
         };
-        if let Err(err) =
-            run_git_worktree_remove(&marker.source_repo, &worktree_path).await
-        {
+        if let Err(err) = run_git_worktree_remove(&marker.source_repo, &worktree_path).await {
             log::warn!(
                 "show_at_revision::cleanup: git worktree remove failed for {}: {err}",
                 worktree_path.display()
@@ -261,10 +260,7 @@ pub fn cleanup_orphan_worktrees_in(root: &Path, older_than_hours: u32) {
         Ok(entries) => entries,
         Err(err) => {
             if err.kind() != std::io::ErrorKind::NotFound {
-                log::warn!(
-                    "show_at_revision: cannot scan {}: {err}",
-                    root.display()
-                );
+                log::warn!("show_at_revision: cannot scan {}: {err}", root.display());
             }
             return;
         }
@@ -329,8 +325,7 @@ pub fn show_at_revision_action(
         log::warn!("git::ShowAtRevision: no active repository");
         return;
     };
-    show_at_revision(workspace, repo, sha, window, cx)
-        .detach_and_log_err(cx);
+    show_at_revision(workspace, repo, sha, window, cx).detach_and_log_err(cx);
 }
 
 const DOT_GIT: &str = ".git";
@@ -379,8 +374,8 @@ fn write_marker(target: &Path, marker: &ReadOnlyMarker) -> Result<()> {
 }
 
 fn read_marker(marker_path: &Path) -> Result<ReadOnlyMarker> {
-    let bytes = std::fs::read(marker_path)
-        .with_context(|| format!("reading {}", marker_path.display()))?;
+    let bytes =
+        std::fs::read(marker_path).with_context(|| format!("reading {}", marker_path.display()))?;
     let marker: ReadOnlyMarker = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing {}", marker_path.display()))?;
     Ok(marker)
@@ -475,8 +470,7 @@ mod tests {
             source_repo: PathBuf::from("/path/to/source"),
         };
         write_marker(tmp.path(), &original).expect("write");
-        let parsed = read_marker(&tmp.path().join(project::READ_ONLY_MARKER_FILE))
-            .expect("read");
+        let parsed = read_marker(&tmp.path().join(project::READ_ONLY_MARKER_FILE)).expect("read");
         assert_eq!(parsed.base_sha, original.base_sha);
         assert_eq!(parsed.branch_template, original.branch_template);
         assert_eq!(parsed.created_at_unix, original.created_at_unix);

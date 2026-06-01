@@ -204,9 +204,17 @@ impl ControlResponseEnvelope {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputMessage {
-    User { message: UserPayload },
-    ControlRequest { request_id: String, request: ControlRequestOut },
-    ControlResponse { request_id: String, response: serde_json::Value },
+    User {
+        message: UserPayload,
+    },
+    ControlRequest {
+        request_id: String,
+        request: ControlRequestOut,
+    },
+    ControlResponse {
+        request_id: String,
+        response: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -380,7 +388,10 @@ mod tests {
     #[test]
     fn serializes_user_text() {
         let s = serde_json::to_string(&InputMessage::user_text("hi")).unwrap();
-        assert_eq!(s, r#"{"type":"user","message":{"role":"user","content":"hi"}}"#);
+        assert_eq!(
+            s,
+            r#"{"type":"user","message":{"role":"user","content":"hi"}}"#
+        );
     }
     #[test]
     fn serializes_user_blocks_text_and_image() {
@@ -391,9 +402,10 @@ mod tests {
                 "image/png".to_string(),
             )),
         ];
-        let v: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&InputMessage::user_blocks(&blocks)).unwrap())
-                .unwrap();
+        let v: serde_json::Value = serde_json::from_str(
+            &serde_json::to_string(&InputMessage::user_blocks(&blocks)).unwrap(),
+        )
+        .unwrap();
         let content = &v["message"]["content"];
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[0]["text"], "hi");

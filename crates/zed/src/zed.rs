@@ -565,8 +565,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             cx.new(|_| line_ending_selector::LineEndingIndicator::default());
         let merge_conflict_indicator =
             cx.new(|cx| git_ui::MergeConflictIndicator::new(workspace, cx));
-        let solutions_status =
-            cx.new(|cx| solutions_ui::SolutionsStatusItem::new(workspace, cx));
+        let solutions_status = cx.new(|cx| solutions_ui::SolutionsStatusItem::new(workspace, cx));
         let remote_control_status =
             cx.new(|cx| remote_control_ui::RemoteControlStatusItem::new(workspace, cx));
         workspace.status_bar().update(cx, |status_bar, cx| {
@@ -1394,11 +1393,7 @@ fn open_about_window(cx: &mut App) {
             let commit_sha = AppCommitSha::try_global(cx)
                 .and_then(|sha| {
                     let full = sha.full();
-                    if full.is_empty() {
-                        None
-                    } else {
-                        Some(full)
-                    }
+                    if full.is_empty() { None } else { Some(full) }
                 })
                 .unwrap_or_else(|| "dev".to_string());
 
@@ -1408,7 +1403,8 @@ fn open_about_window(cx: &mut App) {
                 .filter(|commit| !commit.is_empty())
                 .map(SharedString::from);
 
-            let attribution: SharedString = "Fork of Zed by Zed Industries, Inc., modified by Simonov Pavel.".into();
+            let attribution: SharedString =
+                "Fork of Zed by Zed Industries, Inc., modified by Simonov Pavel.".into();
             let source_url: SharedString = "https://github.com/Sipaha/spk-editor".into();
             let licenses: SharedString = "Distributed under GPL-3.0-or-later (editor), AGPL-3.0 (collab), Apache-2.0 (libraries).".into();
 
@@ -5570,8 +5566,12 @@ mod tests {
         // 5. Critical: Verify .zed is actually excluded from worktree
         let worktree = cx.update(|cx| project.read(cx).worktrees(cx).next().unwrap());
 
-        let has_zed_entry =
-            cx.update(|cx| worktree.read(cx).entry_for_path(rel_path(".spke")).is_some());
+        let has_zed_entry = cx.update(|cx| {
+            worktree
+                .read(cx)
+                .entry_for_path(rel_path(".spke"))
+                .is_some()
+        });
 
         eprintln!(
             "Is .zed directory visible in worktree after exclusion: {}",

@@ -5,7 +5,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use acp_thread::{AcpThread, AgentConnection as _, AgentThreadEntry, SelectedPermissionOutcome, ToolCall, ToolCallStatus};
+use acp_thread::{
+    AcpThread, AgentConnection as _, AgentThreadEntry, SelectedPermissionOutcome, ToolCall,
+    ToolCallStatus,
+};
 use agent_client_protocol::schema as acp;
 use agent_servers::{AgentServer, AgentServerDelegate};
 use claude_native::command::{ClaudeCommandSpec, SessionArg};
@@ -164,9 +167,7 @@ async fn closes_incoming_and_resolves_wait_on_exit(cx: &mut TestAppContext) {
 
     // Closing the outgoing sender drops stdin; the mock loop hits EOF and exits.
     drop(process.outgoing.clone());
-    process
-        .outgoing
-        .close_channel();
+    process.outgoing.close_channel();
 
     // Reader must observe EOF and close `incoming`.
     while recv_with_timeout(&mut process, cx).await.is_some() {}
@@ -180,7 +181,10 @@ async fn closes_incoming_and_resolves_wait_on_exit(cx: &mut TestAppContext) {
             _ = timeout => panic!("timed out waiting for process exit"),
         }
     };
-    assert!(status.is_some(), "wait_status resolved without an exit status");
+    assert!(
+        status.is_some(),
+        "wait_status resolved without an exit status"
+    );
 }
 
 async fn init_test(cx: &mut TestAppContext) -> Entity<Project> {
@@ -275,9 +279,8 @@ async fn prompt_resolves_on_result_and_streams_text(cx: &mut TestAppContext) {
         "hello".to_string(),
     ))];
     let request = acp::PromptRequest::new(session_id, prompt);
-    let prompt_task = cx.update(|cx| {
-        connection.prompt(acp_thread::UserMessageId::new(), request, cx)
-    });
+    let prompt_task =
+        cx.update(|cx| connection.prompt(acp_thread::UserMessageId::new(), request, cx));
 
     let response = {
         let timeout = cx.background_executor.timer(Duration::from_secs(10)).fuse();
@@ -333,9 +336,8 @@ async fn can_use_tool_bridges_authorization_to_control_response(cx: &mut TestApp
         "run a command".to_string(),
     ))];
     let request = acp::PromptRequest::new(session_id, prompt);
-    let prompt_task = cx.update(|cx| {
-        connection.prompt(acp_thread::UserMessageId::new(), request, cx)
-    });
+    let prompt_task =
+        cx.update(|cx| connection.prompt(acp_thread::UserMessageId::new(), request, cx));
 
     // The mock emits a `can_use_tool` control request; the connection's
     // update-pump must surface it as a pending tool-call authorization.
@@ -401,7 +403,9 @@ async fn wait_for_authorization(
         if std::time::Instant::now() >= deadline {
             panic!("thread never entered WaitingForConfirmation");
         }
-        cx.background_executor.timer(Duration::from_millis(20)).await;
+        cx.background_executor
+            .timer(Duration::from_millis(20))
+            .await;
     }
 }
 
@@ -497,10 +501,7 @@ async fn cancel_escalates_to_kill_and_resume(cx: &mut TestAppContext) {
     let project = init_test(cx).await;
     let connection = connect_mock(
         &project,
-        vec![(
-            "MOCK_CLAUDE_IGNORE_INTERRUPT".to_string(),
-            "1".to_string(),
-        )],
+        vec![("MOCK_CLAUDE_IGNORE_INTERRUPT".to_string(), "1".to_string())],
         cx,
     )
     .await;
@@ -548,7 +549,9 @@ async fn cancel_escalates_to_kill_and_resume(cx: &mut TestAppContext) {
         if std::time::Instant::now() >= deadline {
             panic!("escalation never respawned the process (pid still {pid:?})");
         }
-        cx.background_executor.timer(Duration::from_millis(20)).await;
+        cx.background_executor
+            .timer(Duration::from_millis(20))
+            .await;
     };
     // After escalation the session must still exist (resumed) but be backed by a
     // different process than the one we killed.
@@ -567,10 +570,7 @@ async fn repeated_cancel_does_not_double_escalate(cx: &mut TestAppContext) {
     let project = init_test(cx).await;
     let connection = connect_mock(
         &project,
-        vec![(
-            "MOCK_CLAUDE_IGNORE_INTERRUPT".to_string(),
-            "1".to_string(),
-        )],
+        vec![("MOCK_CLAUDE_IGNORE_INTERRUPT".to_string(), "1".to_string())],
         cx,
     )
     .await;
@@ -630,7 +630,9 @@ async fn repeated_cancel_does_not_double_escalate(cx: &mut TestAppContext) {
         if std::time::Instant::now() >= deadline {
             panic!("escalation never respawned the process (pid still {pid:?})");
         }
-        cx.background_executor.timer(Duration::from_millis(20)).await;
+        cx.background_executor
+            .timer(Duration::from_millis(20))
+            .await;
     };
     assert_ne!(
         pid_after, pid_before,
@@ -640,7 +642,9 @@ async fn repeated_cancel_does_not_double_escalate(cx: &mut TestAppContext) {
     // The new process must be stable: a second escalation (from the double
     // cancel) would kill+resume again, changing the pid a second time. Advance
     // the clock well past another escalation window and assert the pid holds.
-    cx.background_executor.timer(Duration::from_millis(200)).await;
+    cx.background_executor
+        .timer(Duration::from_millis(200))
+        .await;
     cx.run_until_parked();
     let pid_settled = connection.session_process_id_for_test(&session_id);
     assert_eq!(
@@ -673,9 +677,8 @@ async fn prompt_stays_pending_without_result(cx: &mut TestAppContext) {
         "hello".to_string(),
     ))];
     let request = acp::PromptRequest::new(session_id, prompt);
-    let prompt_task = cx.update(|cx| {
-        connection.prompt(acp_thread::UserMessageId::new(), request, cx)
-    });
+    let prompt_task =
+        cx.update(|cx| connection.prompt(acp_thread::UserMessageId::new(), request, cx));
 
     // The mock streams text but never sends `result`; the prompt must remain
     // pending. Race it against a short timer and assert the timer wins.
@@ -812,9 +815,8 @@ async fn subagent_tool_use_carries_parent_meta_through_pump(cx: &mut TestAppCont
         "run a subagent".to_string(),
     ))];
     let request = acp::PromptRequest::new(session_id, prompt);
-    let prompt_task = cx.update(|cx| {
-        connection.prompt(acp_thread::UserMessageId::new(), request, cx)
-    });
+    let prompt_task =
+        cx.update(|cx| connection.prompt(acp_thread::UserMessageId::new(), request, cx));
 
     let response = {
         let timeout = cx.background_executor.timer(Duration::from_secs(10)).fuse();
@@ -828,11 +830,13 @@ async fn subagent_tool_use_carries_parent_meta_through_pump(cx: &mut TestAppCont
     assert_eq!(response.stop_reason, acp::StopReason::EndTurn);
 
     let found_subagent_tool_call = thread.read_with(cx, |thread, _| {
-        thread.entries().iter().any(|entry| matches!(
-            entry,
-            AgentThreadEntry::ToolCall(ToolCall { id, .. })
-                if id.0.as_ref() == "toolu_child_abc"
-        ))
+        thread.entries().iter().any(|entry| {
+            matches!(
+                entry,
+                AgentThreadEntry::ToolCall(ToolCall { id, .. })
+                    if id.0.as_ref() == "toolu_child_abc"
+            )
+        })
     });
     assert!(
         found_subagent_tool_call,
@@ -877,7 +881,10 @@ async fn close_session_kills_process_and_removes_session(cx: &mut TestAppContext
         if process_is_killed(process_id) {
             break;
         }
-        let tick = cx.background_executor.timer(Duration::from_millis(20)).fuse();
+        let tick = cx
+            .background_executor
+            .timer(Duration::from_millis(20))
+            .fuse();
         futures::pin_mut!(tick);
         futures::select! {
             _ = tick => continue,

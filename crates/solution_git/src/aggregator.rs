@@ -239,7 +239,12 @@ impl SolutionGitAggregator {
             // same way via `fetch_status(...).log_err()`. `.git` covers
             // both real directories and gitfile redirects (worktrees).
             .filter(|m| m.local_path.join(".git").exists())
-            .map(|m| (SharedString::from(m.catalog_id.0.clone()), m.local_path.clone()))
+            .map(|m| {
+                (
+                    SharedString::from(m.catalog_id.0.clone()),
+                    m.local_path.clone(),
+                )
+            })
             .collect();
 
         if eligible.is_empty() {
@@ -261,7 +266,6 @@ impl SolutionGitAggregator {
             paths: query.paths.clone(),
         })
     }
-
 }
 
 enum Pick {
@@ -400,18 +404,10 @@ async fn produce_range(
                 let git_args = plan.git_args.clone();
                 let paths = plan.paths.clone();
                 cx.background_spawn(async move {
-                    let commits = run_git_log(
-                        &work_dir,
-                        &git_args,
-                        &paths,
-                        0,
-                        INITIAL_BATCH,
-                        &member_id,
-                    )
-                    .await?;
-                    Ok::<(SharedString, Vec<AggregatedCommit>), anyhow::Error>((
-                        member_id, commits,
-                    ))
+                    let commits =
+                        run_git_log(&work_dir, &git_args, &paths, 0, INITIAL_BATCH, &member_id)
+                            .await?;
+                    Ok::<(SharedString, Vec<AggregatedCommit>), anyhow::Error>((member_id, commits))
                 })
             })
             .collect();
@@ -474,13 +470,16 @@ async fn produce_range(
                 })
                 .collect();
             for task in tasks {
-                let (member_id, commits): (SharedString, Vec<AggregatedCommit>) =
-                    task.await?;
+                let (member_id, commits): (SharedString, Vec<AggregatedCommit>) = task.await?;
                 let mut guard = state.lock();
                 let Some(session) = guard.session.as_mut() else {
                     return Ok(output);
                 };
-                if let Some(buf) = session.members.iter_mut().find(|b| b.member_id == member_id) {
+                if let Some(buf) = session
+                    .members
+                    .iter_mut()
+                    .find(|b| b.member_id == member_id)
+                {
                     if commits.len() < REFILL_BATCH {
                         buf.exhausted = true;
                     }
@@ -691,10 +690,7 @@ fn parse_log_line(
 /// Build an aggregator wired to the global `SolutionStore`. Returns
 /// `None` if the global hasn't been installed (e.g. very early init or
 /// minimal test contexts).
-pub fn build_global_aggregator(
-    cx: &App,
-    cap: usize,
-) -> Option<SolutionGitAggregator> {
+pub fn build_global_aggregator(cx: &App, cap: usize) -> Option<SolutionGitAggregator> {
     let store = SolutionStore::try_global(cx)?;
     Some(SolutionGitAggregator::new(store.downgrade(), cap))
 }
@@ -792,13 +788,19 @@ mod tests {
         // because we sort tiebreak by `(member_id ASC, sha ASC)`.
         match pick_next(&mut buffers) {
             Pick::Yielded(c) => assert_eq!(c.member_id.as_ref(), "alpha"),
-            other => panic!("unexpected pick state: {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "unexpected pick state: {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
         // Same call twice with the same buffers gives the next-largest
         // (here: the only other commit).
         match pick_next(&mut buffers) {
             Pick::Yielded(c) => assert_eq!(c.member_id.as_ref(), "beta"),
-            other => panic!("unexpected pick state: {:?}", std::mem::discriminant(&other)),
+            other => panic!(
+                "unexpected pick state: {:?}",
+                std::mem::discriminant(&other)
+            ),
         }
     }
 
@@ -869,4 +871,3 @@ mod tests {
         assert!(session.members[0].pending.len() > 900);
     }
 }
-

@@ -4,9 +4,7 @@
 //! against the resolver entity — no separate Action types are introduced
 //! at this stage; toolbar buttons drive resolver methods directly.
 
-use gpui::{
-    App, Context, InteractiveElement, IntoElement, ParentElement, Styled, Window, div,
-};
+use gpui::{App, Context, InteractiveElement, IntoElement, ParentElement, Styled, Window, div};
 use theme::ActiveTheme as _;
 use ui::{
     Button, ButtonCommon, Clickable, Color, Disableable, Icon, IconButton, IconName, IconSize,
@@ -51,33 +49,41 @@ pub(crate) fn render_toolbar(
                     this.next_chunk(window, cx);
                 })),
         )
-        .child(Label::new(chunk_label).size(LabelSize::Small).color(Color::Muted))
+        .child(
+            Label::new(chunk_label)
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+        )
         .child(div().flex_1())
         .child(
-            Button::new("cfl-accept-yours", "Accept Yours")
-                .on_click(cx.listener(|this, _, window, cx| {
+            Button::new("cfl-accept-yours", "Accept Yours").on_click(cx.listener(
+                |this, _, window, cx| {
                     this.accept_yours(window, cx);
-                })),
+                },
+            )),
         )
         .child(
-            Button::new("cfl-accept-theirs", "Accept Theirs")
-                .on_click(cx.listener(|this, _, window, cx| {
+            Button::new("cfl-accept-theirs", "Accept Theirs").on_click(cx.listener(
+                |this, _, window, cx| {
                     this.accept_theirs(window, cx);
-                })),
+                },
+            )),
         )
         .child(
-            Button::new("cfl-accept-both", "Accept Both")
-                .on_click(cx.listener(|this, _, window, cx| {
+            Button::new("cfl-accept-both", "Accept Both").on_click(cx.listener(
+                |this, _, window, cx| {
                     this.accept_both(window, cx);
-                })),
+                },
+            )),
         );
 
     if this.show_base() {
         row = row.child(
-            Button::new("cfl-accept-base", "Accept Base")
-                .on_click(cx.listener(|this, _, window, cx| {
+            Button::new("cfl-accept-base", "Accept Base").on_click(cx.listener(
+                |this, _, window, cx| {
                     this.accept_base(window, cx);
-                })),
+                },
+            )),
         );
     }
 
@@ -126,10 +132,11 @@ pub(crate) fn render_toolbar(
             })),
     )
     .child(
-        Button::new("cfl-mark-resolved", "Mark as Resolved")
-            .on_click(cx.listener(|this, _, window, cx| {
+        Button::new("cfl-mark-resolved", "Mark as Resolved").on_click(cx.listener(
+            |this, _, window, cx| {
                 this.mark_resolved(window, cx).detach_and_log_err(cx);
-            })),
+            },
+        )),
     )
     .child(
         Button::new(
@@ -181,7 +188,11 @@ pub(crate) fn render_bottom_bar(
         .border_t_1()
         .border_color(cx.theme().colors().border)
         .child(Icon::new(IconName::GitBranch).color(Color::Muted))
-        .child(Label::new(progress).size(LabelSize::Small).color(Color::Muted))
+        .child(
+            Label::new(progress)
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+        )
         .child(div().flex_1());
 
     let op_name = op.map(|o| o.cli_subcommand()).unwrap_or("merge");

@@ -128,13 +128,28 @@ mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        assert!(args.windows(2).any(|w| w[0] == "--input-format" && w[1] == "stream-json"));
-        assert!(args.windows(2).any(|w| w[0] == "--output-format" && w[1] == "stream-json"));
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--input-format" && w[1] == "stream-json")
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--output-format" && w[1] == "stream-json")
+        );
         assert!(args.contains(&"--include-partial-messages".to_string()));
         assert!(args.windows(2).any(|w| w[0] == "--resume" && w[1] == "sid"));
-        assert!(args.windows(2).any(|w| w[0] == "--mcp-config" && w[1] == r#"{"mcpServers":{}}"#));
-        assert!(args.windows(2).any(|w| w[0] == "--permission-mode" && w[1] == "bypassPermissions"));
-        assert!(args.windows(2).any(|w| w[0] == "--append-system-prompt" && w[1] == "SYS"));
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--mcp-config" && w[1] == r#"{"mcpServers":{}}"#)
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--permission-mode" && w[1] == "bypassPermissions")
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--append-system-prompt" && w[1] == "SYS")
+        );
         assert_eq!(cmd.get_current_dir(), Some(std::path::Path::new("/w")));
     }
 
@@ -153,7 +168,10 @@ mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        assert!(args.windows(2).any(|w| w[0] == "--session-id" && w[1] == "uuid"));
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--session-id" && w[1] == "uuid")
+        );
         assert!(!args.iter().any(|a| a == "--resume"));
         assert!(!args.iter().any(|a| a == "--append-system-prompt"));
     }

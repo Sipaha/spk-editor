@@ -20,11 +20,7 @@ pub struct SquashOp {
 }
 
 impl SquashOp {
-    pub async fn run(
-        self,
-        repo_path: &Path,
-        callbacks: RebaseCallbacks,
-    ) -> Result<RebaseHandle> {
+    pub async fn run(self, repo_path: &Path, callbacks: RebaseCallbacks) -> Result<RebaseHandle> {
         let SquashOp {
             shas,
             final_message,
@@ -56,7 +52,8 @@ impl SquashOp {
         let first = shas_iter
             .next()
             .ok_or_else(|| anyhow!("squash: no commits supplied"))?;
-        let mut squash_targets: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut squash_targets: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for s in shas_iter {
             squash_targets.insert(s.to_lowercase());
         }

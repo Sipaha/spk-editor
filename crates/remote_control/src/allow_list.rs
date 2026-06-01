@@ -212,9 +212,15 @@ mod tests {
                 "solution_agent.upload_abort",
             ),
             ("remote.workspace.snapshot", "workspace.snapshot"),
-            ("remote.workspace.list_solutions", "workspace.list_solutions"),
+            (
+                "remote.workspace.list_solutions",
+                "workspace.list_solutions",
+            ),
             ("remote.workspace.open_solution", "workspace.open_solution"),
-            ("remote.workspace.close_solution", "workspace.close_solution"),
+            (
+                "remote.workspace.close_solution",
+                "workspace.close_solution",
+            ),
             ("remote.workspace.open_session", "workspace.open_session"),
             ("remote.workspace.close_session", "workspace.close_session"),
         ];

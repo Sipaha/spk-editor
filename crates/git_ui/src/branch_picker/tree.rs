@@ -44,7 +44,10 @@ impl BranchTree {
         for name in branches {
             match name.rsplit_once('/') {
                 Some((prefix, _)) => {
-                    groups.entry(prefix.to_string()).or_default().push(name.clone());
+                    groups
+                        .entry(prefix.to_string())
+                        .or_default()
+                        .push(name.clone());
                 }
                 None => top_level.push(name.clone()),
             }

@@ -24,8 +24,8 @@ use gpui::{
 use menu::Cancel;
 use ui::{
     App, Button, Checkbox, Clickable, Color, Context, Headline, HeadlineSize, Icon, IconName,
-    IconSize, IntoElement, Label, LabelCommon, LabelSize, ToggleState, Tooltip, h_flex,
-    prelude::*, rems, v_flex,
+    IconSize, IntoElement, Label, LabelCommon, LabelSize, ToggleState, Tooltip, h_flex, prelude::*,
+    rems, v_flex,
 };
 use util::ResultExt as _;
 use util::command::new_command;
@@ -606,9 +606,17 @@ impl PushDialog {
             .child(Headline::new("Push").size(HeadlineSize::Small))
             .child(Label::new(branch).size(LabelSize::Small))
             .child(Label::new("→").size(LabelSize::Small).color(Color::Muted))
-            .child(Label::new(remote).size(LabelSize::Small).color(Color::Muted))
+            .child(
+                Label::new(remote)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
             .child(Label::new("/").size(LabelSize::Small).color(Color::Muted))
-            .child(div().min_w(rems(16.)).child(self.remote_branch_editor.clone()))
+            .child(
+                div()
+                    .min_w(rems(16.))
+                    .child(self.remote_branch_editor.clone()),
+            )
             .when_some(create_hint, |this, hint| this.child(hint))
     }
 
@@ -712,33 +720,30 @@ impl PushDialog {
                 h_flex()
                     .gap_1()
                     .child(
-                        Button::new("push-dialog-squash", "Squash with Previous")
-                            .on_click(move |_event: &ClickEvent, window, cx| {
+                        Button::new("push-dialog-squash", "Squash with Previous").on_click(
+                            move |_event: &ClickEvent, window, cx| {
                                 if let Some(this) = entity_for_squash.upgrade() {
                                     this.update(cx, |this, cx| {
                                         this.run_squash_with_previous(ix, window, cx)
                                     });
                                 }
-                            }),
-                    )
-                    .child(
-                        Button::new("push-dialog-reword", "Reword").on_click(
-                            move |_event: &ClickEvent, window, cx| {
-                                if let Some(this) = entity_for_reword.upgrade() {
-                                    this.update(cx, |this, cx| this.run_reword(ix, window, cx));
-                                }
                             },
                         ),
                     )
-                    .child(
-                        Button::new("push-dialog-drop", "Drop").on_click(
-                            move |_event: &ClickEvent, window, cx| {
-                                if let Some(this) = entity_for_drop.upgrade() {
-                                    this.update(cx, |this, cx| this.run_drop(ix, window, cx));
-                                }
-                            },
-                        ),
-                    ),
+                    .child(Button::new("push-dialog-reword", "Reword").on_click(
+                        move |_event: &ClickEvent, window, cx| {
+                            if let Some(this) = entity_for_reword.upgrade() {
+                                this.update(cx, |this, cx| this.run_reword(ix, window, cx));
+                            }
+                        },
+                    ))
+                    .child(Button::new("push-dialog-drop", "Drop").on_click(
+                        move |_event: &ClickEvent, window, cx| {
+                            if let Some(this) = entity_for_drop.upgrade() {
+                                this.update(cx, |this, cx| this.run_drop(ix, window, cx));
+                            }
+                        },
+                    )),
             )
         } else {
             None
@@ -975,10 +980,7 @@ impl Render for RewordPromptModal {
                     .w_full()
                     .gap_1p5()
                     .child(Icon::new(IconName::Pencil).size(IconSize::XSmall))
-                    .child(
-                        Headline::new(format!("Reword ({short})"))
-                            .size(HeadlineSize::XSmall),
-                    ),
+                    .child(Headline::new(format!("Reword ({short})")).size(HeadlineSize::XSmall)),
             )
             .child(div().px_3().pb_3().w_full().child(self.editor.clone()))
     }
@@ -1044,10 +1046,12 @@ pub async fn build_preview(
         remote_override.trim().to_string()
     };
     let upstream_full = format!("{remote}/{remote_branch}");
-    let remote_ref_exists =
-        run_git_void(work_dir, &["rev-parse", "--verify", "--quiet", &upstream_full])
-            .await
-            .is_ok();
+    let remote_ref_exists = run_git_void(
+        work_dir,
+        &["rev-parse", "--verify", "--quiet", &upstream_full],
+    )
+    .await
+    .is_ok();
 
     let (ahead, behind) = if remote_ref_exists {
         let ahead = list_commits(work_dir, &format!("{upstream_full}..{branch}")).await?;
@@ -1344,7 +1348,12 @@ mod tests {
         run_git_void(&local, &["commit", "-m", "init"]).await?;
         run_git_void(
             &local,
-            &["remote", "add", "origin", remote.to_str().unwrap_or_default()],
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().unwrap_or_default(),
+            ],
         )
         .await?;
         run_git_void(&local, &["push", "-u", "origin", "main"]).await?;
@@ -1371,11 +1380,19 @@ mod tests {
         cx.executor().allow_parking();
         let (_tmp, local, _remote) = boot_repo().await.unwrap_or_else(|e| panic!("boot: {e}"));
         std::fs::write(local.join("a.txt"), "a").expect("write a");
-        run_git_void(&local, &["add", "a.txt"]).await.expect("add a");
-        run_git_void(&local, &["commit", "-m", "add a"]).await.expect("commit a");
+        run_git_void(&local, &["add", "a.txt"])
+            .await
+            .expect("add a");
+        run_git_void(&local, &["commit", "-m", "add a"])
+            .await
+            .expect("commit a");
         std::fs::write(local.join("b.txt"), "b").expect("write b");
-        run_git_void(&local, &["add", "b.txt"]).await.expect("add b");
-        run_git_void(&local, &["commit", "-m", "add b"]).await.expect("commit b");
+        run_git_void(&local, &["add", "b.txt"])
+            .await
+            .expect("add b");
+        run_git_void(&local, &["commit", "-m", "add b"])
+            .await
+            .expect("commit b");
         let preview = build_preview(&local, "main", "")
             .await
             .unwrap_or_else(|e| panic!("preview: {e}"));
@@ -1405,16 +1422,26 @@ mod tests {
             .await
             .expect("config name");
         std::fs::write(other.join("from-other.txt"), "hi").expect("write from-other");
-        run_git_void(&other, &["add", "from-other.txt"]).await.expect("add");
-        run_git_void(&other, &["commit", "-m", "from other"]).await.expect("commit");
-        run_git_void(&other, &["push", "origin", "main"]).await.expect("push");
+        run_git_void(&other, &["add", "from-other.txt"])
+            .await
+            .expect("add");
+        run_git_void(&other, &["commit", "-m", "from other"])
+            .await
+            .expect("commit");
+        run_git_void(&other, &["push", "origin", "main"])
+            .await
+            .expect("push");
 
         std::fs::write(local.join("local-only.txt"), "x").expect("write local-only");
-        run_git_void(&local, &["add", "local-only.txt"]).await.expect("add");
+        run_git_void(&local, &["add", "local-only.txt"])
+            .await
+            .expect("add");
         run_git_void(&local, &["commit", "-m", "local commit"])
             .await
             .expect("commit");
-        run_git_void(&local, &["fetch", "origin"]).await.expect("fetch");
+        run_git_void(&local, &["fetch", "origin"])
+            .await
+            .expect("fetch");
 
         let preview = build_preview(&local, "main", "")
             .await
@@ -1468,15 +1495,23 @@ mod tests {
         let stale_sha = stale_sha.trim().to_string();
 
         std::fs::write(local.join("local.txt"), "x").expect("write local.txt");
-        run_git_void(&local, &["add", "local.txt"]).await.expect("add");
-        run_git_void(&local, &["commit", "-m", "local"]).await.expect("commit");
+        run_git_void(&local, &["add", "local.txt"])
+            .await
+            .expect("add");
+        run_git_void(&local, &["commit", "-m", "local"])
+            .await
+            .expect("commit");
 
         std::fs::write(other.join("other.txt"), "y").expect("write other.txt");
-        run_git_void(&other, &["add", "other.txt"]).await.expect("add");
+        run_git_void(&other, &["add", "other.txt"])
+            .await
+            .expect("add");
         run_git_void(&other, &["commit", "-m", "remote moved"])
             .await
             .expect("commit");
-        run_git_void(&other, &["push", "origin", "main"]).await.expect("push");
+        run_git_void(&other, &["push", "origin", "main"])
+            .await
+            .expect("push");
 
         let result = run_force_with_lease(
             &local,

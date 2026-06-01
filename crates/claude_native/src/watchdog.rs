@@ -210,7 +210,12 @@ impl ClaudeAnalyzer {
 
     /// Spawn the one-shot analyzer, returning its stdout or an error. Kept
     /// separate so `assess` can map every error to `Unknown` in one place.
-    async fn run(binary: PathBuf, prompt: String, timeout: Duration, cx: &AsyncApp) -> Result<String> {
+    async fn run(
+        binary: PathBuf,
+        prompt: String,
+        timeout: Duration,
+        cx: &AsyncApp,
+    ) -> Result<String> {
         let mut command = smol::process::Command::new(&binary);
         command
             .arg("-p")
@@ -249,14 +254,16 @@ impl Analyzer for ClaudeAnalyzer {
         let binary = self.binary.clone();
         let timeout = self.timeout;
         let prompt = Self::build_prompt(&context);
-        cx.spawn(async move |cx| match Self::run(binary, prompt, timeout, cx).await {
-            Ok(stdout) => Self::parse_verdict(&stdout),
-            // Launch / read / timeout failure: do nothing (never `Hung`).
-            Err(error) => {
-                log::warn!("claude_native: analyzer failed, treating as Unknown: {error}");
-                Verdict::Unknown
-            }
-        })
+        cx.spawn(
+            async move |cx| match Self::run(binary, prompt, timeout, cx).await {
+                Ok(stdout) => Self::parse_verdict(&stdout),
+                // Launch / read / timeout failure: do nothing (never `Hung`).
+                Err(error) => {
+                    log::warn!("claude_native: analyzer failed, treating as Unknown: {error}");
+                    Verdict::Unknown
+                }
+            },
+        )
     }
 }
 
@@ -293,7 +300,12 @@ mod tests {
     fn arm_watchdog(
         verdict: Verdict,
         cx: &mut gpui::TestAppContext,
-    ) -> (Watchdog, Rc<Cell<Instant>>, Rc<StdCell<usize>>, Rc<StdCell<usize>>) {
+    ) -> (
+        Watchdog,
+        Rc<Cell<Instant>>,
+        Rc<StdCell<usize>>,
+        Rc<StdCell<usize>>,
+    ) {
         let now = cx.executor().now();
         let last_output = Rc::new(Cell::new(now));
         let analyzer_calls = Rc::new(StdCell::new(0usize));
@@ -334,7 +346,11 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(analyzer_calls.get(), 1, "analyzer should fire once");
-        assert_eq!(recovery_calls.get(), 1, "Hung must invoke recovery exactly once");
+        assert_eq!(
+            recovery_calls.get(),
+            1,
+            "Hung must invoke recovery exactly once"
+        );
 
         // Watchdog stopped after recovery: advancing further must not re-fire.
         cx.executor().advance_clock(WINDOW * 4);
@@ -396,7 +412,8 @@ mod tests {
 
         // Advancing the rest of the original window must NOT trigger analysis,
         // because the bump pushed the deadline out.
-        cx.executor().advance_clock(WINDOW / 2 + Duration::from_millis(1));
+        cx.executor()
+            .advance_clock(WINDOW / 2 + Duration::from_millis(1));
         cx.run_until_parked();
         assert_eq!(analyzer_calls.get(), 0, "output should reset the timer");
         assert_eq!(recovery_calls.get(), 0);

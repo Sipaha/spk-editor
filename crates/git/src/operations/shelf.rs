@@ -92,7 +92,10 @@ impl ShelfStore {
     /// Append a fresh entry. Errors if `name` already exists for this repo.
     pub fn add(&mut self, entry: ShelfEntry) -> Result<()> {
         if self.entries.iter().any(|e| e.name == entry.name) {
-            return Err(anyhow!("a shelf entry named {:?} already exists", entry.name));
+            return Err(anyhow!(
+                "a shelf entry named {:?} already exists",
+                entry.name
+            ));
         }
         self.entries.push(entry);
         self.save()
@@ -272,53 +275,62 @@ mod persistence {
         let db = db()?;
         let rows = db.select_for_repo(repo_key.to_string())?;
         rows.into_iter()
-            .map(|(name, stash_sha, created_at_unix, source_branch, description, files_summary_json)| {
-                let files_summary = serde_json::from_str(&files_summary_json)
-                    .with_context(|| format!("parsing files_summary for {name:?}"))?;
-                Ok(ShelfEntry {
+            .map(
+                |(
                     name,
                     stash_sha,
                     created_at_unix,
                     source_branch,
                     description,
-                    files_summary,
-                })
-            })
+                    files_summary_json,
+                )| {
+                    let files_summary = serde_json::from_str(&files_summary_json)
+                        .with_context(|| format!("parsing files_summary for {name:?}"))?;
+                    Ok(ShelfEntry {
+                        name,
+                        stash_sha,
+                        created_at_unix,
+                        source_branch,
+                        description,
+                        files_summary,
+                    })
+                },
+            )
             .collect()
     }
 
-    pub(super) fn replace_entries_for_repo(
-        repo_key: &str,
-        entries: &[ShelfEntry],
-    ) -> Result<()> {
+    pub(super) fn replace_entries_for_repo(repo_key: &str, entries: &[ShelfEntry]) -> Result<()> {
         let db = db()?;
         let key = repo_key.to_string();
 
-        let serialized: Vec<(String, String, String, i64, Option<String>, Option<String>, String)> =
-            entries
-                .iter()
-                .map(|entry| {
-                    let files_summary_json = serde_json::to_string(&entry.files_summary)
-                        .with_context(|| {
-                            format!("serializing files_summary for {:?}", entry.name)
-                        })?;
-                    Ok::<_, anyhow::Error>((
-                        key.clone(),
-                        entry.name.clone(),
-                        entry.stash_sha.clone(),
-                        entry.created_at_unix,
-                        entry.source_branch.clone(),
-                        entry.description.clone(),
-                        files_summary_json,
-                    ))
-                })
-                .collect::<Result<_>>()?;
+        let serialized: Vec<(
+            String,
+            String,
+            String,
+            i64,
+            Option<String>,
+            Option<String>,
+            String,
+        )> = entries
+            .iter()
+            .map(|entry| {
+                let files_summary_json = serde_json::to_string(&entry.files_summary)
+                    .with_context(|| format!("serializing files_summary for {:?}", entry.name))?;
+                Ok::<_, anyhow::Error>((
+                    key.clone(),
+                    entry.name.clone(),
+                    entry.stash_sha.clone(),
+                    entry.created_at_unix,
+                    entry.source_branch.clone(),
+                    entry.description.clone(),
+                    files_summary_json,
+                ))
+            })
+            .collect::<Result<_>>()?;
 
         gpui::block_on(db.delete_for_repo(key))?;
         for row in serialized {
-            gpui::block_on(db.insert_entry(
-                row.0, row.1, row.2, row.3, row.4, row.5, row.6,
-            ))?;
+            gpui::block_on(db.insert_entry(row.0, row.1, row.2, row.3, row.4, row.5, row.6))?;
         }
         Ok(())
     }
@@ -473,11 +485,8 @@ pub fn apply(repo_path: &Path, name: &str, remove_from_shelf: bool) -> Result<()
         // drop it. We can't use `stash@{0}` here because the user may have
         // pushed unrelated stashes after the shelf was created.
         if let Some(index) = locate_stash_index(repo_path, &entry.stash_sha)? {
-            run_git(
-                repo_path,
-                &["stash", "drop", &format!("stash@{{{index}}}")],
-            )
-            .with_context(|| format!("dropping stash backing {:?}", name))?;
+            run_git(repo_path, &["stash", "drop", &format!("stash@{{{index}}}")])
+                .with_context(|| format!("dropping stash backing {:?}", name))?;
         }
         store.remove(name)?;
     }
@@ -497,13 +506,8 @@ pub fn drop(repo_path: &Path, name: &str) -> Result<()> {
     if let Some(index) = locate_stash_index(repo_path, &entry.stash_sha)? {
         // Best-effort — the shelf entry should disappear even if the stash
         // drop fails (so the user can stop seeing a stale row).
-        if let Err(err) = run_git(
-            repo_path,
-            &["stash", "drop", &format!("stash@{{{index}}}")],
-        ) {
-            log::warn!(
-                "git::shelf: failed to drop stash for shelf entry {name:?}: {err}"
-            );
+        if let Err(err) = run_git(repo_path, &["stash", "drop", &format!("stash@{{{index}}}")]) {
+            log::warn!("git::shelf: failed to drop stash for shelf entry {name:?}: {err}");
         }
     }
     store.remove(name)?;

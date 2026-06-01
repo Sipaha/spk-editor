@@ -1,4 +1,7 @@
-use gpui::{Context, Empty, EventEmitter, IntoElement, ParentElement, Render, SharedString, WeakEntity, Window};
+use gpui::{
+    Context, Empty, EventEmitter, IntoElement, ParentElement, Render, SharedString, WeakEntity,
+    Window,
+};
 use project::Project;
 use settings::Settings;
 use ui::{Button, Tooltip, prelude::*};

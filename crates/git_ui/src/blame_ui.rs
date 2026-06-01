@@ -183,10 +183,7 @@ impl BlameRenderer for GitBlameRenderer {
                             let blame_entry = blame_entry.clone();
                             move |_, window, cx| {
                                 let sha = blame_entry.sha.to_string();
-                                window.dispatch_action(
-                                    Box::new(OpenAtCommit { sha }),
-                                    cx,
-                                );
+                                window.dispatch_action(Box::new(OpenAtCommit { sha }), cx);
                             }
                         })
                         .when(!editor.read(cx).has_mouse_context_menu(), |el| {
@@ -409,25 +406,22 @@ impl BlameRenderer for GitBlameRenderer {
                                             // this commit in the Git Graph
                                             // view (opens it on demand).
                                             .child(
-                                                Button::new(
-                                                    "show-in-log-button",
-                                                    "Show in Log",
-                                                )
-                                                .color(Color::Muted)
-                                                .start_icon(
-                                                    Icon::new(IconName::ListTree)
-                                                        .size(IconSize::Small)
-                                                        .color(Color::Muted),
-                                                )
-                                                .on_click(move |_, window, cx| {
-                                                    window.dispatch_action(
-                                                        Box::new(OpenAtCommit {
-                                                            sha: sha_for_log.clone(),
-                                                        }),
-                                                        cx,
-                                                    );
-                                                    cx.stop_propagation();
-                                                }),
+                                                Button::new("show-in-log-button", "Show in Log")
+                                                    .color(Color::Muted)
+                                                    .start_icon(
+                                                        Icon::new(IconName::ListTree)
+                                                            .size(IconSize::Small)
+                                                            .color(Color::Muted),
+                                                    )
+                                                    .on_click(move |_, window, cx| {
+                                                        window.dispatch_action(
+                                                            Box::new(OpenAtCommit {
+                                                                sha: sha_for_log.clone(),
+                                                            }),
+                                                            cx,
+                                                        );
+                                                        cx.stop_propagation();
+                                                    }),
                                             )
                                             .child(Divider::vertical())
                                             .child(
@@ -503,7 +497,12 @@ fn deploy_blame_entry_context_menu(
     // External / Destructive submenu / Patch).
     let sha: SharedString = blame_entry.sha.to_string().into();
     let subject: SharedString = details
-        .and_then(|d| d.message.split('\n').next().map(|s| s.trim_end().to_string()))
+        .and_then(|d| {
+            d.message
+                .split('\n')
+                .next()
+                .map(|s| s.trim_end().to_string())
+        })
         .map(SharedString::from)
         .unwrap_or_default();
     let provider = repository.read(cx).default_remote_url().and_then(|url| {

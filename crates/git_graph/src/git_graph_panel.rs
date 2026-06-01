@@ -67,16 +67,18 @@ impl GitGraphPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
-        let subscriptions = vec![cx.subscribe_in(
-            &git_store,
-            window,
-            |this, _git_store, event, window, cx| {
-                if let GitStoreEvent::ActiveRepositoryChanged(repo_id) = event {
-                    this.set_active_repo(*repo_id, window, cx);
-                }
-            },
-        )];
-        let active = git_store.read(cx).active_repository().map(|r| r.read(cx).id);
+        let subscriptions =
+            vec![
+                cx.subscribe_in(&git_store, window, |this, _git_store, event, window, cx| {
+                    if let GitStoreEvent::ActiveRepositoryChanged(repo_id) = event {
+                        this.set_active_repo(*repo_id, window, cx);
+                    }
+                }),
+            ];
+        let active = git_store
+            .read(cx)
+            .active_repository()
+            .map(|r| r.read(cx).id);
         let mut this = Self {
             workspace,
             git_store,

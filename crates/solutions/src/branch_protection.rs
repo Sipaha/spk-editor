@@ -116,12 +116,7 @@ pub fn check_with_snapshot(
     decide(protected, &member_rules, op, branch)
 }
 
-fn decide(
-    protected: bool,
-    member: &BranchProtectionMember,
-    op: &str,
-    branch: &str,
-) -> Decision {
+fn decide(protected: bool, member: &BranchProtectionMember, op: &str, branch: &str) -> Decision {
     match op {
         "push" | "fetch" | "pull" => Decision::Allowed,
         "force_push" | "push_force" => {
@@ -132,9 +127,7 @@ fn decide(
             }
             if member.no_force_push {
                 return Decision::Forbidden {
-                    reason: format!(
-                        "force-push to protected branch '{branch}' is forbidden"
-                    ),
+                    reason: format!("force-push to protected branch '{branch}' is forbidden"),
                 };
             }
             Decision::RequiresConfirmation {
@@ -149,9 +142,7 @@ fn decide(
             }
             if member.no_force_reset || member.no_force_push {
                 return Decision::Forbidden {
-                    reason: format!(
-                        "hard reset of protected branch '{branch}' is forbidden"
-                    ),
+                    reason: format!("hard reset of protected branch '{branch}' is forbidden"),
                 };
             }
             Decision::RequiresConfirmation {
@@ -172,9 +163,7 @@ fn decide(
                 };
             }
             Decision::RequiresConfirmation {
-                reason: format!(
-                    "'{branch}' is protected — confirm drop by typing the branch name"
-                ),
+                reason: format!("'{branch}' is protected — confirm drop by typing the branch name"),
             }
         }
         "delete_branch" | "delete_branch_force" => {
@@ -200,9 +189,7 @@ fn decide(
         | "rename_branch" => {
             if protected {
                 return Decision::RequiresConfirmation {
-                    reason: format!(
-                        "'{branch}' is protected — confirm by typing the branch name"
-                    ),
+                    reason: format!("'{branch}' is protected — confirm by typing the branch name"),
                 };
             }
             Decision::Allowed
@@ -241,9 +228,7 @@ fn is_protected(patterns: &[String], branch: &str) -> bool {
                 empty = false;
             }
             Err(err) => {
-                log::warn!(
-                    "branch_protection: invalid glob pattern {pat:?} ignored: {err}"
-                );
+                log::warn!("branch_protection: invalid glob pattern {pat:?} ignored: {err}");
             }
         }
     }
@@ -253,9 +238,7 @@ fn is_protected(patterns: &[String], branch: &str) -> bool {
     let set: GlobSet = match builder.build() {
         Ok(s) => s,
         Err(err) => {
-            log::warn!(
-                "branch_protection: failed to compile protected patterns: {err}"
-            );
+            log::warn!("branch_protection: failed to compile protected patterns: {err}");
             return false;
         }
     };
@@ -319,8 +302,7 @@ mod tests {
         // Because resolve_member returns None when no Solution is
         // configured, the member rule isn't picked up — so we install a
         // synthetic Solution+member to exercise the no_force_push path.
-        s.members
-            .insert("alpha".into(), member);
+        s.members.insert("alpha".into(), member);
         let solution = Solution {
             id: SolutionId("s".into()),
             name: "S".into(),
@@ -345,16 +327,14 @@ mod tests {
     #[test]
     fn default_protected_main_requires_confirm_for_merge() {
         let snap = snapshot(default_settings());
-        let decision =
-            check_with_snapshot(&snap, Path::new("/x"), "main", "merge");
+        let decision = check_with_snapshot(&snap, Path::new("/x"), "main", "merge");
         assert!(matches!(decision, Decision::RequiresConfirmation { .. }));
     }
 
     #[test]
     fn unprotected_branch_allowed_force_push() {
         let snap = snapshot(default_settings());
-        let decision =
-            check_with_snapshot(&snap, Path::new("/x"), "feature/foo", "force_push");
+        let decision = check_with_snapshot(&snap, Path::new("/x"), "feature/foo", "force_push");
         // Unprotected force-push is RequiresConfirmation, not Allowed —
         // force-push always at least confirms even on unprotected
         // branches. The test name from the spec is preserved but the
@@ -366,24 +346,15 @@ mod tests {
     #[test]
     fn glob_release_star_matches_release_v1() {
         let snap = snapshot(default_settings());
-        let decision = check_with_snapshot(
-            &snap,
-            Path::new("/x"),
-            "release/v1",
-            "delete_branch",
-        );
+        let decision = check_with_snapshot(&snap, Path::new("/x"), "release/v1", "delete_branch");
         assert!(matches!(decision, Decision::Forbidden { .. }));
     }
 
     #[test]
     fn glob_release_star_does_not_match_release_v2_hotfix() {
         let snap = snapshot(default_settings());
-        let decision = check_with_snapshot(
-            &snap,
-            Path::new("/x"),
-            "release/v2/hotfix",
-            "delete_branch",
-        );
+        let decision =
+            check_with_snapshot(&snap, Path::new("/x"), "release/v2/hotfix", "delete_branch");
         assert!(matches!(decision, Decision::Allowed));
     }
 
@@ -394,12 +365,8 @@ mod tests {
             members: HashMap::new(),
         };
         let snap = snapshot(s);
-        let decision = check_with_snapshot(
-            &snap,
-            Path::new("/x"),
-            "release/v2/hotfix",
-            "delete_branch",
-        );
+        let decision =
+            check_with_snapshot(&snap, Path::new("/x"), "release/v2/hotfix", "delete_branch");
         assert!(matches!(decision, Decision::Forbidden { .. }));
     }
 
@@ -444,8 +411,7 @@ mod tests {
         let snap = snapshot(default_settings());
         let prot = check_with_snapshot(&snap, Path::new("/x"), "main", "cherry_pick");
         assert!(matches!(prot, Decision::RequiresConfirmation { .. }));
-        let unprot =
-            check_with_snapshot(&snap, Path::new("/x"), "feature/x", "cherry_pick");
+        let unprot = check_with_snapshot(&snap, Path::new("/x"), "feature/x", "cherry_pick");
         assert!(matches!(unprot, Decision::Allowed));
     }
 
@@ -478,12 +444,7 @@ mod tests {
     #[test]
     fn delete_branch_force_blocked_when_protected() {
         let snap = snapshot(default_settings());
-        let decision = check_with_snapshot(
-            &snap,
-            Path::new("/x"),
-            "main",
-            "delete_branch_force",
-        );
+        let decision = check_with_snapshot(&snap, Path::new("/x"), "main", "delete_branch_force");
         assert!(matches!(decision, Decision::Forbidden { .. }));
     }
 }

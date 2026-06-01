@@ -9,8 +9,8 @@
 use editor::{Editor, MinimapVisibility};
 use gpui::{
     App, AppContext as _, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Window,
-    WeakEntity, div, rems,
+    InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, WeakEntity,
+    Window, div, rems,
 };
 use language::Buffer;
 use ui::prelude::*;
@@ -135,11 +135,9 @@ impl Render for AiSuggestModal {
                     .flex()
                     .justify_end()
                     .gap_2()
-                    .child(
-                        Button::new("ai-suggest-cancel", "Cancel").on_click(cx.listener(
-                            |this, _, window, cx| this.cancel(&menu::Cancel, window, cx),
-                        )),
-                    )
+                    .child(Button::new("ai-suggest-cancel", "Cancel").on_click(
+                        cx.listener(|this, _, window, cx| this.cancel(&menu::Cancel, window, cx)),
+                    ))
                     .child(
                         Button::new("ai-suggest-apply", "Apply")
                             .style(ButtonStyle::Filled)

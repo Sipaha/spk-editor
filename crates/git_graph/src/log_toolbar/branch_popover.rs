@@ -19,9 +19,7 @@ use gpui::{
     rems, uniform_list,
 };
 use project::git_store::Repository;
-use ui::{
-    Checkbox, Divider, HighlightedLabel, ListItem, ListItemSpacing, ToggleState, prelude::*,
-};
+use ui::{Checkbox, Divider, HighlightedLabel, ListItem, ListItemSpacing, ToggleState, prelude::*};
 
 use crate::GitGraph;
 
@@ -49,10 +47,7 @@ impl BranchEntry {
 #[derive(Clone)]
 enum Row {
     Header(SharedString),
-    Branch {
-        index: usize,
-        positions: Vec<usize>,
-    },
+    Branch { index: usize, positions: Vec<usize> },
 }
 
 pub struct BranchFilterPopover {
@@ -93,7 +88,10 @@ impl BranchFilterPopover {
         });
 
         let on_query_changed =
-            |this: &mut BranchFilterPopover, _, event: &editor::EditorEvent, cx: &mut Context<BranchFilterPopover>| {
+            |this: &mut BranchFilterPopover,
+             _,
+             event: &editor::EditorEvent,
+             cx: &mut Context<BranchFilterPopover>| {
                 if matches!(
                     event,
                     editor::EditorEvent::BufferEdited | editor::EditorEvent::Edited { .. }
@@ -270,7 +268,11 @@ impl Render for BranchFilterPopover {
             v_flex()
                 .py_4()
                 .items_center()
-                .child(Label::new("No branches").color(Color::Muted).size(LabelSize::Small))
+                .child(
+                    Label::new("No branches")
+                        .color(Color::Muted)
+                        .size(LabelSize::Small),
+                )
                 .into_any_element()
         } else if self.rows.is_empty() {
             v_flex()
@@ -288,59 +290,57 @@ impl Render for BranchFilterPopover {
             uniform_list(
                 "git-graph-branch-filter-list",
                 row_count,
-                cx.processor(move |this: &mut Self, range: std::ops::Range<usize>, _, cx| {
-                    range
-                        .filter_map(|ix| this.rows.get(ix).cloned().map(|row| (ix, row)))
-                        .map(|(ix, row)| match row {
-                            Row::Header(label) => h_flex()
-                                .h(rems(ROW_HEIGHT_REMS))
-                                .px_2()
-                                .items_end()
-                                .child(
-                                    Label::new(label)
-                                        .size(LabelSize::XSmall)
-                                        .color(Color::Muted),
-                                )
-                                .into_any_element(),
-                            Row::Branch { index, positions } => {
-                                let Some(entry) = this.branches.get(index).cloned() else {
-                                    return gpui::Empty.into_any_element();
-                                };
-                                let is_selected = this.selected.contains(&entry.ref_name);
-                                let toggle_state = if is_selected {
-                                    ToggleState::Selected
-                                } else {
-                                    ToggleState::Unselected
-                                };
-                                let row_id = SharedString::from(format!(
-                                    "git-graph-branch-row-{ix}"
-                                ));
-                                let ref_name_for_click = entry.ref_name.clone();
-                                ListItem::new(row_id)
-                                    .inset(true)
-                                    .spacing(ListItemSpacing::Sparse)
-                                    .toggle_state(is_selected)
-                                    .start_slot(
-                                        Checkbox::new(
-                                            SharedString::from(format!(
-                                                "git-graph-branch-check-{ix}"
-                                            )),
-                                            toggle_state,
-                                        )
-                                        .into_any_element(),
+                cx.processor(
+                    move |this: &mut Self, range: std::ops::Range<usize>, _, cx| {
+                        range
+                            .filter_map(|ix| this.rows.get(ix).cloned().map(|row| (ix, row)))
+                            .map(|(ix, row)| match row {
+                                Row::Header(label) => h_flex()
+                                    .h(rems(ROW_HEIGHT_REMS))
+                                    .px_2()
+                                    .items_end()
+                                    .child(
+                                        Label::new(label)
+                                            .size(LabelSize::XSmall)
+                                            .color(Color::Muted),
                                     )
-                                    .child(HighlightedLabel::new(
-                                        entry.display_name,
-                                        positions,
-                                    ))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.toggle_branch(ref_name_for_click.clone(), cx);
-                                    }))
-                                    .into_any_element()
-                            }
-                        })
-                        .collect()
-                }),
+                                    .into_any_element(),
+                                Row::Branch { index, positions } => {
+                                    let Some(entry) = this.branches.get(index).cloned() else {
+                                        return gpui::Empty.into_any_element();
+                                    };
+                                    let is_selected = this.selected.contains(&entry.ref_name);
+                                    let toggle_state = if is_selected {
+                                        ToggleState::Selected
+                                    } else {
+                                        ToggleState::Unselected
+                                    };
+                                    let row_id =
+                                        SharedString::from(format!("git-graph-branch-row-{ix}"));
+                                    let ref_name_for_click = entry.ref_name.clone();
+                                    ListItem::new(row_id)
+                                        .inset(true)
+                                        .spacing(ListItemSpacing::Sparse)
+                                        .toggle_state(is_selected)
+                                        .start_slot(
+                                            Checkbox::new(
+                                                SharedString::from(format!(
+                                                    "git-graph-branch-check-{ix}"
+                                                )),
+                                                toggle_state,
+                                            )
+                                            .into_any_element(),
+                                        )
+                                        .child(HighlightedLabel::new(entry.display_name, positions))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.toggle_branch(ref_name_for_click.clone(), cx);
+                                        }))
+                                        .into_any_element()
+                                }
+                            })
+                            .collect()
+                    },
+                ),
             )
             // See user_popover: `uniform_list` needs a concrete height in this
             // unbounded popover column or it collapses.

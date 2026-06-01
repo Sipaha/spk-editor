@@ -29,17 +29,18 @@ pub fn install(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
     }
     let controller = cx.new(|cx| RunController::new(workspace, cx));
     workspace.set_run_config_controller(controller.clone().into());
-    let status_item =
-        cx.new(|cx| crate::status_item::RunStatusItem::new(controller.clone(), cx));
+    let status_item = cx.new(|cx| crate::status_item::RunStatusItem::new(controller.clone(), cx));
     workspace.status_bar().update(cx, |status_bar, cx| {
         status_bar.add_left_item(status_item, window, cx);
     });
     let strip = cx.new(|cx| {
         let mut subscriptions = Vec::new();
         if let Some(store) = RunConfigStore::try_global(cx) {
-            subscriptions.push(cx.subscribe(&store, |_, _, _: &RunConfigStoreEvent, cx| cx.notify()));
+            subscriptions
+                .push(cx.subscribe(&store, |_, _, _: &RunConfigStoreEvent, cx| cx.notify()));
         }
-        subscriptions.push(cx.subscribe(&controller, |_, _, _: &RunControllerEvent, cx| cx.notify()));
+        subscriptions
+            .push(cx.subscribe(&controller, |_, _, _: &RunControllerEvent, cx| cx.notify()));
         RunConfigStrip {
             controller: controller.clone(),
             menu_handle: PopoverMenuHandle::default(),
@@ -165,7 +166,11 @@ impl Render for RunConfigStrip {
             .unwrap_or_else(|| "Add Configuration…".into());
         let selected_icon = selected
             .as_ref()
-            .and_then(|config| store.provider(&config.provider_type).map(|provider| provider.icon()))
+            .and_then(|config| {
+                store
+                    .provider(&config.provider_type)
+                    .map(|provider| provider.icon())
+            })
             .unwrap_or(IconName::PlayFilled);
 
         let controller_entity = self.controller.clone();
@@ -197,19 +202,25 @@ impl Render for RunConfigStrip {
                     .menu(move |window, cx| {
                         let controller_entity = controller_entity.clone();
                         let menu_entries = menu_entries.clone();
-                        Some(ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
-                            for (name, id) in &menu_entries {
-                                let controller_entity = controller_entity.clone();
-                                let id = id.clone();
-                                menu = menu.entry(name.clone(), None, move |_window, cx| {
-                                    controller_entity.update(cx, |controller, cx| {
-                                        controller.select(id.clone(), cx);
+                        Some(ContextMenu::build(
+                            window,
+                            cx,
+                            move |mut menu, _window, _cx| {
+                                for (name, id) in &menu_entries {
+                                    let controller_entity = controller_entity.clone();
+                                    let id = id.clone();
+                                    menu = menu.entry(name.clone(), None, move |_window, cx| {
+                                        controller_entity.update(cx, |controller, cx| {
+                                            controller.select(id.clone(), cx);
+                                        });
                                     });
-                                });
-                            }
-                            menu.separator()
-                                .action("Edit Configurations…", actions::EditConfigurations.boxed_clone())
-                        }))
+                                }
+                                menu.separator().action(
+                                    "Edit Configurations…",
+                                    actions::EditConfigurations.boxed_clone(),
+                                )
+                            },
+                        ))
                     }),
             )
             .child(
@@ -217,8 +228,14 @@ impl Render for RunConfigStrip {
                     .shape(IconButtonShape::Square)
                     .icon_size(IconSize::Small)
                     .disabled(!supports_run)
-                    .tooltip(Tooltip::text(if selected_running { "Rerun" } else { "Run" }))
-                    .on_click(|_, window, cx| window.dispatch_action(actions::Run.boxed_clone(), cx)),
+                    .tooltip(Tooltip::text(if selected_running {
+                        "Rerun"
+                    } else {
+                        "Run"
+                    }))
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(actions::Run.boxed_clone(), cx)
+                    }),
             )
             .when(supports_debug, |this| {
                 this.child(
@@ -226,7 +243,9 @@ impl Render for RunConfigStrip {
                         .shape(IconButtonShape::Square)
                         .icon_size(IconSize::Small)
                         .tooltip(Tooltip::text("Debug"))
-                        .on_click(|_, window, cx| window.dispatch_action(actions::Debug.boxed_clone(), cx)),
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(actions::Debug.boxed_clone(), cx)
+                        }),
                 )
             })
             .child(
@@ -235,7 +254,9 @@ impl Render for RunConfigStrip {
                     .icon_size(IconSize::Small)
                     .disabled(!selected_running)
                     .tooltip(Tooltip::text("Stop"))
-                    .on_click(|_, window, cx| window.dispatch_action(actions::Stop.boxed_clone(), cx)),
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(actions::Stop.boxed_clone(), cx)
+                    }),
             )
             .into_any_element()
     }
@@ -247,7 +268,9 @@ mod tests {
     use anyhow::Result;
     use gpui::{App, TestAppContext};
     use project::Project;
-    use run_config::{ConfigScope, RunConfigProvider, RunRequest, RunResolveContext, RunConfiguration};
+    use run_config::{
+        ConfigScope, RunConfigProvider, RunConfiguration, RunRequest, RunResolveContext,
+    };
     use ui::IconName;
     use workspace::{AppState, Workspace};
 

@@ -160,7 +160,10 @@ impl ClaudeProcess {
             .lock()
             .unwrap_or_else(|guard| guard.into_inner())
             .insert(request_id.clone(), sender);
-        let message = InputMessage::ControlRequest { request_id, request };
+        let message = InputMessage::ControlRequest {
+            request_id,
+            request,
+        };
         self.outgoing
             .unbounded_send(message)
             .context("claude process stdin closed")?;
@@ -220,9 +223,7 @@ async fn read_stdout(
                 match sender {
                     Some(sender) => {
                         if sender.send(payload).is_err() {
-                            log::debug!(
-                                "control response for {request_id} dropped: caller gone"
-                            );
+                            log::debug!("control response for {request_id} dropped: caller gone");
                         }
                     }
                     // Expected for fire-and-forget control_requests (we send
@@ -231,9 +232,7 @@ async fn read_stdout(
                     // and for any unsolicited acks claude may emit. Logged at
                     // debug so SpkEditor.log isn't flooded — set RUST_LOG to
                     // include it if you're debugging the control plane.
-                    None => log::debug!(
-                        "control response for unknown request_id {request_id}"
-                    ),
+                    None => log::debug!("control response for unknown request_id {request_id}"),
                 }
             }
             Ok(message) => {

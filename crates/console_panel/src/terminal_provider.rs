@@ -30,8 +30,7 @@ impl TerminalProvider {
             let workspace = workspace
                 .upgrade()
                 .ok_or_else(|| anyhow::anyhow!("workspace dropped"))?;
-            let project: Entity<Project> =
-                workspace.read_with(cx, |ws, _| ws.project().clone());
+            let project: Entity<Project> = workspace.read_with(cx, |ws, _| ws.project().clone());
             let resolved_cwd = match cwd {
                 Some(p) => Some(p),
                 None => project.read_with(cx, |p, cx| {
@@ -88,8 +87,7 @@ mod tests {
         fs.insert_tree("/root", serde_json::json!({})).await;
 
         let project = Project::test(fs, ["/root".as_ref()], cx).await;
-        let window_handle =
-            cx.add_window(|window, cx| Workspace::test_new(project, window, cx));
+        let window_handle = cx.add_window(|window, cx| Workspace::test_new(project, window, cx));
 
         let provider = window_handle
             .update(cx, |workspace, _, _| {
@@ -102,10 +100,6 @@ mod tests {
             .unwrap();
 
         let result = task.await;
-        assert!(
-            result.is_ok(),
-            "new_tab should succeed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "new_tab should succeed: {:?}", result.err());
     }
 }

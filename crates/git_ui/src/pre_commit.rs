@@ -17,12 +17,12 @@
 //! `git_panel::commit_changes`).
 
 use anyhow::{Context as _, Result};
+use collections::HashSet;
 use gpui::{AsyncApp, Entity, WeakEntity};
 use lsp::CodeActionKind;
 use project::Project;
 use project::lsp_store::{FormatTrigger, LspFormatTarget};
 use serde::{Deserialize, Serialize};
-use collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
@@ -122,9 +122,9 @@ pub mod test_override {
 }
 
 mod persistence {
+    use anyhow::Result;
     #[cfg(not(any(test, feature = "test-support")))]
     use anyhow::anyhow;
-    use anyhow::Result;
     use db::{
         query,
         sqlez::{domain::Domain, thread_safe_connection::ThreadSafeConnection},
@@ -165,17 +165,13 @@ mod persistence {
         use parking_lot::Mutex;
         use std::collections::HashMap;
         use std::thread::ThreadId;
-        static REGISTRY: OnceLock<Mutex<HashMap<ThreadId, PreCommitConfigDb>>> =
-            OnceLock::new();
+        static REGISTRY: OnceLock<Mutex<HashMap<ThreadId, PreCommitConfigDb>>> = OnceLock::new();
         let registry = REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
         let mut guard = registry.lock();
         if let Some(existing) = guard.get(&std::thread::current().id()) {
             return existing.clone();
         }
-        let name = format!(
-            "pre_commit_test_db_{}",
-            uuid::Uuid::new_v4().simple()
-        );
+        let name = format!("pre_commit_test_db_{}", uuid::Uuid::new_v4().simple());
         let leaked: &'static str = Box::leak(name.into_boxed_str());
         let db = gpui::block_on(PreCommitConfigDb::open_test_db(leaked));
         guard.insert(std::thread::current().id(), db.clone());
@@ -314,8 +310,7 @@ impl CheckRunner {
         }
 
         for (label, template) in &self.task_templates {
-            let work_dir =
-                cx.update(|cx| self.repo.read(cx).work_directory_abs_path.clone());
+            let work_dir = cx.update(|cx| self.repo.read(cx).work_directory_abs_path.clone());
             match run_task(template, &work_dir).await {
                 Ok(()) => {}
                 Err(e) => {
@@ -328,8 +323,7 @@ impl CheckRunner {
         }
 
         if self.config.run_hook {
-            let work_dir =
-                cx.update(|cx| self.repo.read(cx).work_directory_abs_path.clone());
+            let work_dir = cx.update(|cx| self.repo.read(cx).work_directory_abs_path.clone());
             match run_pre_commit_hook(&work_dir).await {
                 Ok(()) => {}
                 Err(e) => {
@@ -376,10 +370,7 @@ async fn run_organize_imports(project: &Entity<Project>, cx: &mut AsyncApp) -> R
     Ok(())
 }
 
-fn collect_dirty_buffers(
-    project: &Entity<Project>,
-    cx: &mut AsyncApp,
-) -> HashSet<Entity<Buffer>> {
+fn collect_dirty_buffers(project: &Entity<Project>, cx: &mut AsyncApp) -> HashSet<Entity<Buffer>> {
     project.update(cx, |project, cx| {
         let mut set: HashSet<Entity<Buffer>> = HashSet::default();
         for buffer in project.opened_buffers(cx) {
@@ -418,10 +409,7 @@ async fn run_task(template: &TaskTemplate, work_dir: &Path) -> Result<()> {
 
     let mut command = util::command::new_command(&program);
     command.args(&spawn.args);
-    let cwd: std::path::PathBuf = spawn
-        .cwd
-        .clone()
-        .unwrap_or_else(|| work_dir.to_path_buf());
+    let cwd: std::path::PathBuf = spawn.cwd.clone().unwrap_or_else(|| work_dir.to_path_buf());
     command.current_dir(&cwd);
     for (key, value) in &spawn.env {
         command.env(key, value);
@@ -701,8 +689,7 @@ mod tests {
             let hooks = dir.path().join(".git").join("hooks");
             std::fs::create_dir_all(&hooks).expect("mkdir hooks");
             let hook = hooks.join("pre-commit");
-            std::fs::write(&hook, "#!/bin/sh\necho boom 1>&2\nexit 23\n")
-                .expect("write hook");
+            std::fs::write(&hook, "#!/bin/sh\necho boom 1>&2\nexit 23\n").expect("write hook");
             use std::os::unix::fs::PermissionsExt;
             let mut perms = std::fs::metadata(&hook).expect("meta").permissions();
             perms.set_mode(0o755);

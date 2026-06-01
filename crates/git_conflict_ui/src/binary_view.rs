@@ -11,7 +11,10 @@ use gpui::{
 use std::path::Path;
 use std::sync::Arc;
 use theme::ActiveTheme as _;
-use ui::{Button, Clickable as _, Color, Icon, IconName, Label, LabelCommon as _, LabelSize, h_flex, v_flex};
+use ui::{
+    Button, Clickable as _, Color, Icon, IconName, Label, LabelCommon as _, LabelSize, h_flex,
+    v_flex,
+};
 
 pub struct BinaryConflictView {
     path: RepoPath,
@@ -34,12 +37,8 @@ impl BinaryConflictView {
         &self.path
     }
 
-    fn run_with_feedback<F>(
-        &mut self,
-        label: &str,
-        cx: &mut Context<Self>,
-        op: F,
-    ) where
+    fn run_with_feedback<F>(&mut self, label: &str, cx: &mut Context<Self>, op: F)
+    where
         F: std::future::Future<Output = Result<()>> + Send + 'static,
     {
         let label = label.to_string();
@@ -103,21 +102,13 @@ impl BinaryConflictView {
             // remove the original from index
             crate::operations::run_git_void(&work, &["rm", "--", &path_str]).await?;
             // stage both renamed files
-            crate::operations::run_git_void(
-                &work,
-                &["add", "--", &ours_path, &theirs_path],
-            )
-            .await
+            crate::operations::run_git_void(&work, &["add", "--", &ours_path, &theirs_path]).await
         });
     }
 }
 
 impl Render for BinaryConflictView {
-    fn render(
-        &mut self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let path_str = self.path.as_std_path().to_string_lossy().into_owned();
 
         let entity = cx.entity();
@@ -149,35 +140,30 @@ impl Render for BinaryConflictView {
             .child(
                 h_flex()
                     .gap_2()
+                    .child(Button::new("binary-accept-ours", "Accept Ours").on_click({
+                        let entity = entity.clone();
+                        move |_, _, cx: &mut gpui::App| {
+                            entity.update(cx, |this, cx: &mut Context<Self>| this.accept_ours(cx));
+                        }
+                    }))
                     .child(
-                        Button::new("binary-accept-ours", "Accept Ours")
-                            .on_click({
-                                let entity = entity.clone();
-                                move |_, _, cx: &mut gpui::App| {
-                                    entity.update(cx, |this, cx: &mut Context<Self>| {
-                                        this.accept_ours(cx)
-                                    });
-                                }
-                            }),
+                        Button::new("binary-accept-theirs", "Accept Theirs").on_click({
+                            let entity = entity.clone();
+                            move |_, _, cx: &mut gpui::App| {
+                                entity.update(cx, |this, cx: &mut Context<Self>| {
+                                    this.accept_theirs(cx)
+                                });
+                            }
+                        }),
                     )
                     .child(
-                        Button::new("binary-accept-theirs", "Accept Theirs")
-                            .on_click({
-                                let entity = entity.clone();
-                                move |_, _, cx: &mut gpui::App| {
-                                    entity.update(cx, |this, cx: &mut Context<Self>| {
-                                        this.accept_theirs(cx)
-                                    });
-                                }
-                            }),
-                    )
-                    .child(
-                        Button::new("binary-keep-both", "Keep Both Renamed")
-                            .on_click(move |_, _, cx: &mut gpui::App| {
+                        Button::new("binary-keep-both", "Keep Both Renamed").on_click(
+                            move |_, _, cx: &mut gpui::App| {
                                 entity.update(cx, |this, cx: &mut Context<Self>| {
                                     this.keep_both_renamed(cx)
                                 });
-                            }),
+                            },
+                        ),
                     ),
             );
         if let Some(label) = self.last_action.as_ref() {

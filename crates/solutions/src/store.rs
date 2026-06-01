@@ -1,10 +1,10 @@
 use crate::add_member::InFlightAdd;
 use crate::db::SolutionsDb;
+use crate::dock_snapshot::{DockSnapshots, SolutionDockSnapshot};
 use crate::git;
 use crate::model::{CatalogId, CatalogProject, Solution, SolutionId, SolutionMember};
 use crate::persistence::{CURRENT_VERSION, SolutionsConfig};
 use crate::slug::unique_slug;
-use crate::dock_snapshot::{DockSnapshots, SolutionDockSnapshot};
 use crate::tabs_snapshot::{SolutionTabsSnapshot, TabSnapshots};
 use anyhow::{Context as _, Result, bail};
 use chrono::Utc;
@@ -44,8 +44,7 @@ pub struct SolutionStore {
     /// updated through `set_panel_member_selection`. Lives only in the
     /// DB (no JSON equivalent) — the cache field exists so panels
     /// don't have to round-trip through SQL on every render.
-    pub(crate) panel_member_selections:
-        HashMap<(SolutionId, crate::db::PanelKind), CatalogId>,
+    pub(crate) panel_member_selections: HashMap<(SolutionId, crate::db::PanelKind), CatalogId>,
     /// Runtime-only set of solutions whose desktop window is currently open.
     /// Populated by `event_sources::install` from MultiWorkspace lifecycle
     /// (observe_new fires on window creation; observe_release fires on close).
@@ -106,7 +105,9 @@ pub enum SolutionStoreEvent {
     /// the wire path only flipped the `open` flag + emitted the mobile
     /// notification, leaving the corresponding desktop workspace tabs
     /// open until the user closed them manually.
-    Closed { id: SolutionId },
+    Closed {
+        id: SolutionId,
+    },
     /// Emitted by `mark_open`. Distinct from `Changed` so cross-crate
     /// observers (notably `workspace_events`, which can see both
     /// `SolutionStore` and `SolutionAgentStore`) can react with side
@@ -115,7 +116,9 @@ pub enum SolutionStoreEvent {
     /// session for the just-opened solution. Without that fan-out the
     /// mobile mirror sees the solution row appear with `sessions: []`
     /// even when the persisted tab strip has entries.
-    Opened { id: SolutionId },
+    Opened {
+        id: SolutionId,
+    },
 }
 
 impl EventEmitter<SolutionStoreEvent> for SolutionStore {}
@@ -134,9 +137,7 @@ impl SolutionStore {
     fn init_with_db(db: SolutionsDb, cx: &mut App) {
         let json_path = paths::config_dir().join("solutions.json");
         if let Err(err) = crate::migrate::run_one_time_migration(&db, &json_path) {
-            log::error!(
-                "solutions::store: legacy import failed: {err}. Continuing with empty DB."
-            );
+            log::error!("solutions::store: legacy import failed: {err}. Continuing with empty DB.");
         }
         let config = match Self::load_from_db_blocking(&db) {
             Ok(cfg) => cfg,
@@ -151,9 +152,7 @@ impl SolutionStore {
         let panel_rows = match gpui::block_on(db.load_all_panel_selections()) {
             Ok(rows) => rows,
             Err(err) => {
-                log::error!(
-                    "solutions::store: failed to load panel_member_selections: {err}"
-                );
+                log::error!("solutions::store: failed to load panel_member_selections: {err}");
                 Vec::new()
             }
         };
@@ -214,8 +213,7 @@ impl SolutionStore {
                 });
             }
         }
-        let solutions: Vec<Solution> =
-            order.into_iter().filter_map(|k| by_id.remove(&k)).collect();
+        let solutions: Vec<Solution> = order.into_iter().filter_map(|k| by_id.remove(&k)).collect();
 
         Ok(SolutionsConfig {
             version: CURRENT_VERSION,
@@ -631,20 +629,22 @@ impl SolutionStore {
         // DB rows for this solution's panel selections are removed by
         // `ON DELETE CASCADE`; mirror that on the in-memory cache so
         // stale entries don't leak past the deletion.
-        self.panel_member_selections
-            .retain(|(sid, _), _| sid != id);
+        self.panel_member_selections.retain(|(sid, _), _| sid != id);
         // Emit the sequenced workspace-level notification so the mobile snapshot
         // (and any other listener) updates regardless of who triggered the delete.
         // Reserve seq first, then drop the borrow, then emit — avoids holding
         // &WorkspaceEventCoordinator while also borrowing cx for emit_notification.
-        let seq_opt =
-            editor_mcp::workspace_seq::WorkspaceEventCoordinator::try_global(cx)
-                .map(|c| c.next_seq());
+        let seq_opt = editor_mcp::workspace_seq::WorkspaceEventCoordinator::try_global(cx)
+            .map(|c| c.next_seq());
         if let Some(seq) = seq_opt {
-            editor_mcp::emit_notification(cx, "workspace.solution_deleted", serde_json::json!({
-                "seq": seq,
-                "solution_id": id.as_str(),
-            }));
+            editor_mcp::emit_notification(
+                cx,
+                "workspace.solution_deleted",
+                serde_json::json!({
+                    "seq": seq,
+                    "solution_id": id.as_str(),
+                }),
+            );
         }
         cx.emit(SolutionStoreEvent::Changed);
         if let Some(root) = root {
@@ -745,28 +745,36 @@ impl SolutionStore {
         // panic while we are inside a mutable update of the same entity).
         // sessions is always empty: solutions does not depend on solution_agent
         // (cycle). The mobile client calls workspace.snapshot for full state.
-        let solution_json = self.config.solutions.iter()
+        let solution_json = self
+            .config
+            .solutions
+            .iter()
             .find(|s| s.id == id)
-            .map(|sol| serde_json::json!({
-                "id": sol.id.as_str(),
-                "name": sol.name,
-                "root": sol.root.to_string_lossy(),
-                "member_count": sol.members.len(),
-                "last_opened_at": sol.last_opened_at.map(|t| t.to_rfc3339()),
-                "open": true,
-                "main_window_id": serde_json::Value::Null,
-            }));
+            .map(|sol| {
+                serde_json::json!({
+                    "id": sol.id.as_str(),
+                    "name": sol.name,
+                    "root": sol.root.to_string_lossy(),
+                    "member_count": sol.members.len(),
+                    "last_opened_at": sol.last_opened_at.map(|t| t.to_rfc3339()),
+                    "open": true,
+                    "main_window_id": serde_json::Value::Null,
+                })
+            });
         // Reserve seq first, then drop the borrow, then emit — avoids holding
         // &WorkspaceEventCoordinator while also borrowing cx for emit_notification.
-        let seq_opt =
-            editor_mcp::workspace_seq::WorkspaceEventCoordinator::try_global(cx)
-                .map(|c| c.next_seq());
+        let seq_opt = editor_mcp::workspace_seq::WorkspaceEventCoordinator::try_global(cx)
+            .map(|c| c.next_seq());
         if let Some(seq) = seq_opt {
-            editor_mcp::emit_notification(cx, "workspace.solution_opened", serde_json::json!({
-                "seq": seq,
-                "solution": solution_json,
-                "sessions": [],
-            }));
+            editor_mcp::emit_notification(
+                cx,
+                "workspace.solution_opened",
+                serde_json::json!({
+                    "seq": seq,
+                    "solution": solution_json,
+                    "sessions": [],
+                }),
+            );
         }
         cx.emit(SolutionStoreEvent::Opened { id: id.clone() });
         cx.emit(SolutionStoreEvent::Changed);
@@ -783,14 +791,17 @@ impl SolutionStore {
         }
         // Reserve seq first, then drop the borrow, then emit — avoids holding
         // &WorkspaceEventCoordinator while also borrowing cx for emit_notification.
-        let seq_opt =
-            editor_mcp::workspace_seq::WorkspaceEventCoordinator::try_global(cx)
-                .map(|c| c.next_seq());
+        let seq_opt = editor_mcp::workspace_seq::WorkspaceEventCoordinator::try_global(cx)
+            .map(|c| c.next_seq());
         if let Some(seq) = seq_opt {
-            editor_mcp::emit_notification(cx, "workspace.solution_closed", serde_json::json!({
-                "seq": seq,
-                "solution_id": id.as_str(),
-            }));
+            editor_mcp::emit_notification(
+                cx,
+                "workspace.solution_closed",
+                serde_json::json!({
+                    "seq": seq,
+                    "solution_id": id.as_str(),
+                }),
+            );
         }
         cx.emit(SolutionStoreEvent::Closed { id: id.clone() });
         cx.emit(SolutionStoreEvent::Changed);
@@ -889,12 +900,13 @@ impl SolutionStore {
     /// for use in unit tests. Returns the generated `SolutionId`.
     /// Only available in test builds.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn create_for_test_minimal(
-        &mut self,
-        name: &str,
-        cx: &mut Context<Self>,
-    ) -> SolutionId {
-        let taken: Vec<String> = self.config.solutions.iter().map(|s| s.id.0.clone()).collect();
+    pub fn create_for_test_minimal(&mut self, name: &str, cx: &mut Context<Self>) -> SolutionId {
+        let taken: Vec<String> = self
+            .config
+            .solutions
+            .iter()
+            .map(|s| s.id.0.clone())
+            .collect();
         let slug = crate::slug::unique_slug(name, &taken);
         let id = SolutionId(slug.clone());
         let root = std::env::temp_dir().join("spke-test-solutions").join(&slug);

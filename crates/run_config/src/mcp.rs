@@ -52,7 +52,9 @@ fn parse_executor(name: &str) -> Result<Executor> {
     match name {
         "run" => Ok(Executor::Run),
         "debug" => Ok(Executor::Debug),
-        other => anyhow::bail!("invalid_params: unknown executor `{other}` (expected `run` or `debug`)"),
+        other => {
+            anyhow::bail!("invalid_params: unknown executor `{other}` (expected `run` or `debug`)")
+        }
     }
 }
 
@@ -229,8 +231,8 @@ impl McpServerTool for CreateRunConfigTool {
         );
 
         let id = cx.update(|cx| -> Result<String> {
-            let store = RunConfigStore::try_global(cx)
-                .context("run configurations are not available")?;
+            let store =
+                RunConfigStore::try_global(cx).context("run configurations are not available")?;
 
             let provider = store
                 .read(cx)
@@ -244,7 +246,10 @@ impl McpServerTool for CreateRunConfigTool {
                     .collect::<Result<_>>()?,
                 None => provider.supported_executors().to_vec(),
             };
-            anyhow::ensure!(!executors.is_empty(), "invalid_params: executors must not be empty");
+            anyhow::ensure!(
+                !executors.is_empty(),
+                "invalid_params: executors must not be empty"
+            );
 
             let scope = match input.scope.as_deref().unwrap_or("global") {
                 "global" => ConfigScope::Global,

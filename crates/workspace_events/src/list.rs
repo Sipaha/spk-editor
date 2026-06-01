@@ -12,7 +12,11 @@ use crate::dto::{ListSolutionsParams, ListSolutionsResult};
 pub(crate) fn build_list(cx: &App, open: Option<bool>) -> ListSolutionsResult {
     let store = match solutions::SolutionStore::try_global(cx) {
         Some(s) => s,
-        None => return ListSolutionsResult { solutions: Vec::new() },
+        None => {
+            return ListSolutionsResult {
+                solutions: Vec::new(),
+            };
+        }
     };
     let solutions: Vec<_> = store.read_with(cx, |store, cx| {
         store

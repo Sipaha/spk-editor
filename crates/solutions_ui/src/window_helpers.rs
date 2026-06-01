@@ -61,7 +61,10 @@ pub fn active_solution_in_workspace(workspace: &Workspace, cx: &App) -> Option<S
 /// Inner pure-data helper: walks `paths` and returns the id of the first
 /// solution whose root is an ancestor of any path. Kept private so tests
 /// can drive it directly without needing a full workspace harness.
-fn active_solution_for_paths<P>(store: &SolutionStore, paths: impl IntoIterator<Item = P>) -> Option<SolutionId>
+fn active_solution_for_paths<P>(
+    store: &SolutionStore,
+    paths: impl IntoIterator<Item = P>,
+) -> Option<SolutionId>
 where
     P: AsRef<std::path::Path>,
 {
@@ -87,7 +90,9 @@ mod tests {
 
         let store = cx.update(|cx| SolutionStore::for_test(PathBuf::new(), cx));
         let sol_id = store
-            .update(cx, |s, cx| s.create_solution("S", dir.path().to_path_buf(), cx))
+            .update(cx, |s, cx| {
+                s.create_solution("S", dir.path().to_path_buf(), cx)
+            })
             .expect("create");
 
         // `create_solution` appends the slug ("s") to the base, so the actual
@@ -105,7 +110,9 @@ mod tests {
 
         let store = cx.update(|cx| SolutionStore::for_test(PathBuf::new(), cx));
         store
-            .update(cx, |s, cx| s.create_solution("S", dir.path().to_path_buf(), cx))
+            .update(cx, |s, cx| {
+                s.create_solution("S", dir.path().to_path_buf(), cx)
+            })
             .expect("create");
 
         // A path outside the solution root should not match.

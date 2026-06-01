@@ -24,9 +24,7 @@ use gpui::{
     rems, uniform_list,
 };
 use project::git_store::Repository;
-use ui::{
-    Checkbox, Divider, HighlightedLabel, ListItem, ListItemSpacing, ToggleState, prelude::*,
-};
+use ui::{Checkbox, Divider, HighlightedLabel, ListItem, ListItemSpacing, ToggleState, prelude::*};
 
 use crate::GitGraph;
 
@@ -51,10 +49,7 @@ struct AuthorRow {
 #[derive(Clone)]
 enum Row {
     Header(SharedString),
-    Author {
-        index: usize,
-        positions: Vec<usize>,
-    },
+    Author { index: usize, positions: Vec<usize> },
 }
 
 enum LoadState {
@@ -92,7 +87,10 @@ impl UserFilterPopover {
         });
 
         let on_query_changed =
-            |this: &mut UserFilterPopover, _, event: &editor::EditorEvent, cx: &mut Context<UserFilterPopover>| {
+            |this: &mut UserFilterPopover,
+             _,
+             event: &editor::EditorEvent,
+             cx: &mut Context<UserFilterPopover>| {
                 if matches!(
                     event,
                     editor::EditorEvent::BufferEdited | editor::EditorEvent::Edited { .. }
@@ -115,8 +113,7 @@ impl UserFilterPopover {
                             this.load_state = LoadState::Ready;
                         }
                         Err(err) => {
-                            this.load_state =
-                                LoadState::Error(SharedString::from(err.to_string()));
+                            this.load_state = LoadState::Error(SharedString::from(err.to_string()));
                         }
                     }
                     this.refresh_matches(cx);
@@ -209,7 +206,9 @@ impl UserFilterPopover {
         let mut sorted: Vec<(usize, Vec<usize>)> = matches
             .into_iter()
             .filter_map(|m| {
-                self.authors.get(m.candidate_id).map(|_| (m.candidate_id, m.positions))
+                self.authors
+                    .get(m.candidate_id)
+                    .map(|_| (m.candidate_id, m.positions))
             })
             .collect();
 
@@ -313,7 +312,11 @@ impl Render for UserFilterPopover {
             LoadState::Loading => v_flex()
                 .py_4()
                 .items_center()
-                .child(Label::new("Loading…").color(Color::Muted).size(LabelSize::Small))
+                .child(
+                    Label::new("Loading…")
+                        .color(Color::Muted)
+                        .size(LabelSize::Small),
+                )
                 .into_any_element(),
             LoadState::Error(message) => v_flex()
                 .py_4()
@@ -327,7 +330,11 @@ impl Render for UserFilterPopover {
             LoadState::Ready if total_authors == 0 => v_flex()
                 .py_4()
                 .items_center()
-                .child(Label::new("No authors").color(Color::Muted).size(LabelSize::Small))
+                .child(
+                    Label::new("No authors")
+                        .color(Color::Muted)
+                        .size(LabelSize::Small),
+                )
                 .into_any_element(),
             LoadState::Ready if self.rows.is_empty() => v_flex()
                 .py_4()
@@ -345,86 +352,85 @@ impl Render for UserFilterPopover {
                 uniform_list(
                     "git-graph-user-filter-list",
                     row_count,
-                    cx.processor(move |this: &mut Self, range: std::ops::Range<usize>, _, cx| {
-                        range
-                            .filter_map(|ix| this.rows.get(ix).cloned().map(|row| (ix, row)))
-                            .map(|(ix, row)| match row {
-                                Row::Header(label) => h_flex()
-                                    .h(rems(ROW_HEIGHT_REMS))
-                                    .px_2()
-                                    .items_end()
-                                    .child(
-                                        Label::new(label)
-                                            .size(LabelSize::XSmall)
-                                            .color(Color::Muted),
-                                    )
-                                    .into_any_element(),
-                                Row::Author { index, positions } => {
-                                    let Some(entry) = this.authors.get(index).cloned() else {
-                                        return gpui::Empty.into_any_element();
-                                    };
-                                    let is_selected = this.selected.contains(&entry.email);
-                                    let toggle_state = if is_selected {
-                                        ToggleState::Selected
-                                    } else {
-                                        ToggleState::Unselected
-                                    };
-                                    let row_id = SharedString::from(format!(
-                                        "git-graph-user-row-{ix}"
-                                    ));
-                                    let email_for_click = entry.email.clone();
-                                    // Highlight only the positions falling
-                                    // inside the name span; positions on
-                                    // the email tail would map to a
-                                    // different label so we drop them.
-                                    let name_positions: Vec<usize> = positions
-                                        .into_iter()
-                                        .filter(|p| *p < entry.name_len)
-                                        .collect();
-                                    let count_label = SharedString::from(format!(
-                                        "({})",
-                                        entry.commit_count
-                                    ));
-                                    ListItem::new(row_id)
-                                        .inset(true)
-                                        .spacing(ListItemSpacing::Sparse)
-                                        .toggle_state(is_selected)
-                                        .start_slot(
-                                            Checkbox::new(
-                                                SharedString::from(format!(
-                                                    "git-graph-user-check-{ix}"
-                                                )),
-                                                toggle_state,
-                                            )
-                                            .into_any_element(),
-                                        )
+                    cx.processor(
+                        move |this: &mut Self, range: std::ops::Range<usize>, _, cx| {
+                            range
+                                .filter_map(|ix| this.rows.get(ix).cloned().map(|row| (ix, row)))
+                                .map(|(ix, row)| match row {
+                                    Row::Header(label) => h_flex()
+                                        .h(rems(ROW_HEIGHT_REMS))
+                                        .px_2()
+                                        .items_end()
                                         .child(
-                                            h_flex()
-                                                .gap_2()
-                                                .flex_1()
-                                                .child(HighlightedLabel::new(
-                                                    entry.name.clone(),
-                                                    name_positions,
-                                                ))
-                                                .child(
-                                                    Label::new(entry.email)
-                                                        .color(Color::Muted)
-                                                        .size(LabelSize::Small),
-                                                ),
+                                            Label::new(label)
+                                                .size(LabelSize::XSmall)
+                                                .color(Color::Muted),
                                         )
-                                        .end_slot(
-                                            Label::new(count_label)
-                                                .color(Color::Muted)
-                                                .size(LabelSize::Small),
-                                        )
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.toggle_author(email_for_click.clone(), cx);
-                                        }))
-                                        .into_any_element()
-                                }
-                            })
-                            .collect()
-                    }),
+                                        .into_any_element(),
+                                    Row::Author { index, positions } => {
+                                        let Some(entry) = this.authors.get(index).cloned() else {
+                                            return gpui::Empty.into_any_element();
+                                        };
+                                        let is_selected = this.selected.contains(&entry.email);
+                                        let toggle_state = if is_selected {
+                                            ToggleState::Selected
+                                        } else {
+                                            ToggleState::Unselected
+                                        };
+                                        let row_id =
+                                            SharedString::from(format!("git-graph-user-row-{ix}"));
+                                        let email_for_click = entry.email.clone();
+                                        // Highlight only the positions falling
+                                        // inside the name span; positions on
+                                        // the email tail would map to a
+                                        // different label so we drop them.
+                                        let name_positions: Vec<usize> = positions
+                                            .into_iter()
+                                            .filter(|p| *p < entry.name_len)
+                                            .collect();
+                                        let count_label =
+                                            SharedString::from(format!("({})", entry.commit_count));
+                                        ListItem::new(row_id)
+                                            .inset(true)
+                                            .spacing(ListItemSpacing::Sparse)
+                                            .toggle_state(is_selected)
+                                            .start_slot(
+                                                Checkbox::new(
+                                                    SharedString::from(format!(
+                                                        "git-graph-user-check-{ix}"
+                                                    )),
+                                                    toggle_state,
+                                                )
+                                                .into_any_element(),
+                                            )
+                                            .child(
+                                                h_flex()
+                                                    .gap_2()
+                                                    .flex_1()
+                                                    .child(HighlightedLabel::new(
+                                                        entry.name.clone(),
+                                                        name_positions,
+                                                    ))
+                                                    .child(
+                                                        Label::new(entry.email)
+                                                            .color(Color::Muted)
+                                                            .size(LabelSize::Small),
+                                                    ),
+                                            )
+                                            .end_slot(
+                                                Label::new(count_label)
+                                                    .color(Color::Muted)
+                                                    .size(LabelSize::Small),
+                                            )
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.toggle_author(email_for_click.clone(), cx);
+                                            }))
+                                            .into_any_element()
+                                    }
+                                })
+                                .collect()
+                        },
+                    ),
                 )
                 // `uniform_list` virtualizes against its viewport height — with
                 // only `max_h` and no concrete height in this unbounded popover

@@ -69,12 +69,7 @@ pub fn enumerate_window_clickables(window_id: WindowId, window: &Window) -> Vec<
         let bounds = hitbox.bounds;
         let arr = bounds_to_array(bounds);
         let (kind, label) = inspector_kind_and_label(window, hitbox.id);
-        let id = stable_id(
-            window_id,
-            kind.as_deref(),
-            label.as_deref(),
-            arr,
-        );
+        let id = stable_id(window_id, kind.as_deref(), label.as_deref(), arr);
         let focused = hitbox.is_hovered(window);
         out.push(Clickable {
             id,
@@ -178,16 +173,36 @@ mod tests {
 
     #[test]
     fn stable_id_is_deterministic() {
-        let id1 = stable_id(fake_window_id(7), Some("Tab"), Some("README.md"), [10, 20, 100, 30]);
-        let id2 = stable_id(fake_window_id(7), Some("Tab"), Some("README.md"), [10, 20, 100, 30]);
+        let id1 = stable_id(
+            fake_window_id(7),
+            Some("Tab"),
+            Some("README.md"),
+            [10, 20, 100, 30],
+        );
+        let id2 = stable_id(
+            fake_window_id(7),
+            Some("Tab"),
+            Some("README.md"),
+            [10, 20, 100, 30],
+        );
         assert_eq!(id1, id2);
         assert!(id1.starts_with("click:"));
     }
 
     #[test]
     fn stable_id_changes_with_window_id() {
-        let id1 = stable_id(fake_window_id(1), Some("Tab"), Some("README.md"), [10, 20, 100, 30]);
-        let id2 = stable_id(fake_window_id(2), Some("Tab"), Some("README.md"), [10, 20, 100, 30]);
+        let id1 = stable_id(
+            fake_window_id(1),
+            Some("Tab"),
+            Some("README.md"),
+            [10, 20, 100, 30],
+        );
+        let id2 = stable_id(
+            fake_window_id(2),
+            Some("Tab"),
+            Some("README.md"),
+            [10, 20, 100, 30],
+        );
         assert_ne!(id1, id2);
     }
 
@@ -195,14 +210,20 @@ mod tests {
     fn stable_id_tolerates_sub_grid_shifts() {
         let id1 = stable_id(fake_window_id(1), Some("Tab"), None, [10, 20, 100, 30]);
         let id2 = stable_id(fake_window_id(1), Some("Tab"), None, [12, 22, 100, 30]);
-        assert_eq!(id1, id2, "bounds shifts within an 8px grid should not invalidate the id");
+        assert_eq!(
+            id1, id2,
+            "bounds shifts within an 8px grid should not invalidate the id"
+        );
     }
 
     #[test]
     fn stable_id_changes_when_grid_crossed() {
         let id1 = stable_id(fake_window_id(1), Some("Tab"), None, [10, 20, 100, 30]);
         let id2 = stable_id(fake_window_id(1), Some("Tab"), None, [40, 20, 100, 30]);
-        assert_ne!(id1, id2, "moves across a grid boundary should change the id");
+        assert_ne!(
+            id1, id2,
+            "moves across a grid boundary should change the id"
+        );
     }
 
     #[test]

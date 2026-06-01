@@ -122,7 +122,10 @@ async fn snapshot_excludes_solutions_not_marked_open(cx: &mut TestAppContext) {
     assert!(
         snap.solutions.is_empty(),
         "solution without mark_open must be filtered out; got {:?}",
-        snap.solutions.iter().map(|s| &s.solution.name).collect::<Vec<_>>()
+        snap.solutions
+            .iter()
+            .map(|s| &s.solution.name)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -159,7 +162,10 @@ async fn snapshot_includes_solution_marked_open(cx: &mut TestAppContext) {
         snap.solutions.len(),
         1,
         "solution with mark_open must appear in snapshot; got {:?}",
-        snap.solutions.iter().map(|s| &s.solution.name).collect::<Vec<_>>()
+        snap.solutions
+            .iter()
+            .map(|s| &s.solution.name)
+            .collect::<Vec<_>>()
     );
     assert_eq!(snap.solutions[0].solution.name, "visible");
 }
@@ -387,7 +393,9 @@ async fn open_solution_for_closed_marks_open_and_advances_seq(cx: &mut TestAppCo
     assert!(ack.seq > pre_seq, "open must advance seq");
 
     let is_open = cx.update(|cx| {
-        solutions::SolutionStore::global(cx).read(cx).is_open(&sol_id)
+        solutions::SolutionStore::global(cx)
+            .read(cx)
+            .is_open(&sol_id)
     });
     assert!(is_open, "solution must be marked open after open_solution");
 }
@@ -408,9 +416,14 @@ async fn close_solution_marks_closed_and_advances_seq(cx: &mut TestAppContext) {
     assert!(ack.seq > pre_seq, "close must advance seq");
 
     let is_open = cx.update(|cx| {
-        solutions::SolutionStore::global(cx).read(cx).is_open(&sol_id)
+        solutions::SolutionStore::global(cx)
+            .read(cx)
+            .is_open(&sol_id)
     });
-    assert!(!is_open, "solution must be marked closed after close_solution");
+    assert!(
+        !is_open,
+        "solution must be marked closed after close_solution"
+    );
 }
 
 #[gpui::test]
@@ -454,7 +467,10 @@ async fn full_lifecycle_round_trip(cx: &mut TestAppContext) {
     assert!(
         s0.solutions.is_empty(),
         "s0 must be empty before open_solution; got {:?}",
-        s0.solutions.iter().map(|s| &s.solution.name).collect::<Vec<_>>()
+        s0.solutions
+            .iter()
+            .map(|s| &s.solution.name)
+            .collect::<Vec<_>>()
     );
     let seq0 = s0.seq;
 
@@ -501,7 +517,10 @@ async fn full_lifecycle_round_trip(cx: &mut TestAppContext) {
     assert!(
         s4.solutions.is_empty(),
         "s4 must be empty after close_solution; got {:?}",
-        s4.solutions.iter().map(|s| &s.solution.name).collect::<Vec<_>>()
+        s4.solutions
+            .iter()
+            .map(|s| &s.solution.name)
+            .collect::<Vec<_>>()
     );
     assert!(s4.seq > s3.seq, "s4.seq must exceed s3.seq");
 }

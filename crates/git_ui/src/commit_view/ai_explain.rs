@@ -271,12 +271,7 @@ async fn run_git_diff_stat(work_dir: &Path, sha: &str) -> Result<String> {
     cmd.current_dir(work_dir);
     // For root commits `<sha>~..<sha>` errors; fall back to
     // `<sha>~..<sha>` first and on failure to `--root <sha>`.
-    cmd.args([
-        "diff",
-        "--stat",
-        "--shortstat",
-        &format!("{sha}~..{sha}"),
-    ]);
+    cmd.args(["diff", "--stat", "--shortstat", &format!("{sha}~..{sha}")]);
     let output = cmd
         .output()
         .await
@@ -375,10 +370,7 @@ pub fn cleanup_expired_in(root: &Path, cache_ttl_days: u32) -> usize {
         Ok(it) => it,
         Err(err) => {
             if err.kind() != std::io::ErrorKind::NotFound {
-                log::warn!(
-                    "ai_explain: cannot scan {}: {err}",
-                    root.display()
-                );
+                log::warn!("ai_explain: cannot scan {}: {err}", root.display());
             }
             return 0;
         }
@@ -392,10 +384,7 @@ pub fn cleanup_expired_in(root: &Path, cache_ttl_days: u32) -> usize {
         let inner = match std::fs::read_dir(&dir_path) {
             Ok(it) => it,
             Err(err) => {
-                log::warn!(
-                    "ai_explain: cannot scan {}: {err}",
-                    dir_path.display()
-                );
+                log::warn!("ai_explain: cannot scan {}: {err}", dir_path.display());
                 continue;
             }
         };
@@ -512,7 +501,8 @@ mod tests {
         // Mirror the literal `git show --format=%H%x09%an%x09%ae%x09%ct%x09%s%x09%b`
         // output: tab-separated header fields, with the body following
         // the 5th tab (and possibly containing newlines).
-        let stdout = "deadbeef\tAlice\talice@example.com\t1700000000\tfix bug\nbody line one\nbody line two";
+        let stdout =
+            "deadbeef\tAlice\talice@example.com\t1700000000\tfix bug\nbody line one\nbody line two";
         // The format puts a tab right before `%b`, so re-create that
         // boundary in the test fixture (the parser drops the empty body
         // case otherwise).
@@ -539,7 +529,10 @@ mod tests {
             subject: "fix something".into(),
             body: "longer description".into(),
         };
-        let prompt = build_prompt(&header, " 2 files changed, 4 insertions(+), 1 deletion(-)\n");
+        let prompt = build_prompt(
+            &header,
+            " 2 files changed, 4 insertions(+), 1 deletion(-)\n",
+        );
         assert!(prompt.contains("Explain in 2-3 sentences"));
         assert!(prompt.contains("deadbeef"));
         assert!(prompt.contains("fix something"));
@@ -588,10 +581,9 @@ mod tests {
         }));
 
         let mut acx = cx.to_async();
-        let outcome =
-            explain_commit_with(work_dir, sha, &project, 7, &mut acx, fetcher, runner)
-                .await
-                .expect("cache hit");
+        let outcome = explain_commit_with(work_dir, sha, &project, 7, &mut acx, fetcher, runner)
+            .await
+            .expect("cache hit");
         assert_eq!(outcome.text, "cached body");
         assert_eq!(outcome.source, ExplainSource::Cached);
         test_override::clear();
@@ -616,15 +608,13 @@ mod tests {
         }));
 
         let mut acx = cx.to_async();
-        let outcome =
-            explain_commit_with(work_dir, sha, &project, 7, &mut acx, fetcher, runner)
-                .await
-                .expect("generate");
+        let outcome = explain_commit_with(work_dir, sha, &project, 7, &mut acx, fetcher, runner)
+            .await
+            .expect("generate");
         assert_eq!(outcome.text, "This commit does X.");
         assert_eq!(outcome.source, ExplainSource::Generated);
 
-        let written = std::fs::read_to_string(cache_path(work_dir, sha))
-            .expect("cache written");
+        let written = std::fs::read_to_string(cache_path(work_dir, sha)).expect("cache written");
         assert!(written.contains("This commit does X."));
         test_override::clear();
     }
@@ -648,10 +638,9 @@ mod tests {
         let runner = EphemeralRunner::Mock(Box::new(|_prompt| Ok("fresh text".to_string())));
 
         let mut acx = cx.to_async();
-        let outcome =
-            explain_commit_with(work_dir, sha, &project, 7, &mut acx, fetcher, runner)
-                .await
-                .expect("regenerate");
+        let outcome = explain_commit_with(work_dir, sha, &project, 7, &mut acx, fetcher, runner)
+            .await
+            .expect("regenerate");
         assert_eq!(outcome.text, "fresh text");
         assert_eq!(outcome.source, ExplainSource::Generated);
         let written = std::fs::read_to_string(cache_file).expect("cache rewritten");
@@ -695,5 +684,4 @@ mod tests {
             .expect("open for backdate");
         file.set_modified(target).expect("set_modified");
     }
-
 }

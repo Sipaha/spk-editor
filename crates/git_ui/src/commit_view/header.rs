@@ -241,9 +241,7 @@ fn render_explain_button(is_stash: bool, explain: &ExplainHeaderState) -> Option
     } else if explain.pending {
         button.tooltip(Tooltip::text("AI explanation in progress"))
     } else if explain.body.is_some() {
-        button.tooltip(Tooltip::text(
-            "Toggle the AI-generated explanation panel",
-        ))
+        button.tooltip(Tooltip::text("Toggle the AI-generated explanation panel"))
     } else {
         button.tooltip(Tooltip::text(
             "Generate a 2-3 sentence AI explanation of this commit",
@@ -429,7 +427,10 @@ fn render_message_block(
         // the user can override.
         let _ = host;
         let _ = BuildCommitPermalinkParams { sha: "" };
-        Some(format!("https://github.com/{}/{}/issues/{}", host, repo, number))
+        Some(format!(
+            "https://github.com/{}/{}/issues/{}",
+            host, repo, number
+        ))
     };
 
     let mut subject_children: Vec<AnyElement> = Vec::with_capacity(subject_tokens.len());
@@ -469,13 +470,10 @@ fn render_token(
         MessageToken::IssueRef(number) => {
             let label = format!("#{}", number);
             let url = permalink_for_issue(&number);
-            let mut btn = Button::new(
-                SharedString::from(format!("issue-{}", number)),
-                label,
-            )
-            .style(ButtonStyle::Subtle)
-            .color(Color::Accent)
-            .label_size(LabelSize::Default);
+            let mut btn = Button::new(SharedString::from(format!("issue-{}", number)), label)
+                .style(ButtonStyle::Subtle)
+                .color(Color::Accent)
+                .label_size(LabelSize::Default);
             if let Some(url) = url {
                 btn = btn.on_click(move |_, _, cx| cx.open_url(&url));
             }

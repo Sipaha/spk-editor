@@ -12,18 +12,16 @@ use std::sync::Arc;
 use editor::{Editor, EditorEvent, MultiBuffer};
 use git::operations::shelf::{self, FilesSummary, ShelfEntry};
 use gpui::{
-    AnyElement, Anchor, App, AppContext as _, ClipboardItem, Context, DismissEvent, Entity,
+    Anchor, AnyElement, App, AppContext as _, ClipboardItem, Context, DismissEvent, Entity,
     EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, MouseDownEvent,
-    ParentElement, Pixels, Point, PromptLevel, Render, SharedString, Styled, Subscription,
-    Task, WeakEntity, Window, anchored, deferred, uniform_list,
+    ParentElement, Pixels, Point, PromptLevel, Render, SharedString, Styled, Subscription, Task,
+    WeakEntity, Window, anchored, deferred, uniform_list,
 };
 use language::{Buffer, Capability};
 use project::Project;
 use project::git_store::{Repository, RepositoryEvent};
 use time::{OffsetDateTime, UtcOffset};
-use ui::{
-    ContextMenu, Divider, IconButtonShape, ListItem, ListItemSpacing, Tooltip, prelude::*,
-};
+use ui::{ContextMenu, Divider, IconButtonShape, ListItem, ListItemSpacing, Tooltip, prelude::*};
 use workspace::item::{ItemEvent, TabContentParams};
 use workspace::notifications::DetachAndPromptErr;
 use workspace::{Item, ItemNavHistory, ModalView, Workspace};
@@ -163,8 +161,8 @@ impl ShelfView {
             .and_then(|ix| self.rows.get(ix))
             .map(|row| row.entry.stash_sha.clone());
         cx.spawn(async move |this, cx| {
-            let load_result: anyhow::Result<(Vec<ShelfEntry>, Vec<String>)> =
-                cx.background_spawn(async move {
+            let load_result: anyhow::Result<(Vec<ShelfEntry>, Vec<String>)> = cx
+                .background_spawn(async move {
                     let store = shelf::ShelfStore::load(&work_dir)?;
                     let entries: Vec<ShelfEntry> = store.entries().to_vec();
                     let orphans = store.lookup_orphaned(&work_dir);
@@ -232,7 +230,11 @@ impl ShelfView {
                     row.entry.source_branch.as_deref().unwrap_or(""),
                 )
                 .to_lowercase();
-                if haystack.contains(&needle) { Some(ix) } else { None }
+                if haystack.contains(&needle) {
+                    Some(ix)
+                } else {
+                    None
+                }
             })
             .collect()
     }
@@ -295,10 +297,8 @@ impl ShelfView {
         let work_dir = repo.read(cx).work_directory_abs_path.clone();
         let name = entry.name;
         cx.spawn_in(window, async move |this, cx| {
-            cx.background_spawn(async move {
-                shelf::apply(&work_dir, &name, remove)
-            })
-            .await?;
+            cx.background_spawn(async move { shelf::apply(&work_dir, &name, remove) })
+                .await?;
             this.update_in(cx, |this, window, cx| {
                 this.refresh_entries(window, cx);
             })
@@ -310,12 +310,7 @@ impl ShelfView {
         });
     }
 
-    fn dispatch_drop(
-        &mut self,
-        entry: ShelfEntry,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn dispatch_drop(&mut self, entry: ShelfEntry, window: &mut Window, cx: &mut Context<Self>) {
         let Some(repo) = self.repo.clone() else {
             return;
         };
@@ -323,7 +318,10 @@ impl ShelfView {
         let name = entry.name;
         let answer = window.prompt(
             PromptLevel::Warning,
-            &format!("Drop shelf entry {:?}? The underlying stash is also dropped.", name),
+            &format!(
+                "Drop shelf entry {:?}? The underlying stash is also dropped.",
+                name
+            ),
             None,
             &["Drop", "Cancel"],
             cx,
@@ -332,10 +330,8 @@ impl ShelfView {
             if answer.await != Ok(0) {
                 return anyhow::Ok(());
             }
-            cx.background_spawn(async move {
-                shelf::drop(&work_dir, &name)
-            })
-            .await?;
+            cx.background_spawn(async move { shelf::drop(&work_dir, &name) })
+                .await?;
             this.update_in(cx, |this, window, cx| {
                 this.refresh_entries(window, cx);
             })
@@ -347,12 +343,7 @@ impl ShelfView {
         });
     }
 
-    fn dispatch_forget(
-        &mut self,
-        entry: ShelfEntry,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn dispatch_forget(&mut self, entry: ShelfEntry, window: &mut Window, cx: &mut Context<Self>) {
         let Some(repo) = self.repo.clone() else {
             return;
         };
@@ -399,12 +390,7 @@ impl ShelfView {
         );
     }
 
-    fn dispatch_rename(
-        &mut self,
-        entry: ShelfEntry,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn dispatch_rename(&mut self, entry: ShelfEntry, window: &mut Window, cx: &mut Context<Self>) {
         let Some(repo) = self.repo.clone() else {
             return;
         };
@@ -475,10 +461,8 @@ impl ShelfView {
                         let entry = entry.clone();
                         move |window, cx| {
                             let entry = entry.clone();
-                            view.update(cx, |view, cx| {
-                                view.dispatch_forget(entry, window, cx)
-                            })
-                            .ok();
+                            view.update(cx, |view, cx| view.dispatch_forget(entry, window, cx))
+                                .ok();
                         }
                     })
                     .separator();
@@ -521,10 +505,8 @@ impl ShelfView {
                         let entry = entry.clone();
                         move |window, cx| {
                             let entry = entry.clone();
-                            view.update(cx, |view, cx| {
-                                view.dispatch_view_diff(entry, window, cx)
-                            })
-                            .ok();
+                            view.update(cx, |view, cx| view.dispatch_view_diff(entry, window, cx))
+                                .ok();
                         }
                     })
                     .entry("Rename…", None, {
@@ -557,14 +539,11 @@ impl ShelfView {
             });
             menu
         });
-        let subscription = cx.subscribe_in(
-            &menu,
-            window,
-            |this, _, _: &DismissEvent, _window, cx| {
+        let subscription =
+            cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, _window, cx| {
                 this.context_menu.take();
                 cx.notify();
-            },
-        );
+            });
         self.context_menu = Some((menu, position, subscription));
         self.selected = Some(ix);
         cx.notify();
@@ -734,19 +713,21 @@ impl Render for ShelfView {
                                 uniform_list(
                                     "shelf-list",
                                     row_count,
-                                    cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
-                                        let mut items = Vec::with_capacity(range.len());
-                                        for i in range {
-                                            let Some(&ix) = visible.get(i) else {
-                                                continue;
-                                            };
-                                            let Some(row) = rows.get(ix) else {
-                                                continue;
-                                            };
-                                            items.push(this.render_row(ix, row, cx));
-                                        }
-                                        items
-                                    }),
+                                    cx.processor(
+                                        move |this, range: std::ops::Range<usize>, _window, cx| {
+                                            let mut items = Vec::with_capacity(range.len());
+                                            for i in range {
+                                                let Some(&ix) = visible.get(i) else {
+                                                    continue;
+                                                };
+                                                let Some(row) = rows.get(ix) else {
+                                                    continue;
+                                                };
+                                                items.push(this.render_row(ix, row, cx));
+                                            }
+                                            items
+                                        },
+                                    ),
                                 )
                                 .h_full()
                             }),
@@ -758,12 +739,7 @@ impl Render for ShelfView {
                             .h_full()
                             .child(self.render_detail_header(&selected_row, cx))
                             .child(Divider::horizontal())
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_h_0()
-                                    .child(self.detail_editor.clone()),
-                            ),
+                            .child(div().flex_1().min_h_0().child(self.detail_editor.clone())),
                     ),
             )
             .child(self.render_bottom_toolbar(cx))
@@ -780,19 +756,21 @@ impl Render for ShelfView {
 }
 
 impl ShelfView {
-    fn render_detail_header(
-        &self,
-        selected: &Option<ShelfRow>,
-        _cx: &Context<Self>,
-    ) -> AnyElement {
+    fn render_detail_header(&self, selected: &Option<ShelfRow>, _cx: &Context<Self>) -> AnyElement {
         match selected {
             Some(row) => h_flex()
                 .w_full()
                 .px_2()
                 .py_1p5()
                 .gap_2()
-                .child(Icon::new(IconName::Hash).size(IconSize::Small).color(Color::Muted))
-                .child(Label::new(SharedString::from(row.entry.name.clone())).size(LabelSize::Small))
+                .child(
+                    Icon::new(IconName::Hash)
+                        .size(IconSize::Small)
+                        .color(Color::Muted),
+                )
+                .child(
+                    Label::new(SharedString::from(row.entry.name.clone())).size(LabelSize::Small),
+                )
                 .when_some(row.entry.source_branch.clone(), |this, branch| {
                     this.child(
                         Label::new("•")
@@ -995,7 +973,11 @@ impl ShelveCurrentChangesModal {
         let description = {
             let raw = self.description_editor.read(cx).text(cx);
             let trimmed = raw.trim().to_string();
-            if trimmed.is_empty() { None } else { Some(trimmed) }
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
         };
         let work_dir = self.repo.read(cx).work_directory_abs_path.clone();
         let remove_after = self.remove_after;
@@ -1053,15 +1035,12 @@ impl Render for ShelveCurrentChangesModal {
             )
             .child(
                 v_flex().px_3().pb_2().gap_1().child(
-                    ui::Checkbox::new(
-                        "shelf-remove-after",
-                        ui::ToggleState::from(remove_after),
-                    )
-                    .label("Remove from working tree after shelve")
-                    .on_click(cx.listener(|this, state: &ui::ToggleState, _, cx| {
-                        this.remove_after = matches!(state, ui::ToggleState::Selected);
-                        cx.notify();
-                    })),
+                    ui::Checkbox::new("shelf-remove-after", ui::ToggleState::from(remove_after))
+                        .label("Remove from working tree after shelve")
+                        .on_click(cx.listener(|this, state: &ui::ToggleState, _, cx| {
+                            this.remove_after = matches!(state, ui::ToggleState::Selected);
+                            cx.notify();
+                        })),
                 ),
             )
             .child(
@@ -1081,13 +1060,11 @@ impl Render for ShelveCurrentChangesModal {
                     .pb_3()
                     .gap_2()
                     .justify_end()
-                    .child(
-                        Button::new("shelf-cancel", "Cancel").on_click(cx.listener(
-                            |_, _, _, cx| {
-                                cx.emit(DismissEvent);
-                            },
-                        )),
-                    )
+                    .child(Button::new("shelf-cancel", "Cancel").on_click(cx.listener(
+                        |_, _, _, cx| {
+                            cx.emit(DismissEvent);
+                        },
+                    )))
                     .child(
                         Button::new("shelf-confirm", "Shelve")
                             .style(ButtonStyle::Filled)
@@ -1143,12 +1120,9 @@ impl ShelfRenameModal {
             Ok(())
         });
         cx.spawn(async move |_, _| task.await)
-            .detach_and_prompt_err(
-                "Failed to rename shelf entry",
-                window,
-                cx,
-                |e, _, _| Some(e.to_string()),
-            );
+            .detach_and_prompt_err("Failed to rename shelf entry", window, cx, |e, _, _| {
+                Some(e.to_string())
+            });
         cx.emit(DismissEvent);
     }
 }
@@ -1256,12 +1230,9 @@ impl ShelfEditDescriptionModal {
             Ok(())
         });
         cx.spawn(async move |_, _| task.await)
-            .detach_and_prompt_err(
-                "Failed to update description",
-                window,
-                cx,
-                |e, _, _| Some(e.to_string()),
-            );
+            .detach_and_prompt_err("Failed to update description", window, cx, |e, _, _| {
+                Some(e.to_string())
+            });
         cx.emit(DismissEvent);
     }
 }
@@ -1296,11 +1267,8 @@ impl Render for ShelfEditDescriptionModal {
                     .gap_1p5()
                     .child(Icon::new(IconName::Pencil).size(IconSize::XSmall))
                     .child(
-                        Headline::new(format!(
-                            "Edit Description — {}",
-                            self.entry.name
-                        ))
-                        .size(HeadlineSize::XSmall),
+                        Headline::new(format!("Edit Description — {}", self.entry.name))
+                            .size(HeadlineSize::XSmall),
                     ),
             )
             .child(
@@ -1334,4 +1302,3 @@ impl Render for ShelfEditDescriptionModal {
             )
     }
 }
-

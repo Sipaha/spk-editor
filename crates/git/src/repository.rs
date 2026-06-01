@@ -810,10 +810,7 @@ pub trait GitRepository: Send + Sync {
     /// from Here…" handler.
     fn branch_at_sha(&self, name: String, sha: String) -> BoxFuture<'_, Result<()>> {
         let _ = (name, sha);
-        future::ready(Err(anyhow!(
-            "branch_at_sha not supported on this backend"
-        )))
-        .boxed()
+        future::ready(Err(anyhow!("branch_at_sha not supported on this backend"))).boxed()
     }
 
     /// Create a tag `name` pointing at `sha`. When `message` is `Some`, the
@@ -862,28 +859,19 @@ pub trait GitRepository: Send + Sync {
     /// `upstream` is a remote tracking ref like `origin/main`.
     fn set_upstream(&self, branch: String, upstream: String) -> BoxFuture<'_, Result<()>> {
         let _ = (branch, upstream);
-        future::ready(Err(anyhow!(
-            "set_upstream not supported on this backend"
-        )))
-        .boxed()
+        future::ready(Err(anyhow!("set_upstream not supported on this backend"))).boxed()
     }
 
     /// S-BRP "Delete Tag" — `git tag -d <name>`.
     fn delete_tag(&self, name: String) -> BoxFuture<'_, Result<()>> {
         let _ = name;
-        future::ready(Err(anyhow!(
-            "delete_tag not supported on this backend"
-        )))
-        .boxed()
+        future::ready(Err(anyhow!("delete_tag not supported on this backend"))).boxed()
     }
 
     /// S-BRP "Push Tag" — `git push <remote> <tag>`.
     fn push_tag(&self, remote: String, tag: String) -> BoxFuture<'_, Result<()>> {
         let _ = (remote, tag);
-        future::ready(Err(anyhow!(
-            "push_tag not supported on this backend"
-        )))
-        .boxed()
+        future::ready(Err(anyhow!("push_tag not supported on this backend"))).boxed()
     }
 
     /// "Delete Remote Tag" — `git push <remote> --delete refs/tags/<tag>`.
@@ -969,20 +957,14 @@ pub trait GitRepository: Send + Sync {
     /// Local branches (and remote-tracking branches if there's no
     /// `--list` filter) that contain the given commit. Empty when the
     /// commit is unreachable.
-    fn branches_containing(
-        &self,
-        sha: String,
-    ) -> BoxFuture<'_, Result<Vec<SharedString>>> {
+    fn branches_containing(&self, sha: String) -> BoxFuture<'_, Result<Vec<SharedString>>> {
         let _ = sha;
         future::ready(Ok(Vec::new())).boxed()
     }
 
     /// Tags that contain the given commit. Empty when the commit is
     /// unreachable from any tag.
-    fn tags_containing(
-        &self,
-        sha: String,
-    ) -> BoxFuture<'_, Result<Vec<SharedString>>> {
+    fn tags_containing(&self, sha: String) -> BoxFuture<'_, Result<Vec<SharedString>>> {
         let _ = sha;
         future::ready(Ok(Vec::new())).boxed()
     }
@@ -1089,7 +1071,10 @@ pub trait GitRepository: Send + Sync {
         env: Arc<HashMap<String, String>>,
     ) -> BoxFuture<'_, Result<String>> {
         let _ = (stash_ref, env);
-        future::ready(Err(anyhow!("stash_show_patch not supported on this backend"))).boxed()
+        future::ready(Err(anyhow!(
+            "stash_show_patch not supported on this backend"
+        )))
+        .boxed()
     }
 
     /// `git stash show --stat --include-untracked <stash_ref>` parsed for
@@ -1773,8 +1758,7 @@ impl GitRepository for RealGitRepository {
                         return Ok(None);
                     }
                     Err(err) => {
-                        return Err(err)
-                            .context("failed to run git config --get commit.template");
+                        return Err(err).context("failed to run git config --get commit.template");
                     }
                 };
 
@@ -2348,8 +2332,7 @@ impl GitRepository for RealGitRepository {
                 // Step 1: capture `git show <sha>`. We don't pipe directly
                 // into `git patch-id`'s stdin because `util::command::Child`
                 // smol-process stdout is not `Into<Stdio>` on all targets.
-                let show_output =
-                    git.build_command(&["show", &sha]).output().await?;
+                let show_output = git.build_command(&["show", &sha]).output().await?;
                 anyhow::ensure!(
                     show_output.status.success(),
                     "Failed to run `git show {}`:\n{}",
@@ -2362,7 +2345,9 @@ impl GitRepository for RealGitRepository {
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped());
-                let mut child = patch_id_command.spawn().context("spawning `git patch-id`")?;
+                let mut child = patch_id_command
+                    .spawn()
+                    .context("spawning `git patch-id`")?;
                 {
                     let mut stdin = child
                         .stdin
@@ -2374,10 +2359,7 @@ impl GitRepository for RealGitRepository {
                         .context("writing diff to `git patch-id` stdin")?;
                     stdin.flush().await.ok();
                 }
-                let output = child
-                    .output()
-                    .await
-                    .context("waiting on `git patch-id`")?;
+                let output = child.output().await.context("waiting on `git patch-id`")?;
                 anyhow::ensure!(
                     output.status.success(),
                     "Failed to run `git patch-id`:\n{}",
@@ -2398,7 +2380,9 @@ impl GitRepository for RealGitRepository {
         let git_binary = self.git_binary();
         self.executor
             .spawn(async move {
-                git_binary?.run(&["branch", "-u", &upstream, &branch]).await?;
+                git_binary?
+                    .run(&["branch", "-u", &upstream, &branch])
+                    .await?;
                 anyhow::Ok(())
             })
             .boxed()
@@ -2442,11 +2426,7 @@ impl GitRepository for RealGitRepository {
             .spawn(async move {
                 let git = git_binary?;
                 let output = git
-                    .build_command(&[
-                        "tag",
-                        "--sort=-taggerdate",
-                        "--format=%(refname:short)",
-                    ])
+                    .build_command(&["tag", "--sort=-taggerdate", "--format=%(refname:short)"])
                     .output()
                     .await?;
                 anyhow::ensure!(
@@ -3187,16 +3167,19 @@ impl GitRepository for RealGitRepository {
             .boxed()
     }
 
-    fn branches_containing(
-        &self,
-        sha: String,
-    ) -> BoxFuture<'_, Result<Vec<SharedString>>> {
+    fn branches_containing(&self, sha: String) -> BoxFuture<'_, Result<Vec<SharedString>>> {
         let git_binary = self.git_binary();
         self.executor
             .spawn(async move {
                 let git = git_binary?;
                 let output = git
-                    .build_command(&["branch", "--list", "--contains", &sha, "--format=%(refname:short)"])
+                    .build_command(&[
+                        "branch",
+                        "--list",
+                        "--contains",
+                        &sha,
+                        "--format=%(refname:short)",
+                    ])
                     .output()
                     .await?;
                 if !output.status.success() {
@@ -3205,15 +3188,14 @@ impl GitRepository for RealGitRepository {
                         String::from_utf8_lossy(&output.stderr).trim_end()
                     );
                 }
-                Ok(parse_contains_output(&String::from_utf8_lossy(&output.stdout)))
+                Ok(parse_contains_output(&String::from_utf8_lossy(
+                    &output.stdout,
+                )))
             })
             .boxed()
     }
 
-    fn tags_containing(
-        &self,
-        sha: String,
-    ) -> BoxFuture<'_, Result<Vec<SharedString>>> {
+    fn tags_containing(&self, sha: String) -> BoxFuture<'_, Result<Vec<SharedString>>> {
         let git_binary = self.git_binary();
         self.executor
             .spawn(async move {
@@ -3228,7 +3210,9 @@ impl GitRepository for RealGitRepository {
                         String::from_utf8_lossy(&output.stderr).trim_end()
                     );
                 }
-                Ok(parse_contains_output(&String::from_utf8_lossy(&output.stdout)))
+                Ok(parse_contains_output(&String::from_utf8_lossy(
+                    &output.stdout,
+                )))
             })
             .boxed()
     }
@@ -3252,13 +3236,7 @@ impl GitRepository for RealGitRepository {
             // Re-use the same `name-status -z` parsing the first-parent path
             // already exercises, but force the comparison against `<sha>^N`.
             let show_output = git
-                .build_command(&[
-                    "diff",
-                    "--format=",
-                    "-z",
-                    "--no-renames",
-                    "--name-status",
-                ])
+                .build_command(&["diff", "--format=", "-z", "--no-renames", "--name-status"])
                 .arg(&parent_ref)
                 .arg(&commit)
                 .stdin(Stdio::null())
@@ -5476,9 +5454,7 @@ mod tests {
             .await
             .expect("first branch_at_sha should succeed");
 
-        let second = repo
-            .branch_at_sha("feature".into(), head_sha.clone())
-            .await;
+        let second = repo.branch_at_sha("feature".into(), head_sha.clone()).await;
         assert!(
             second.is_err(),
             "creating an existing branch must error, got: {second:?}"
@@ -5528,10 +5504,7 @@ mod tests {
             patch_id.chars().all(|c| c.is_ascii_hexdigit()),
             "patch-id should be hex, got {patch_id:?}"
         );
-        assert!(
-            !patch_id.is_empty(),
-            "patch-id should be non-empty"
-        );
+        assert!(!patch_id.is_empty(), "patch-id should be non-empty");
     }
 
     impl RealGitRepository {

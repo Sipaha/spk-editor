@@ -159,11 +159,7 @@ fn render_row(
                                 .size(LabelSize::XSmall)
                                 .color(Color::Muted),
                         )
-                        .child(
-                            Label::new(date)
-                                .size(LabelSize::XSmall)
-                                .color(Color::Muted),
-                        ),
+                        .child(Label::new(date).size(LabelSize::XSmall).color(Color::Muted)),
                 ),
         )
         .into_any_element()
@@ -248,7 +244,11 @@ mod tests {
     fn many_commits_graph() {
         let mut commits = Vec::new();
         for ix in 0..50 {
-            commits.push(sample(&format!("sha{ix:040}"), &format!("commit {ix}"), ix as i64));
+            commits.push(sample(
+                &format!("sha{ix:040}"),
+                &format!("commit {ix}"),
+                ix as i64,
+            ));
         }
         let graph = MiniGraph::new(commits);
         assert_eq!(graph.len(), 50);

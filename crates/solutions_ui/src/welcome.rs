@@ -251,13 +251,7 @@ fn render_section(cx: &mut App) -> Option<AnyElement> {
             let renaming = matches!(&mode, WelcomeEditMode::Renaming(id) if id == &entry.id);
             let confirming_delete =
                 matches!(&mode, WelcomeEditMode::ConfirmingDelete(id) if id == &entry.id);
-            list = list.child(render_card(
-                index,
-                entry,
-                renaming,
-                confirming_delete,
-                cx,
-            ));
+            list = list.child(render_card(index, entry, renaming, confirming_delete, cx));
         }
     }
     if matches!(mode, WelcomeEditMode::Creating) {

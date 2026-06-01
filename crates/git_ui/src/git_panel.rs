@@ -2,8 +2,8 @@ use crate::askpass_modal::AskPassModal;
 use crate::commit_modal::CommitModal;
 use crate::commit_tooltip::CommitTooltip;
 use crate::commit_view::CommitView;
-use crate::pre_commit;
 use crate::git_panel_settings::GitPanelScrollbarAccessor;
+use crate::pre_commit;
 use crate::project_diff::{self, BranchDiff, Diff, ProjectDiff};
 use crate::remote_output::{self, RemoteAction, SuccessMessage};
 use crate::{branch_picker, picker_prompt, render_remote_button};
@@ -59,6 +59,8 @@ use proto::RpcError;
 use serde::{Deserialize, Serialize};
 use settings::{Settings, SettingsStore, StatusStyle};
 use smallvec::SmallVec;
+use solutions;
+use solutions_ui;
 use std::future::Future;
 use std::ops::Range;
 use std::path::Path;
@@ -79,8 +81,6 @@ use workspace::{
     dock::{DockPosition, Panel, PanelEvent},
     notifications::{DetachAndPromptErr, ErrorMessagePrompt, NotificationId, NotifyResultExt},
 };
-use solutions;
-use solutions_ui;
 
 actions!(
     git_panel,
@@ -269,13 +269,11 @@ pub fn register(workspace: &mut Workspace) {
     // weren't previously routed (because the panel-local handler only
     // fires when focus is already inside the panel) now reach the
     // panel via the registered `GitPanel` entity.
-    workspace.register_action(
-        |workspace, _: &git::GenerateCommitMessage, _window, cx| {
-            if let Some(panel) = workspace.panel::<GitPanel>(cx) {
-                panel.update(cx, |panel, cx| panel.generate_commit_message(cx));
-            }
-        },
-    );
+    workspace.register_action(|workspace, _: &git::GenerateCommitMessage, _window, cx| {
+        if let Some(panel) = workspace.panel::<GitPanel>(cx) {
+            panel.update(cx, |panel, cx| panel.generate_commit_message(cx));
+        }
+    });
 }
 
 #[derive(Debug, Clone)]
@@ -2508,10 +2506,8 @@ impl GitPanel {
         cx: &Context<Self>,
     ) -> Option<pre_commit::CheckRunner> {
         let cfg = &self.pre_commit_config;
-        let nothing_configured = !cfg.format
-            && !cfg.organize_imports
-            && cfg.tasks.is_empty()
-            && !cfg.run_hook;
+        let nothing_configured =
+            !cfg.format && !cfg.organize_imports && cfg.tasks.is_empty() && !cfg.run_hook;
         if nothing_configured && !self.pre_commit_no_verify {
             return None;
         }
@@ -2604,12 +2600,9 @@ impl GitPanel {
                 workspace
                     .update(cx, |workspace, cx| {
                         let toast = workspace::Toast::new(
-                            workspace::notifications::NotificationId::unique::<
-                                PreCommitFailureId,
-                            >(),
-                            format!(
-                                "Pre-commit check `{which_for_async}` output captured to log"
+                            workspace::notifications::NotificationId::unique::<PreCommitFailureId>(
                             ),
+                            format!("Pre-commit check `{which_for_async}` output captured to log"),
                         );
                         workspace.show_toast(toast, cx);
                     })
@@ -3841,10 +3834,7 @@ impl GitPanel {
     /// active Solution has ≥ 2 members and a `SolutionPanelProvider` is
     /// registered. When toggled on, also exposes the auto-trailer
     /// checkbox.
-    fn render_solution_wide_toggle(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement> {
+    fn render_solution_wide_toggle(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         if !self.solution_wide_toggle_available(cx) {
             return None;
         }
@@ -4560,7 +4550,12 @@ impl GitPanel {
         // only precondition is that a Solution is open — we don't surface
         // the upstream "Configure an LLM provider..." path.
         let no_active_solution = solutions::SolutionStore::try_global(cx)
-            .map(|s| s.read(cx).solutions().iter().all(|s| s.last_opened_at.is_none()))
+            .map(|s| {
+                s.read(cx)
+                    .solutions()
+                    .iter()
+                    .all(|s| s.last_opened_at.is_none())
+            })
             .unwrap_or(true);
         let can_commit = self.can_commit();
 
@@ -4578,10 +4573,7 @@ impl GitPanel {
                     if !can_commit {
                         Tooltip::simple("No Changes to Commit", cx)
                     } else if no_active_solution {
-                        Tooltip::simple(
-                            "Open a Solution to generate AI commit messages",
-                            cx,
-                        )
+                        Tooltip::simple("Open a Solution to generate AI commit messages", cx)
                     } else {
                         Tooltip::for_action_in(
                             "Generate Commit Message",
@@ -4858,8 +4850,8 @@ impl GitPanel {
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
         let active_repository = self.active_repository.clone()?;
-        let setting_enables_hook_row = GitPanelSettings::get_global(cx)
-            .run_pre_commit_hooks_in_panel;
+        let setting_enables_hook_row =
+            GitPanelSettings::get_global(cx).run_pre_commit_hooks_in_panel;
         let work_dir = active_repository.read(cx).work_directory_abs_path.clone();
         let hook_runnable = pre_commit::pre_commit_hook_runnable(&work_dir);
         let show_hook_row = setting_enables_hook_row && hook_runnable;
@@ -4882,16 +4874,15 @@ impl GitPanel {
             .on_click(cx.listener(|this, state: &ui::ToggleState, _, cx| {
                 this.set_pre_commit_format(matches!(state, ui::ToggleState::Selected), cx);
             }));
-        let organize_row =
-            Checkbox::new("pre-commit-organize-imports", to_state(cfg.organize_imports))
-                .label("Organize imports")
-                .disabled(no_verify)
-                .on_click(cx.listener(|this, state: &ui::ToggleState, _, cx| {
-                    this.set_pre_commit_organize_imports(
-                        matches!(state, ui::ToggleState::Selected),
-                        cx,
-                    );
-                }));
+        let organize_row = Checkbox::new(
+            "pre-commit-organize-imports",
+            to_state(cfg.organize_imports),
+        )
+        .label("Organize imports")
+        .disabled(no_verify)
+        .on_click(cx.listener(|this, state: &ui::ToggleState, _, cx| {
+            this.set_pre_commit_organize_imports(matches!(state, ui::ToggleState::Selected), cx);
+        }));
 
         let mut rows = v_flex()
             .px_2()
@@ -6375,11 +6366,7 @@ impl GitPanel {
         cx.notify();
     }
 
-    pub(crate) fn set_pre_commit_organize_imports(
-        &mut self,
-        value: bool,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn set_pre_commit_organize_imports(&mut self, value: bool, cx: &mut Context<Self>) {
         if self.pre_commit_config.organize_imports == value {
             return;
         }
@@ -6638,8 +6625,7 @@ impl Render for GitPanel {
                             let provider = crate::providers::solution_panel_provider();
                             match provider {
                                 Some(p) => this.child(p.render_solution_commit_panel(cx)),
-                                None => this
-                                    .child(self.render_empty_state(cx).into_any_element()),
+                                None => this.child(self.render_empty_state(cx).into_any_element()),
                             }
                         } else if let Some(repo) = self.active_repository.clone()
                             && has_entries
@@ -9032,11 +9018,7 @@ mod tests {
         panel.read_with(cx, |panel, cx| {
             // With no solution active, selected_member() returns None.
             assert!(
-                panel
-                    .solution_selector
-                    .read(cx)
-                    .selected_member()
-                    .is_none(),
+                panel.solution_selector.read(cx).selected_member().is_none(),
                 "selector should have no selected member when no solution is active"
             );
         });

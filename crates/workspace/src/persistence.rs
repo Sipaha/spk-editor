@@ -5564,13 +5564,7 @@ mod tests {
                 Some("/tmp/work".to_string()),
                 false,
             ),
-            (
-                1,
-                "chat".to_string(),
-                "abcd1234".to_string(),
-                None,
-                true,
-            ),
+            (1, "chat".to_string(), "abcd1234".to_string(), None, true),
         ];
         db.save_console_panel_tabs(workspace_id, initial.clone())
             .await

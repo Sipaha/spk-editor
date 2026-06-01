@@ -14,8 +14,8 @@
 //!     folder is empty / fails to stat / is missing).
 
 use gpui::{
-    Context, DismissEvent, EventEmitter, FocusHandle, Focusable, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Task, Window,
+    Context, DismissEvent, EventEmitter, FocusHandle, Focusable, IntoElement, ParentElement as _,
+    Render, SharedString, Styled as _, Task, Window,
 };
 use std::path::{Path, PathBuf};
 use ui::{TintColor, prelude::*};
@@ -178,9 +178,7 @@ impl Render for DeleteConfirmModal {
                 };
                 h_flex()
                     .gap_2()
-                    .child(
-                        Label::new(format!("• {}", item.label.clone())).color(Color::Default),
-                    )
+                    .child(Label::new(format!("• {}", item.label.clone())).color(Color::Default))
                     .when(!size_label.is_empty(), |this| {
                         this.child(Label::new(size_label).color(Color::Muted))
                     })
@@ -262,9 +260,6 @@ mod tests {
         assert_eq!(format_size(512), "512 B");
         assert_eq!(format_size(2 * 1024), "2 KB");
         assert_eq!(format_size(5 * 1024 * 1024), "5 MB");
-        assert_eq!(
-            format_size(2 * 1024 * 1024 * 1024 + 500_000_000),
-            "2.5 GB"
-        );
+        assert_eq!(format_size(2 * 1024 * 1024 * 1024 + 500_000_000), "2.5 GB");
     }
 }

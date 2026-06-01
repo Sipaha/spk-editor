@@ -42,29 +42,20 @@ pub struct RemoteControlModal {
 }
 
 impl RemoteControlModal {
-    pub fn toggle(
-        workspace: &mut Workspace,
-        window: &mut Window,
-        cx: &mut Context<Workspace>,
-    ) {
+    pub fn toggle(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
         let weak = workspace.weak_handle();
         workspace.toggle_modal(window, cx, move |window, cx| {
             RemoteControlModal::new(weak, window, cx)
         });
     }
 
-    fn new(
-        workspace: WeakEntity<Workspace>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    fn new(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let address_editor = cx.new(|cx| Editor::single_line(window, cx));
         let port_editor = cx.new(|cx| Editor::single_line(window, cx));
         let new_client_editor = cx.new(|cx| Editor::single_line(window, cx));
         let focus_handle = cx.focus_handle();
-        let store_subscription = RemoteControlStore::try_global(cx).map(|store| {
-            cx.subscribe(&store, |_, _, _: &RemoteControlStoreEvent, cx| cx.notify())
-        });
+        let store_subscription = RemoteControlStore::try_global(cx)
+            .map(|store| cx.subscribe(&store, |_, _, _: &RemoteControlStoreEvent, cx| cx.notify()));
         let mut this = Self {
             workspace,
             address_editor,
@@ -127,8 +118,7 @@ impl RemoteControlModal {
                 self.inline_error = None;
             }
             Err(err) => {
-                self.inline_error =
-                    Some(format!("Port must be a number 0-65535: {err}").into());
+                self.inline_error = Some(format!("Port must be a number 0-65535: {err}").into());
             }
         }
     }
@@ -180,8 +170,7 @@ impl RemoteControlModal {
                     }
                     Err(err) => {
                         log::warn!("remote_control: detect_address failed: {err:#}");
-                        this.inline_error =
-                            Some(format!("Couldn't detect address: {err}").into());
+                        this.inline_error = Some(format!("Couldn't detect address: {err}").into());
                         cx.notify();
                     }
                 }
@@ -317,8 +306,7 @@ impl Render for RemoteControlModal {
                     .clients
                     .iter()
                     .map(|client| {
-                        let prefix: String =
-                            client.secret_base64.chars().take(16).collect();
+                        let prefix: String = client.secret_base64.chars().take(16).collect();
                         let label = format!("{prefix}\u{2026}");
                         (
                             SharedString::from(client.name.clone()),
@@ -327,11 +315,7 @@ impl Render for RemoteControlModal {
                         )
                     })
                     .collect();
-                (
-                    settings.enabled,
-                    settings.server_address.is_some(),
-                    clients,
-                )
+                (settings.enabled, settings.server_address.is_some(), clients)
             }),
             None => (false, false, Vec::new()),
         };
@@ -433,16 +417,15 @@ impl RemoteControlModal {
                             .tooltip(Tooltip::text(
                                 "Ask ifconfig.me for the public address of this machine.",
                             ))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.detect_address(window, cx)
-                            })),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.detect_address(window, cx)),
+                            ),
                     )
-                    .child(
-                        Button::new("remote-control-save-address", "Save")
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                this.save_address_from_editor(cx);
-                            })),
-                    ),
+                    .child(Button::new("remote-control-save-address", "Save").on_click(
+                        cx.listener(|this, _, _window, cx| {
+                            this.save_address_from_editor(cx);
+                        }),
+                    )),
             )
     }
 
@@ -464,10 +447,11 @@ impl RemoteControlModal {
                             .child(self.port_editor.clone()),
                     )
                     .child(
-                        Button::new("remote-control-save-port", "Save")
-                            .on_click(cx.listener(|this, _, _window, cx| {
+                        Button::new("remote-control-save-port", "Save").on_click(cx.listener(
+                            |this, _, _window, cx| {
                                 this.save_port_from_editor(cx);
-                            })),
+                            },
+                        )),
                     ),
             )
     }
@@ -519,24 +503,21 @@ impl RemoteControlModal {
                                 .color(Color::Muted),
                         )
                         .child(
-                            IconButton::new(
-                                ("remote-control-show-qr", index),
-                                IconName::Maximize,
-                            )
-                            .icon_size(IconSize::Small)
-                            .tooltip(Tooltip::text("Show QR"))
-                            .on_click(cx.listener({
-                                let name = name_for_btn.clone();
-                                let secret = secret_for_btn.clone();
-                                move |this, _, window, cx| {
-                                    this.show_qr_popover(
-                                        name.clone(),
-                                        secret.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                }
-                            })),
+                            IconButton::new(("remote-control-show-qr", index), IconName::Maximize)
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::text("Show QR"))
+                                .on_click(cx.listener({
+                                    let name = name_for_btn.clone();
+                                    let secret = secret_for_btn.clone();
+                                    move |this, _, window, cx| {
+                                        this.show_qr_popover(
+                                            name.clone(),
+                                            secret.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                })),
                         ),
                 );
             }

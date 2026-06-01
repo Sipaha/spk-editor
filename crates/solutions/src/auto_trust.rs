@@ -29,10 +29,7 @@ pub fn init(cx: &mut App) -> Subscription {
     })
 }
 
-fn trust_solution_roots_for_project(
-    project: &gpui::Entity<project::Project>,
-    cx: &mut App,
-) {
+fn trust_solution_roots_for_project(project: &gpui::Entity<project::Project>, cx: &mut App) {
     let Some(store) = SolutionStore::try_global(cx) else {
         return;
     };

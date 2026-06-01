@@ -54,11 +54,13 @@ fn create_patch_single_sha_writes_file() {
     let sha = rev_parse(dir.path(), "HEAD");
 
     let out_dir = tempfile::tempdir().expect("out tempdir");
-    let paths = create_patch(dir.path(), &sha, None, Some(out_dir.path()))
-        .expect("create_patch");
+    let paths = create_patch(dir.path(), &sha, None, Some(out_dir.path())).expect("create_patch");
     assert_eq!(paths.len(), 1, "expected one patch file, got {paths:?}");
     let patch_file = &paths[0];
-    assert!(patch_file.exists(), "patch file should exist: {patch_file:?}");
+    assert!(
+        patch_file.exists(),
+        "patch file should exist: {patch_file:?}"
+    );
     let body = std::fs::read_to_string(patch_file).expect("read patch");
     assert!(body.starts_with("From "), "patch should be mbox: {body:?}");
     assert!(body.contains("add beta"), "patch should reference subject");
@@ -90,8 +92,7 @@ fn apply_patch_clean() {
     let sha = rev_parse(dir.path(), "HEAD");
 
     let out_dir = tempfile::tempdir().expect("out");
-    let patches = create_patch(dir.path(), &sha, None, Some(out_dir.path()))
-        .expect("format-patch");
+    let patches = create_patch(dir.path(), &sha, None, Some(out_dir.path())).expect("format-patch");
     assert_eq!(patches.len(), 1);
 
     git(dir.path(), &["checkout", "-q", "main"]);
@@ -133,8 +134,7 @@ fn apply_patch_unified_no_index_clean() {
     body.push_str("+bravo\n");
     std::fs::write(&patch_path, body).unwrap();
 
-    let outcome = apply_patch(dir.path(), &patch_path, ApplyOptions::default())
-        .expect("apply");
+    let outcome = apply_patch(dir.path(), &patch_path, ApplyOptions::default()).expect("apply");
     match outcome {
         ApplyOutcome::Clean => {}
         other => panic!("expected Clean, got {other:?}"),
@@ -157,8 +157,7 @@ fn apply_patch_with_conflict() {
     let sha = rev_parse(dir.path(), "HEAD");
 
     let out_dir = tempfile::tempdir().expect("out");
-    let patches = create_patch(dir.path(), &sha, None, Some(out_dir.path()))
-        .expect("format-patch");
+    let patches = create_patch(dir.path(), &sha, None, Some(out_dir.path())).expect("format-patch");
 
     git(dir.path(), &["checkout", "-q", "main"]);
     std::fs::write(dir.path().join("a.txt"), "alpha\nmain\n").unwrap();
@@ -182,9 +181,7 @@ fn apply_patch_with_conflict() {
                 "expected at least one conflicted file"
             );
             assert!(
-                conflicted_files
-                    .iter()
-                    .any(|p| p.ends_with("a.txt")),
+                conflicted_files.iter().any(|p| p.ends_with("a.txt")),
                 "expected a.txt in conflicts, got {conflicted_files:?}"
             );
         }

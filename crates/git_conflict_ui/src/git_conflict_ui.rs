@@ -22,9 +22,7 @@ pub mod resolver_view;
 pub mod sidebar;
 mod toolbar;
 
-pub use conflict_parser::{
-    ConflictedFile, InProgressOp, ThreeWayContent, detect_in_progress_op,
-};
+pub use conflict_parser::{ConflictedFile, InProgressOp, ThreeWayContent, detect_in_progress_op};
 pub use resolver_view::{ConflictResolverView, ResolverPane, ThreeWaySplitState};
 
 use gpui::App;
@@ -47,8 +45,7 @@ pub fn init(cx: &mut App) {
                     log::warn!("OpenConflictResolver: no active repository");
                     return;
                 };
-                let work_dir: Arc<std::path::Path> =
-                    repo.read(cx).work_directory_abs_path.clone();
+                let work_dir: Arc<std::path::Path> = repo.read(cx).work_directory_abs_path.clone();
                 let weak = workspace.weak_handle();
                 ConflictResolverView::open(project, weak, work_dir, window, cx)
                     .detach_and_log_err(cx);

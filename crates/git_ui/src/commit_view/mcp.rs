@@ -78,8 +78,12 @@ impl McpServerTool for CommitShowTool {
             cx.update(|cx| resolve_work_directory(input.repo_id.map(RepositoryId), cx))?;
         let header = run_show_header(&work_dir, &input.sha).await?;
         let files = run_show_numstat(&work_dir, &input.sha).await?;
-        let branches = run_contains(&work_dir, &input.sha, "branch").await.unwrap_or_default();
-        let tags = run_contains(&work_dir, &input.sha, "tag").await.unwrap_or_default();
+        let branches = run_contains(&work_dir, &input.sha, "branch")
+            .await
+            .unwrap_or_default();
+        let tags = run_contains(&work_dir, &input.sha, "tag")
+            .await
+            .unwrap_or_default();
         let summary = format!(
             "{} ({} files, {} branches / {} tags)",
             input.sha,
@@ -121,7 +125,11 @@ struct CommitHeader {
 async fn run_show_header(work_dir: &Path, sha: &str) -> Result<CommitHeader> {
     // %H<NUL>%P<NUL>%ct<NUL>%an<NUL>%ae<NUL>%D<NUL>%s<NUL>%b
     let format = "--format=%H%x00%P%x00%ct%x00%an%x00%ae%x00%D%x00%s%x00%b";
-    let output = run_git(work_dir, &["show", "--no-patch", "--decorate=full", format, sha]).await?;
+    let output = run_git(
+        work_dir,
+        &["show", "--no-patch", "--decorate=full", format, sha],
+    )
+    .await?;
     parse_show_header(&output).context("parsing `git show --format=` output")
 }
 
@@ -160,16 +168,8 @@ fn parse_show_header(stdout: &str) -> Option<CommitHeader> {
 async fn run_show_numstat(work_dir: &Path, sha: &str) -> Result<Vec<FileWithNumstat>> {
     // `--name-status` + `--numstat` in one pass via `--format=`
     // would interleave; run two passes and join by file path.
-    let stat_out = run_git(
-        work_dir,
-        &["show", "--format=", "-z", "--numstat", sha],
-    )
-    .await?;
-    let status_out = run_git(
-        work_dir,
-        &["show", "--format=", "-z", "--name-status", sha],
-    )
-    .await?;
+    let stat_out = run_git(work_dir, &["show", "--format=", "-z", "--numstat", sha]).await?;
+    let status_out = run_git(work_dir, &["show", "--format=", "-z", "--name-status", sha]).await?;
     Ok(merge_numstat(&stat_out, &status_out))
 }
 
@@ -259,7 +259,13 @@ fn parse_namestatus_z(stdout: &str) -> Vec<(String, String, Option<String>)> {
 
 async fn run_contains(work_dir: &Path, sha: &str, kind: &str) -> Result<Vec<String>> {
     let args: Vec<&str> = match kind {
-        "branch" => vec!["branch", "--list", "--contains", sha, "--format=%(refname:short)"],
+        "branch" => vec![
+            "branch",
+            "--list",
+            "--contains",
+            sha,
+            "--format=%(refname:short)",
+        ],
         "tag" => vec!["tag", "--contains", sha],
         _ => return Err(anyhow!("unknown contains kind: {kind}")),
     };
@@ -285,14 +291,23 @@ async fn run_git(work_dir: &Path, args: &[&str]) -> Result<String> {
     command.stderr(Stdio::piped());
 
     let mut child = command.spawn().context("spawning `git`")?;
-    let stdout = child.stdout.take().context("`git` stdout pipe unavailable")?;
-    let stderr = child.stderr.take().context("`git` stderr pipe unavailable")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("`git` stdout pipe unavailable")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("`git` stderr pipe unavailable")?;
     let mut stdout_reader = futures::io::BufReader::new(stdout);
     let mut stdout_buf = String::new();
     let mut line = String::new();
     loop {
         line.clear();
-        let n = stdout_reader.read_line(&mut line).await.context("reading git stdout")?;
+        let n = stdout_reader
+            .read_line(&mut line)
+            .await
+            .context("reading git stdout")?;
         if n == 0 {
             break;
         }
@@ -380,11 +395,17 @@ mod tests {
         let raw = "abc123\x00parent1 parent2\x001700000000\x00Alice\x00alice@example.com\x00HEAD -> refs/heads/main\x00Subject line\x00Multi\nline body\n";
         let parsed = parse_show_header(raw).expect("parsed");
         assert_eq!(parsed.sha, "abc123");
-        assert_eq!(parsed.parents, vec!["parent1".to_string(), "parent2".to_string()]);
+        assert_eq!(
+            parsed.parents,
+            vec!["parent1".to_string(), "parent2".to_string()]
+        );
         assert_eq!(parsed.committer_date_unix, 1_700_000_000);
         assert_eq!(parsed.author_name, "Alice");
         assert_eq!(parsed.author_email, "alice@example.com");
-        assert_eq!(parsed.ref_names, vec!["HEAD -> refs/heads/main".to_string()]);
+        assert_eq!(
+            parsed.ref_names,
+            vec!["HEAD -> refs/heads/main".to_string()]
+        );
         assert_eq!(parsed.subject, "Subject line");
         assert!(parsed.body.starts_with("Multi"));
     }

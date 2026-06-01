@@ -26,9 +26,9 @@ use git::{
     parse_git_remote_url,
 };
 use gpui::{
-    AnyElement, App, AppContext as _, AsyncApp, AsyncWindowContext, Context, Entity,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement,
-    PromptLevel, Render, Styled, Task, WeakEntity, Window, actions,
+    AnyElement, App, AppContext as _, AsyncApp, AsyncWindowContext, Context, Entity, EventEmitter,
+    FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement, PromptLevel, Render,
+    Styled, Task, WeakEntity, Window, actions,
 };
 use language::{
     Anchor, Buffer, Capability, DiskState, File, LanguageRegistry, LineEnding, OffsetRangeExt as _,
@@ -94,22 +94,20 @@ pub fn init(cx: &mut App) {
         workspace.register_action(|workspace, _: &PopCurrentStash, window, cx| {
             CommitView::pop_stash(workspace, window, cx);
         });
-        workspace.register_action(
-            |workspace, action: &OpenCommitInNewTab, window, cx| {
-                let Some(repo) = workspace.project().read(cx).active_repository(cx) else {
-                    return;
-                };
-                CommitView::open(
-                    action.sha.clone(),
-                    repo.downgrade(),
-                    workspace.weak_handle(),
-                    None,
-                    None,
-                    window,
-                    cx,
-                );
-            },
-        );
+        workspace.register_action(|workspace, action: &OpenCommitInNewTab, window, cx| {
+            let Some(repo) = workspace.project().read(cx).active_repository(cx) else {
+                return;
+            };
+            CommitView::open(
+                action.sha.clone(),
+                repo.downgrade(),
+                workspace.weak_handle(),
+                None,
+                None,
+                window,
+                cx,
+            );
+        });
     })
     .detach();
 }
@@ -198,7 +196,16 @@ impl CommitView {
         window: &mut Window,
         cx: &mut App,
     ) {
-        Self::open_internal(commit_sha, repo, workspace, stash, file_filter, false, window, cx);
+        Self::open_internal(
+            commit_sha,
+            repo,
+            workspace,
+            stash,
+            file_filter,
+            false,
+            window,
+            cx,
+        );
     }
 
     /// Open a focused diff of a single file's changes in `commit_sha`
@@ -213,7 +220,16 @@ impl CommitView {
         window: &mut Window,
         cx: &mut App,
     ) {
-        Self::open_internal(commit_sha, repo, workspace, None, Some(file), true, window, cx);
+        Self::open_internal(
+            commit_sha,
+            repo,
+            workspace,
+            None,
+            Some(file),
+            true,
+            window,
+            cx,
+        );
     }
 
     fn open_internal(
@@ -243,7 +259,11 @@ impl CommitView {
                     commit_diff.files.retain(|f| &f.path == filter_path);
                 }
 
-                let single_file = if single_file_mode { file_filter.clone() } else { None };
+                let single_file = if single_file_mode {
+                    file_filter.clone()
+                } else {
+                    None
+                };
 
                 let repo = repo.upgrade()?;
 
@@ -270,8 +290,7 @@ impl CommitView {
                                 let commit_view = item.downcast::<CommitView>();
                                 commit_view.is_some_and(|view| {
                                     let view = view.read(cx);
-                                    view.commit.sha == commit_sha
-                                        && view.single_file == single_file
+                                    view.commit.sha == commit_sha && view.single_file == single_file
                                 })
                             });
                             if let Some(ix) = ix {
@@ -572,9 +591,9 @@ impl CommitView {
         let work_dir = repository.read(cx).work_directory_abs_path.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move {
-                    load_commit_metadata(work_dir.as_ref(), &sha).await
-                })
+                .background_spawn(
+                    async move { load_commit_metadata(work_dir.as_ref(), &sha).await },
+                )
                 .await;
             if let Some(metadata) = result.log_err() {
                 this.update(cx, |view, cx| {
@@ -670,8 +689,7 @@ impl CommitView {
                 match outcome {
                     Ok(out) => {
                         view.explain_body = Some(SharedString::from(out.text));
-                        view.explain_from_cache =
-                            out.source == ai_explain::ExplainSource::Cached;
+                        view.explain_from_cache = out.source == ai_explain::ExplainSource::Cached;
                         view.explain_expanded = true;
                     }
                     Err(err) => {
@@ -771,10 +789,14 @@ impl CommitView {
         v_flex()
             .gap_1()
             .child(header)
-            .when_some(parents, |this, el| this.child(div().px_2().pt_1p5().child(el)))
+            .when_some(parents, |this, el| {
+                this.child(div().px_2().pt_1p5().child(el))
+            })
             .when_some(refs, |this, el| this.child(div().px_2().child(el)))
             .when_some(contains, |this, el| this.child(div().px_2().child(el)))
-            .when_some(affected, |this, el| this.child(div().px_2().pt_1p5().child(el)))
+            .when_some(affected, |this, el| {
+                this.child(div().px_2().pt_1p5().child(el))
+            })
     }
 
     fn render_inline_footer(&self, cx: &mut App) -> impl IntoElement {
@@ -1500,7 +1522,11 @@ fn render_parent_toggle(
             "Cycle through merge-commit parents to diff against",
         ))
         .on_click(move |_, _, cx| {
-            let next = if selected >= parent_count { 1 } else { selected + 1 };
+            let next = if selected >= parent_count {
+                1
+            } else {
+                selected + 1
+            };
             commit_view
                 .update(cx, |view, cx| {
                     view.select_parent_index(next, cx);

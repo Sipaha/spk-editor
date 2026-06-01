@@ -120,9 +120,7 @@ impl Settings for SolutionsSettings {
             .and_then(|g| g.aggregated_log.as_ref())
             .map(|a| AggregatedLogSettings {
                 background_load: a.background_load.unwrap_or(defaults.background_load),
-                max_total_commits: a
-                    .max_total_commits
-                    .unwrap_or(defaults.max_total_commits),
+                max_total_commits: a.max_total_commits.unwrap_or(defaults.max_total_commits),
             })
             .unwrap_or(defaults);
         let branch_protection = solutions
@@ -211,8 +209,12 @@ mod tests {
     #[test]
     fn branch_protection_defaults_cover_main_master_release() {
         let s = SolutionsSettings::default();
-        let patterns: Vec<&str> =
-            s.branch_protection.default_protected.iter().map(|s| s.as_str()).collect();
+        let patterns: Vec<&str> = s
+            .branch_protection
+            .default_protected
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
         assert!(patterns.contains(&"main"));
         assert!(patterns.contains(&"master"));
         assert!(patterns.contains(&"release/*"));

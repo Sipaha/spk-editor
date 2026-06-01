@@ -55,12 +55,9 @@ impl SolutionTabStrip {
         let mut subscriptions = Vec::new();
 
         let store = SolutionStore::global(cx);
-        subscriptions.push(cx.subscribe(
-            &store,
-            |_, _, _: &SolutionStoreEvent, cx| {
-                cx.notify();
-            },
-        ));
+        subscriptions.push(cx.subscribe(&store, |_, _, _: &SolutionStoreEvent, cx| {
+            cx.notify();
+        }));
 
         // Agent store may not be initialised in headless / test contexts;
         // only subscribe when present.
@@ -181,32 +178,34 @@ impl Render for SolutionTabStrip {
 
         let picker_workspace = self.workspace.clone();
         let picker_mw = self.multi_workspace.clone();
-        let plus_popover = PopoverMenu::new("solution-tab-strip-plus-popover")
-            .trigger(plus_button)
-            .menu(move |window, cx| {
-                let picker_workspace = picker_workspace.clone();
-                let picker_mw = picker_mw.clone();
-                Some(cx.new(|cx| {
-                    SolutionPickerDropdown::new(picker_workspace, picker_mw, window, cx)
-                }))
-            });
+        let plus_popover =
+            PopoverMenu::new("solution-tab-strip-plus-popover")
+                .trigger(plus_button)
+                .menu(move |window, cx| {
+                    let picker_workspace = picker_workspace.clone();
+                    let picker_mw = picker_mw.clone();
+                    Some(cx.new(|cx| {
+                        SolutionPickerDropdown::new(picker_workspace, picker_mw, window, cx)
+                    }))
+                });
 
         h_flex()
             .id("solution-tab-strip")
             .h_full()
             .overflow_x_scroll()
-            .children(tabs.into_iter().map(
-                |(id, name, is_active, ai_count, in_flight)| {
-                    SolutionTab::new(
-                        id,
-                        name,
-                        is_active,
-                        ai_count,
-                        in_flight,
-                        weak_workspace.clone(),
-                    )
-                },
-            ))
+            .children(
+                tabs.into_iter()
+                    .map(|(id, name, is_active, ai_count, in_flight)| {
+                        SolutionTab::new(
+                            id,
+                            name,
+                            is_active,
+                            ai_count,
+                            in_flight,
+                            weak_workspace.clone(),
+                        )
+                    }),
+            )
             .child(div().px_1().child(plus_popover))
             .into_any_element()
     }
