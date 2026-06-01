@@ -1520,6 +1520,17 @@ impl BranchesPopup {
         });
     }
 
+    /// Public constructor for hosting inside a `PopoverMenu` (title-bar widget)
+    /// or as a fallback modal (keyboard action). Mirrors `new`.
+    pub fn build(
+        workspace: WeakEntity<Workspace>,
+        repository: Option<Entity<Repository>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new(workspace, repository, window, cx)
+    }
+
     fn new(
         workspace: WeakEntity<Workspace>,
         repository: Option<Entity<Repository>>,
