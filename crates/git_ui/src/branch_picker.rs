@@ -2090,6 +2090,95 @@ impl BranchesPopup {
         }
     }
 
+    /// Render the IDEA-style action header rows that appear between the search
+    /// field and the first section node. Rows: Update Project / Commit / Push /
+    /// separator / New Branch / Checkout Tag or Revision… / separator.
+    fn render_action_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let workspace = self.workspace.clone();
+
+        // Pre-compute theme colors so the closures below don't need to borrow cx.
+        let hover_bg = cx.theme().colors().ghost_element_hover;
+        let border_color = cx.theme().colors().border_variant;
+
+        let make_row = |id: &'static str| {
+            h_flex()
+                .id(id)
+                .w_full()
+                .px_3()
+                .py_1()
+                .gap_2()
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover_bg))
+        };
+        let icon_slot = |name: IconName| Icon::new(name).size(IconSize::Small).color(Color::Muted);
+
+        let sep = || div().h_px().mx_3().bg(border_color);
+
+        v_flex()
+            // Update Project
+            .child(
+                make_row("popup-action-update-project")
+                    .child(icon_slot(IconName::ArrowCircle))
+                    .child(Label::new("Update Project").size(LabelSize::Small))
+                    .on_click(cx.listener(|_, _, window, cx| {
+                        window.dispatch_action(Box::new(git::Fetch), cx);
+                        cx.emit(DismissEvent);
+                    })),
+            )
+            // Commit
+            .child(
+                make_row("popup-action-commit")
+                    .child(icon_slot(IconName::GitCommit))
+                    .child(Label::new("Commit").size(LabelSize::Small))
+                    .on_click(cx.listener(|_, _, window, cx| {
+                        window.dispatch_action(Box::new(crate::git_panel::ToggleFocus), cx);
+                        cx.emit(DismissEvent);
+                    })),
+            )
+            // Push — solution-wide if provider is active, else single-repo push dialog
+            .child({
+                let workspace_for_push = workspace.clone();
+                make_row("popup-action-push")
+                    .child(icon_slot(IconName::ArrowUp))
+                    .child(Label::new("Push").size(LabelSize::Small))
+                    .on_click(cx.listener(move |_, _, window, cx| {
+                        if let Some(provider) = crate::providers::solution_push_provider() {
+                            if provider.is_active() {
+                                provider.open_solution_push_dialog(workspace_for_push.clone(), cx);
+                                cx.emit(DismissEvent);
+                                return;
+                            }
+                        }
+                        window.dispatch_action(Box::new(git::Push), cx);
+                        cx.emit(DismissEvent);
+                    }))
+            })
+            // Separator between solution-wide ops and repo-local ops
+            .child(sep().my_1())
+            // New Branch — opens BranchList picker where typing a new name creates it
+            .child(
+                make_row("popup-action-new-branch")
+                    .child(icon_slot(IconName::GitBranchPlus))
+                    .child(Label::new("New Branch").size(LabelSize::Small))
+                    .on_click(cx.listener(|_, _, window, cx| {
+                        window.dispatch_action(Box::new(zed_actions::git::Branch), cx);
+                        cx.emit(DismissEvent);
+                    })),
+            )
+            // Checkout Tag or Revision… — opens BranchList picker (switch to Tags section)
+            .child(
+                make_row("popup-action-checkout-revision")
+                    .child(icon_slot(IconName::GitBranch))
+                    .child(Label::new("Checkout Tag or Revision…").size(LabelSize::Small))
+                    .on_click(cx.listener(|_, _, window, cx| {
+                        window.dispatch_action(Box::new(zed_actions::git::Branch), cx);
+                        cx.emit(DismissEvent);
+                    })),
+            )
+            // Separator before branch section nodes
+            .child(sep().mt_1())
+    }
+
     fn render_row(
         &self,
         ix: usize,
@@ -2455,6 +2544,7 @@ impl Render for BranchesPopup {
                     .child(self.query.clone()),
             )
             .child(div().h_px().bg(cx.theme().colors().border_variant))
+            .child(self.render_action_header(cx))
             .child(
                 div()
                     .flex_1()
