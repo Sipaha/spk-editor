@@ -5,15 +5,17 @@
 //! the menu shape but disabled with an explanatory tooltip — this keeps
 //! the menu shape stable across releases.
 
-use git::operations::{DeleteBranchOp, OpRunner};
+use git::operations::{DeleteBranchOp, OpRunner, RunOutcome};
 use gpui::{App, ClipboardItem, Entity, IntoElement, SharedString, WeakEntity, Window};
+use notifications::status_toast::StatusToast;
 use project::git_store::Repository;
-use ui::{ContextMenu, ContextMenuEntry, DocumentationSide, prelude::*};
+use ui::{ContextMenu, ContextMenuEntry, DocumentationSide, Icon, IconName, IconSize, prelude::*};
 use util::ResultExt as _;
 use workspace::Workspace;
 
 use crate::branch_picker::favorites;
 use crate::handlers::compare as compare_handlers;
+use crate::handlers::{merge as merge_handler, rebase as rebase_handler};
 use crate::project_diff::ProjectDiff;
 
 /// Surrounding context for a branch row's context menu. Cheap to clone.
@@ -60,12 +62,23 @@ pub fn build_branch_menu(
             compare_with_current(dwt_ctx.clone(), window, cx);
         });
 
-        // S-DST stubs — destructive sub-actions; menu shape locked so the
-        // S-DST PR drops in handlers without rearranging entries.
+        // S-DST destructive sub-actions; menu shape locked so future
+        // S-* work drops in handlers without rearranging entries.
+        let rebase_ctx = ctx.clone();
+        let merge_ctx = ctx.clone();
+        let row_branch = ctx.branch_name.clone();
         menu = menu
             .separator()
-            .item(disabled_entry("Rebase Current Onto…", "Not yet implemented — S-DST"))
-            .item(disabled_entry("Merge Into Current…", "Not yet implemented — S-DST"));
+            .entry(
+                format!("Rebase Current Onto {row_branch}"),
+                None,
+                move |window, cx| run_rebase(rebase_ctx.clone(), window, cx),
+            )
+            .entry(
+                format!("Merge {row_branch} Into Current"),
+                None,
+                move |window, cx| run_merge(merge_ctx.clone(), window, cx),
+            );
 
         menu = menu
             .separator()
@@ -304,9 +317,181 @@ fn toggle_favorite(ctx: BranchContext, cx: &mut App) {
     .detach();
 }
 
+/// Pure decision over the outcome of a merge/rebase op. `RunOutcome` has
+/// no failure variant — hard failures surface as `Result::Err`, so the
+/// runner result is mapped to `PostOp::Failed` separately.
+#[derive(Debug, PartialEq)]
+enum PostOp {
+    Done,
+    Conflict,
+    Failed(String),
+}
+
+/// Classify a successful `RunOutcome` (the `Result::Ok` arm). A
+/// `PausedForExecFailure` can't occur for plain merge/rebase (no `exec`
+/// steps), but we map it to `Failed` defensively rather than panicking.
+fn classify(outcome: &RunOutcome) -> PostOp {
+    match outcome {
+        RunOutcome::Completed => PostOp::Done,
+        RunOutcome::PausedForConflict { .. } => PostOp::Conflict,
+        RunOutcome::PausedForExecFailure { stderr, .. } => PostOp::Failed(stderr.clone()),
+    }
+}
+
+/// Map the full `Result<RunOutcome>` from a handler into a `PostOp`.
+fn classify_result(result: &Result<RunOutcome, anyhow::Error>) -> PostOp {
+    match result {
+        Ok(outcome) => classify(outcome),
+        Err(err) => PostOp::Failed(err.to_string()),
+    }
+}
+
+fn notify(
+    workspace: &WeakEntity<Workspace>,
+    message: impl Into<SharedString>,
+    icon: IconName,
+    color: Color,
+    cx: &mut App,
+) {
+    let Some(workspace) = workspace.upgrade() else {
+        return;
+    };
+    let message = message.into();
+    workspace.update(cx, |workspace, cx| {
+        let toast = StatusToast::new(message, cx, move |this, _cx| {
+            this.icon(Icon::new(icon).size(IconSize::Small).color(color))
+        });
+        workspace.toggle_status_toast(toast, cx);
+    });
+}
+
+/// Apply a `PostOp` to the UI: success/error toast, or conflict toast plus
+/// routing into the existing conflict resolver via `git::OpenConflictResolver`.
+fn handle_post_op(
+    post: PostOp,
+    workspace: &WeakEntity<Workspace>,
+    success_message: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    match post {
+        PostOp::Done => {
+            notify(workspace, success_message, IconName::Check, Color::Success, cx);
+        }
+        PostOp::Conflict => {
+            notify(
+                workspace,
+                "Conflicts — resolve them in the editor",
+                IconName::Warning,
+                Color::Warning,
+                cx,
+            );
+            // The resolver action resolves the active repository/workspace
+            // itself, sidestepping any borrow of entities we already hold.
+            window.dispatch_action(Box::new(git_conflict_ui::OpenConflictResolver), cx);
+        }
+        PostOp::Failed(message) => {
+            notify(workspace, message, IconName::XCircle, Color::Error, cx);
+        }
+    }
+}
+
+/// "Rebase Current Onto <branch>" — rebase the current HEAD branch onto the
+/// row's branch. `LinearRebaseOp` runs `git rebase --autostash <branch>`
+/// under `OpRunner` (backup-ref created before the op); `--autostash`
+/// handles a dirty working tree so we don't need a separate stash pre-flight.
+fn run_rebase(ctx: BranchContext, window: &mut Window, cx: &mut App) {
+    let work_dir = ctx.repository.read(cx).work_directory_abs_path.clone();
+    let workspace = ctx.workspace.clone();
+    let target = ctx.branch_name.clone();
+    let success_message = format!("Rebased onto {target}");
+    let task = rebase_handler::run(work_dir.to_path_buf(), target.to_string(), true, cx);
+    window
+        .spawn(cx, async move |cx| {
+            let result = task.await;
+            let post = classify_result(&result);
+            cx.update(|window, cx| {
+                handle_post_op(post, &workspace, success_message, window, cx);
+            })
+            .log_err();
+        })
+        .detach();
+}
+
+/// "Merge <branch> Into Current" — merge the row's branch into the current
+/// HEAD branch. `MergeOp` runs under `OpRunner` (backup-ref of the current
+/// branch created before the op).
+fn run_merge(ctx: BranchContext, window: &mut Window, cx: &mut App) {
+    let work_dir = ctx.repository.read(cx).work_directory_abs_path.clone();
+    let workspace = ctx.workspace.clone();
+    let target = ctx.branch_name.clone();
+    let success_message = format!("Merged {target} into current branch");
+    let task = merge_handler::run(
+        work_dir.to_path_buf(),
+        target.to_string(),
+        false,
+        false,
+        None,
+        cx,
+    );
+    window
+        .spawn(cx, async move |cx| {
+            let result = task.await;
+            let post = classify_result(&result);
+            cx.update(|window, cx| {
+                handle_post_op(post, &workspace, success_message, window, cx);
+            })
+            .log_err();
+        })
+        .detach();
+}
+
 fn disabled_entry(label: &'static str, tooltip: &'static str) -> ContextMenuEntry {
     ContextMenuEntry::new(label).disabled(true).documentation_aside(
         DocumentationSide::Right,
         move |_| Label::new(tooltip).into_any_element(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn classify_completed_is_done() {
+        assert_eq!(classify(&RunOutcome::Completed), PostOp::Done);
+    }
+
+    #[test]
+    fn classify_conflict_is_conflict() {
+        let outcome = RunOutcome::PausedForConflict {
+            conflicted_files: vec![PathBuf::from("a.txt")],
+        };
+        assert_eq!(classify(&outcome), PostOp::Conflict);
+    }
+
+    #[test]
+    fn classify_exec_failure_is_failed() {
+        let outcome = RunOutcome::PausedForExecFailure {
+            command: "make".into(),
+            stderr: "boom".into(),
+        };
+        assert_eq!(classify(&outcome), PostOp::Failed("boom".into()));
+    }
+
+    #[test]
+    fn classify_result_err_is_failed() {
+        let result: Result<RunOutcome, anyhow::Error> = Err(anyhow::anyhow!("rebase failed: nope"));
+        assert_eq!(
+            classify_result(&result),
+            PostOp::Failed("rebase failed: nope".into())
+        );
+    }
+
+    #[test]
+    fn classify_result_ok_delegates_to_classify() {
+        let result: Result<RunOutcome, anyhow::Error> = Ok(RunOutcome::Completed);
+        assert_eq!(classify_result(&result), PostOp::Done);
+    }
 }
