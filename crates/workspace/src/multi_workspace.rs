@@ -1390,6 +1390,35 @@ impl MultiWorkspace {
             .chain(std::iter::once(&self.active_workspace).filter(move |_| !active_is_retained))
     }
 
+    /// Drag-and-drop reorder of the title-bar solution tabs. `from`/`to`
+    /// index into the displayed [`workspaces()`](Self::workspaces) order
+    /// (retained workspaces, with the active one appended when it isn't
+    /// retained). The active workspace is retained first so the whole
+    /// displayed order lives in `retained_workspaces` and the indices map
+    /// 1:1; `workspaces()` already appends a transient active last, which is
+    /// where `retain_workspace` puts it, so existing indices stay valid. The
+    /// tab at `from` is then moved to land at `to`'s slot, mirroring
+    /// `ConsolePanel::reorder_tab`.
+    pub fn reorder_workspaces(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        if from == to {
+            return;
+        }
+        if !self.active_workspace_is_retained() {
+            let key = self.active_workspace.read(cx).project_group_key(cx);
+            self.retain_workspace(self.active_workspace.clone(), key, cx);
+        }
+        let len = self.retained_workspaces.len();
+        if from >= len || to >= len {
+            return;
+        }
+        let workspace = self.retained_workspaces.remove(from);
+        // `to` indexed the original array; after removing `from` it is still a
+        // valid insertion index because `to <= len - 1 == retained.len()` now.
+        self.retained_workspaces.insert(to, workspace);
+        self.serialize(cx);
+        cx.notify();
+    }
+
     /// Adds a workspace to this window as persistent without changing which
     /// workspace is active. Unlike `activate()`, this always inserts into the
     /// persistent list regardless of sidebar state — it's used for system-

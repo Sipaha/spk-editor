@@ -167,6 +167,7 @@ impl Render for SolutionTabStrip {
             .any(|s| !seen_ids.contains(&s.id) && !is_solution_open_anywhere(&s.id, cx));
 
         let weak_workspace = self.workspace.clone();
+        let weak_multi_workspace = self.multi_workspace.clone();
         let plus_button = IconButton::new("solution-tab-strip-plus", IconName::Plus)
             .icon_size(IconSize::Small)
             .icon_color(Color::Muted)
@@ -193,19 +194,20 @@ impl Render for SolutionTabStrip {
             .id("solution-tab-strip")
             .h_full()
             .overflow_x_scroll()
-            .children(
-                tabs.into_iter()
-                    .map(|(id, name, is_active, ai_count, in_flight)| {
-                        SolutionTab::new(
-                            id,
-                            name,
-                            is_active,
-                            ai_count,
-                            in_flight,
-                            weak_workspace.clone(),
-                        )
-                    }),
-            )
+            .children(tabs.into_iter().enumerate().map(
+                |(index, (id, name, is_active, ai_count, in_flight))| {
+                    SolutionTab::new(
+                        id,
+                        name,
+                        is_active,
+                        ai_count,
+                        in_flight,
+                        index,
+                        weak_multi_workspace.clone(),
+                        weak_workspace.clone(),
+                    )
+                },
+            ))
             .child(div().px_1().child(plus_popover))
             .into_any_element()
     }

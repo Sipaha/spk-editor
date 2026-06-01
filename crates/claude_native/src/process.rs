@@ -333,9 +333,23 @@ async fn drain_stderr(
             Ok(0) | Err(_) => break,
             Ok(_) => {
                 let trimmed = line.trim_end_matches(['\n', '\r']);
-                if let Some(callback_id) = parse_hook_callback_error(trimmed) {
+                if let Some((callback_id, inline_preview)) = parse_hook_callback_error(trimmed) {
                     log::warn!("claude stderr: {trimmed}");
-                    pending_hook_error = Some((callback_id, None));
+                    // claude usually prints the human-readable cause on the same
+                    // line as the header (after a `<lineno> |` marker), then
+                    // dumps minified source on the following lines. When the
+                    // header carries that message, emit it immediately — it's a
+                    // far better preview than the `${…}` source line that the
+                    // subsequent-line scan would otherwise capture.
+                    if let Some(preview) = inline_preview {
+                        let _ = critical.unbounded_send(CriticalStderr::HookCallbackError {
+                            callback_id: callback_id.clone(),
+                            first_line: preview.clone(),
+                        });
+                        pending_hook_error = Some((callback_id, Some(preview)));
+                    } else {
+                        pending_hook_error = Some((callback_id, None));
+                    }
                     continue;
                 }
                 if let Some((cb_id, first_line_slot)) = pending_hook_error.as_mut() {
@@ -366,17 +380,26 @@ async fn drain_stderr(
 
 /// Match the `Error in hook callback <id>:` header claude writes to stderr
 /// when a hook callback fails inside its runtime (the leading edge of the
-/// container-restart hang). Returns the callback id when matched.
-fn parse_hook_callback_error(line: &str) -> Option<String> {
+/// container-restart hang). Returns the callback id plus an optional inline
+/// preview: the text after the colon, with claude's `<lineno> |` source-frame
+/// marker stripped. That tail is frequently the actual human-readable cause
+/// (e.g. `… stop_inj: 2283 | The container was restarted.`), so capturing it
+/// here avoids falling through to the minified source line that follows.
+fn parse_hook_callback_error(line: &str) -> Option<(String, Option<String>)> {
     let stripped = line.strip_prefix("Error in hook callback ")?;
     // `<id>: …` or `<id>` alone.
     let id_end = stripped.find(':').unwrap_or(stripped.len());
     let id = stripped[..id_end].trim();
     if id.is_empty() {
-        None
-    } else {
-        Some(id.to_string())
+        return None;
     }
+    let inline_preview = if id_end < stripped.len() {
+        let tail = strip_line_number_prefix(&stripped[id_end + 1..]).trim();
+        (!tail.is_empty()).then(|| tail.to_string())
+    } else {
+        None
+    };
+    Some((id.to_string(), inline_preview))
 }
 
 /// Drop a leading `<digits> | ` marker claude inserts on every line of its
@@ -418,16 +441,60 @@ mod tests {
 
     #[test]
     fn parses_hook_callback_error_header() {
+        // Plain header with a textual tail after the colon: id + inline preview.
         assert_eq!(
-            parse_hook_callback_error("Error in hook callback stop_inj: ..."),
-            Some("stop_inj".to_string())
+            parse_hook_callback_error("Error in hook callback stop_inj: boom"),
+            Some(("stop_inj".to_string(), Some("boom".to_string())))
         );
+        // Header carrying claude's `<lineno> | <message>` source-frame marker
+        // inline: the marker is stripped and the message is the preview.
+        assert_eq!(
+            parse_hook_callback_error(
+                "Error in hook callback stop_inj: 2283 | The container was restarted."
+            ),
+            Some((
+                "stop_inj".to_string(),
+                Some("The container was restarted.".to_string())
+            ))
+        );
+        // No colon → id only, no inline preview (fall back to subsequent lines).
         assert_eq!(
             parse_hook_callback_error("Error in hook callback pti"),
-            Some("pti".to_string())
+            Some(("pti".to_string(), None))
         );
         assert!(parse_hook_callback_error("not a hook error").is_none());
         assert!(parse_hook_callback_error("Error in hook callback : empty").is_none());
+    }
+
+    #[test]
+    fn drain_stderr_prefers_inline_header_message_over_source_dump() {
+        // Reproduces the production dump observed 2026-06-01: claude prints the
+        // human-readable cause on the SAME line as the header (after a
+        // `<lineno> |` marker), then dumps minified template source on the
+        // following lines. The preview must be the readable message, not the
+        // `${H.map(...)` gibberish that follows.
+        let dump = concat!(
+            "Error in hook callback stop_inj: 2283 | The container was restarted. ",
+            "The following background tasks were running and are now stopped:\n",
+            "2284 | ${H.map((q)=>`- ${q.description||\"(no description)\"} (task ${q.task_id})`).join(`\n",
+            "2285 | `)}\n",
+            "2286 | Re-create them if still needed.\n"
+        );
+        let (tx, mut rx) = mpsc::unbounded::<CriticalStderr>();
+        futures::executor::block_on(drain_stderr(
+            futures::io::Cursor::new(dump.as_bytes().to_vec()),
+            tx,
+        ));
+        let first = rx.try_recv().ok().expect("expected a HookCallbackError");
+        let CriticalStderr::HookCallbackError {
+            callback_id,
+            first_line,
+        } = first;
+        assert_eq!(callback_id, "stop_inj");
+        assert_eq!(
+            first_line,
+            "The container was restarted. The following background tasks were running and are now stopped:"
+        );
     }
 
     #[test]

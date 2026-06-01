@@ -17,12 +17,14 @@
 //! events that change them and pass fresh values down on each rerender.
 
 use gpui::{
-    App, ClickEvent, Hsla, IntoElement, RenderOnce, SharedString, WeakEntity, Window, div, hsla, px,
+    App, ClickEvent, Context, Hsla, IntoElement, Render, RenderOnce, SharedString, WeakEntity,
+    Window, div, hsla, px,
 };
 use solutions::SolutionId;
 use std::cell::RefCell;
 use ui::{ContextMenu, Indicator, prelude::*, right_click_menu};
-use workspace::Workspace;
+use util::ResultExt as _;
+use workspace::{MultiWorkspace, Workspace};
 
 use crate::actions::{
     CloseSolutionFromTabBar, DeleteSolutionFromTabBar, RenameSolution, RevealSolutionFolder,
@@ -36,12 +38,45 @@ pub struct SolutionTab {
     is_active: bool,
     ai_session_count: usize,
     clone_in_flight: bool,
+    /// Position in the displayed tab order — the drag payload and drop target
+    /// both key off it so `MultiWorkspace::reorder_workspaces` can move the
+    /// dragged tab to land at this tab's slot.
+    index: usize,
+    /// Drop target for reorder — `on_drop` calls back into the multi-workspace
+    /// to move the dragged tab into this tab's position.
+    multi_workspace: WeakEntity<MultiWorkspace>,
     /// Held for parity with the spec and to give Task 7's tab-strip a
     /// stable handle path; currently unused inside `render` because the
     /// click handler dispatches through `cx.windows()` and the right-
     /// click context menu dispatches actions globally.
     #[allow(dead_code)]
     weak_workspace: WeakEntity<Workspace>,
+}
+
+/// Drag payload for reordering solution tabs. Mirrors
+/// `console_panel::DraggedConsoleTab`: carries the source `index` (consumed by
+/// the drop target's [`MultiWorkspace::reorder_workspaces`]) plus the
+/// colour-dot + name so the drag preview looks like the tab being dragged.
+#[derive(Clone)]
+pub struct DraggedSolutionTab {
+    index: usize,
+    name: SharedString,
+    dot: Hsla,
+}
+
+impl Render for DraggedSolutionTab {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .h_8()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .bg(cx.theme().colors().tab_active_background)
+            .border_1()
+            .border_color(cx.theme().colors().border)
+            .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(self.dot))
+            .child(Label::new(self.name.clone()))
+    }
 }
 
 impl SolutionTab {
@@ -51,6 +86,8 @@ impl SolutionTab {
         is_active: bool,
         ai_session_count: usize,
         clone_in_flight: bool,
+        index: usize,
+        multi_workspace: WeakEntity<MultiWorkspace>,
         weak_workspace: WeakEntity<Workspace>,
     ) -> Self {
         Self {
@@ -59,6 +96,8 @@ impl SolutionTab {
             is_active,
             ai_session_count,
             clone_in_flight,
+            index,
+            multi_workspace,
             weak_workspace,
         }
     }
@@ -82,10 +121,12 @@ impl RenderOnce for SolutionTab {
         let row = h_flex()
             .id(row_id)
             .h_full()
-            .px_2()
+            .px_3()
             .gap_2()
-            .min_w(px(80.0))
-            .max_w(px(200.0))
+            // Match the Console panel chat-tab sizing (panel.rs render_tab_strip)
+            // so the title-bar solution tabs read at the same width.
+            .min_w(px(140.0))
+            .max_w(px(220.0))
             .items_center()
             .when_some(active_bg, |this, bg| this.bg(bg))
             .border_b_2()
@@ -129,6 +170,30 @@ impl RenderOnce for SolutionTab {
                     let id = id_for_click.clone();
                     let source = window.window_handle().downcast();
                     open_solution(id, source, OpenIntent::SameWindow, cx);
+                }
+            })
+            // Drag-and-drop reorder. `on_drag` only fires once the pointer
+            // crosses GPUI's movement threshold, so a plain click still
+            // reaches `on_click` above and switches solutions.
+            .on_drag(
+                DraggedSolutionTab {
+                    index: self.index,
+                    name: self.name.clone(),
+                    dot,
+                },
+                |dragged, _offset, _window, cx| cx.new(|_| dragged.clone()),
+            )
+            .drag_over::<DraggedSolutionTab>(|style, _dragged, _window, cx| {
+                style.bg(cx.theme().colors().drop_target_background)
+            })
+            .on_drop({
+                let multi_workspace = self.multi_workspace.clone();
+                let target = self.index;
+                move |dragged: &DraggedSolutionTab, _window, cx| {
+                    let from = dragged.index;
+                    multi_workspace
+                        .update(cx, |mw, cx| mw.reorder_workspaces(from, target, cx))
+                        .log_err();
                 }
             });
 
