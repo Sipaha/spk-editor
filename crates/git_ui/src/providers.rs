@@ -12,6 +12,7 @@
 pub mod log_data_source;
 pub mod push;
 pub mod solution_panel;
+pub mod update;
 
 use std::sync::OnceLock;
 
@@ -20,16 +21,19 @@ pub use push::SolutionPushProvider;
 pub use solution_panel::{
     CommitAllOutcome, CommitStatus, MemberCommitResult, SolutionPanelProvider,
 };
+pub use update::SolutionUpdateProvider;
 
 struct Providers {
     solution_panel: OnceLock<Box<dyn SolutionPanelProvider>>,
     solution_push: OnceLock<Box<dyn SolutionPushProvider>>,
+    solution_update: OnceLock<Box<dyn SolutionUpdateProvider>>,
     log_data_source: OnceLock<Box<dyn LogDataSource>>,
 }
 
 static PROVIDERS: Providers = Providers {
     solution_panel: OnceLock::new(),
     solution_push: OnceLock::new(),
+    solution_update: OnceLock::new(),
     log_data_source: OnceLock::new(),
 };
 
@@ -54,6 +58,16 @@ pub fn set_solution_push_provider(provider: Box<dyn SolutionPushProvider>) {
 
 pub fn solution_push_provider() -> Option<&'static dyn SolutionPushProvider> {
     PROVIDERS.solution_push.get().map(|b| b.as_ref())
+}
+
+pub fn set_solution_update_provider(provider: Box<dyn SolutionUpdateProvider>) {
+    if PROVIDERS.solution_update.set(provider).is_err() {
+        log::warn!("git_ui::providers: solution_update provider was already registered");
+    }
+}
+
+pub fn solution_update_provider() -> Option<&'static dyn SolutionUpdateProvider> {
+    PROVIDERS.solution_update.get().map(|b| b.as_ref())
 }
 
 pub fn set_log_data_source(provider: Box<dyn LogDataSource>) {

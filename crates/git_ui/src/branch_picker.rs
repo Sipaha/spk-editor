@@ -2131,17 +2131,29 @@ impl BranchesPopup {
         let sep = || div().h_px().mx_3().bg(border_color);
 
         v_flex()
-            // Update Project
-            .child(
+            // Update Project — solution-wide fetch+pull if provider is
+            // active, else single-repo fetch.
+            .child({
+                let workspace_for_update = workspace.clone();
                 make_row("popup-action-update-project")
                     .child(icon_slot(IconName::ArrowCircle))
                     .child(Label::new("Update Project").size(LabelSize::Small))
-                    .on_click(cx.listener(|_, _, window, cx| {
+                    .on_click(cx.listener(move |_, _, window, cx| {
+                        if let Some(provider) = crate::providers::solution_update_provider() {
+                            if provider.is_active() {
+                                provider.update_solution(workspace_for_update.clone(), cx);
+                                cx.emit(DismissEvent);
+                                return;
+                            }
+                        }
                         window.dispatch_action(Box::new(git::Fetch), cx);
                         cx.emit(DismissEvent);
-                    })),
-            )
-            // Commit
+                    }))
+            })
+            // Commit — routes to the git panel, which renders the
+            // solution-wide commit surface (`render_solution_commit_panel`,
+            // via the registered `SolutionPanelProvider`) when a Solution
+            // is active and ≥2 members; otherwise the single-repo commit.
             .child(
                 make_row("popup-action-commit")
                     .child(icon_slot(IconName::GitCommit))

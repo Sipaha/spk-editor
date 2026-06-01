@@ -15,6 +15,7 @@ pub mod cross_cherry_pick;
 pub mod dashboard;
 pub mod mcp;
 pub mod push;
+pub mod update;
 
 use gpui::App;
 use settings::Settings as _;
@@ -71,6 +72,19 @@ pub fn init(cx: &mut App) {
         log::debug!(
             "solution_git::init: SolutionStore global not installed — \
              SolutionPushProvider not registered (likely a non-solution test context)"
+        );
+    }
+
+    // Register the solution-wide "Update Project" orchestrator
+    // (fetch + pull all git members) as the `SolutionUpdateProvider`.
+    // Consumed by the branches-popup Update Project row. Idempotent
+    // (`OnceLock`-backed).
+    if let Some(orchestrator) = update::build_global_orchestrator(cx) {
+        let boxed: Box<dyn git_ui::providers::SolutionUpdateProvider> = Box::new(orchestrator);
+        git_ui::providers::set_solution_update_provider(boxed);
+    } else {
+        log::debug!(
+            "solution_git::init: SolutionUpdateProvider not registered (non-solution context)"
         );
     }
 

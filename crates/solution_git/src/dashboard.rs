@@ -552,7 +552,7 @@ async fn fetch_last_fetched_unix(work_dir: &Path) -> Option<i64> {
 }
 
 /// Spawn `git fetch` in `work_dir`. Output is captured for error reporting.
-async fn run_git_fetch(work_dir: &Path) -> Result<()> {
+pub(crate) async fn run_git_fetch(work_dir: &Path) -> Result<()> {
     let mut command = new_command("git");
     command.current_dir(work_dir);
     command.args(["fetch", "--prune"]);
@@ -574,7 +574,7 @@ async fn run_git_fetch(work_dir: &Path) -> Result<()> {
 
 /// Spawn `git pull --ff-only` in `work_dir` — refuses non-fast-forward to
 /// preserve history; the caller is responsible for skipping dirty trees.
-async fn run_git_pull(work_dir: &Path) -> Result<()> {
+pub(crate) async fn run_git_pull(work_dir: &Path) -> Result<()> {
     let mut command = new_command("git");
     command.current_dir(work_dir);
     command.args(["pull", "--ff-only"]);
