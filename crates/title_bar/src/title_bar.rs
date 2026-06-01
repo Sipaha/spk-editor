@@ -144,11 +144,12 @@ pub fn init(cx: &mut App) {
                     .titlebar_item()
                     .and_then(|item| item.downcast::<TitleBar>().ok())
                 {
-                    // Defer so the &mut Workspace lease is released before the
-                    // PopoverMenu's .menu() closure runs (it calls workspace.read(cx)
-                    // internally, which would double-lease the Workspace entity and
-                    // trigger the GPUI double-lease panic).
-                    cx.defer_in(window, move |_workspace, window, cx| {
+                    // Defer via `Window::defer` (callback gets `&mut Window,
+                    // &mut App` — crucially NOT `&mut Workspace`) so the popover's
+                    // `.menu()` closure, which reads the `Workspace` entity at show
+                    // time, doesn't double-lease it. `cx.defer_in` would re-lease
+                    // `Workspace` in its callback and panic just the same.
+                    window.defer(cx, move |window, cx| {
                         titlebar.update(cx, |titlebar, cx| {
                             titlebar.toggle_branch_popover(window, cx);
                         });
