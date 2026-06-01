@@ -154,6 +154,7 @@ pub struct TitleBar {
     banner: Option<Entity<OnboardingBanner>>,
     update_version: Entity<UpdateVersion>,
     screen_share_popover_handle: PopoverMenuHandle<ContextMenu>,
+    branch_popover_handle: PopoverMenuHandle<git_ui::branch_picker::BranchesPopup>,
     _diagnostics_subscription: Option<gpui::Subscription>,
 }
 
@@ -254,6 +255,9 @@ impl Render for TitleBar {
                 })
                 .gap_1()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                // SPK Editor fork: IDEA-style branch widget (opens BranchesPopup
+                // anchored under the widget instead of the centered modal).
+                .children(self.render_branch_widget(cx))
                 // SPK Editor fork: IDEA-style run-config widget, right-aligned
                 // in the header (set by `run_config_ui`, read from the workspace).
                 .children(
@@ -418,6 +422,7 @@ impl TitleBar {
             banner: None,
             update_version,
             screen_share_popover_handle: PopoverMenuHandle::default(),
+            branch_popover_handle: PopoverMenuHandle::default(),
             _diagnostics_subscription: None,
         };
 
@@ -550,6 +555,58 @@ impl TitleBar {
         active_call
             .update(cx, |call, cx| call.unshare_project(project, cx))
             .log_err();
+    }
+
+    fn render_branch_widget(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let workspace = self.workspace.upgrade()?;
+        let repository = workspace.read(cx).project().read(cx).active_repository(cx)?;
+        let branch = repository.read(cx).branch.clone()?;
+        let name = SharedString::from(branch.name().to_string());
+        let (ahead, behind) = match branch.tracking_status() {
+            Some(status) => (status.ahead, status.behind),
+            None => (0, 0),
+        };
+        let workspace_weak = self.workspace.clone();
+        Some(
+            PopoverMenu::new("branch-widget")
+                .with_handle(self.branch_popover_handle.clone())
+                .trigger(
+                    ui::ButtonLike::new("branch-widget-trigger")
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(Icon::new(IconName::GitBranch).size(IconSize::Small))
+                                .child(Label::new(name).size(LabelSize::Small))
+                                .when(ahead > 0, |this| {
+                                    this.child(
+                                        Label::new(format!("↑{ahead}"))
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    )
+                                })
+                                .when(behind > 0, |this| {
+                                    this.child(
+                                        Label::new(format!("↓{behind}"))
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    )
+                                })
+                                .child(Icon::new(IconName::ChevronDown).size(IconSize::XSmall)),
+                        )
+                        .toggle_state(self.branch_popover_handle.is_deployed()),
+                )
+                .menu(move |window, cx| {
+                    let workspace = workspace_weak.upgrade()?;
+                    let repository = workspace.read(cx).project().read(cx).active_repository(cx);
+                    let weak = workspace.downgrade();
+                    Some(cx.new(|cx| {
+                        git_ui::branch_picker::BranchesPopup::build(weak, repository, window, cx)
+                    }))
+                }),
+        )
     }
 
     fn render_connection_status(
