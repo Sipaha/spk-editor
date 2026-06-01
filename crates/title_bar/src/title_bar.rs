@@ -134,6 +134,29 @@ pub fn init(cx: &mut App) {
                 });
             }
         });
+
+        workspace.register_action(
+            |workspace,
+             _: &git_ui::branch_picker::BranchesPopupOpen,
+             window,
+             cx| {
+                if let Some(titlebar) = workspace
+                    .titlebar_item()
+                    .and_then(|item| item.downcast::<TitleBar>().ok())
+                {
+                    titlebar.update(cx, |titlebar, cx| {
+                        titlebar.toggle_branch_popover(window, cx);
+                    });
+                    return;
+                }
+                // Fallback: no title bar (e.g. headless) — open a centered modal.
+                let repository = workspace.project().read(cx).active_repository(cx);
+                let handle = workspace.weak_handle();
+                workspace.toggle_modal(window, cx, |window, cx| {
+                    git_ui::branch_picker::BranchesPopup::build(handle, repository, window, cx)
+                });
+            },
+        );
     })
     .detach();
 }
@@ -435,6 +458,10 @@ impl TitleBar {
         self.update_version
             .update(cx, |banner, cx| banner.update_simulation(cx));
         cx.notify();
+    }
+
+    pub fn toggle_branch_popover(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.branch_popover_handle.toggle(window, cx);
     }
 
     /// Build (or return the cached) `SolutionTabStrip` entity. Called from

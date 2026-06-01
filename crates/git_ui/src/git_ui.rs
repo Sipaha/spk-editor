@@ -324,7 +324,6 @@ pub fn init(cx: &mut App) {
         workspace.register_action(|workspace, _: &git::CopyBranchName, _, cx| {
             copy_branch_name(workspace, cx);
         });
-        workspace.register_action(branch_picker::BranchesPopup::open_action);
         workspace.register_action(show_ref_picker);
         workspace.register_action(
             |workspace, action: &DiffClipboardWithSelectionData, window, cx| {
