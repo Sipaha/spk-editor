@@ -46,7 +46,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
-use ui::{prelude::*, IconButton, Tooltip};
+use ui::{IconButton, Tooltip, prelude::*};
 use util::ResultExt as _;
 use util::command::new_command;
 use workspace::{
@@ -226,12 +226,7 @@ impl SolutionStatusDashboard {
     /// workspace entity is mid-update, so any `workspace.read(cx)` here
     /// panics with "cannot read workspace::Workspace while it is already
     /// being updated".
-    fn spawn_fs_watchers(
-        &mut self,
-        fs: Arc<dyn fs::Fs>,
-        cx: &mut Context<Self>,
-    ) {
-
+    fn spawn_fs_watchers(&mut self, fs: Arc<dyn fs::Fs>, cx: &mut Context<Self>) {
         for row in self.rows.clone() {
             let path = row.path.clone();
             let member_id = row.member_id.clone();
@@ -271,12 +266,7 @@ impl SolutionStatusDashboard {
     /// Inserting into `pending_loads` by `member_id` cancels any earlier
     /// in-flight load for the same row (the old `Task` is dropped, which
     /// `cx.spawn` interprets as cancellation).
-    fn reload_row(
-        &mut self,
-        member_id: SharedString,
-        path: PathBuf,
-        cx: &mut Context<Self>,
-    ) {
+    fn reload_row(&mut self, member_id: SharedString, path: PathBuf, cx: &mut Context<Self>) {
         if let Some(row) = self.rows.iter_mut().find(|r| r.member_id == member_id) {
             row.loading = true;
         }
@@ -287,11 +277,7 @@ impl SolutionStatusDashboard {
             let last_commit = fetch_last_commit(&path).await.log_err();
             let last_fetched = fetch_last_fetched_unix(&path).await;
             let _ = this.update(cx, |this, cx| {
-                if let Some(row) = this
-                    .rows
-                    .iter_mut()
-                    .find(|r| r.member_id == member_id)
-                {
+                if let Some(row) = this.rows.iter_mut().find(|r| r.member_id == member_id) {
                     if let Some(s) = status {
                         row.current_branch = s.current_branch.map(SharedString::from);
                         row.ahead = s.ahead;
@@ -363,14 +349,16 @@ pub fn sort_rows(rows: &mut [MemberRow], by: SortColumn) {
             rows.sort_by(|a, b| {
                 let ba = a.current_branch.as_deref().unwrap_or("");
                 let bb = b.current_branch.as_deref().unwrap_or("");
-                ba.cmp(bb).then_with(|| a.name.as_ref().cmp(b.name.as_ref()))
+                ba.cmp(bb)
+                    .then_with(|| a.name.as_ref().cmp(b.name.as_ref()))
             });
         }
         SortColumn::AheadBehindDesc => {
             rows.sort_by(|a, b| {
                 let sa = a.ahead + a.behind;
                 let sb = b.ahead + b.behind;
-                sb.cmp(&sa).then_with(|| a.name.as_ref().cmp(b.name.as_ref()))
+                sb.cmp(&sa)
+                    .then_with(|| a.name.as_ref().cmp(b.name.as_ref()))
             });
         }
         SortColumn::LastCommitDesc => {
@@ -378,7 +366,8 @@ pub fn sort_rows(rows: &mut [MemberRow], by: SortColumn) {
                 let sa = a.last_commit_subject.is_some();
                 let sb = b.last_commit_subject.is_some();
                 // Rows with a known last-commit float to the top.
-                sb.cmp(&sa).then_with(|| a.name.as_ref().cmp(b.name.as_ref()))
+                sb.cmp(&sa)
+                    .then_with(|| a.name.as_ref().cmp(b.name.as_ref()))
             });
         }
     }
@@ -534,7 +523,11 @@ async fn fetch_last_commit(work_dir: &Path) -> Result<(String, String)> {
         .ok_or_else(|| anyhow!("empty `git log` output"))?
         .trim_end_matches('\n')
         .to_string();
-    let rel = parts.next().unwrap_or("").trim_end_matches('\n').to_string();
+    let rel = parts
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('\n')
+        .to_string();
     Ok((subject, rel))
 }
 
@@ -544,10 +537,7 @@ async fn fetch_last_fetched_unix(work_dir: &Path) -> Option<i64> {
     let path = work_dir.join(".git/FETCH_HEAD");
     let meta = smol::fs::metadata(&path).await.ok()?;
     let mtime = meta.modified().ok()?;
-    let unix = mtime
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
+    let unix = mtime.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
     Some(unix as i64)
 }
 
@@ -558,9 +548,10 @@ pub(crate) async fn run_git_fetch(work_dir: &Path) -> Result<()> {
     command.args(["fetch", "--prune"]);
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
-    let output = command.output().await.with_context(|| {
-        format!("running `git fetch` in {}", work_dir.display())
-    })?;
+    let output = command
+        .output()
+        .await
+        .with_context(|| format!("running `git fetch` in {}", work_dir.display()))?;
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow!(
@@ -600,12 +591,7 @@ pub(crate) async fn run_git_pull(work_dir: &Path) -> Result<()> {
 async fn member_has_branch(work_dir: &Path, branch: &str) -> bool {
     let mut command = new_command("git");
     command.current_dir(work_dir);
-    command.args([
-        "branch",
-        "--list",
-        branch,
-        "--format=%(refname:short)",
-    ]);
+    command.args(["branch", "--list", branch, "--format=%(refname:short)"]);
     command.stdout(Stdio::piped());
     command.stderr(Stdio::null());
     let Ok(output) = command.output().await else {
@@ -666,13 +652,10 @@ fn active_solution(cx: &App) -> Option<Solution> {
 
 /// Resolve `members` filter (catalog ids; empty/None ⇒ all members of
 /// the active Solution) into `(member_id, work_dir)` pairs.
-fn resolve_targets(
-    cx: &App,
-    filter: Option<&[String]>,
-) -> Result<Vec<(SharedString, PathBuf)>> {
+fn resolve_targets(cx: &App, filter: Option<&[String]>) -> Result<Vec<(SharedString, PathBuf)>> {
     let solution = active_solution(cx).ok_or_else(|| anyhow!("no active Solution"))?;
-    let allowed: Option<std::collections::HashSet<&str>> = filter
-        .map(|ids| ids.iter().map(String::as_str).collect());
+    let allowed: Option<std::collections::HashSet<&str>> =
+        filter.map(|ids| ids.iter().map(String::as_str).collect());
     let pairs: Vec<(SharedString, PathBuf)> = solution
         .members
         .iter()
@@ -687,7 +670,12 @@ fn resolve_targets(
         // for paths that aren't repos to begin with. Mirrors
         // `aggregator::plan_session` and `commit::build_plan`.
         .filter(|m| m.local_path.join(".git").exists())
-        .map(|m| (SharedString::from(m.catalog_id.0.clone()), m.local_path.clone()))
+        .map(|m| {
+            (
+                SharedString::from(m.catalog_id.0.clone()),
+                m.local_path.clone(),
+            )
+        })
         .collect();
     if pairs.is_empty() {
         return Err(anyhow!("no members match the requested filter"));
@@ -741,8 +729,7 @@ impl McpServerTool for StatusDashboardTool {
                     last_commit_subject: last_commit
                         .as_ref()
                         .map(|(s, _)| SharedString::from(s.clone())),
-                    last_commit_relative_date: last_commit
-                        .map(|(_, r)| SharedString::from(r)),
+                    last_commit_relative_date: last_commit.map(|(_, r)| SharedString::from(r)),
                     last_fetched_unix: last_fetched,
                     loading: false,
                 }
@@ -850,9 +837,7 @@ impl McpServerTool for BatchPullTool {
             tasks.push(cx.background_spawn(async move {
                 if skip_dirty {
                     if let Ok(status) = fetch_status(&path).await
-                        && (status.dirty_modified
-                            + status.dirty_staged
-                            + status.dirty_untracked)
+                        && (status.dirty_modified + status.dirty_staged + status.dirty_untracked)
                             > 0
                     {
                         return BatchOpOutcome {
@@ -1154,10 +1139,7 @@ impl SolutionStatusDashboard {
             .last_commit_subject
             .clone()
             .unwrap_or_else(|| SharedString::from(""));
-        let last_rel = row
-            .last_commit_relative_date
-            .clone()
-            .unwrap_or_default();
+        let last_rel = row.last_commit_relative_date.clone().unwrap_or_default();
         let last_fetched = row
             .last_fetched_unix
             .map(|u| format_unix_relative(u))
@@ -1337,11 +1319,7 @@ impl SolutionStatusDashboard {
     /// At that moment the workspace entity is mid-update; resolving the
     /// project from `self._workspace.upgrade()?.read(cx)` would panic
     /// with the same double-lease as the `spawn_fs_watchers` site.
-    pub fn start_ai_suggest(
-        &mut self,
-        project: Entity<project::Project>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn start_ai_suggest(&mut self, project: Entity<project::Project>, cx: &mut Context<Self>) {
         self.ai_suggest.section_open = true;
         if self.ai_suggest.in_flight {
             cx.notify();
@@ -1361,10 +1339,9 @@ impl SolutionStatusDashboard {
                 token_budget,
                 ..crate::ai_cherry_pick_suggest::AnalyzeConfig::default()
             };
-            let outcome = crate::ai_cherry_pick_suggest::analyze_solution(
-                &solution, &project, config, cx,
-            )
-            .await;
+            let outcome =
+                crate::ai_cherry_pick_suggest::analyze_solution(&solution, &project, config, cx)
+                    .await;
             let _ = this.update(cx, |this, cx| {
                 this.ai_suggest.in_flight = false;
                 match outcome {
@@ -1373,8 +1350,7 @@ impl SolutionStatusDashboard {
                         this.ai_suggest.last_error = None;
                     }
                     Err(err) => {
-                        this.ai_suggest.last_error =
-                            Some(SharedString::from(format!("{err}")));
+                        this.ai_suggest.last_error = Some(SharedString::from(format!("{err}")));
                     }
                 }
                 cx.notify();
@@ -1407,11 +1383,7 @@ impl SolutionStatusDashboard {
     /// User clicked "Dismiss" on a suggestion — write a `verdict: false`
     /// cache entry so the pair doesn't come back, then drop the row
     /// from the live list.
-    fn dismiss_suggestion(
-        &mut self,
-        index: usize,
-        cx: &mut Context<Self>,
-    ) {
+    fn dismiss_suggestion(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(outcome) = self.ai_suggest.last_outcome.as_mut() else {
             return;
         };
@@ -1513,8 +1485,7 @@ impl SolutionStatusDashboard {
                 .color(Color::Muted),
             )
             .child(
-                Label::new(SharedString::from("Cross-member suggestions"))
-                    .size(LabelSize::Default),
+                Label::new(SharedString::from("Cross-member suggestions")).size(LabelSize::Default),
             )
             .child({
                 let count = self
@@ -1619,7 +1590,11 @@ impl SolutionStatusDashboard {
                     .size(ui::IconSize::Small)
                     .color(Color::Muted),
             )
-            .child(Label::new(stats_label).size(LabelSize::Small).color(Color::Muted))
+            .child(
+                Label::new(stats_label)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
     }
 
     fn render_ai_suggestion_row(
@@ -1667,9 +1642,11 @@ impl SolutionStatusDashboard {
                             SharedString::from(format!("dsh-ai-apply-{index}")),
                             "Apply",
                         )
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.apply_suggestion(&suggestion_for_apply, window, cx);
-                        })),
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.apply_suggestion(&suggestion_for_apply, window, cx);
+                            },
+                        )),
                     )
                     .child(
                         ui::Button::new(
@@ -1685,9 +1662,11 @@ impl SolutionStatusDashboard {
                             SharedString::from(format!("dsh-ai-compare-{index}")),
                             "Compare",
                         )
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.compare_suggestion(&suggestion_for_compare, window, cx);
-                        })),
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.compare_suggestion(&suggestion_for_compare, window, cx);
+                            },
+                        )),
                     ),
             )
     }
@@ -1807,7 +1786,11 @@ u UU N... 100644 100644 100644 100644 a a a a unmerged
 
     #[test]
     fn sort_by_name_ascending() {
-        let mut rows = vec![row("c", 0, 0, (0, 0, 0)), row("a", 0, 0, (0, 0, 0)), row("b", 0, 0, (0, 0, 0))];
+        let mut rows = vec![
+            row("c", 0, 0, (0, 0, 0)),
+            row("a", 0, 0, (0, 0, 0)),
+            row("b", 0, 0, (0, 0, 0)),
+        ];
         sort_rows(&mut rows, SortColumn::Name);
         let names: Vec<&str> = rows.iter().map(|r| r.name.as_ref()).collect();
         assert_eq!(names, vec!["a", "b", "c"]);

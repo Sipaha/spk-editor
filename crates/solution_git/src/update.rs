@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use git_ui::providers::SolutionUpdateProvider;
-use gpui::{App, AppContext, SharedString, WeakEntity};
+use gpui::{App, AppContext, WeakEntity};
 use notifications::status_toast::StatusToast;
 use solutions::{Solution, SolutionStore};
 use ui::{Color, Icon, IconName, IconSize};
@@ -32,7 +32,7 @@ impl SolutionUpdateOrchestrator {
 
     fn active_solution(&self, cx: &App) -> Option<Solution> {
         let store = self.store.upgrade()?;
-        active_solution_from_store(&store, cx)
+        crate::active_solution_from_store(&store, cx)
     }
 }
 
@@ -43,33 +43,15 @@ pub fn build_global_orchestrator(cx: &App) -> Option<SolutionUpdateOrchestrator>
     Some(SolutionUpdateOrchestrator::new(store.downgrade()))
 }
 
-/// Most-recent `last_opened_at` heuristic — same as the dashboard / push /
-/// commit orchestrators.
-fn active_solution_from_store(store: &gpui::Entity<SolutionStore>, cx: &App) -> Option<Solution> {
-    let store_ref = store.read(cx);
-    let mut best: Option<&Solution> = None;
-    for sol in store_ref.solutions() {
-        best = Some(match best {
-            None => sol,
-            Some(prev) => match (prev.last_opened_at, sol.last_opened_at) {
-                (Some(a), Some(b)) if b > a => sol,
-                (None, Some(_)) => sol,
-                _ => prev,
-            },
-        });
-    }
-    best.cloned()
-}
-
-/// Resolve `(member_id, work_dir)` pairs for every git member of `solution`.
-/// Drops non-git members so per-member `git fetch`/`pull` don't surface
-/// "fatal: not a git repository" — mirrors `dashboard::resolve_targets`.
-fn git_member_targets(solution: &Solution) -> Vec<(SharedString, PathBuf)> {
+/// Work dirs of every git member of `solution`. Drops non-git members so
+/// per-member `git fetch`/`pull` don't surface "fatal: not a git repository"
+/// — mirrors `dashboard::resolve_targets`.
+fn git_member_targets(solution: &Solution) -> Vec<PathBuf> {
     solution
         .members
         .iter()
         .filter(|m| m.local_path.join(".git").exists())
-        .map(|m| (SharedString::from(m.catalog_id.0.clone()), m.local_path.clone()))
+        .map(|m| m.local_path.clone())
         .collect()
 }
 
@@ -77,8 +59,6 @@ fn git_member_targets(solution: &Solution) -> Vec<(SharedString, PathBuf)> {
 /// is unit-testable without real git.
 #[derive(Debug, Clone)]
 struct MemberUpdateOutcome {
-    #[allow(dead_code)]
-    member_id: SharedString,
     ok: bool,
 }
 
@@ -120,7 +100,7 @@ impl SolutionUpdateProvider for SolutionUpdateOrchestrator {
 
         cx.spawn(async move |cx| {
             let mut tasks = Vec::with_capacity(targets.len());
-            for (member_id, work_dir) in targets {
+            for work_dir in targets {
                 tasks.push(cx.background_spawn(async move {
                     // Fetch first, then fast-forward pull. A fetch failure
                     // counts as a failed member even if pull would no-op.
@@ -131,7 +111,6 @@ impl SolutionUpdateProvider for SolutionUpdateOrchestrator {
                         Ok(())
                     };
                     MemberUpdateOutcome {
-                        member_id,
                         ok: fetch.is_ok() && pull.is_ok(),
                     }
                 }));
@@ -156,7 +135,11 @@ impl SolutionUpdateProvider for SolutionUpdateOrchestrator {
                                 IconName::XCircle
                             })
                             .size(IconSize::Small)
-                            .color(if success { Color::Success } else { Color::Error }),
+                            .color(if success {
+                                Color::Success
+                            } else {
+                                Color::Error
+                            }),
                         )
                         .dismiss_button(true)
                     });

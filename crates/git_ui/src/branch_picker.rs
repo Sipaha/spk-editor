@@ -7,7 +7,7 @@ use git::repository::Branch;
 use gpui::http_client::Url;
 use gpui::{
     Action, AnyElement, App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
-    Focusable, InteractiveElement, IntoElement, MouseDownEvent, Modifiers, ModifiersChangedEvent,
+    Focusable, InteractiveElement, IntoElement, Modifiers, ModifiersChangedEvent, MouseDownEvent,
     ParentElement, Render, SharedString, Styled, Subscription, Task, WeakEntity, Window, actions,
     rems, uniform_list,
 };
@@ -1446,10 +1446,7 @@ impl BranchStatusEntry {
                     local_offset,
                     time_format::TimestampFormat::Relative,
                 );
-                (
-                    Some(c.subject.clone()),
-                    Some(SharedString::from(relative)),
-                )
+                (Some(c.subject.clone()), Some(SharedString::from(relative)))
             })
             .unwrap_or((None, None));
         Self {
@@ -1524,17 +1521,8 @@ pub struct BranchesPopup {
 
 impl BranchesPopup {
     /// Public constructor for hosting inside a `PopoverMenu` (title-bar widget)
-    /// or as a fallback modal (keyboard action). Mirrors `new`.
-    pub fn build(
-        workspace: WeakEntity<Workspace>,
-        repository: Option<Entity<Repository>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        Self::new(workspace, repository, window, cx)
-    }
-
-    fn new(
+    /// or as a fallback modal (keyboard action).
+    pub fn new(
         workspace: WeakEntity<Workspace>,
         repository: Option<Entity<Repository>>,
         window: &mut Window,
@@ -1729,11 +1717,7 @@ impl BranchesPopup {
 
         // Default selection to the first actionable row so Enter always acts
         // on a branch/tag/backup rather than toggling a section header.
-        self.selected_index = self
-            .rows
-            .iter()
-            .position(Self::is_actionable)
-            .unwrap_or(0);
+        self.selected_index = self.rows.iter().position(Self::is_actionable).unwrap_or(0);
         cx.notify();
     }
 
@@ -1783,9 +1767,7 @@ impl BranchesPopup {
         entries.sort_by(|a, b| a.name.as_ref().cmp(b.name.as_ref()));
         if entries.is_empty() {
             vec![PopupRow::Empty {
-                message: SharedString::from(
-                    "No favorites yet — star a branch to keep it here.",
-                ),
+                message: SharedString::from("No favorites yet — star a branch to keep it here."),
             }]
         } else {
             entries
@@ -1823,14 +1805,20 @@ impl BranchesPopup {
             let mut rows = Vec::new();
             for row in tree.rows {
                 match row {
-                    tree::TreeRow::Group { path, depth, expanded } => {
+                    tree::TreeRow::Group {
+                        path,
+                        depth,
+                        expanded,
+                    } => {
                         rows.push(PopupRow::Group {
                             path: SharedString::from(path),
                             depth,
                             expanded,
                         });
                     }
-                    tree::TreeRow::Leaf { full_name, depth, .. } => {
+                    tree::TreeRow::Leaf {
+                        full_name, depth, ..
+                    } => {
                         if let Some(entry) = by_name.get(full_name.as_str()) {
                             rows.push(PopupRow::Branch {
                                 entry: (*entry).clone(),
@@ -1858,7 +1846,9 @@ impl BranchesPopup {
                 message: SharedString::from("No tags"),
             }]
         } else {
-            tags.into_iter().map(|name| PopupRow::Tag { name }).collect()
+            tags.into_iter()
+                .map(|name| PopupRow::Tag { name })
+                .collect()
         }
     }
 
@@ -1905,12 +1895,7 @@ impl BranchesPopup {
             .map(|b| b.name.as_ref())
     }
 
-    fn dispatch_default(
-        &mut self,
-        idx: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn dispatch_default(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(row) = self.rows.get(idx).cloned() else {
             return;
         };
@@ -1931,7 +1916,9 @@ impl BranchesPopup {
                 self.checkout_revision(name, window, cx);
                 cx.emit(DismissEvent);
             }
-            PopupRow::Backup { branch, before_sha, .. } => {
+            PopupRow::Backup {
+                branch, before_sha, ..
+            } => {
                 self.restore_backup(branch, before_sha, window, cx);
             }
             PopupRow::Section { key, .. } => {
@@ -1958,8 +1945,7 @@ impl BranchesPopup {
             match recv.await {
                 Ok(Ok(())) => {
                     if let Some(work_dir) = work_dir {
-                        favorites::record_checkout(&work_dir, branch_for_recent.as_ref())
-                            .log_err();
+                        favorites::record_checkout(&work_dir, branch_for_recent.as_ref()).log_err();
                     }
                     anyhow::Ok(())
                 }
@@ -2086,12 +2072,7 @@ impl BranchesPopup {
         }
     }
 
-    fn select_next(
-        &mut self,
-        _: &menu::SelectNext,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn select_next(&mut self, _: &menu::SelectNext, _window: &mut Window, cx: &mut Context<Self>) {
         let mut index = self.selected_index;
         loop {
             if index + 1 >= self.rows.len() {
@@ -2193,7 +2174,9 @@ impl BranchesPopup {
                         cx.emit(DismissEvent);
                     })),
             )
-            // Checkout Tag or Revision… — opens BranchList picker (switch to Tags section)
+            // Checkout Tag or Revision… — opens the BranchList picker (same action as New
+            // Branch); the user can pick a branch, tag, or type a revision there. There is
+            // no dedicated tag-focused open path yet.
             .child(
                 make_row("popup-action-checkout-revision")
                     .child(icon_slot(IconName::GitBranch))
@@ -2207,19 +2190,18 @@ impl BranchesPopup {
             .child(sep().mt_1())
     }
 
-    fn render_row(
-        &self,
-        ix: usize,
-        row: &PopupRow,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_row(&self, ix: usize, row: &PopupRow, cx: &mut Context<Self>) -> AnyElement {
         let selected = ix == self.selected_index;
         match row {
             PopupRow::Empty { message } => Label::new(message.clone())
                 .color(Color::Muted)
                 .size(LabelSize::Small)
                 .into_any_element(),
-            PopupRow::Group { path, depth, expanded } => {
+            PopupRow::Group {
+                path,
+                depth,
+                expanded,
+            } => {
                 let path = path.clone();
                 let chevron = if *expanded {
                     IconName::ChevronDown
@@ -2246,7 +2228,11 @@ impl BranchesPopup {
                     }))
                     .into_any_element()
             }
-            PopupRow::Section { key, label, collapsed } => {
+            PopupRow::Section {
+                key,
+                label,
+                collapsed,
+            } => {
                 let key = *key;
                 let chevron = if *collapsed {
                     IconName::ChevronRight
@@ -2351,11 +2337,7 @@ impl BranchesPopup {
             .as_ref()
             .map(|wd| {
                 matches!(
-                    solutions::branch_protection::check(
-                        wd,
-                        entry.name.as_ref(),
-                        "delete_branch"
-                    ),
+                    solutions::branch_protection::check(wd, entry.name.as_ref(), "delete_branch"),
                     solutions::branch_protection::Decision::Forbidden { .. }
                 )
             })
@@ -2365,7 +2347,11 @@ impl BranchesPopup {
         } else {
             IconName::Star
         };
-        let star_color = if is_favorite { Color::Accent } else { Color::Muted };
+        let star_color = if is_favorite {
+            Color::Accent
+        } else {
+            Color::Muted
+        };
 
         let entry_for_click = entry.clone();
         let entry_for_menu = entry.clone();
@@ -2391,9 +2377,9 @@ impl BranchesPopup {
                 let branch = star_branch.clone();
                 cx.spawn(async move |this, cx| {
                     let _ = cx
-                        .background_spawn(async move {
-                            favorites::toggle_favorite(&work_dir, &branch)
-                        })
+                        .background_spawn(
+                            async move { favorites::toggle_favorite(&work_dir, &branch) },
+                        )
                         .await;
                     let work_dir = this
                         .read_with(cx, |this, _| this.work_dir.clone())
@@ -2565,33 +2551,26 @@ impl Render for BranchesPopup {
                         )
                     }),
             )
-            .child(
-                div()
-                    .px_3()
-                    .pb_1()
-                    .child(self.query.clone()),
-            )
+            .child(div().px_3().pb_1().child(self.query.clone()))
             .child(div().h_px().bg(cx.theme().colors().border_variant))
             .child(self.render_action_header(cx))
             .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .child(
-                        uniform_list("branches-popup-list", row_count, cx.processor(
-                            |this, range: std::ops::Range<usize>, _window, cx| {
-                                let mut items = Vec::with_capacity(range.len());
-                                for ix in range {
-                                    if let Some(row) = this.rows.get(ix).cloned() {
-                                        items.push(this.render_row(ix, &row, cx));
-                                    }
+                div().flex_1().min_h_0().overflow_hidden().child(
+                    uniform_list(
+                        "branches-popup-list",
+                        row_count,
+                        cx.processor(|this, range: std::ops::Range<usize>, _window, cx| {
+                            let mut items = Vec::with_capacity(range.len());
+                            for ix in range {
+                                if let Some(row) = this.rows.get(ix).cloned() {
+                                    items.push(this.render_row(ix, &row, cx));
                                 }
-                                items
-                            },
-                        ))
-                        .h_full(),
-                    ),
+                            }
+                            items
+                        }),
+                    )
+                    .h_full(),
+                ),
             );
 
         popup
@@ -3545,7 +3524,9 @@ mod tests {
 
         let popup = window_handle
             .update(cx, |_mw, window, cx| {
-                cx.new(|cx| BranchesPopup::new(WeakEntity::<Workspace>::new_invalid(), None, window, cx))
+                cx.new(|cx| {
+                    BranchesPopup::new(WeakEntity::<Workspace>::new_invalid(), None, window, cx)
+                })
             })
             .unwrap();
         cx.run_until_parked();
@@ -3569,7 +3550,9 @@ mod tests {
 
         let popup = window_handle
             .update(cx, |_mw, window, cx| {
-                cx.new(|cx| BranchesPopup::new(WeakEntity::<Workspace>::new_invalid(), None, window, cx))
+                cx.new(|cx| {
+                    BranchesPopup::new(WeakEntity::<Workspace>::new_invalid(), None, window, cx)
+                })
             })
             .unwrap();
         cx.run_until_parked();
@@ -3595,7 +3578,12 @@ mod tests {
                 .rows
                 .iter()
                 .find_map(|r| {
-                    if let PopupRow::Section { key: "recent", collapsed, .. } = r {
+                    if let PopupRow::Section {
+                        key: "recent",
+                        collapsed,
+                        ..
+                    } = r
+                    {
                         Some(*collapsed)
                     } else {
                         None
@@ -3605,6 +3593,174 @@ mod tests {
             assert!(collapsed, "recent section should be collapsed after toggle");
             // All 6 section headers still present regardless of collapsed state.
             assert_eq!(section_headers(&popup.rows).len(), 6);
+        });
+
+        // Toggle "recent" section again — it should expand back to false.
+        window_handle
+            .update(cx, |_mw, _window, cx| {
+                popup.update(cx, |popup, cx| {
+                    popup.toggle_section("recent", cx);
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        popup.update(cx, |popup, _cx| {
+            let collapsed = popup
+                .rows
+                .iter()
+                .find_map(|r| {
+                    if let PopupRow::Section {
+                        key: "recent",
+                        collapsed,
+                        ..
+                    } = r
+                    {
+                        Some(*collapsed)
+                    } else {
+                        None
+                    }
+                })
+                .expect("recent section header must exist");
+            assert!(
+                !collapsed,
+                "recent section should be expanded after second toggle"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn test_branches_popup_nav_skips_non_actionable_rows(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let window_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
+
+        let popup = window_handle
+            .update(cx, |_mw, window, cx| {
+                cx.new(|cx| {
+                    BranchesPopup::new(WeakEntity::<Workspace>::new_invalid(), None, window, cx)
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        // Build a hand-crafted rows vec:
+        //   index 0 — Section (non-actionable)
+        //   index 1 — Empty   (non-actionable)
+        //   index 2 — Tag     (actionable)
+        //   index 3 — Section (non-actionable)
+        //   index 4 — Tag     (actionable)
+        window_handle
+            .update(cx, |_mw, _window, cx| {
+                popup.update(cx, |popup, cx| {
+                    popup.rows = vec![
+                        PopupRow::Section {
+                            key: "recent",
+                            label: "Recent".into(),
+                            collapsed: false,
+                        },
+                        PopupRow::Empty {
+                            message: "none".into(),
+                        },
+                        PopupRow::Tag { name: "v1".into() },
+                        PopupRow::Section {
+                            key: "tags",
+                            label: "Tags".into(),
+                            collapsed: false,
+                        },
+                        PopupRow::Tag { name: "v2".into() },
+                    ];
+                    popup.selected_index = 0;
+                    cx.notify();
+                });
+            })
+            .unwrap();
+
+        // select_next from index 0 (Section) → should land on index 2 (Tag "v1"),
+        // skipping index 1 (Empty).
+        window_handle
+            .update(cx, |_mw, window, cx| {
+                popup.update(cx, |popup, cx| {
+                    popup.select_next(&menu::SelectNext, window, cx);
+                });
+            })
+            .unwrap();
+
+        popup.update(cx, |popup, _cx| {
+            assert_eq!(
+                popup.selected_index, 2,
+                "select_next from Section(0) should skip Empty(1) and land on Tag(2)"
+            );
+        });
+
+        // select_next from index 2 (Tag "v1") → should land on index 4 (Tag "v2"),
+        // skipping index 3 (Section).
+        window_handle
+            .update(cx, |_mw, window, cx| {
+                popup.update(cx, |popup, cx| {
+                    popup.select_next(&menu::SelectNext, window, cx);
+                });
+            })
+            .unwrap();
+
+        popup.update(cx, |popup, _cx| {
+            assert_eq!(
+                popup.selected_index, 4,
+                "select_next from Tag(2) should skip Section(3) and land on Tag(4)"
+            );
+        });
+
+        // select_next from index 4 (last row) → no-op, stays at 4.
+        window_handle
+            .update(cx, |_mw, window, cx| {
+                popup.update(cx, |popup, cx| {
+                    popup.select_next(&menu::SelectNext, window, cx);
+                });
+            })
+            .unwrap();
+
+        popup.update(cx, |popup, _cx| {
+            assert_eq!(
+                popup.selected_index, 4,
+                "select_next at last actionable row should be a no-op"
+            );
+        });
+
+        // select_prev from index 4 (Tag "v2") → should land on index 2 (Tag "v1"),
+        // skipping index 3 (Section).
+        window_handle
+            .update(cx, |_mw, window, cx| {
+                popup.update(cx, |popup, cx| {
+                    popup.selected_index = 4;
+                    popup.select_prev(&menu::SelectPrevious, window, cx);
+                });
+            })
+            .unwrap();
+
+        popup.update(cx, |popup, _cx| {
+            assert_eq!(
+                popup.selected_index, 2,
+                "select_prev from Tag(4) should skip Section(3) and land on Tag(2)"
+            );
+        });
+
+        // select_prev from index 2 (Tag "v1") → no actionable row before it
+        // (index 0 = Section, index 1 = Empty) → no-op, stays at 2.
+        window_handle
+            .update(cx, |_mw, window, cx| {
+                popup.update(cx, |popup, cx| {
+                    popup.select_prev(&menu::SelectPrevious, window, cx);
+                });
+            })
+            .unwrap();
+
+        popup.update(cx, |popup, _cx| {
+            assert_eq!(
+                popup.selected_index, 2,
+                "select_prev from Tag(2) with only non-actionable rows before it should be a no-op"
+            );
         });
     }
 }

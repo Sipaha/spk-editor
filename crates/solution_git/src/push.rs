@@ -60,7 +60,7 @@ impl SolutionPushOrchestrator {
     /// no Solutions.
     fn active_solution(&self, cx: &App) -> Option<Solution> {
         let store = self.store.upgrade()?;
-        active_solution_from_store(&store, cx)
+        crate::active_solution_from_store(&store, cx)
     }
 }
 
@@ -70,22 +70,6 @@ impl SolutionPushOrchestrator {
 pub fn build_global_orchestrator(cx: &App) -> Option<SolutionPushOrchestrator> {
     let store = SolutionStore::try_global(cx)?;
     Some(SolutionPushOrchestrator::new(store.downgrade()))
-}
-
-fn active_solution_from_store(store: &gpui::Entity<SolutionStore>, cx: &App) -> Option<Solution> {
-    let store_ref = store.read(cx);
-    let mut best: Option<&Solution> = None;
-    for sol in store_ref.solutions() {
-        best = Some(match best {
-            None => sol,
-            Some(prev) => match (prev.last_opened_at, sol.last_opened_at) {
-                (Some(a), Some(b)) if b > a => sol,
-                (None, Some(_)) => sol,
-                _ => prev,
-            },
-        });
-    }
-    best.cloned()
 }
 
 impl SolutionPushProvider for SolutionPushOrchestrator {
@@ -294,10 +278,8 @@ impl SolutionPushDialog {
                 Err(err) => {
                     let msg = format!("{err}");
                     let _ = this.update(cx, |this, cx| {
-                        if let Some(section) = this
-                            .sections
-                            .iter_mut()
-                            .find(|s| s.member_id == member_id)
+                        if let Some(section) =
+                            this.sections.iter_mut().find(|s| s.member_id == member_id)
                         {
                             section.loading = false;
                             section.load_error = Some(SharedString::from(msg));
@@ -315,11 +297,7 @@ impl SolutionPushDialog {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if let Some(section) = this
-                    .sections
-                    .iter_mut()
-                    .find(|s| s.member_id == member_id)
-                {
+                if let Some(section) = this.sections.iter_mut().find(|s| s.member_id == member_id) {
                     section.loading = false;
                     match preview {
                         Ok(preview) => {
@@ -638,11 +616,7 @@ impl SolutionPushDialog {
         } else if section.loading {
             "loading…".into()
         } else if section.skip {
-            format!(
-                "skipped — {} ahead",
-                section.ahead_commits.len()
-            )
-            .into()
+            format!("skipped — {} ahead", section.ahead_commits.len()).into()
         } else if section.ahead_commits.is_empty() && !section.will_create_remote {
             "nothing to push".into()
         } else {
@@ -670,13 +644,10 @@ impl SolutionPushDialog {
             .border_b_1()
             .border_color(cx.theme().colors().border_variant)
             .child(
-                ui::IconButton::new(
-                    SharedString::from(format!("toggle-{id_str}")),
-                    chevron,
-                )
-                .on_click(
-                    cx.listener(move |this, _, _, cx| this.toggle_section_collapsed(ix, cx)),
-                ),
+                ui::IconButton::new(SharedString::from(format!("toggle-{id_str}")), chevron)
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.toggle_section_collapsed(ix, cx)),
+                    ),
             )
             .child(Label::new(section.member_id.clone()).size(LabelSize::Default))
             .child(
@@ -778,27 +749,23 @@ impl SolutionPushDialog {
         let tags_locked = self.apply_to_all.push_tags.is_some();
         let no_verify_locked = self.apply_to_all.no_verify.is_some();
 
-        let mut force_box =
-            Checkbox::new(SharedString::from(format!("force-with-lease-{id_str}")), force_lease_state)
-                .label("force-with-lease")
-                .disabled(force_locked)
-                .on_click(
-                    cx.listener(move |this, _, _, cx| {
-                        this.toggle_section_force_with_lease(ix, cx)
-                    }),
-                );
+        let mut force_box = Checkbox::new(
+            SharedString::from(format!("force-with-lease-{id_str}")),
+            force_lease_state,
+        )
+        .label("force-with-lease")
+        .disabled(force_locked)
+        .on_click(cx.listener(move |this, _, _, cx| this.toggle_section_force_with_lease(ix, cx)));
         if force_locked {
             force_box = force_box.tooltip(Tooltip::text(SharedString::from(
                 "Overridden by Apply-to-all",
             )));
         }
-        let mut force_plain_box = Checkbox::new(
-            SharedString::from(format!("force-{id_str}")),
-            force_state,
-        )
-        .label("force")
-        .disabled(force_locked)
-        .on_click(cx.listener(move |this, _, _, cx| this.toggle_section_force(ix, cx)));
+        let mut force_plain_box =
+            Checkbox::new(SharedString::from(format!("force-{id_str}")), force_state)
+                .label("force")
+                .disabled(force_locked)
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_section_force(ix, cx)));
         if force_locked {
             force_plain_box = force_plain_box.tooltip(Tooltip::text(SharedString::from(
                 "Overridden by Apply-to-all",
@@ -822,9 +789,7 @@ impl SolutionPushDialog {
                 Checkbox::new(SharedString::from(format!("tags-{id_str}")), tags_state)
                     .label("tags")
                     .disabled(tags_locked)
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.toggle_section_tags(ix, cx)),
-                    ),
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_section_tags(ix, cx))),
             )
             .child(
                 Checkbox::new(
@@ -833,9 +798,7 @@ impl SolutionPushDialog {
                 )
                 .label("no-verify")
                 .disabled(no_verify_locked)
-                .on_click(
-                    cx.listener(move |this, _, _, cx| this.toggle_section_no_verify(ix, cx)),
-                ),
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_section_no_verify(ix, cx))),
             );
 
         let body = v_flex()
@@ -1009,10 +972,9 @@ impl MemberPushPlan {
         match self.force_mode {
             ForceMode::None => {}
             ForceMode::WithLease => match &self.expected_remote_sha {
-                Some(sha) => args.push(format!(
-                    "--force-with-lease={}:{}",
-                    self.remote_branch, sha
-                )),
+                Some(sha) => {
+                    args.push(format!("--force-with-lease={}:{}", self.remote_branch, sha))
+                }
                 None => args.push("--force-with-lease".into()),
             },
             ForceMode::Force => args.push("--force".into()),
@@ -1257,10 +1219,10 @@ pub mod mcp {
     ) -> Result<Vec<MemberPushPlan>> {
         let store = SolutionStore::try_global(cx)
             .ok_or_else(|| anyhow!("no SolutionStore global — `solution_git::init` must run"))?;
-        let solution = active_solution_from_store(&store, cx)
+        let solution = crate::active_solution_from_store(&store, cx)
             .ok_or_else(|| anyhow!("no active Solution"))?;
-        let allowed: Option<std::collections::HashSet<&str>> = members
-            .map(|ids| ids.iter().map(String::as_str).collect());
+        let allowed: Option<std::collections::HashSet<&str>> =
+            members.map(|ids| ids.iter().map(String::as_str).collect());
 
         let mut plans = Vec::new();
         for member in &solution.members {
@@ -1337,8 +1299,8 @@ pub mod mcp {
             cx: &mut AsyncApp,
         ) -> Result<ToolResponse<Self::Output>> {
             let per_member = input.per_member_options.unwrap_or_default();
-            let initial_plans: Vec<MemberPushPlan> = cx
-                .update(|cx| build_plans(input.members.as_deref(), &per_member, cx))?;
+            let initial_plans: Vec<MemberPushPlan> =
+                cx.update(|cx| build_plans(input.members.as_deref(), &per_member, cx))?;
             let any_force = initial_plans
                 .iter()
                 .any(|p| matches!(p.force_mode, ForceMode::Force));
@@ -1435,8 +1397,8 @@ mod tests {
         let mut section = skeleton("a", "feature", "origin", "feature");
         section.force_mode = ForceMode::WithLease;
         section.push_tags = true;
-        let mut plan = build_per_member_command(&section, &ApplyAllOptions::default())
-            .expect("plan");
+        let mut plan =
+            build_per_member_command(&section, &ApplyAllOptions::default()).expect("plan");
         plan.expected_remote_sha = Some("deadbeef".into());
         let argv = plan.build_argv();
         assert_eq!(

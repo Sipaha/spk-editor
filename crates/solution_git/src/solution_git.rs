@@ -19,12 +19,34 @@ pub mod update;
 
 use gpui::App;
 use settings::Settings as _;
-use solutions::SolutionsSettings;
+use solutions::{Solution, SolutionStore, SolutionsSettings};
 
 pub use aggregator::{
     DEFAULT_MAX_TOTAL_COMMITS, MEMBER_PALETTE_LEN, SolutionGitAggregator, member_color,
 };
 pub use dashboard::{OpenStatusDashboard, SolutionStatusDashboard};
+
+/// Most-recent `last_opened_at` heuristic shared by push, update, commit,
+/// and MCP tools — returns the Solution with the latest `last_opened_at`
+/// timestamp, or `None` when the store is gone or contains no Solutions.
+pub(crate) fn active_solution_from_store(
+    store: &gpui::Entity<SolutionStore>,
+    cx: &App,
+) -> Option<Solution> {
+    let store_ref = store.read(cx);
+    let mut best: Option<&Solution> = None;
+    for sol in store_ref.solutions() {
+        best = Some(match best {
+            None => sol,
+            Some(prev) => match (prev.last_opened_at, sol.last_opened_at) {
+                (Some(a), Some(b)) if b > a => sol,
+                (None, Some(_)) => sol,
+                _ => prev,
+            },
+        });
+    }
+    best.cloned()
+}
 
 pub fn init(cx: &mut App) {
     // S-SOL-LOG: build an aggregator wired to the global `SolutionStore`

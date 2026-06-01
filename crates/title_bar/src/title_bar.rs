@@ -136,10 +136,7 @@ pub fn init(cx: &mut App) {
         });
 
         workspace.register_action(
-            |workspace,
-             _: &git_ui::branch_picker::BranchesPopupOpen,
-             window,
-             cx| {
+            |workspace, _: &git_ui::branch_picker::BranchesPopupOpen, window, cx| {
                 if let Some(titlebar) = workspace
                     .titlebar_item()
                     .and_then(|item| item.downcast::<TitleBar>().ok())
@@ -160,7 +157,7 @@ pub fn init(cx: &mut App) {
                 let repository = workspace.project().read(cx).active_repository(cx);
                 let handle = workspace.weak_handle();
                 workspace.toggle_modal(window, cx, |window, cx| {
-                    git_ui::branch_picker::BranchesPopup::build(handle, repository, window, cx)
+                    git_ui::branch_picker::BranchesPopup::new(handle, repository, window, cx)
                 });
             },
         );
@@ -241,7 +238,9 @@ impl Render for TitleBar {
                         // Task 9). The `show_branch_name` /
                         // `show_project_items` settings no longer have a
                         // surface to gate here.
-                        .when_some(solution_tab_strip, |title_bar, strip| title_bar.child(strip))
+                        .when_some(solution_tab_strip, |title_bar, strip| {
+                            title_bar.child(strip)
+                        })
                 })
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .into_any_element(),
@@ -591,12 +590,13 @@ impl TitleBar {
             .log_err();
     }
 
-    fn render_branch_widget(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement> {
+    fn render_branch_widget(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let workspace = self.workspace.upgrade()?;
-        let repository = workspace.read(cx).project().read(cx).active_repository(cx)?;
+        let repository = workspace
+            .read(cx)
+            .project()
+            .read(cx)
+            .active_repository(cx)?;
         let snapshot = repository.read(cx);
         let (name, ahead, behind) = match &snapshot.branch {
             Some(branch) => {
@@ -646,7 +646,7 @@ impl TitleBar {
                     let repository = workspace.read(cx).project().read(cx).active_repository(cx);
                     let weak = workspace.downgrade();
                     Some(cx.new(|cx| {
-                        git_ui::branch_picker::BranchesPopup::build(weak, repository, window, cx)
+                        git_ui::branch_picker::BranchesPopup::new(weak, repository, window, cx)
                     }))
                 }),
         )

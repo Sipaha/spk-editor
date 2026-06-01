@@ -47,9 +47,13 @@ pub fn build_branch_menu(
 
         let new_branch_ctx = ctx.clone();
         menu = menu
-            .entry("Checkout as New Branch From Here…", None, move |_window, cx| {
-                checkout_as_new(new_branch_ctx.clone(), cx);
-            })
+            .entry(
+                "Checkout as New Branch From Here…",
+                None,
+                move |_window, cx| {
+                    checkout_as_new(new_branch_ctx.clone(), cx);
+                },
+            )
             .separator();
 
         let cwc_ctx = ctx.clone();
@@ -95,9 +99,11 @@ pub fn build_branch_menu(
             });
 
         let upstream_ctx = ctx.clone();
-        menu = menu.separator().entry("Set Upstream…", None, move |window, cx| {
-            open_set_upstream_modal(upstream_ctx.clone(), window, cx);
-        });
+        menu = menu
+            .separator()
+            .entry("Set Upstream…", None, move |window, cx| {
+                open_set_upstream_modal(upstream_ctx.clone(), window, cx);
+            });
 
         if !ctx.is_remote {
             let rename_ctx = ctx.clone();
@@ -119,9 +125,11 @@ pub fn build_branch_menu(
             "Favorite Branch"
         };
         let fav_ctx = ctx.clone();
-        menu = menu.separator().entry(star_label, None, move |_window, cx| {
-            toggle_favorite(fav_ctx.clone(), cx);
-        });
+        menu = menu
+            .separator()
+            .entry(star_label, None, move |_window, cx| {
+                toggle_favorite(fav_ctx.clone(), cx);
+            });
 
         let copy_branch_name = ctx.branch_name.to_string();
         menu = menu.entry("Copy Branch Name", None, move |_window, cx| {
@@ -139,11 +147,7 @@ pub struct TagContext {
     pub tag_name: SharedString,
 }
 
-pub fn build_tag_menu(
-    ctx: TagContext,
-    window: &mut Window,
-    cx: &mut App,
-) -> Entity<ContextMenu> {
+pub fn build_tag_menu(ctx: TagContext, window: &mut Window, cx: &mut App) -> Entity<ContextMenu> {
     ContextMenu::build(window, cx, move |menu, _window, _cx| {
         let checkout_ctx = ctx.clone();
         let compare_ctx = ctx.clone();
@@ -154,8 +158,7 @@ pub fn build_tag_menu(
             let tag = checkout_ctx.tag_name.clone();
             let repo = checkout_ctx.repository.clone();
             cx.spawn(async move |cx| {
-                let recv = repo
-                    .update(cx, |repo, _| repo.checkout_revision(tag.to_string()));
+                let recv = repo.update(cx, |repo, _| repo.checkout_revision(tag.to_string()));
                 recv.await??;
                 anyhow::Ok(())
             })
@@ -282,9 +285,7 @@ fn delete_branch(ctx: BranchContext, cx: &mut App) {
         // `Repository::delete_branch` path — we don't backup-ref remote
         // refs, since the remote retains them.
         cx.spawn(async move |cx| {
-            let recv = repo.update(cx, |repo, _| {
-                repo.delete_branch(true, branch.to_string())
-            });
+            let recv = repo.update(cx, |repo, _| repo.delete_branch(true, branch.to_string()));
             recv.await??;
             anyhow::Ok(())
         })
@@ -380,7 +381,13 @@ fn handle_post_op(
 ) {
     match post {
         PostOp::Done => {
-            notify(workspace, success_message, IconName::Check, Color::Success, cx);
+            notify(
+                workspace,
+                success_message,
+                IconName::Check,
+                Color::Success,
+                cx,
+            );
         }
         PostOp::Conflict => {
             notify(
