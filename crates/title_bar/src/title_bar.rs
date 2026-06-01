@@ -590,11 +590,20 @@ impl TitleBar {
     ) -> Option<impl IntoElement> {
         let workspace = self.workspace.upgrade()?;
         let repository = workspace.read(cx).project().read(cx).active_repository(cx)?;
-        let branch = repository.read(cx).branch.clone()?;
-        let name = SharedString::from(branch.name().to_string());
-        let (ahead, behind) = match branch.tracking_status() {
-            Some(status) => (status.ahead, status.behind),
-            None => (0, 0),
+        let snapshot = repository.read(cx);
+        let (name, ahead, behind) = match &snapshot.branch {
+            Some(branch) => {
+                let (ahead, behind) = branch
+                    .tracking_status()
+                    .map(|s| (s.ahead, s.behind))
+                    .unwrap_or((0, 0));
+                (SharedString::from(branch.name().to_string()), ahead, behind)
+            }
+            None => {
+                // Detached HEAD: show short commit SHA, no upstream tracking indicators.
+                let sha = snapshot.head_commit.as_ref().map(|c| c.short_sha())?;
+                (sha, 0, 0)
+            }
         };
         let workspace_weak = self.workspace.clone();
         Some(
