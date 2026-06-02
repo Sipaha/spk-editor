@@ -9,7 +9,7 @@ use gpui::{
     Action, AnyElement, App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
     Focusable, InteractiveElement, IntoElement, Modifiers, ModifiersChangedEvent, MouseDownEvent,
     ParentElement, Render, SharedString, Styled, Subscription, Task, WeakEntity, Window, actions,
-    rems, uniform_list,
+    rems,
 };
 use menu::{Cancel, Confirm};
 use picker::{Picker, PickerDelegate, PickerEditorPosition};
@@ -2519,7 +2519,6 @@ impl Focusable for BranchesPopup {
 
 impl Render for BranchesPopup {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let row_count = self.rows.len();
         let head = self.current_head().map(|s| s.to_string());
         let popup = v_flex()
             .key_context("BranchesPopup")
@@ -2555,22 +2554,24 @@ impl Render for BranchesPopup {
             .child(div().h_px().bg(cx.theme().colors().border_variant))
             .child(self.render_action_header(cx))
             .child(
-                div().flex_1().min_h_0().overflow_hidden().child(
-                    uniform_list(
-                        "branches-popup-list",
-                        row_count,
-                        cx.processor(|this, range: std::ops::Range<usize>, _window, cx| {
-                            let mut items = Vec::with_capacity(range.len());
-                            for ix in range {
-                                if let Some(row) = this.rows.get(ix).cloned() {
-                                    items.push(this.render_row(ix, &row, cx));
-                                }
-                            }
-                            items
-                        }),
-                    )
-                    .h_full(),
-                ),
+                // Rows have heterogeneous heights (1-line section headers /
+                // empty / tags vs 2-line branch rows with a commit subtitle),
+                // so a `uniform_list` (single measured row height) overflows the
+                // taller branch rows onto the next row. Render a plain
+                // variable-height scroll list instead — the popup has few rows
+                // and no scroll-to-selected, so virtualization isn't needed.
+                v_flex()
+                    .id("branches-popup-list")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .children({
+                        let rows = self.rows.clone();
+                        rows.iter()
+                            .enumerate()
+                            .map(|(ix, row)| self.render_row(ix, row, cx))
+                            .collect::<Vec<_>>()
+                    }),
             );
 
         popup
