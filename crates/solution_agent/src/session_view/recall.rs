@@ -26,19 +26,12 @@ use crate::store::SolutionAgentStore;
 pub(super) fn unpack_recalled_bundle(
     blocks: Vec<acp::ContentBlock>,
 ) -> (String, Vec<PendingImage>) {
-    let mut text = String::new();
+    let mut raw_text = String::new();
     let mut images: Vec<PendingImage> = Vec::new();
-    let mut first_text = true;
     for block in blocks {
         match block {
             acp::ContentBlock::Text(t) => {
-                let chunk = if first_text {
-                    crate::conversation_render::strip_injected_meta(&t.text)
-                } else {
-                    t.text
-                };
-                first_text = false;
-                text.push_str(&chunk);
+                raw_text.push_str(&t.text);
             }
             acp::ContentBlock::Image(img) => {
                 images.push(PendingImage {
@@ -50,6 +43,12 @@ pub(super) fn unpack_recalled_bundle(
             _ => {}
         }
     }
+    // Strip injected metadata from the FULLY concatenated text, not just the
+    // first block: each merged follow-up carries its own `[HH:MM:SS]` stamp as
+    // a separate block, so a first-block-only strip would leak the 2nd+
+    // timestamps into the recalled draft. `strip_injected_meta` is per-segment
+    // (splits on `\n\n`), so it cleans every follow-up's stamp.
+    let text = crate::conversation_render::strip_injected_meta(&raw_text);
     let placeholders: Vec<usize> = crate::conversation_render::IMAGE_PLACEHOLDER_RE
         .captures_iter(&text)
         .filter_map(|c| c.get(1)?.as_str().parse::<usize>().ok())

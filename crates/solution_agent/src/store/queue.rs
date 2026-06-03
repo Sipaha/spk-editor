@@ -127,13 +127,21 @@ pub(crate) fn inject_text_from_blocks(blocks: &[acp::ContentBlock]) -> String {
     for block in blocks {
         match block {
             acp::ContentBlock::Text(t) => {
-                if !out.is_empty() && !out.ends_with('\n') {
+                // Skip the join-newline when the prior block already ends in
+                // whitespace — keeps the `[HH:MM:SS] ` stamp block on the same
+                // line as the user text that follows it (the stamp ends in a
+                // space), instead of breaking the timestamp onto its own line.
+                if !out.is_empty() && !out.ends_with(char::is_whitespace) {
                     out.push('\n');
                 }
                 out.push_str(&t.text);
             }
             acp::ContentBlock::Image(_) => {
-                if !out.is_empty() && !out.ends_with('\n') {
+                // Skip the join-newline when the prior block already ends in
+                // whitespace — keeps the `[HH:MM:SS] ` stamp block on the same
+                // line as the user text that follows it (the stamp ends in a
+                // space), instead of breaking the timestamp onto its own line.
+                if !out.is_empty() && !out.ends_with(char::is_whitespace) {
                     out.push('\n');
                 }
                 out.push_str(&format!("[image #{image_idx}]"));
@@ -672,5 +680,17 @@ mod tests {
         assert_eq!(inner.len(), 8, "expected HH:MM:SS, got {inner:?}");
         assert_eq!(inner.as_bytes()[2], b':');
         assert_eq!(inner.as_bytes()[5], b':');
+    }
+
+    #[test]
+    fn inject_text_keeps_timestamp_on_the_message_line() {
+        // The stamp is its own block ending in a space; the agent-facing text
+        // must keep it inline with the user content, not break it onto its own
+        // line.
+        let blocks = vec![
+            acp::ContentBlock::Text(acp::TextContent::new("[10:39:12] ".to_string())),
+            acp::ContentBlock::Text(acp::TextContent::new("hello".to_string())),
+        ];
+        assert_eq!(inject_text_from_blocks(&blocks), "[10:39:12] hello");
     }
 }

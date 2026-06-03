@@ -18,9 +18,15 @@ fn image_block(data: &str, mime: &str) -> acp::ContentBlock {
 
 #[test]
 fn unpack_recalled_bundle_strips_timestamp_and_concatenates_text() {
+    // Mirror the real enqueue shape: each merged follow-up is a STANDALONE
+    // `[HH:MM:SS] ` stamp block followed by the user's text, joined by a
+    // `\n\n` block (see `store::queue::send_message_blocks`). Both stamps must
+    // be stripped — a first-block-only strip would leak the second.
     let bundle = vec![
-        text_block("[14:23:01] first part"),
+        text_block("[14:23:01] "),
+        text_block("first part"),
         text_block("\n\n"),
+        text_block("[14:24:10] "),
         text_block("second part"),
     ];
     let (text, images) = unpack_recalled_bundle(bundle);
