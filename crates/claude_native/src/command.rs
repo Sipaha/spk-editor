@@ -50,6 +50,15 @@ impl ClaudeCommandSpec {
         cmd.current_dir(&self.work_dir);
         cmd.envs(self.extra_env.iter().cloned());
 
+        // Enable Claude Code's "Agent Teams" feature. Without this gate the
+        // agent can spawn subagents (the `Agent`/`Task` tools) but has no way
+        // to message a still-running one — the `SendMessage` tool (plus
+        // `TeamCreate`/`TaskCreate`) is registered only when this flag is set.
+        // It's an experimental feature keyed off an env var rather than a CLI
+        // option (claude 2.1.x). See anthropics/claude-code issues #42737 /
+        // #35240. Set after `extra_env` so it always wins.
+        cmd.env("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
+
         cmd.args([
             "--output-format",
             "stream-json",
@@ -151,6 +160,12 @@ mod tests {
                 .any(|w| w[0] == "--append-system-prompt" && w[1] == "SYS")
         );
         assert_eq!(cmd.get_current_dir(), Some(std::path::Path::new("/w")));
+        // Agent Teams must be enabled so the agent gets the SendMessage tool.
+        let teams = cmd.get_envs().any(|(k, v)| {
+            k == std::ffi::OsStr::new("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS")
+                && v == Some(std::ffi::OsStr::new("1"))
+        });
+        assert!(teams, "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 must be set");
     }
 
     #[test]
