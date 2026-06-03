@@ -57,6 +57,12 @@ What is the current state of the world?
   cannot rederive (auth tokens already exchanged, mocked services,
   scratch directories created, running PIDs that hold sockets/DB
   locks, etc.).
+- **The natural language the user has been communicating in** during
+  this session. The next context starts cold and cannot otherwise know
+  which language to use, so state it explicitly (e.g. "User writes in
+  Russian — address the user in Russian; internal reasoning and generic
+  status phrases may stay English."). This is load-bearing: the resumed
+  agent must keep talking *to the user* in their own language.
 
 ### `decisions.md`
 Architectural / design / approach decisions made during the session.
@@ -78,6 +84,22 @@ above files and is briefing a fresh agent. It must:
   absolute paths (they live in `COMPACT_DIR` — i.e. under
   `<solution_root>/.agents/<SESSION_ID>/c<NN>/`). The new session
   has a cold context; those files are its only memory of this one.
+- **Tell the new agent which language to address the user in.** Name the
+  language the user has been communicating in this session (also recorded
+  in `state.md`) and instruct the new agent: every reply *addressed to the
+  user* — the terse acknowledgement above, answers, questions, summaries —
+  must be in that language, starting with the very first one. Its own
+  internal reasoning / thinking and throwaway progress interjections (e.g.
+  "exploring the current state") are NOT replies to the user in this sense
+  and may stay in English — the user does not read those for language.
+- **Demand a terse, action-first style.** Instruct the new agent that,
+  on reading this brief, it must reply with a single short
+  acknowledgement in the user's language (the equivalent of "got it —
+  on it") and then just do the work. No progress narration, no status
+  recaps, no "I will now…" preamble, no restating the plan back — emit
+  user-facing prose only when it hits a real blocker or genuinely needs
+  the user's input. The user does not want tokens burned on commentary
+  they did not ask for.
 - End with the *first concrete instruction* (the new agent's first
   step), not with "let me know if you have questions". Be directive.
 - For **case C**, the first instruction is "Read the files above and
