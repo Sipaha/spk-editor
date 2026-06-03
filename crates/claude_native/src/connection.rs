@@ -45,6 +45,14 @@ use crate::translate::{
 };
 use crate::watchdog::{AnalyzerContext, ClaudeAnalyzer, Watchdog};
 
+/// Store-provided pull invoked at each hook to fetch the next queued follow-up
+/// for `session_id`. `is_end_of_turn` is true for the `Stop` hook (the agent
+/// has produced a complete message). Returns the formatted agent-facing text,
+/// or `None` when the queue is empty. Type-erased so `claude_native` needs no
+/// dependency on `solution_agent`.
+pub type HookPull =
+    std::rc::Rc<dyn Fn(&acp::SessionId, bool, &mut gpui::AsyncApp) -> Option<String>>;
+
 /// Stable id for the `PostToolUse` hook callback registered in `initialize`.
 const HOOK_CALLBACK_POST_TOOL_USE: &str = "pti";
 /// Stable id for the `Stop` hook callback registered in `initialize`. When a
@@ -117,6 +125,7 @@ impl AgentServer for ClaudeNativeAgentServer {
             silence_window: Cell::new(DEFAULT_SILENCE_WINDOW),
             self_handle: RefCell::new(std::rc::Weak::new()),
             escalations_armed: Cell::new(0),
+            store_pull: std::rc::Rc::new(std::cell::RefCell::new(None)),
         });
         *connection.self_handle.borrow_mut() = Rc::downgrade(&connection);
         Task::ready(Ok(connection as Rc<dyn AgentConnection>))
@@ -170,6 +179,12 @@ struct SessionShared {
     /// been seen yet (`inferContextWindowFromModel` in JS:`acp-agent.js:716`).
     /// Reset on session restart but persists across turns within a session.
     active_model: RefCell<Option<String>>,
+    /// The session's own id, so the hook arm can pass it to the store pull.
+    session_id: acp::SessionId,
+    /// Shared cell holding the store's follow-up pull (see `ClaudeNativeConnection::store_pull`).
+    /// A clone of the connection's `Rc`, so a `set_store_pull` AFTER this session
+    /// was created is still visible here.
+    pending_pull: std::rc::Rc<std::cell::RefCell<Option<HookPull>>>,
 }
 
 /// Everything needed to respawn a session's `claude` process under the same
@@ -222,6 +237,10 @@ pub struct ClaudeNativeConnection {
     /// idempotency guard means a burst of repeated cancels for one in-flight
     /// turn arms exactly one — observable without racing the respawn.
     escalations_armed: Cell<usize>,
+    /// Store-provided follow-up pull, registered once by the store
+    /// (`subscribe_to_session`). Shared by `Rc` into every `SessionShared` so a
+    /// late registration reaches already-created sessions' pumps.
+    store_pull: std::rc::Rc<std::cell::RefCell<Option<HookPull>>>,
 }
 
 /// Hook map registered in the `initialize` control_request. `PostToolUse`
@@ -424,6 +443,17 @@ fn dispatch_initialize(
 }
 
 impl ClaudeNativeConnection {
+    /// Register the store's follow-up pull. First registration wins (the store
+    /// calls this on every session attach, but the closure is store-global).
+    /// Shared by `Rc` with every `SessionShared`, so this is visible to sessions
+    /// created before this call too.
+    pub fn set_store_pull(&self, pull: HookPull) {
+        let mut slot = self.store_pull.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(pull);
+        }
+    }
+
     /// Buffer a user-typed follow-up to be injected into the running turn at
     /// the next safe boundary (next `PostToolUse` hook firing, or the `Stop`
     /// hook if no tool fires before end-of-turn). Idempotent on repeated calls
@@ -437,26 +467,6 @@ impl ClaudeNativeConnection {
         }
     }
 
-    /// Like [`inject_user_message`], but on a collision with an unconsumed
-    /// previous buffer, appends the new text after a blank-line separator
-    /// instead of replacing it. Mirrors the merge UX of the pre-existing
-    /// `pending_messages` queue: two follow-ups typed in the same Running
-    /// window land as one growing message at the next hook boundary, never
-    /// losing the earlier text. Returns `true` if the session existed (and
-    /// the slot was updated), `false` if the session is unknown.
-    pub fn inject_user_message_append(&self, session_id: &acp::SessionId, text: String) -> bool {
-        let sessions = self.sessions.borrow();
-        let Some(session) = sessions.get(session_id) else {
-            return false;
-        };
-        let mut slot = session.shared.pending_inject.borrow_mut();
-        *slot = Some(match slot.take() {
-            Some(previous) if !previous.is_empty() => format!("{previous}\n\n{text}"),
-            _ => text,
-        });
-        true
-    }
-
     /// Test-only accessor for the per-session `pending_inject` buffer. Returns
     /// `None` for unknown sessions or for a session whose slot is currently
     /// empty (`Some(None)` is collapsed to `None` for ergonomics).
@@ -466,6 +476,13 @@ impl ClaudeNativeConnection {
             .borrow()
             .get(session_id)
             .and_then(|session| session.shared.pending_inject.borrow().clone())
+    }
+
+    /// Test-only: whether a store follow-up pull has been registered via
+    /// [`set_store_pull`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn store_pull_registered_for_test(&self) -> bool {
+        self.store_pull.borrow().is_some()
     }
 
     /// Extract the `--append-system-prompt` text from the ACP `_meta` extension
@@ -561,6 +578,8 @@ impl ClaudeNativeConnection {
                 stream_usage: RefCell::new(None),
                 stream_used_total: Cell::new(None),
                 active_model: RefCell::new(None),
+                session_id: session_id.clone(),
+                pending_pull: self.store_pull.clone(),
             });
 
             let thread: Entity<AcpThread> = cx.update(|cx| {
@@ -786,6 +805,8 @@ impl ClaudeNativeConnection {
                 stream_usage: RefCell::new(None),
                 stream_used_total: Cell::new(None),
                 active_model: RefCell::new(None),
+                session_id: session_id.clone(),
+                pending_pull: self.store_pull.clone(),
             });
             let incoming = process.take_incoming();
             let critical_stderr = process.take_critical_stderr();
@@ -1102,10 +1123,17 @@ async fn run_update_pump(
         if let OutputMessage::ControlRequest(envelope) = message {
             match &envelope.request {
                 ControlRequestKind::HookCallback { callback_id, .. } => {
-                    // Consume any pending injected user message and ship it back
-                    // as `additionalContext` (or, for Stop, also as `reason` with
-                    // `decision: "block"`). No pending → empty success no-op.
-                    let pending = shared.pending_inject.borrow_mut().take();
+                    // Ask the store for the next queued follow-up (when a pull is
+                    // registered), falling back to the local `pending_inject`
+                    // buffer (kept for tests with no registered pull). Ship it
+                    // back as `additionalContext` (or, for Stop, also as `reason`
+                    // with `decision: "block"`). No pending → empty success no-op.
+                    let is_end_of_turn = callback_id.as_str() == HOOK_CALLBACK_STOP;
+                    let pull = shared.pending_pull.borrow().clone();
+                    let pending = match pull {
+                        Some(pull) => pull(&shared.session_id, is_end_of_turn, cx),
+                        None => shared.pending_inject.borrow_mut().take(),
+                    };
                     let response = build_hook_response(&envelope.request_id, callback_id, pending);
                     outgoing
                         .unbounded_send(InputMessage::ControlResponse {
@@ -1799,6 +1827,57 @@ mod tests {
         assert_eq!(inner["decision"], "block");
         let reason = inner["reason"].as_str().unwrap();
         assert!(reason.contains("FOLLOWUP"), "reason={reason}");
+    }
+
+    #[test]
+    fn hook_response_wraps_pulled_text_as_additional_context() {
+        let resp = build_hook_response("req-1", HOOK_CALLBACK_POST_TOOL_USE, Some("PULLED".into()));
+        let ctx = resp["response"]["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(ctx.contains("PULLED"));
+    }
+
+    #[test]
+    fn set_store_pull_registers_and_is_first_write_wins() {
+        let connection = ClaudeNativeConnection {
+            agent_id: AgentId::new("test"),
+            binary: PathBuf::from("claude"),
+            extra_env: Vec::new(),
+            sessions: RefCell::new(HashMap::new()),
+            escalation_timeout: Cell::new(DEFAULT_ESCALATION_TIMEOUT),
+            silence_window: Cell::new(DEFAULT_SILENCE_WINDOW),
+            self_handle: RefCell::new(std::rc::Weak::new()),
+            escalations_armed: Cell::new(0),
+            store_pull: std::rc::Rc::new(std::cell::RefCell::new(None)),
+        };
+        assert!(!connection.store_pull_registered_for_test());
+
+        // A guard captured by the FIRST closure flips `first_dropped` on drop.
+        // If a later `set_store_pull` replaced the first closure, that closure
+        // (and its guard) would be dropped — so `first_dropped` staying false
+        // proves first-registration-wins.
+        struct DropFlag(std::rc::Rc<Cell<bool>>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+        let first_dropped = std::rc::Rc::new(Cell::new(false));
+        let guard = DropFlag(first_dropped.clone());
+        connection.set_store_pull(std::rc::Rc::new(move |_id, _eot, _cx| {
+            let _ = &guard;
+            Some("FIRST".to_string())
+        }));
+        assert!(connection.store_pull_registered_for_test());
+
+        // Second registration must be a no-op: the first closure stays retained.
+        connection.set_store_pull(std::rc::Rc::new(|_id, _eot, _cx| Some("SECOND".to_string())));
+        assert!(connection.store_pull_registered_for_test());
+        assert!(
+            !first_dropped.get(),
+            "first registration must survive a second set_store_pull"
+        );
     }
 
     #[test]
