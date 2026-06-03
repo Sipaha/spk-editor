@@ -1028,7 +1028,7 @@ async fn take_pending_for_delivery_drains_pushes_and_formats(cx: &mut TestAppCon
     let text = mid.expect("pending present");
     assert!(text.contains("hello"), "delivers user content, got {text:?}");
     assert!(
-        !text.contains("not a reply"),
+        !text.contains(crate::store::queue::QUEUE_HINT_LINE),
         "no hint mid-work, got {text:?}"
     );
     cx.update(|cx| {
@@ -1076,7 +1076,7 @@ async fn take_pending_for_delivery_drains_pushes_and_formats(cx: &mut TestAppCon
         })
         .expect("pending present");
     assert!(
-        end.contains("not a reply"),
+        end.contains(crate::store::queue::QUEUE_HINT_LINE),
         "Stop/idle delivery carries the hint, got {end:?}"
     );
 }
