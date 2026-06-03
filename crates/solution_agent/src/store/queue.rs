@@ -119,6 +119,30 @@ fn build_queue_marker(at: chrono::DateTime<Utc>) -> String {
     )
 }
 
+/// Sentinel opening every per-message timestamp prefix the queue bakes into
+/// the agent-facing text. Shared with `conversation_render::strip_injected_meta`
+/// so the writer and the UI stripper never desync.
+pub(crate) const TS_PREFIX_OPEN: &str = "[";
+/// Closing run after the `HH:MM:SS` timestamp; the stripper skips past this to
+/// reach the user's content.
+pub(crate) const TS_PREFIX_CLOSE: &str = "] ";
+
+/// One-line hint prepended (at delivery, not enqueue) when a follow-up is
+/// handed to the agent after it has already produced a complete message
+/// (Stop-hook in-turn delivery, or idle-flush new turn). Shared with the
+/// stripper. The "before your turn ended" clause is what makes "not a reply"
+/// honest rather than wishy-washy.
+pub(crate) const QUEUE_HINT_LINE: &str =
+    "[Queued before your turn ended — not a reply to your last message.]";
+
+/// `[HH:MM:SS] ` local-time prefix baked onto each follow-up at send time so
+/// the agent can reason about when each message was sent. Compact by design;
+/// stripped from every UI render site by `conversation_render::strip_injected_meta`.
+pub(crate) fn queue_timestamp_prefix(at: chrono::DateTime<Utc>) -> String {
+    let local = at.with_timezone(&chrono::Local);
+    format!("{TS_PREFIX_OPEN}{}{TS_PREFIX_CLOSE}", local.format("%H:%M:%S"))
+}
+
 /// Compact one-line summary of a content-block bundle for the audit log
 /// — enough to reconstruct what was queued / dropped from log lines
 /// alone, without dumping multi-MB image blobs. Text is truncated to
@@ -480,27 +504,22 @@ impl SolutionAgentStore {
             // silently (e.g. by a `/clear` or a Cancelled stop).
             // `target: "solution_agent::queue"` makes these greppable.
             let blocks_text_summary = summarize_blocks_for_log(&blocks);
+            let stamp = queue_timestamp_prefix(Utc::now());
+            let stamped: Vec<agent_client_protocol::schema::ContentBlock> =
+                std::iter::once(agent_client_protocol::schema::ContentBlock::Text(
+                    agent_client_protocol::schema::TextContent::new(stamp),
+                ))
+                .chain(blocks)
+                .collect();
             let merged = session_entity.update(cx, |s, _| {
                 let merged = s.pending_messages.back().is_some();
                 if let Some(last) = s.pending_messages.back_mut() {
                     last.push(agent_client_protocol::schema::ContentBlock::Text(
                         agent_client_protocol::schema::TextContent::new("\n\n".to_string()),
                     ));
-                    last.extend(blocks);
+                    last.extend(stamped);
                 } else {
-                    // First enqueue → prepend a timestamp marker so when the
-                    // queue flushes, the agent sees "this was typed in advance
-                    // at HH:MM:SS, not in response to my last question". Once
-                    // the bundle exists, follow-up enqueues are merged
-                    // (above) WITHOUT a second marker — per UX, queued
-                    // follow-ups are continuations of the same thought.
-                    let marker = build_queue_marker(Utc::now());
-                    let mut bundle = Vec::with_capacity(2);
-                    bundle.push(agent_client_protocol::schema::ContentBlock::Text(
-                        agent_client_protocol::schema::TextContent::new(marker),
-                    ));
-                    bundle.extend(blocks);
-                    s.pending_messages.push_back(bundle);
+                    s.pending_messages.push_back(stamped);
                 }
                 s.last_activity_at = Utc::now();
                 merged
@@ -710,5 +729,24 @@ impl SolutionAgentStore {
             })?;
             task.await
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn timestamp_prefix_is_compact_local_hms() {
+        // 2026-06-03 10:39:12 UTC; formatted in local tz — assert shape, not tz.
+        let at = chrono::Utc.with_ymd_and_hms(2026, 6, 3, 10, 39, 12).unwrap();
+        let prefix = queue_timestamp_prefix(at);
+        assert!(prefix.starts_with('['), "prefix must open with '['");
+        assert!(prefix.ends_with("] "), "prefix must end with '] ' separator");
+        let inner = &prefix[1..prefix.len() - 2];
+        assert_eq!(inner.len(), 8, "expected HH:MM:SS, got {inner:?}");
+        assert_eq!(inner.as_bytes()[2], b':');
+        assert_eq!(inner.as_bytes()[5], b':');
     }
 }
