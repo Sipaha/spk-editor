@@ -13,12 +13,12 @@ use base64::Engine;
 use chrono::TimeZone as _;
 use gpui::{
     AnyElement, App, Context, ElementId, Empty, Entity, InteractiveElement as _, IntoElement,
-    ParentElement, Render, SharedString, Styled,
+    ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
     Window, div, px, relative,
 };
 use markdown::{Markdown, MarkdownElement, MarkdownStyle};
 use ui::prelude::*;
-use ui::{ContextMenu, CopyButton, IconName, Label};
+use ui::{Color, ContextMenu, CopyButton, Icon, IconName, IconSize, Label, LabelSize, Tooltip};
 use util::ResultExt as _;
 
 #[derive(Clone, Debug)]
@@ -539,6 +539,79 @@ pub(crate) fn render_user_message(
             ),
         )
         .into_any_element()
+}
+
+/// True when a user message's text is the (large, agent-only) compact-
+/// context prompt the editor injects on a Compact action. Matched by the
+/// template's stable first heading rather than a wire flag so it works
+/// without a protocol change; `compact::compaction_template_starts_with_heading`
+/// keeps the heading constant in lockstep with the resource file.
+pub(crate) fn is_compaction_prompt_text(text: &str) -> bool {
+    text.trim_start()
+        .starts_with(crate::compact::COMPACT_PROMPT_HEADING)
+}
+
+/// `is_compaction_prompt_text` against a rendered `UserMessage`. The
+/// injected prompt is sent as a plain turn (no queue timestamp / hint
+/// prefix), so the raw content already begins with the heading.
+pub(crate) fn is_compaction_prompt_message(message: &UserMessage, cx: &App) -> bool {
+    is_compaction_prompt_text(&content_block_text(&message.content, cx))
+}
+
+/// Renders the compact-context prompt as a collapsible one-line strip
+/// (chevron + label) instead of dumping the whole template into the chat.
+/// `body` is the fully-rendered message element, passed only when
+/// expanded. Clicking the strip dispatches [`crate::actions::ToggleCompactPrompt`],
+/// which the session view handles by flipping `compact_prompt_collapsed`
+/// and re-rendering. `idx` keeps the strip's `ElementId` unique within the
+/// virtualized list.
+pub(crate) fn render_compaction_prompt_strip(
+    idx: usize,
+    collapsed: bool,
+    body: Option<AnyElement>,
+    cx: &App,
+) -> AnyElement {
+    let chevron = if collapsed {
+        IconName::ChevronRight
+    } else {
+        IconName::ChevronDown
+    };
+    let strip = h_flex()
+        .id(("compact-prompt-toggle", idx))
+        .gap_1p5()
+        .px_2()
+        .py_1()
+        .rounded_sm()
+        .cursor_pointer()
+        .items_center()
+        .hover(|this| this.bg(cx.theme().colors().element_hover))
+        .child(
+            Icon::new(chevron)
+                .size(IconSize::Small)
+                .color(Color::Muted),
+        )
+        .child(
+            Icon::new(IconName::Archive)
+                .size(IconSize::Small)
+                .color(Color::Muted),
+        )
+        .child(
+            Label::new(SharedString::from("Compact-context request"))
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+        )
+        .on_click(|_, window, cx| {
+            window.dispatch_action(Box::new(crate::actions::ToggleCompactPrompt), cx);
+        })
+        .tooltip(Tooltip::text(
+            "Auto-generated compact-context prompt (agent-only). Click to expand/collapse.",
+        ));
+
+    let mut section = v_flex().px_1().mb_2().child(strip);
+    if let Some(body) = body {
+        section = section.child(body);
+    }
+    section.into_any_element()
 }
 
 /// Cleans a user message's merged-markdown source for display:
@@ -1365,6 +1438,25 @@ mod tests {
         // generates a fresh UUID).
         serde_json::from_value(serde_json::Value::String(label.into()))
             .expect("UserMessageId deserializes from any string")
+    }
+
+    #[test]
+    fn detects_compaction_prompt_by_heading() {
+        // The real heading (and a body after it) is folded.
+        let prompt = format!(
+            "{}\n\nThe user has triggered the Compact Context action…",
+            crate::compact::COMPACT_PROMPT_HEADING
+        );
+        assert!(is_compaction_prompt_text(&prompt));
+        // Leading whitespace is tolerated (template is included verbatim).
+        assert!(is_compaction_prompt_text(&format!(
+            "\n  {}",
+            crate::compact::COMPACT_PROMPT_HEADING
+        )));
+        // Ordinary user messages are never folded.
+        assert!(!is_compaction_prompt_text("# Compact the build, please"));
+        assert!(!is_compaction_prompt_text("compact this session"));
+        assert!(!is_compaction_prompt_text(""));
     }
 
     #[test]

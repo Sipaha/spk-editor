@@ -312,6 +312,17 @@ pub(crate) const COMPACT_HEADROOM_MIN_TOKENS: u64 = 30_000;
 const COMPACT_INSTRUCTIONS_TEMPLATE: &str =
     include_str!("../resources/compact_context_instructions.md");
 
+/// First heading of the compact-instructions template. The conversation
+/// renderer matches user messages against this to fold the (large,
+/// agent-only) compact prompt into a one-line placeholder instead of
+/// dumping the whole template into the chat the user has to scroll past.
+/// `compaction_template_starts_with_heading` keeps this in lockstep with
+/// the resource file so the match can never silently drift. If you change
+/// the template's first line, change this too (and the mobile client's
+/// copy in `SessionDetailScreen.kt`).
+pub(crate) const COMPACT_PROMPT_HEADING: &str =
+    "# Compact this session and prepare a clean handoff";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,6 +332,23 @@ mod tests {
     use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
+
+    /// The renderer (desktop `conversation_render::is_compaction_prompt_text`
+    /// and the mobile `SessionDetailScreen.kt`) folds the compact prompt by
+    /// matching its first heading against `COMPACT_PROMPT_HEADING`. If the
+    /// template's opening line ever drifts from that constant, the fold
+    /// silently stops working — assert they stay in lockstep.
+    #[test]
+    fn compaction_template_starts_with_heading() {
+        assert!(
+            COMPACT_INSTRUCTIONS_TEMPLATE
+                .trim_start()
+                .starts_with(COMPACT_PROMPT_HEADING),
+            "compact template's first heading must match COMPACT_PROMPT_HEADING; \
+             template starts with: {:?}",
+            &COMPACT_INSTRUCTIONS_TEMPLATE[..COMPACT_INSTRUCTIONS_TEMPLATE.len().min(80)]
+        );
+    }
 
     /// Cold-compact orchestrator must:
     ///   1. Render the compact instructions prompt (template variables
