@@ -9,9 +9,10 @@
 //!     `pending_messages` (one bundle ever; subsequent submissions
 //!     append to it). The bundle is flushed when `Stopped` arrives.
 //!
-//! The first push into an empty queue gets a timestamp marker prepended
-//! (see `build_queue_marker`) so the agent reads "the user typed this in
-//! advance" rather than "the user is replying to my last question".
+//! Each enqueued follow-up gets a compact `[HH:MM:SS] ` timestamp prefix
+//! baked onto its leading text (see `queue_timestamp_prefix`) so the agent
+//! can tell when each one was sent; the prefix is stripped from every UI
+//! render site by `conversation_render::strip_injected_meta`.
 //!
 //! `cancel_turn` and `interrupt_and_flush_pending` belong here because
 //! they're the inverse path — stop the in-flight turn so the queue can
@@ -744,7 +745,10 @@ mod tests {
         let prefix = queue_timestamp_prefix(at);
         assert!(prefix.starts_with('['), "prefix must open with '['");
         assert!(prefix.ends_with("] "), "prefix must end with '] ' separator");
-        let inner = &prefix[1..prefix.len() - 2];
+        let inner = prefix
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix("] "))
+            .expect("prefix must be wrapped in '[' … '] '");
         assert_eq!(inner.len(), 8, "expected HH:MM:SS, got {inner:?}");
         assert_eq!(inner.as_bytes()[2], b':');
         assert_eq!(inner.as_bytes()[5], b':');
