@@ -12,13 +12,16 @@ use agent_client_protocol::schema as acp;
 use base64::Engine;
 use chrono::TimeZone as _;
 use gpui::{
-    AnyElement, App, Context, ElementId, Empty, Entity, InteractiveElement as _, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
-    Window, div, px, relative,
+    Anchor, AnyElement, App, Context, DismissEvent, ElementId, Empty, Entity, EventEmitter,
+    FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement, Render,
+    SharedString, StatefulInteractiveElement as _, Styled, Window, div, px, relative, rems,
 };
 use markdown::{Markdown, MarkdownElement, MarkdownStyle};
 use ui::prelude::*;
-use ui::{Color, ContextMenu, CopyButton, Icon, IconName, IconSize, Label, LabelSize, Tooltip};
+use ui::{
+    Button, ButtonStyle, Color, ContextMenu, CopyButton, Icon, IconName, IconSize, Label,
+    LabelSize, PopoverMenu,
+};
 use util::ResultExt as _;
 
 #[derive(Clone, Debug)]
@@ -558,60 +561,137 @@ pub(crate) fn is_compaction_prompt_message(message: &UserMessage, cx: &App) -> b
     is_compaction_prompt_text(&content_block_text(&message.content, cx))
 }
 
-/// Renders the compact-context prompt as a collapsible one-line strip
-/// (chevron + label) instead of dumping the whole template into the chat.
-/// `body` is the fully-rendered message element, passed only when
-/// expanded. Clicking the strip dispatches [`crate::actions::ToggleCompactPrompt`],
-/// which the session view handles by flipping `compact_prompt_collapsed`
-/// and re-rendering. `idx` keeps the strip's `ElementId` unique within the
-/// virtualized list.
-pub(crate) fn render_compaction_prompt_strip(
+/// Renders the compact-context prompt as a distinct, clickable chip that
+/// opens the full prompt text in a popover. We deliberately do NOT expand
+/// it inline: the prompt is hundreds of lines, and splicing it into the
+/// conversation balloons the scroll height (the user has to scroll forever
+/// past it). `markdown`/`style` are the cached render entity for the prompt
+/// entry; `raw_text` is the fallback shown if the entity isn't ready. `idx`
+/// keeps the element ids unique within the virtualized list.
+pub(crate) fn render_compaction_prompt_chip(
     idx: usize,
-    collapsed: bool,
-    body: Option<AnyElement>,
-    cx: &App,
+    markdown: Option<Entity<Markdown>>,
+    style: Option<MarkdownStyle>,
+    raw_text: String,
+    _cx: &App,
 ) -> AnyElement {
-    let chevron = if collapsed {
-        IconName::ChevronRight
-    } else {
-        IconName::ChevronDown
-    };
-    let strip = h_flex()
-        .id(("compact-prompt-toggle", idx))
-        .gap_1p5()
-        .px_2()
-        .py_1()
-        .rounded_sm()
-        .cursor_pointer()
-        .items_center()
-        .hover(|this| this.bg(cx.theme().colors().element_hover))
-        .child(
-            Icon::new(chevron)
-                .size(IconSize::Small)
-                .color(Color::Muted),
-        )
-        .child(
+    let trigger = Button::new(("compact-prompt", idx), "Compact-context request")
+        .style(ButtonStyle::Outlined)
+        .label_size(LabelSize::Small)
+        .color(Color::Accent)
+        .start_icon(
             Icon::new(IconName::Archive)
                 .size(IconSize::Small)
-                .color(Color::Muted),
-        )
-        .child(
-            Label::new(SharedString::from("Compact-context request"))
-                .size(LabelSize::Small)
-                .color(Color::Muted),
-        )
-        .on_click(|_, window, cx| {
-            window.dispatch_action(Box::new(crate::actions::ToggleCompactPrompt), cx);
-        })
-        .tooltip(Tooltip::text(
-            "Auto-generated compact-context prompt (agent-only). Click to expand/collapse.",
-        ));
+                .color(Color::Accent),
+        );
 
-    let mut section = v_flex().px_1().mb_2().child(strip);
-    if let Some(body) = body {
-        section = section.child(body);
+    v_flex()
+        .px_1()
+        .mb_3()
+        .child(
+            // h_flex so the chip hugs its content instead of stretching the
+            // full panel width.
+            h_flex().child(
+                PopoverMenu::new(("compact-prompt-menu", idx))
+                    .trigger(trigger)
+                    .menu(move |_window, cx| {
+                        let markdown = markdown.clone();
+                        let style = style.clone();
+                        let raw_text = raw_text.clone();
+                        Some(cx.new(|cx| {
+                            CompactPromptPopover::new(markdown, style, raw_text, cx)
+                        }))
+                    })
+                    .anchor(Anchor::TopLeft),
+            ),
+        )
+        .into_any_element()
+}
+
+/// Popover body for the compact-context prompt: a bounded, scrollable panel
+/// showing the full prompt so it never bloats the conversation. A
+/// [`ManagedView`](ui::prelude) — `PopoverMenu` owns its open/close state
+/// and dismisses it on click-outside.
+pub(crate) struct CompactPromptPopover {
+    markdown: Option<Entity<Markdown>>,
+    style: Option<MarkdownStyle>,
+    raw_text: SharedString,
+    focus_handle: FocusHandle,
+}
+
+impl CompactPromptPopover {
+    fn new(
+        markdown: Option<Entity<Markdown>>,
+        style: Option<MarkdownStyle>,
+        raw_text: String,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
+            markdown,
+            style,
+            raw_text: raw_text.into(),
+            focus_handle: cx.focus_handle(),
+        }
     }
-    section.into_any_element()
+}
+
+impl Focusable for CompactPromptPopover {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl EventEmitter<DismissEvent> for CompactPromptPopover {}
+
+impl Render for CompactPromptPopover {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let body: AnyElement = match (self.markdown.clone(), self.style.clone()) {
+            (Some(entity), Some(style)) => MarkdownElement::new(entity, style).into_any_element(),
+            _ => Label::new(self.raw_text.clone())
+                .size(LabelSize::Small)
+                .into_any_element(),
+        };
+
+        v_flex()
+            .key_context("CompactPromptPopover")
+            .track_focus(&self.focus_handle)
+            .elevation_2(cx)
+            // Definite height (not just max_h): an anchored popover is
+            // content-sized, so the flex_1 scroll child below would collapse
+            // to 0 without it.
+            .w(rems(34.))
+            .h(rems(28.))
+            .overflow_hidden()
+            .child(
+                h_flex()
+                    .px_3()
+                    .pt_2()
+                    .pb_1()
+                    .gap_1p5()
+                    .items_center()
+                    .child(
+                        Icon::new(IconName::Archive)
+                            .size(IconSize::Small)
+                            .color(Color::Accent),
+                    )
+                    .child(
+                        Label::new(SharedString::from("Compact-context request"))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
+            )
+            .child(div().h_px().bg(cx.theme().colors().border_variant))
+            .child(
+                v_flex()
+                    .id("compact-prompt-popover-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px_3()
+                    .py_2()
+                    .child(body),
+            )
+    }
 }
 
 /// Cleans a user message's merged-markdown source for display:

@@ -32,9 +32,5 @@ actions!(
         /// content the default Ctrl-V would have wrapped into a
         /// pending image. Bound to Ctrl/Cmd-Shift-V.
         PasteWithoutFormatting,
-        /// Expand or collapse the folded compact-context prompt in the
-        /// conversation. Dispatched by clicking the prompt's one-line
-        /// placeholder; not bound to a key.
-        ToggleCompactPrompt,
     ]
 );

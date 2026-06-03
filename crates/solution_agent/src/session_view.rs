@@ -228,15 +228,6 @@ pub struct SolutionSessionView {
     /// conversation. Not persisted across editor restarts (overkill for
     /// what is effectively a UX hint label).
     image_count_so_far: usize,
-    /// `true` when the auto-generated compact-context prompt (a large,
-    /// agent-only template the editor injects on a Compact action) is
-    /// shown folded as a one-line placeholder rather than rendered in
-    /// full. Default `true`: the user never needs to read this prompt and
-    /// asked not to have to scroll past it. Clicking the placeholder
-    /// dispatches `ToggleCompactPrompt` to flip this. Transient, not
-    /// persisted — the prompt lives only in the context being compacted,
-    /// which the rotation discards anyway.
-    compact_prompt_collapsed: bool,
     /// While `Some`, the user clicked Send while the session was cold;
     /// these are the ACP content blocks waiting for `resume_session`
     /// to populate `acp_thread`, at which point the observe callback
@@ -553,7 +544,6 @@ impl SolutionSessionView {
             _session_event_subscription: Some(session_event_subscription),
             _store_subscription: store_subscription,
             image_count_so_far: 0,
-            compact_prompt_collapsed: true,
             pending_send: None,
             resuming: false,
             recalled_bundle: None,
@@ -1309,16 +1299,6 @@ impl SolutionSessionView {
             window.focus(&self.focus_handle, cx);
             cx.notify();
         }
-    }
-
-    fn toggle_compact_prompt(
-        &mut self,
-        _: &crate::actions::ToggleCompactPrompt,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.compact_prompt_collapsed = !self.compact_prompt_collapsed;
-        cx.notify();
     }
 
     fn next_match(&mut self, _: &FindNextMatch, _window: &mut Window, cx: &mut Context<Self>) {
@@ -2716,7 +2696,6 @@ impl Render for SolutionSessionView {
             // action next and moves the cursor as usual.
             .capture_action(cx.listener(Self::recall_queued_message))
             .on_action(cx.listener(Self::submit_compose_action))
-            .on_action(cx.listener(Self::toggle_compact_prompt))
             .on_drag_move(
                 cx.listener(|this, e: &DragMoveEvent<DraggedComposeHandle>, _, cx| {
                     log::debug!(
@@ -2971,36 +2950,29 @@ impl Render for SolutionSessionView {
                                     }
                                 });
 
-                                // Fold the auto-injected compact-context
-                                // prompt (a large, agent-only template)
-                                // into a one-line placeholder so the user
-                                // doesn't have to scroll past it. Detected
-                                // by its stable heading; the placeholder's
-                                // click dispatches `ToggleCompactPrompt`,
-                                // flipping `compact_prompt_collapsed`.
+                                // The auto-injected compact-context prompt is
+                                // a large, agent-only template. Render it as a
+                                // distinct chip that opens the full text in a
+                                // popover (detected by its stable heading) —
+                                // never inline, which would balloon the scroll.
                                 if let AgentThreadEntry::UserMessage(message) = entry
                                     && crate::conversation_render::is_compaction_prompt_message(
                                         message, cx,
                                     )
                                 {
-                                    let collapsed = this.compact_prompt_collapsed;
-                                    let body = (!collapsed).then(|| {
-                                        render_entry(
-                                            idx,
-                                            entry,
-                                            created_ms,
-                                            is_last,
-                                            date_separator,
-                                            &this.markdown_for_render,
-                                            style,
-                                            &this.assistant_label_for_render,
-                                            rewind_target,
-                                            thread_weak,
-                                            cx,
-                                        )
-                                    });
-                                    return crate::conversation_render::render_compaction_prompt_strip(
-                                        idx, collapsed, body, cx,
+                                    let prompt_markdown =
+                                        this.markdown_for_render.get(&(idx, 0)).cloned();
+                                    let prompt_style = this.markdown_style_for_render.clone();
+                                    let raw_text = crate::conversation_render::content_block_text(
+                                        &message.content,
+                                        cx,
+                                    );
+                                    return crate::conversation_render::render_compaction_prompt_chip(
+                                        idx,
+                                        prompt_markdown,
+                                        prompt_style,
+                                        raw_text,
+                                        cx,
                                     );
                                 }
 
