@@ -17,13 +17,9 @@ fn image_block(data: &str, mime: &str) -> acp::ContentBlock {
 }
 
 #[test]
-fn unpack_recalled_bundle_strips_marker_and_concatenates_text() {
+fn unpack_recalled_bundle_strips_timestamp_and_concatenates_text() {
     let bundle = vec![
-        text_block(
-            "[The user typed the following at 14:23:01 (local time) while you were still on \
-             the previous turn — this is NOT a direct reply to your last question or tool \
-             result, it was queued in advance.]\n\nfirst part",
-        ),
+        text_block("[14:23:01] first part"),
         text_block("\n\n"),
         text_block("second part"),
     ];

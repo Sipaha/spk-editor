@@ -890,7 +890,7 @@ async fn send_message_starts_running_state_immediately(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
-async fn queued_message_gets_timestamp_marker_on_first_enqueue(cx: &mut TestAppContext) {
+async fn queued_messages_get_per_message_timestamp_prefix(cx: &mut TestAppContext) {
     let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
 
     // Force `Running` so send_message_blocks takes the queueing branch.
@@ -918,21 +918,19 @@ async fn queued_message_gets_timestamp_marker_on_first_enqueue(cx: &mut TestAppC
         store.update(cx, |store, cx| {
             let session = store.session(session_id).expect("session exists");
             let s = session.read(cx);
-            assert_eq!(s.pending_messages.len(), 1, "one queued bundle");
+            assert_eq!(s.pending_messages.len(), 1, "one queued bundle after first enqueue");
             let bundle = &s.pending_messages[0];
             let first = match &bundle[0] {
                 agent_client_protocol::schema::ContentBlock::Text(t) => t.text.as_str(),
                 other => panic!("first block must be Text, got {other:?}"),
             };
+            assert!(first.starts_with('['), "first block starts with timestamp prefix, got {first:?}");
+            let inner = first.strip_prefix('[').and_then(|s| s.split_once("] ")).map(|(ts, _)| ts);
             assert!(
-                first.contains("queued in advance"),
-                "first block carries the queue marker, got {first:?}"
+                matches!(inner, Some(ts) if ts.len() == 8 && ts.as_bytes()[2] == b':' && ts.as_bytes()[5] == b':'),
+                "expected [HH:MM:SS] prefix, got {first:?}"
             );
-            assert!(
-                first.contains("NOT a direct reply"),
-                "marker mentions it's not a direct reply, got {first:?}"
-            );
-            let payload: String = bundle[1..]
+            let payload: String = bundle
                 .iter()
                 .filter_map(|b| match b {
                     agent_client_protocol::schema::ContentBlock::Text(t) => Some(t.text.clone()),
@@ -942,14 +940,16 @@ async fn queued_message_gets_timestamp_marker_on_first_enqueue(cx: &mut TestAppC
                 .join("");
             assert!(
                 payload.contains("first thought"),
-                "user content preserved after marker, got {payload:?}"
+                "user content preserved after prefix, got {payload:?}"
+            );
+            assert!(
+                !payload.contains("queued in advance"),
+                "old verbose marker must not appear, got {payload:?}"
             );
         });
     });
 
-    // Second enqueue while still Running should append to the same bundle
-    // without injecting a second marker — the queue is one growing message,
-    // not a fresh thought, and the marker is set by the first push.
+    // Second enqueue while still Running — each follow-up gets its own timestamp prefix.
     cx.update(|cx| {
         let store = SolutionAgentStore::global(cx);
         store.update(cx, |store, cx| {
@@ -967,18 +967,8 @@ async fn queued_message_gets_timestamp_marker_on_first_enqueue(cx: &mut TestAppC
         store.update(cx, |store, cx| {
             let session = store.session(session_id).expect("session exists");
             let s = session.read(cx);
-            assert_eq!(s.pending_messages.len(), 1, "still one bundle");
+            assert_eq!(s.pending_messages.len(), 1, "still one bundle after second enqueue");
             let bundle = &s.pending_messages[0];
-            let marker_count = bundle
-                .iter()
-                .filter(|b| match b {
-                    agent_client_protocol::schema::ContentBlock::Text(t) => {
-                        t.text.contains("queued in advance")
-                    }
-                    _ => false,
-                })
-                .count();
-            assert_eq!(marker_count, 1, "marker not duplicated on second enqueue");
             let payload: String = bundle
                 .iter()
                 .filter_map(|b| match b {
@@ -991,6 +981,18 @@ async fn queued_message_gets_timestamp_marker_on_first_enqueue(cx: &mut TestAppC
                 payload.contains("first thought") && payload.contains("follow-up"),
                 "both messages preserved, got {payload:?}"
             );
+            let stamp_count = bundle
+                .iter()
+                .filter(|b| matches!(b,
+                    agent_client_protocol::schema::ContentBlock::Text(t)
+                        if t.text.starts_with('[')
+                            && t.text.strip_prefix('[')
+                                .and_then(|s| s.split_once("] "))
+                                .map(|(ts, _)| ts.len() == 8 && ts.as_bytes()[2] == b':' && ts.as_bytes()[5] == b':')
+                                .unwrap_or(false)
+                ))
+                .count();
+            assert_eq!(stamp_count, 2, "each follow-up gets its own timestamp prefix");
         });
     });
 }
@@ -2645,17 +2647,12 @@ fn native_mock_binary() -> PathBuf {
         .join("mock_claude.sh")
 }
 
-/// Phase 2 routing: when the session is `Running` and the backing connection
-/// is the native `claude` backend, a follow-up send must
-///   (a) append a real user entry to the `AcpThread` (so the chat list shows
-///       the user's bubble — claude won't echo the injected text as a
-///       UserMessage update),
-///   (b) buffer the text on the connection's `pending_inject` slot (so the
-///       next hook_callback delivers it as additionalContext mid-turn),
-///   (c) NOT push into `pending_messages` (that's the non-native fallback).
+/// All mid-turn sends (including those backed by a native `ClaudeNativeConnection`)
+/// now route through `pending_messages` — the inject branch has been removed.
+/// In-turn delivery will be restored via a pull-closure in a later task.
 #[gpui::test]
-async fn send_during_running_on_native_connection_routes_to_inject(cx: &mut TestAppContext) {
-    use acp_thread::{AgentConnection, AgentThreadEntry};
+async fn send_during_running_on_native_connection_routes_to_queue(cx: &mut TestAppContext) {
+    use acp_thread::AgentConnection;
     use agent_client_protocol::schema as acp;
     use agent_servers::{AgentServer, AgentServerDelegate};
     use claude_native::{ClaudeNativeAgentServer, ClaudeNativeConnection};
@@ -2688,10 +2685,6 @@ async fn send_during_running_on_native_connection_routes_to_inject(cx: &mut Test
         });
     });
 
-    // Connect directly so we can hand-build a session whose `AcpThread` is
-    // backed by a real `ClaudeNativeConnection`. Going through
-    // `create_session` would also work but it routes via the pool +
-    // adapter — this stays focused on the queue-routing decision.
     let connection: Rc<dyn acp_thread::AgentConnection> = cx
         .update(|cx| {
             let store = project.read(cx).agent_server_store().clone();
@@ -2713,11 +2706,6 @@ async fn send_during_running_on_native_connection_routes_to_inject(cx: &mut Test
 
     let acp_session_id = acp_thread.read_with(cx, |t, _| t.session_id().clone());
 
-    // Insert the session into the store by hand, pointing its `acp_thread`
-    // at the live native-backed thread. This skips `create_session` (which
-    // would require a fully-wired solution-agent pool entry) while still
-    // exercising the exact `send_message_blocks` codepath the production
-    // mobile/desktop client takes.
     let session_id = SolutionSessionId::new();
     cx.update(|cx| {
         let session = cx.new(|_| {
@@ -2749,101 +2737,46 @@ async fn send_during_running_on_native_connection_routes_to_inject(cx: &mut Test
         });
     });
 
-    let send_result = cx
-        .update(|cx| {
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, cx| {
-                store.send_message_blocks(
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            store
+                .send_message_blocks(
                     session_id,
                     vec![acp::ContentBlock::Text(acp::TextContent::new(
                         "PURPLE_PINEAPPLE".to_string(),
                     ))],
                     cx,
                 )
-            })
-        })
-        .await;
-    send_result.expect("send_message_blocks during Running on native");
+                .detach_and_log_err(cx);
+        });
+    });
 
     cx.update(|cx| {
         let store = SolutionAgentStore::global(cx);
         store.update(cx, |store, cx| {
             let session = store.session(session_id).expect("session exists");
             let s = session.read(cx);
-
-            // (c) Non-native fallback queue is NOT touched.
-            assert!(
-                s.pending_messages.is_empty(),
-                "native-backed Running send must bypass pending_messages, queue_len={}",
-                s.pending_messages.len()
+            // All running sends go through pending_messages now — native is no exception.
+            assert_eq!(
+                s.pending_messages.len(),
+                1,
+                "native-backed Running send must queue into pending_messages"
             );
-
-            // (a) AcpThread has a freshly appended user entry containing the
-            //     sent text — claude won't echo it as a UserMessage update,
-            //     so without this append the chat would silently miss the
-            //     bubble.
-            let entries = acp_thread.read(cx).entries();
-            let last_user = entries.iter().rev().find_map(|entry| match entry {
-                AgentThreadEntry::UserMessage(message) => Some(message),
-                _ => None,
-            });
-            let user_text = last_user
-                .expect("native inject path must append a user entry")
-                .chunks
+            let payload: String = s.pending_messages[0]
                 .iter()
-                .filter_map(|chunk| match chunk {
+                .filter_map(|b| match b {
                     acp::ContentBlock::Text(t) => Some(t.text.clone()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
                 .join("");
             assert!(
-                user_text.contains("PURPLE_PINEAPPLE"),
-                "appended user entry must carry the sent text, got {user_text:?}"
+                payload.contains("PURPLE_PINEAPPLE"),
+                "queued bundle must carry the sent text, got {payload:?}"
             );
         });
     });
-
-    // (b) The connection's pending_inject slot is buffered for the next
-    //     hook_callback to deliver as additionalContext.
-    let buffered = native
-        .inject_slot_for_test(&acp_session_id)
-        .expect("inject slot must hold the injected text");
-    assert!(
-        buffered.contains("PURPLE_PINEAPPLE"),
-        "inject slot must hold the sent text, got {buffered:?}"
-    );
-
-    // A second send in the same Running window must merge into the slot
-    // (blank-line separator) instead of overwriting, mirroring the
-    // legacy pending_messages merge UX.
-    let send_result = cx
-        .update(|cx| {
-            let store = SolutionAgentStore::global(cx);
-            store.update(cx, |store, cx| {
-                store.send_message_blocks(
-                    session_id,
-                    vec![acp::ContentBlock::Text(acp::TextContent::new(
-                        "FOLLOW_UP".to_string(),
-                    ))],
-                    cx,
-                )
-            })
-        })
-        .await;
-    send_result.expect("second send_message_blocks during Running on native");
-
-    let merged = native
-        .inject_slot_for_test(&acp_session_id)
-        .expect("inject slot still buffered after second send");
-    assert!(
-        merged.contains("PURPLE_PINEAPPLE") && merged.contains("FOLLOW_UP"),
-        "second send must merge with first, got {merged:?}"
-    );
-    assert!(
-        merged.contains("\n\n"),
-        "merged buffer must use a blank-line separator, got {merged:?}"
-    );
 
     cx.update(|cx| {
         let store = SolutionAgentStore::global(cx);
