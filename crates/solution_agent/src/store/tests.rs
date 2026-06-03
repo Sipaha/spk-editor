@@ -4733,3 +4733,102 @@ async fn open_session_in_strip_is_idempotent(cx: &mut TestAppContext) {
         "re-opening an already-pinned session is a no-op"
     );
 }
+
+/// Idle-flush (queue drained on `Stopped`) must prepend the "not a reply"
+/// hint so the agent knows the follow-up arrived after its last response.
+#[gpui::test]
+async fn idle_flush_prepends_not_a_reply_hint(cx: &mut TestAppContext) {
+    let (session_id, thread, _tmp) = create_session_with_thread(cx).await;
+
+    let entries_before = cx.update(|cx| thread.read(cx).entries().len());
+
+    // Force Running so send_message takes the queueing branch.
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            store.session(session_id).unwrap().update(cx, |s, _| {
+                s.state = SessionState::Running {
+                    started_at: std::time::Instant::now(),
+                    notified: false,
+                };
+            });
+            store
+                .send_message(session_id, "LATE_FOLLOWUP".to_string(), cx)
+                .detach_and_log_err(cx);
+        });
+    });
+
+    // Confirm the message is queued, not yet sent.
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            assert_eq!(
+                store
+                    .session(session_id)
+                    .unwrap()
+                    .read(cx)
+                    .pending_messages
+                    .len(),
+                1,
+                "message queued while Running"
+            );
+        });
+    });
+
+    // Emit Stopped(EndTurn) — the Stopped handler transitions to Idle and
+    // flushes the queue as a new turn WITH the not-a-reply hint prepended.
+    cx.update(|cx| {
+        thread.update(cx, |_thread, cx| {
+            cx.emit(acp_thread::AcpThreadEvent::Stopped(
+                agent_client_protocol::schema::StopReason::EndTurn,
+            ));
+        });
+    });
+    cx.executor().run_until_parked();
+
+    // Queue must be drained.
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            assert_eq!(
+                store
+                    .session(session_id)
+                    .unwrap()
+                    .read(cx)
+                    .pending_messages
+                    .len(),
+                0,
+                "queue flushed after Stopped"
+            );
+        });
+    });
+
+    // The flushed turn must have pushed a new UserMessage entry.  Its
+    // `chunks` carry the raw blocks we sent — verify the hint and the
+    // follow-up text are both present.
+    let found = cx.update(|cx| {
+        thread.read(cx).entries()[entries_before..].iter().any(|e| {
+            if let acp_thread::AgentThreadEntry::UserMessage(msg) = e {
+                let text: String = msg
+                    .chunks
+                    .iter()
+                    .filter_map(|b| {
+                        if let agent_client_protocol::schema::ContentBlock::Text(t) = b {
+                            Some(t.text.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                text.contains(crate::store::queue::QUEUE_HINT_LINE)
+                    && text.contains("LATE_FOLLOWUP")
+            } else {
+                false
+            }
+        })
+    });
+    assert!(
+        found,
+        "idle-flush new turn must carry the not-a-reply hint and the follow-up text"
+    );
+}

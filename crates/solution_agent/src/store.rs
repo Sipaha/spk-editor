@@ -4162,7 +4162,20 @@ impl SolutionAgentStore {
                                     combined.len(),
                                     queue::summarize_blocks_for_log(&combined),
                                 );
-                                self.send_message_blocks(session_id, combined, cx).detach();
+                                // Idle-flush is always end-of-turn: the agent
+                                // already produced a complete message, so
+                                // prepend the "not a reply" hint (stripped on
+                                // render, like the per-message timestamps
+                                // already in `combined`).
+                                let mut with_hint = Vec::with_capacity(combined.len() + 1);
+                                with_hint.push(acp::ContentBlock::Text(
+                                    acp::TextContent::new(format!(
+                                        "{}\n\n",
+                                        queue::QUEUE_HINT_LINE
+                                    )),
+                                ));
+                                with_hint.extend(combined);
+                                self.send_message_blocks(session_id, with_hint, cx).detach();
                             }
                         }
                     }
