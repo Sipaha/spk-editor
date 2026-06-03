@@ -998,6 +998,90 @@ async fn queued_messages_get_per_message_timestamp_prefix(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+async fn take_pending_for_delivery_drains_pushes_and_formats(cx: &mut TestAppContext) {
+    let (session_id, thread, _tmp) = create_session_with_thread(cx).await;
+    let entries_before = cx.update(|cx| thread.read(cx).entries().len());
+
+    // Force Running so send_message enqueues, then queue one follow-up.
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            store.session(session_id).unwrap().update(cx, |s, _| {
+                s.state = SessionState::Running {
+                    started_at: std::time::Instant::now(),
+                    notified: false,
+                };
+            });
+            store
+                .send_message(session_id, "hello".to_string(), cx)
+                .detach_and_log_err(cx);
+        });
+    });
+
+    // Mid-work delivery: text has the timestamp, NO hint; queue drained; one timeline entry pushed.
+    let mid = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            store.take_pending_for_delivery(session_id, false, cx)
+        })
+    });
+    let text = mid.expect("pending present");
+    assert!(text.contains("hello"), "delivers user content, got {text:?}");
+    assert!(
+        !text.contains("not a reply"),
+        "no hint mid-work, got {text:?}"
+    );
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            assert_eq!(
+                store
+                    .session(session_id)
+                    .unwrap()
+                    .read(cx)
+                    .pending_messages
+                    .len(),
+                0,
+                "queue drained"
+            );
+        });
+    });
+    assert_eq!(
+        cx.update(|cx| thread.read(cx).entries().len()),
+        entries_before + 1,
+        "one user entry pushed"
+    );
+
+    // End-of-turn delivery carries the hint.
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            store.session(session_id).unwrap().update(cx, |s, _| {
+                s.state = SessionState::Running {
+                    started_at: std::time::Instant::now(),
+                    notified: false,
+                };
+            });
+            store
+                .send_message(session_id, "again".to_string(), cx)
+                .detach_and_log_err(cx);
+        });
+    });
+    let end = cx
+        .update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| {
+                store.take_pending_for_delivery(session_id, true, cx)
+            })
+        })
+        .expect("pending present");
+    assert!(
+        end.contains("not a reply"),
+        "Stop/idle delivery carries the hint, got {end:?}"
+    );
+}
+
+#[gpui::test]
 async fn reset_context_swaps_acp_thread_without_bumping_count(cx: &mut TestAppContext) {
     let (session_id, old_thread, _tmp) = create_session_with_thread(cx).await;
 

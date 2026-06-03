@@ -1532,6 +1532,46 @@ impl SolutionAgentStore {
         self.sessions.values().cloned()
     }
 
+    /// Drain the session's queued follow-ups, push them into the live thread as
+    /// one user entry, and return the agent-facing text (per-message timestamps
+    /// already baked in; a leading hint line when `is_end_of_turn`). Returns
+    /// `None` when the queue is empty or the session/thread is gone. Invoked by
+    /// the native hook pull-closure (see `subscribe_to_session`).
+    pub fn take_pending_for_delivery(
+        &mut self,
+        session_id: SolutionSessionId,
+        is_end_of_turn: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let session = self.session(session_id)?;
+        let drained: Vec<Vec<acp::ContentBlock>> =
+            session.update(cx, |s, _| s.pending_messages.drain(..).collect());
+        if drained.is_empty() {
+            return None;
+        }
+        let combined: Vec<acp::ContentBlock> = drained.into_iter().flatten().collect();
+
+        // Timeline entry = the raw (timestamp-baked) blocks; the baked stamp is
+        // stripped at render time, so the bubble shows clean user text.
+        if let Some(thread) = session.read(cx).acp_thread().cloned() {
+            thread.update(cx, |thread, cx| {
+                thread.push_user_message_entry(None, combined.clone(), cx);
+            });
+        }
+        cx.emit(SolutionAgentStoreEvent::SessionQueueChanged(session_id));
+        cx.notify();
+
+        // Agent-facing text: text-only (additionalContext is text-only; images
+        // degrade to `[image #N]`). Prepend the hint only at end-of-turn.
+        let body = queue::inject_text_from_blocks(&combined);
+        let text = if is_end_of_turn {
+            format!("{}\n\n{}", queue::QUEUE_HINT_LINE, body)
+        } else {
+            body
+        };
+        Some(text)
+    }
+
     /// Test-only helper: register a session whose `acp_thread` was constructed
     /// elsewhere (or left `None`). Real `create_session` (Task 3.3) replaces
     /// this for production use.

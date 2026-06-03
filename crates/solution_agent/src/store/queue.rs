@@ -115,6 +115,36 @@ pub(crate) fn queue_timestamp_prefix(at: chrono::DateTime<Utc>) -> String {
     format!("{TS_PREFIX_OPEN}{}{TS_PREFIX_CLOSE}", local.format("%H:%M:%S"))
 }
 
+/// Flatten a content-block bundle into a single human-readable string the
+/// native backend can hand to the agent as `additionalContext`. Text blocks
+/// are concatenated verbatim; image blocks collapse to numbered placeholders
+/// (`[image #1]`, `[image #2]`, …) so a text-only side channel can still
+/// signal "the user attached an image" without trying to ship the bytes.
+/// Other variants are silently dropped — the inject side channel is text-only.
+pub(crate) fn inject_text_from_blocks(blocks: &[acp::ContentBlock]) -> String {
+    let mut out = String::new();
+    let mut image_idx = 1usize;
+    for block in blocks {
+        match block {
+            acp::ContentBlock::Text(t) => {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str(&t.text);
+            }
+            acp::ContentBlock::Image(_) => {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str(&format!("[image #{image_idx}]"));
+                image_idx += 1;
+            }
+            _ => {}
+        }
+    }
+    out.trim().to_string()
+}
+
 /// Compact one-line summary of a content-block bundle for the audit log
 /// — enough to reconstruct what was queued / dropped from log lines
 /// alone, without dumping multi-MB image blobs. Text is truncated to
