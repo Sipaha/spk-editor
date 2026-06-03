@@ -92,34 +92,6 @@ pub(crate) fn pending_authorization_reject(
     None
 }
 
-/// Opening of every queue-marker text block. Shared with
-/// [`crate::conversation_render::strip_queue_marker`] so a future tweak to
-/// the wording lands in exactly one place — without sharing, the strip
-/// path silently desyncs from the writer and the marker leaks back into
-/// the ghost preview / recalled draft.
-pub(crate) const QUEUE_MARKER_PREFIX: &str = "[The user typed the following at ";
-
-/// Trailing run after the marker's closing `]`. The `\n\n` is what
-/// `strip_queue_marker` skips past to reach the user's content.
-pub(crate) const QUEUE_MARKER_BODY_SEP: &str = "]\n\n";
-
-/// Header text prepended to a queued message bundle on the first enqueue
-/// during a `Running` turn. Tells the agent the user typed this in advance
-/// (so it's not a direct reply to the last question or tool result) and
-/// gives a local-time timestamp for when it landed in the queue. Follow-up
-/// enqueues into the same bundle are merged without a second marker — by
-/// design, since the queue is conceptually one growing message.
-fn build_queue_marker(at: chrono::DateTime<Utc>) -> String {
-    let local = at.with_timezone(&chrono::Local);
-    format!(
-        "{prefix}{time} (local time) while you were still on the previous turn — this is NOT a \
-         direct reply to your last question or tool result, it was queued in advance.{sep}",
-        prefix = QUEUE_MARKER_PREFIX,
-        time = local.format("%H:%M:%S"),
-        sep = QUEUE_MARKER_BODY_SEP,
-    )
-}
-
 /// Sentinel opening every per-message timestamp prefix the queue bakes into
 /// the agent-facing text. Shared with `conversation_render::strip_injected_meta`
 /// so the writer and the UI stripper never desync.

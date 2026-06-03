@@ -16,8 +16,8 @@ use crate::store::SolutionAgentStore;
 /// timestamp marker and embedded images) and rebuilds the inputs the user
 /// originally had — concatenated text + a list of `PendingImage`s.
 ///
-/// The marker (prepended by `store::build_queue_marker` on first enqueue)
-/// is stripped if present so the recovered draft is just what the user
+/// The injected metadata (timestamp prefix and optional hint line baked in by
+/// the queue) is stripped so the recovered draft is just what the user
 /// typed. Image labels are re-derived from the `[image #N]` placeholders
 /// already present in the text — they're only used for paste-time inserts
 /// and never displayed otherwise, so a missing tag falls back to "image
@@ -33,7 +33,7 @@ pub(super) fn unpack_recalled_bundle(
         match block {
             acp::ContentBlock::Text(t) => {
                 let chunk = if first_text {
-                    crate::conversation_render::strip_queue_marker(&t.text).to_string()
+                    crate::conversation_render::strip_injected_meta(&t.text)
                 } else {
                     t.text
                 };

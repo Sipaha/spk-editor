@@ -13,7 +13,7 @@ use base64::Engine;
 use chrono::TimeZone as _;
 use gpui::{
     AnyElement, App, Context, ElementId, Empty, Entity, InteractiveElement as _, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled, WeakEntity,
+    ParentElement, Render, SharedString, Styled, WeakEntity,
     Window, div, px, relative,
 };
 use markdown::{Markdown, MarkdownElement, MarkdownStyle};
@@ -400,26 +400,16 @@ pub(crate) fn render_entry(
 /// `send_message_blocks` injects when merging queued submits) and
 /// substitutes `[image #N]` placeholders for image blocks.
 ///
-/// Strips the leading queue marker that `send_message_blocks` prepends
-/// on first enqueue (`[The user typed the following at HH:MM:SS …]`) —
-/// the marker is for the agent, not the user, and showing it in the
-/// ghost just clutters the preview without telling the user anything
-/// the "Queued — sends when agent finishes" caption doesn't already
-/// convey.
+/// Strips agent-only injected metadata (hint line and per-segment
+/// `[HH:MM:SS] ` timestamp prefixes) from the assembled output so the
+/// ghost shows only what the user typed.
 pub(crate) fn pending_blocks_preview(blocks: &[acp::ContentBlock], _cx: &App) -> String {
     let mut out = String::new();
     let mut image_idx = 1usize;
-    let mut first_text = true;
     for block in blocks {
         match block {
             acp::ContentBlock::Text(t) => {
-                let text = if first_text {
-                    strip_queue_marker(&t.text)
-                } else {
-                    t.text.as_str()
-                };
-                first_text = false;
-                out.push_str(text);
+                out.push_str(&t.text);
             }
             acp::ContentBlock::Image(_) => {
                 out.push_str(&format!("[image #{image_idx}]"));
@@ -428,54 +418,47 @@ pub(crate) fn pending_blocks_preview(blocks: &[acp::ContentBlock], _cx: &App) ->
             _ => {}
         }
     }
-    out.trim().to_string()
+    strip_injected_meta(out.trim())
 }
 
-/// If `text` starts with the timestamp marker emitted by
-/// `store::build_queue_marker`, return everything after the closing
-/// `]` plus the trailing blank-line separator. Otherwise return
-/// `text` unchanged.
-///
-/// Reads the prefix / body-separator from `store::QUEUE_MARKER_*` so the
-/// writer and reader stay in sync — a wording change there propagates
-/// here for free.
-pub(crate) fn strip_queue_marker(text: &str) -> &str {
-    if !text.starts_with(crate::store::QUEUE_MARKER_PREFIX) {
-        return text;
+/// Remove the agent-only metadata the queue bakes in — the optional leading
+/// hint line ([`crate::store::QUEUE_HINT_LINE`]) and the per-segment
+/// `[HH:MM:SS] ` timestamps ([`crate::store::queue_timestamp_prefix`]) — so the
+/// UI shows only the user's own text. Returns an owned String because segment
+/// stripping is not a simple prefix slice.
+pub(crate) fn strip_injected_meta(text: &str) -> String {
+    let body = text
+        .strip_prefix(crate::store::QUEUE_HINT_LINE)
+        .map(|rest| rest.trim_start_matches('\n'))
+        .unwrap_or(text);
+    let mut out = String::with_capacity(body.len());
+    for (i, segment) in body.split("\n\n").enumerate() {
+        if i > 0 {
+            out.push_str("\n\n");
+        }
+        out.push_str(strip_one_timestamp(segment));
     }
-    let Some(close_idx) = text.find(crate::store::QUEUE_MARKER_BODY_SEP) else {
-        return text;
+    out
+}
+
+/// Drop a single leading `[HH:MM:SS] ` prefix from one segment, if present.
+fn strip_one_timestamp(segment: &str) -> &str {
+    let Some(rest) = segment.strip_prefix(crate::store::TS_PREFIX_OPEN) else {
+        return segment;
     };
-    &text[close_idx + crate::store::QUEUE_MARKER_BODY_SEP.len()..]
-}
-
-/// If `text` starts with the timestamp marker emitted by
-/// `store::build_queue_marker`, return the marker portion (the bracketed
-/// `[...]` block, no trailing `\n\n`). Otherwise return `None`.
-///
-/// Used by the user-message renderer to surface the original marker
-/// behind a click affordance — hidden by default, expanded on demand.
-pub(crate) fn extract_queue_marker(text: &str) -> Option<&str> {
-    if !text.starts_with(crate::store::QUEUE_MARKER_PREFIX) {
-        return None;
+    let Some(close) = rest.find(crate::store::TS_PREFIX_CLOSE) else {
+        return segment;
+    };
+    let stamp = &rest[..close];
+    let is_hms = stamp.len() == 8
+        && stamp.as_bytes()[2] == b':'
+        && stamp.as_bytes()[5] == b':'
+        && stamp.bytes().enumerate().all(|(i, b)| i == 2 || i == 5 || b.is_ascii_digit());
+    if is_hms {
+        &rest[close + crate::store::TS_PREFIX_CLOSE.len()..]
+    } else {
+        segment
     }
-    let close_idx = text.find(crate::store::QUEUE_MARKER_BODY_SEP)?;
-    Some(&text[..close_idx + 1])
-}
-
-/// Pull just the `HH:MM:SS` substring out of a queue marker — the
-/// marker's only user-meaningful payload. Returns `None` if the input
-/// isn't a marker or the timestamp shape is off (defensive against
-/// future wording tweaks). Used as the collapsed-chip label so the
-/// glanceable cue is the time, not the boilerplate sentence around it.
-pub(crate) fn queue_marker_timestamp(marker: &str) -> Option<&str> {
-    let prefix = crate::store::QUEUE_MARKER_PREFIX;
-    if !marker.starts_with(prefix) {
-        return None;
-    }
-    let after = &marker[prefix.len()..];
-    let space_idx = after.find(' ')?;
-    Some(&after[..space_idx])
 }
 
 pub(crate) fn render_user_message(
@@ -485,8 +468,8 @@ pub(crate) fn render_user_message(
     is_last: bool,
     markdown_for: &HashMap<(usize, usize), Entity<Markdown>>,
     style: &MarkdownStyle,
-    view: WeakEntity<crate::session_view::SolutionSessionView>,
-    queue_marker_expanded: bool,
+    _view: WeakEntity<crate::session_view::SolutionSessionView>,
+    _queue_marker_expanded: bool,
     cx: &App,
 ) -> AnyElement {
     // `clean_user_message_text` strips the literal "`Image`"
@@ -496,10 +479,6 @@ pub(crate) fn render_user_message(
     // image preview opens through the `on_url_click` hook below.
     let raw_text = content_block_text(&message.content, cx);
     let text = clean_user_message_text(&raw_text);
-    let queue_marker = extract_queue_marker(&raw_text).map(str::to_owned);
-    let queue_marker_timestamp = queue_marker
-        .as_deref()
-        .and_then(|m| crate::conversation_render::queue_marker_timestamp(m).map(str::to_owned));
     let bubble_bg = cx.theme().colors().text_accent.opacity(0.12);
     let group_name = SharedString::from(format!("user-msg-{entry_idx}"));
 
@@ -538,66 +517,10 @@ pub(crate) fn render_user_message(
             .into_any_element()
     };
 
-    // Queue-marker chip: tiny pill above the bubble that the user can
-    // click to reveal the original "[The user typed the following at
-    // HH:MM:SS …]" boilerplate. Hidden by default because the marker
-    // is just a system bracket around the user's own text and adds
-    // nothing they didn't already see when typing — but the timestamp
-    // is occasionally useful ("when did I queue this follow-up?"), so
-    // a one-click reveal is worth a small affordance.
-    let queue_chip: Option<AnyElement> = queue_marker.as_deref().map(|marker| {
-        let chip_id = SharedString::from(format!("queue-marker-toggle-{entry_idx}"));
-        let view_for_click = view.clone();
-        let label_text: SharedString = if let Some(ts) = queue_marker_timestamp.as_deref() {
-            format!("queued · {ts}").into()
-        } else {
-            "queued".into()
-        };
-        let mut chip = h_flex()
-            .id(chip_id)
-            .gap_1()
-            .px_1p5()
-            .py_0p5()
-            .rounded_sm()
-            .cursor_pointer()
-            .bg(cx.theme().colors().element_background)
-            .hover(|s| s.bg(cx.theme().colors().element_hover))
-            .child(
-                ui::Icon::new(IconName::HistoryRerun)
-                    .size(ui::IconSize::XSmall)
-                    .color(Color::Muted),
-            )
-            .child(
-                Label::new(label_text)
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
-            )
-            .on_click(move |_, _, cx| {
-                if let Some(view) = view_for_click.upgrade() {
-                    view.update(cx, |view, cx| {
-                        view.toggle_queue_marker(entry_idx);
-                        cx.notify();
-                    });
-                }
-            });
-        if queue_marker_expanded {
-            chip = chip.child(
-                Label::new(SharedString::from(marker.to_string()))
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted)
-                    .italic(),
-            );
-        }
-        chip.into_any_element()
-    });
-
     v_flex()
         .group(group_name.clone())
         .px_1()
         .mb_3()
-        .when_some(queue_chip, |this, chip| {
-            this.child(h_flex().mb_1().child(chip))
-        })
         .child(
             // h_flex wrap so the bubble shrinks to content (no full-
             // panel-width slab). max_w(85%) caps long messages.
@@ -625,15 +548,11 @@ pub(crate) fn render_user_message(
 }
 
 /// Cleans a user message's merged-markdown source for display:
-///   1. Strips the leading queue marker (`[The user typed the
-///      following at HH:MM:SS …]\n\n`) that `send_message_blocks`
-///      prepends to every queued follow-up. The marker is meaningful
-///      for the agent (telling Claude "this was typed pre-emptively,
-///      not in response to your last turn") but pure noise for the
-///      user — they typed the message and don't need to see their own
-///      submission re-narrated by a system bracket. Same helper as
-///      `pending_blocks_preview` so the queued ghost bubble and the
-///      sent message render identically.
+///   1. Strips agent-only injected metadata (the optional leading hint
+///      line and the per-segment `[HH:MM:SS] ` timestamp prefixes) via
+///      `strip_injected_meta` so the user sees only what they typed.
+///      Same helper as `pending_blocks_preview` so the queued ghost
+///      bubble and the sent message render identically.
 ///   2. Rewrites EVERY image placeholder in the text into a clickable
 ///      markdown link of the form `[image #N](spk-image://<idx>)`.
 ///      Two flavours of placeholder hit this path:
@@ -655,7 +574,7 @@ pub(crate) fn render_user_message(
 ///   3. Collapses leftover double-blank lines so the bubble doesn't
 ///      grow an empty paragraph where the placeholder used to live.
 pub(crate) fn clean_user_message_text(text: &str) -> String {
-    let unmarked = strip_queue_marker(text);
+    let unmarked = strip_injected_meta(text);
     let mut ordinal: usize = 0;
     let rewrite = |caps: &regex::Captures, ordinal: &mut usize| {
         let label_n = caps
@@ -1631,23 +1550,25 @@ mod tests {
     }
 
     #[test]
-    fn strip_queue_marker_drops_prefix_when_present() {
-        let with_marker = "[The user typed the following at 14:23:01 (local time) while you were \
-                           still on the previous turn — this is NOT a direct reply to your last \
-                           question or tool result, it was queued in advance.]\n\nactual user text";
-        assert_eq!(super::strip_queue_marker(with_marker), "actual user text");
+    fn strip_injected_meta_removes_leading_timestamp() {
+        assert_eq!(super::strip_injected_meta("[10:39:12] actual user text"), "actual user text");
     }
 
     #[test]
-    fn strip_queue_marker_passes_through_unmarked_text() {
-        // Plain user content (no leading marker) is returned untouched.
-        assert_eq!(super::strip_queue_marker("hi there"), "hi there");
-        // Looks like a marker but missing the closing `]\n\n` → leave it alone
-        // rather than risk eating real content.
-        assert_eq!(
-            super::strip_queue_marker("[The user typed the following at "),
-            "[The user typed the following at "
-        );
+    fn strip_injected_meta_removes_each_segment_timestamp() {
+        let s = "[10:39:12] first\n\n[10:39:30] second";
+        assert_eq!(super::strip_injected_meta(s), "first\n\nsecond");
+    }
+
+    #[test]
+    fn strip_injected_meta_removes_leading_hint_line() {
+        let s = format!("{}\n\n[10:39:12] text", crate::store::QUEUE_HINT_LINE);
+        assert_eq!(super::strip_injected_meta(&s), "text");
+    }
+
+    #[test]
+    fn strip_injected_meta_passes_through_plain_text() {
+        assert_eq!(super::strip_injected_meta("hi there"), "hi there");
     }
 
     fn collect(text: &str, query: &str) -> Vec<Range<usize>> {

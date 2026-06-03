@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use acp_thread::{AgentThreadEntry, ToolCallContent, ToolCallStatus, UserMessageId};
@@ -275,12 +275,6 @@ pub struct SolutionSessionView {
     /// the user has clicked open. By default the marker (`[The user
     /// typed the following at HH:MM:SS … queued in advance.]`) is
     /// hidden — it's noise to a human reading their own message back —
-    /// but a tiny clickable chip above the bubble lets curious users
-    /// reveal the timestamp + full marker text on demand. State lives
-    /// here (not on the `SolutionSession`) because it's purely a
-    /// transient UI affordance: switching tabs / restarting the editor
-    /// resets it; nothing about the conversation changes.
-    expanded_queue_markers: HashSet<usize>,
     /// Subscription to `SolutionAgentStore` events that affect the
     /// sub-agents bubble strip — `SessionCreated` (new child appears),
     /// `SessionClosed` (child vanishes), `SessionStateChanged` /
@@ -572,7 +566,6 @@ impl SolutionSessionView {
             pending_markdown_source: SharedString::default(),
             resuming_markdown: None,
             resuming_markdown_source: SharedString::default(),
-            expanded_queue_markers: HashSet::new(),
             selected_subagent: crate::store::SubagentView::default(),
             tool_tick: None,
             background_entries_for_render: Vec::new(),
@@ -621,16 +614,6 @@ impl SolutionSessionView {
 
     pub(crate) fn session_entity(&self) -> &Entity<SolutionSession> {
         &self.session
-    }
-
-    /// Flip the expanded/collapsed state of the queued-prefix chip on
-    /// the user message at `entry_idx`. Caller is responsible for
-    /// `cx.notify()` — kept out of here so the click-handler closure
-    /// stays in control of when the entity actually re-renders.
-    pub(crate) fn toggle_queue_marker(&mut self, entry_idx: usize) {
-        if !self.expanded_queue_markers.remove(&entry_idx) {
-            self.expanded_queue_markers.insert(entry_idx);
-        }
     }
 
     /// Reattach the AcpThreadEvent subscription if the underlying
@@ -2915,7 +2898,6 @@ impl Render for SolutionSessionView {
                                     return Empty.into_any_element();
                                 };
                                 let view_weak = cx.entity().downgrade();
-                                let queue_expanded = this.expanded_queue_markers.contains(&idx);
 
                                 // Per-entry timestamp + date-separator
                                 // computation. `entry_created_ms` is
@@ -2997,7 +2979,7 @@ impl Render for SolutionSessionView {
                                     rewind_target,
                                     thread_weak,
                                     view_weak,
-                                    queue_expanded,
+                                    false,
                                     cx,
                                 )
                             },

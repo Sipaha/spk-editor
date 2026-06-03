@@ -28,7 +28,7 @@ mod queue;
 #[cfg(test)]
 pub(crate) mod tests;
 
-pub(crate) use queue::{QUEUE_MARKER_BODY_SEP, QUEUE_MARKER_PREFIX};
+pub(crate) use queue::{QUEUE_HINT_LINE, TS_PREFIX_CLOSE, TS_PREFIX_OPEN};
 
 pub struct SolutionAgentStore {
     sessions: HashMap<SolutionSessionId, Entity<SolutionSession>>,
