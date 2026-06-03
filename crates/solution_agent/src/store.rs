@@ -1528,6 +1528,21 @@ impl SolutionAgentStore {
         self.sessions.get(&id).cloned()
     }
 
+    /// Reverse-lookup the `SolutionSessionId` owning a given ACP session id.
+    /// The native hook pull-closure knows only the `acp::SessionId`, but the
+    /// queue is keyed by `SolutionSessionId`; there are only a handful of live
+    /// sessions per solution so a linear scan is fine.
+    pub fn session_id_for_acp(
+        &self,
+        acp_session_id: &acp::SessionId,
+        cx: &App,
+    ) -> Option<SolutionSessionId> {
+        self.sessions
+            .iter()
+            .find(|(_, session)| session.read(cx).acp_session_id == *acp_session_id)
+            .map(|(id, _)| *id)
+    }
+
     pub fn all_sessions(&self) -> impl Iterator<Item = Entity<SolutionSession>> + '_ {
         self.sessions.values().cloned()
     }
@@ -2668,6 +2683,30 @@ impl SolutionAgentStore {
         acp_thread: Entity<acp_thread::AcpThread>,
         cx: &mut Context<Self>,
     ) -> Subscription {
+        // Wire the native follow-up pull: at each hook the connection asks the
+        // store for this session's queued follow-ups. The closure captures a
+        // weak store handle so `claude_native` stays free of any
+        // `solution_agent` dependency. First-write-wins inside `set_store_pull`,
+        // so re-attaches (resume / new thread) are harmless no-ops.
+        if let Some(connection) = acp_thread
+            .read(cx)
+            .connection()
+            .clone()
+            .downcast::<claude_native::ClaudeNativeConnection>()
+        {
+            let weak = cx.weak_entity();
+            connection.set_store_pull(std::rc::Rc::new(
+                move |acp_sid: &acp::SessionId, is_end_of_turn: bool, cx: &mut AsyncApp| {
+                    weak.update(cx, |store, cx| {
+                        let session_id = store.session_id_for_acp(acp_sid, cx)?;
+                        store.take_pending_for_delivery(session_id, is_end_of_turn, cx)
+                    })
+                    .ok()
+                    .flatten()
+                },
+            ));
+        }
+
         cx.subscribe(&acp_thread, move |store, _thread, event, cx| {
             store.handle_acp_event(session_id, event, cx);
         })

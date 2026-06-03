@@ -485,6 +485,21 @@ impl ClaudeNativeConnection {
         self.store_pull.borrow().is_some()
     }
 
+    /// Test-only: invoke the registered store pull for `session_id`, if any.
+    /// Lets a store test exercise the pull-closure directly without driving the
+    /// live pump. Returns `None` when no pull is registered or the pull yields
+    /// nothing (empty queue).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn invoke_store_pull_for_test(
+        &self,
+        session_id: &acp::SessionId,
+        is_end_of_turn: bool,
+        cx: &mut gpui::AsyncApp,
+    ) -> Option<String> {
+        let pull = self.store_pull.borrow().clone();
+        pull.and_then(|p| p(session_id, is_end_of_turn, cx))
+    }
+
     /// Extract the `--append-system-prompt` text from the ACP `_meta` extension
     /// the fork uses: `{ "systemPrompt": { "append": "<text>" } }`. Absent /
     /// malformed meta yields `None` (no flag added).

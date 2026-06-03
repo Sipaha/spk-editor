@@ -784,6 +784,74 @@ async fn hook_inject_round_trips_additional_context(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn hook_pulls_from_registered_store_closure(cx: &mut TestAppContext) {
+    let capture = std::env::temp_dir().join(format!(
+        "claude_native_hook_store_pull_{}.ndjson",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&capture);
+
+    let project = init_test(cx).await;
+    let connection = connect_mock(
+        &project,
+        vec![
+            ("MOCK_CLAUDE_HOOK_INJECT".to_string(), "1".to_string()),
+            (
+                "MOCK_CLAUDE_CAPTURE".to_string(),
+                capture.to_string_lossy().into_owned(),
+            ),
+        ],
+        cx,
+    )
+    .await;
+
+    let task = cx.update(|cx| {
+        Rc::clone(&connection).new_session(
+            project.clone(),
+            PathList::new(&[std::env::temp_dir().as_path()]),
+            cx,
+        )
+    });
+    let thread = await_thread(task, cx).await;
+    let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
+
+    // Register a store pull BEFORE sending the prompt — this is the production
+    // path (instead of the test-only `inject_user_message`). The pump must
+    // invoke this closure at the hook and ship its output back as
+    // `additionalContext`, which the mock echoes in its final result.
+    connection.set_store_pull(Rc::new(|_sid, _eot, _cx| {
+        Some("STORE_PULL_MARKER".to_string())
+    }));
+
+    let prompt = vec![acp::ContentBlock::Text(acp::TextContent::new(
+        "hello".to_string(),
+    ))];
+    let request = acp::PromptRequest::new(session_id, prompt);
+    let prompt_task =
+        cx.update(|cx| connection.prompt(acp_thread::UserMessageId::new(), request, cx));
+
+    let response = {
+        let timeout = cx.background_executor.timer(Duration::from_secs(10)).fuse();
+        let prompt_task = prompt_task.fuse();
+        futures::pin_mut!(timeout, prompt_task);
+        futures::select! {
+            response = prompt_task => response.expect("prompt resolved Ok"),
+            _ = timeout => panic!("prompt did not resolve after hook round trip"),
+        }
+    };
+    assert_eq!(response.stop_reason, acp::StopReason::EndTurn);
+
+    let captured = std::fs::read_to_string(&capture).expect("read capture");
+    assert!(
+        captured.contains(r#""type":"control_response""#)
+            && captured.contains("STORE_PULL_MARKER")
+            && captured.contains("additionalContext"),
+        "captured stdin missing hook control_response carrying the store-pull marker: {captured}"
+    );
+    let _ = std::fs::remove_file(&capture);
+}
+
+#[gpui::test]
 async fn subagent_tool_use_carries_parent_meta_through_pump(cx: &mut TestAppContext) {
     // Drives a fake subagent (`parent_tool_use_id != null`) assistant message
     // through the real update-pump and asserts the resulting ToolCall reaches

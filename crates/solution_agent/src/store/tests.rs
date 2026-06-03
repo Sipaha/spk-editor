@@ -2873,6 +2873,219 @@ async fn send_during_running_on_native_connection_routes_to_queue(cx: &mut TestA
     drop(server);
 }
 
+/// End-to-end of the pull side: after a native-backed session is wired through
+/// `subscribe_to_session`, the connection holds a store pull-closure. Invoking
+/// that closure (as the live pump does at each hook) must map the ACP session
+/// id back to the `SolutionSessionId`, drain `pending_messages`, push a single
+/// user entry onto the thread, and return the agent-facing text (no hint for a
+/// mid-turn hook, hint prepended at end-of-turn).
+#[gpui::test]
+async fn registered_store_pull_drains_queue_and_returns_followup_text(cx: &mut TestAppContext) {
+    use acp_thread::AgentConnection;
+    use agent_client_protocol::schema as acp;
+    use agent_servers::{AgentServer, AgentServerDelegate};
+    use claude_native::ClaudeNativeConnection;
+    use project::AgentId;
+
+    let mock_binary = native_mock_binary();
+    if !mock_binary.exists() {
+        panic!(
+            "mock claude binary missing at {} — tests/fixtures/mock_claude.sh not bundled?",
+            mock_binary.display()
+        );
+    }
+    cx.executor().allow_parking();
+
+    let (solution_id, _tmp, project) = setup_solution_and_project(cx).await;
+    let agent_id = SharedString::from("claude-native");
+
+    let server = Rc::new(claude_native::ClaudeNativeAgentServer::with_binary(
+        AgentId::new("claude-native"),
+        mock_binary,
+        Vec::new(),
+    ));
+
+    cx.update(|cx| {
+        let registry = Arc::new(AdapterRegistry::new());
+        SolutionAgentStore::init_global(cx, registry);
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, _| {
+            store.register_agent_server(agent_id.clone(), server.clone());
+        });
+    });
+
+    let connection: Rc<dyn acp_thread::AgentConnection> = cx
+        .update(|cx| {
+            let store = project.read(cx).agent_server_store().clone();
+            let delegate = AgentServerDelegate::new(store, None);
+            AgentServer::connect(server.as_ref(), delegate, project.clone(), cx)
+        })
+        .await
+        .expect("native connect");
+    let native = connection
+        .clone()
+        .downcast::<ClaudeNativeConnection>()
+        .expect("downcast to ClaudeNativeConnection");
+
+    let work_dirs = util::path_list::PathList::new(&[std::env::temp_dir().as_path()]);
+    let acp_thread = cx
+        .update(|cx| Rc::clone(&native).new_session(project.clone(), work_dirs, cx))
+        .await
+        .expect("new_session");
+
+    let acp_session_id = acp_thread.read_with(cx, |t, _| t.session_id().clone());
+
+    // Insert the session AND wire it through `subscribe_to_session` (the single
+    // attach choke point) so Part A's pull-registration runs.
+    let session_id = SolutionSessionId::new();
+    cx.update(|cx| {
+        let session = cx.new(|_| {
+            let mut s = crate::model::SolutionSession::new_idle(
+                session_id,
+                solution_id.clone(),
+                agent_id.clone(),
+                acp_session_id.clone(),
+            );
+            s.title = SharedString::from("native-pull-test");
+            s.project = Some(project.clone());
+            s.state = SessionState::Running {
+                started_at: std::time::Instant::now(),
+                notified: false,
+            };
+            s
+        });
+        session.update(cx, |session, cx| {
+            session.set_acp_thread(Some(acp_thread.clone()), cx);
+        });
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            store.sessions.insert(session_id, session.clone());
+            store
+                .by_solution
+                .entry(solution_id.clone())
+                .or_default()
+                .push(session_id);
+            let sub = store.subscribe_to_session(session_id, acp_thread.clone(), cx);
+            session.update(cx, |s, _| s._acp_subscription = Some(sub));
+        });
+    });
+
+    // (1) Pull registered via `subscribe_to_session` ⇒ Part A ran.
+    assert!(
+        native.store_pull_registered_for_test(),
+        "subscribe_to_session must register the native store pull"
+    );
+
+    // (2) Mid-turn send enqueues into pending_messages.
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            store
+                .send_message_blocks(
+                    session_id,
+                    vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "FOLLOWUP_XYZ".to_string(),
+                    ))],
+                    cx,
+                )
+                .detach_and_log_err(cx);
+        });
+    });
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let session = store.session(session_id).expect("session exists");
+            assert_eq!(
+                session.read(cx).pending_messages.len(),
+                1,
+                "running send must queue"
+            );
+        });
+    });
+
+    let entries_before = acp_thread.read_with(cx, |t, _| t.entries().len());
+
+    // (3) Invoke the registered pull exactly as the pump would (mid-turn ⇒
+    // is_end_of_turn = false). The closure runs `weak.update` itself, so it must
+    // be called OUTSIDE any open store update.
+    let mut async_cx = cx.to_async();
+    let pulled = native.invoke_store_pull_for_test(&acp_session_id, false, &mut async_cx);
+    let pulled = pulled.expect("pull must return the queued follow-up text");
+    assert!(
+        pulled.contains("FOLLOWUP_XYZ"),
+        "pulled text must carry the queued message, got {pulled:?}"
+    );
+    assert!(
+        !pulled.contains(crate::store::queue::QUEUE_HINT_LINE),
+        "mid-turn pull must NOT prepend the queue hint, got {pulled:?}"
+    );
+
+    // (4) Queue drained + the thread gained exactly one user entry ⇒ the
+    // acp→solution id mapping ran and `take_pending_for_delivery` executed.
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let session = store.session(session_id).expect("session exists");
+            assert_eq!(
+                session.read(cx).pending_messages.len(),
+                0,
+                "pull must drain pending_messages"
+            );
+        });
+    });
+    let entries_after = acp_thread.read_with(cx, |t, _| t.entries().len());
+    assert_eq!(
+        entries_after,
+        entries_before + 1,
+        "delivery must push exactly one user entry onto the thread"
+    );
+    let last_is_user = acp_thread.read_with(cx, |t, _| {
+        matches!(
+            t.entries().last(),
+            Some(acp_thread::AgentThreadEntry::UserMessage(_))
+        )
+    });
+    assert!(last_is_user, "the appended entry must be a user message");
+
+    // (5) End-of-turn pull prepends the hint.
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            store
+                .send_message_blocks(
+                    session_id,
+                    vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "FOLLOWUP_EOT".to_string(),
+                    ))],
+                    cx,
+                )
+                .detach_and_log_err(cx);
+        });
+    });
+    let mut async_cx = cx.to_async();
+    let pulled_eot = native
+        .invoke_store_pull_for_test(&acp_session_id, true, &mut async_cx)
+        .expect("end-of-turn pull must return text");
+    assert!(
+        pulled_eot.contains("FOLLOWUP_EOT"),
+        "end-of-turn pull must carry the queued message, got {pulled_eot:?}"
+    );
+    assert!(
+        pulled_eot.contains(crate::store::queue::QUEUE_HINT_LINE),
+        "end-of-turn pull must prepend the queue hint, got {pulled_eot:?}"
+    );
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store
+            .update(cx, |store, cx| store.close_session(session_id, cx))
+            .ok();
+    });
+    drop(acp_thread);
+    drop(native);
+    drop(server);
+}
+
 // ---------------------------------------------------------------------------
 // Etap 3: Subagent-tab lifecycle (`active_subagents` + insertion-order vec).
 // These exercise `SolutionAgentStore::apply_subagent_lifecycle` through the
