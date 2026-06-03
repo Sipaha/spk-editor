@@ -2893,8 +2893,6 @@ impl Render for SolutionSessionView {
                                 let Some(style) = this.markdown_style_for_render.as_ref() else {
                                     return Empty.into_any_element();
                                 };
-                                let view_weak = cx.entity().downgrade();
-
                                 // Per-entry timestamp + date-separator
                                 // computation. `entry_created_ms` is
                                 // index-aligned with the parent-thread
@@ -2974,8 +2972,6 @@ impl Render for SolutionSessionView {
                                     &this.assistant_label_for_render,
                                     rewind_target,
                                     thread_weak,
-                                    view_weak,
-                                    false,
                                     cx,
                                 )
                             },

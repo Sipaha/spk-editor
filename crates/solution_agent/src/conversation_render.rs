@@ -13,7 +13,7 @@ use base64::Engine;
 use chrono::TimeZone as _;
 use gpui::{
     AnyElement, App, Context, ElementId, Empty, Entity, InteractiveElement as _, IntoElement,
-    ParentElement, Render, SharedString, Styled, WeakEntity,
+    ParentElement, Render, SharedString, Styled,
     Window, div, px, relative,
 };
 use markdown::{Markdown, MarkdownElement, MarkdownStyle};
@@ -294,8 +294,6 @@ pub(crate) fn render_entry(
     assistant_label: &SharedString,
     rewind_target: Option<UserMessageId>,
     thread: gpui::WeakEntity<AcpThread>,
-    view: WeakEntity<crate::session_view::SolutionSessionView>,
-    queue_marker_expanded: bool,
     cx: &App,
 ) -> AnyElement {
     let inner: AnyElement = match entry {
@@ -306,8 +304,6 @@ pub(crate) fn render_entry(
             is_last,
             markdown_for,
             style,
-            view,
-            queue_marker_expanded,
             cx,
         ),
         AgentThreadEntry::AssistantMessage(message) => render_assistant_message(
@@ -468,8 +464,6 @@ pub(crate) fn render_user_message(
     is_last: bool,
     markdown_for: &HashMap<(usize, usize), Entity<Markdown>>,
     style: &MarkdownStyle,
-    _view: WeakEntity<crate::session_view::SolutionSessionView>,
-    _queue_marker_expanded: bool,
     cx: &App,
 ) -> AnyElement {
     // `clean_user_message_text` strips the literal "`Image`"
@@ -1569,6 +1563,12 @@ mod tests {
     #[test]
     fn strip_injected_meta_passes_through_plain_text() {
         assert_eq!(super::strip_injected_meta("hi there"), "hi there");
+    }
+
+    #[test]
+    fn strip_injected_meta_passes_through_non_timestamp_bracket() {
+        // A leading bracket that is NOT a valid HH:MM:SS must be left intact.
+        assert_eq!(super::strip_injected_meta("[not-a-timestamp] text"), "[not-a-timestamp] text");
     }
 
     fn collect(text: &str, query: &str) -> Vec<Range<usize>> {
