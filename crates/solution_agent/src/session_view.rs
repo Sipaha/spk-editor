@@ -271,10 +271,6 @@ pub struct SolutionSessionView {
     /// Send on a cold tab. Drives the inline "Starting agent…"
     /// indicator on the compose row and disables further Send actions.
     pub(crate) resuming: bool,
-    /// Per-entry-index set of user messages whose queued-prefix marker
-    /// the user has clicked open. By default the marker (`[The user
-    /// typed the following at HH:MM:SS … queued in advance.]`) is
-    /// hidden — it's noise to a human reading their own message back —
     /// Subscription to `SolutionAgentStore` events that affect the
     /// sub-agents bubble strip — `SessionCreated` (new child appears),
     /// `SessionClosed` (child vanishes), `SessionStateChanged` /
