@@ -228,16 +228,6 @@ pub struct SolutionSessionView {
     /// conversation. Not persisted across editor restarts (overkill for
     /// what is effectively a UX hint label).
     image_count_so_far: usize,
-    /// `true` when the queued-message ghost-bubble is shown in its
-    /// one-line collapsed form ("▸ Queued message — click to expand")
-    /// rather than the full preview. Default `true` because a queued
-    /// follow-up sitting under the conversation is visual noise most of
-    /// the time — the user knows what they typed; the chevron is just
-    /// a "yes, your draft is still there" affordance. Click on the
-    /// header expands; submit / recall flushes the queue and the row
-    /// disappears either way, so this state is purely transient and
-    /// not worth persisting.
-    queue_collapsed: bool,
     /// `true` when the auto-generated compact-context prompt (a large,
     /// agent-only template the editor injects on a Compact action) is
     /// shown folded as a one-line placeholder rather than rendered in
@@ -563,7 +553,6 @@ impl SolutionSessionView {
             _session_event_subscription: Some(session_event_subscription),
             _store_subscription: store_subscription,
             image_count_so_far: 0,
-            queue_collapsed: true,
             compact_prompt_collapsed: true,
             pending_send: None,
             resuming: false,

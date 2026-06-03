@@ -2,19 +2,21 @@
 //!
 //! When the user types a follow-up while the agent is still working, the
 //! message is parked in `SolutionSession::pending_messages`. This module
-//! paints the optional bubble (selectable text + clickable image links)
-//! and the always-present footer strip with chevron + "queued message"
-//! label + Bolt-button (interrupt-and-flush). Click on the strip toggles
-//! `queue_collapsed`. The section returns `None` when the queue is empty
-//! so the caller can `when_some(...)` it into the layout without
+//! paints the ghost bubble (selectable text + clickable image links) plus
+//! a footer strip with a "queued message" label and a Bolt-button
+//! (interrupt-and-flush). The section returns `None` when the queue is
+//! empty so the caller can `when_some(...)` it into the layout without
 //! reserving spacing.
+//!
+//! The bubble is always shown in full. (An earlier collapse-to-one-line
+//! affordance existed for when delivery could lag minutes-to-hours and the
+//! ghost cluttered the view; the queue-unification work made delivery
+//! prompt, so the collapse was pure friction and was removed.)
 
 use std::sync::Arc;
 
 use agent_client_protocol::schema as acp;
-use gpui::{
-    Context, Div, IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled,
-};
+use gpui::{Context, Div, IntoElement, ParentElement, SharedString, Styled};
 use markdown::MarkdownElement;
 use ui::prelude::*;
 use ui::{Color, Icon, IconName, IconSize, Label, LabelSize, Tooltip};
@@ -45,22 +47,15 @@ impl SolutionSessionView {
         if bundles.is_empty() {
             return None;
         }
-        let queue_collapsed = self.queue_collapsed;
-        let chevron = if queue_collapsed {
-            IconName::ChevronRight
-        } else {
-            IconName::ChevronDown
-        };
         let is_running = matches!(self.session.read(cx).state, SessionState::Running { .. });
 
-        // Bubble (expanded only): selectable markdown text + clickable
-        // `[image #N]` links wired through `spk-image://` to
-        // `open_image_preview`. Reuses the cached `pending_markdown`
-        // entity refreshed by `ensure_pending_markdown` in the render
-        // pre-pass — building a fresh `Markdown::new` per frame would
-        // never finish parsing.
-        let bubble = (!queue_collapsed)
-            .then(|| {
+        // Ghost bubble: selectable markdown text + clickable `[image #N]`
+        // links wired through `spk-image://` to `open_image_preview`. Reuses
+        // the cached `pending_markdown` entity refreshed by
+        // `ensure_pending_markdown` in the render pre-pass — building a fresh
+        // `Markdown::new` per frame would never finish parsing. `None` only
+        // until that entity is ready (filled in on the next frame).
+        let bubble = (|| {
                 let entity = self.pending_markdown.as_ref()?.clone();
                 let style = self.markdown_style_for_render.as_ref()?.clone();
                 let bubble_bg = cx.theme().colors().text_accent.opacity(0.06);
@@ -106,28 +101,18 @@ impl SolutionSessionView {
                             .child(body),
                     ),
                 )
-            })
-            .flatten();
+        })();
 
-        // Footer strip — always rendered. Hosts the chevron + label +
-        // Bolt button. Tooltip carries the "Queued — sends when agent
-        // finishes" copy that used to live as a footer label inside
-        // the bubble (the user's request: keep the bubble clean,
-        // surface the explanation only on intent-to-learn-more).
+        // Footer strip — always rendered. A "queued message" label + the
+        // send-now Bolt button (when running). Hover tooltip carries the
+        // "Queued — sends when the agent finishes" explanation + the recall
+        // hint, surfaced only on intent-to-learn-more.
         let strip = h_flex()
             .id("solution-session-queue-header")
             .gap_2()
             .px_2()
             .py_1()
-            .rounded_sm()
-            .cursor_pointer()
             .items_center()
-            .hover(|this| this.bg(cx.theme().colors().element_hover))
-            .child(
-                Icon::new(chevron)
-                    .size(IconSize::Small)
-                    .color(Color::Default),
-            )
             .child(
                 Icon::new(IconName::CountdownTimer)
                     .size(IconSize::Small)
@@ -157,19 +142,14 @@ impl SolutionSessionView {
                         })),
                 )
             })
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.queue_collapsed = !this.queue_collapsed;
-                cx.notify();
-            }))
             .tooltip(Tooltip::text(
-                "Queued — sends when agent finishes. Click to expand/collapse. \
-                 Up arrow in an empty compose recalls; Esc cancels recall.",
+                "Queued — sends when the agent finishes. Up arrow in an empty \
+                 compose recalls; Esc cancels recall.",
             ));
 
-        // Compose: bubble (when expanded) FIRST, then the always-
-        // visible strip — matches the user's request to anchor the
-        // collapse control at the BOTTOM of the queue UI, right above
-        // the status row.
+        // Compose: ghost bubble FIRST, then the strip beneath it — the
+        // "queued message" label + send-now bolt sit at the bottom of the
+        // queue UI, right above the status row.
         let _ = window;
         let mut section = v_flex().w_full().px_1();
         if let Some(bubble) = bubble {
