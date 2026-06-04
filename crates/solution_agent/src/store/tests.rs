@@ -1022,7 +1022,7 @@ async fn take_pending_for_delivery_drains_pushes_and_formats(cx: &mut TestAppCon
     let mid = cx.update(|cx| {
         let store = SolutionAgentStore::global(cx);
         store.update(cx, |store, cx| {
-            store.take_pending_for_delivery(session_id, false, cx)
+            store.take_pending_for_delivery(session_id, None, false, cx)
         })
     });
     let text = mid.expect("pending present");
@@ -1071,7 +1071,7 @@ async fn take_pending_for_delivery_drains_pushes_and_formats(cx: &mut TestAppCon
         .update(|cx| {
             let store = SolutionAgentStore::global(cx);
             store.update(cx, |store, cx| {
-                store.take_pending_for_delivery(session_id, true, cx)
+                store.take_pending_for_delivery(session_id, None, true, cx)
             })
         })
         .expect("pending present");
@@ -3009,7 +3009,17 @@ async fn registered_store_pull_drains_queue_and_returns_followup_text(cx: &mut T
     // is_end_of_turn = false). The closure runs `weak.update` itself, so it must
     // be called OUTSIDE any open store update.
     let mut async_cx = cx.to_async();
-    let pulled = native.invoke_store_pull_for_test(&acp_session_id, false, &mut async_cx);
+    // A subagent's hook (agent_id present) must NOT drain the main queue —
+    // otherwise a running Agent Teams teammate swallows the follow-up. It
+    // stays queued for the main agent's next hook.
+    let sub_pull =
+        native.invoke_store_pull_for_test(&acp_session_id, Some("sub-agent-1"), false, &mut async_cx);
+    assert!(
+        sub_pull.is_none(),
+        "a subagent hook must not drain the main agent's queue, got {sub_pull:?}"
+    );
+    // The main agent's hook (no agent_id) drains it.
+    let pulled = native.invoke_store_pull_for_test(&acp_session_id, None, false, &mut async_cx);
     let pulled = pulled.expect("pull must return the queued follow-up text");
     assert!(
         pulled.contains("FOLLOWUP_XYZ"),
@@ -3064,7 +3074,7 @@ async fn registered_store_pull_drains_queue_and_returns_followup_text(cx: &mut T
     });
     let mut async_cx = cx.to_async();
     let pulled_eot = native
-        .invoke_store_pull_for_test(&acp_session_id, true, &mut async_cx)
+        .invoke_store_pull_for_test(&acp_session_id, None, true, &mut async_cx)
         .expect("end-of-turn pull must return text");
     assert!(
         pulled_eot.contains("FOLLOWUP_EOT"),

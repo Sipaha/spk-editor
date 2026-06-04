@@ -819,7 +819,7 @@ async fn hook_pulls_from_registered_store_closure(cx: &mut TestAppContext) {
     // path (instead of the test-only `inject_user_message`). The pump must
     // invoke this closure at the hook and ship its output back as
     // `additionalContext`, which the mock echoes in its final result.
-    connection.set_store_pull(Rc::new(|_sid, _eot, _cx| {
+    connection.set_store_pull(Rc::new(|_sid, _agent_id, _eot, _cx| {
         Some("STORE_PULL_MARKER".to_string())
     }));
 

@@ -1555,9 +1555,18 @@ impl SolutionAgentStore {
     pub fn take_pending_for_delivery(
         &mut self,
         session_id: SolutionSessionId,
+        agent_id: Option<&str>,
         is_end_of_turn: bool,
         cx: &mut Context<Self>,
     ) -> Option<String> {
+        // Agent Teams: a subagent's hook carries an `agent_id`; the main
+        // agent's does not. Step 1 routes everything to the MAIN agent — only
+        // its hooks drain the queue, so a running subagent can't swallow a
+        // follow-up the user typed for the main thread. (Per-tab routing to a
+        // specific subagent lands in step 2, keyed on this `agent_id`.)
+        if agent_id.is_some() {
+            return None;
+        }
         let session = self.session(session_id)?;
         let drained: Vec<Vec<acp::ContentBlock>> =
             session.update(cx, |s, _| s.pending_messages.drain(..).collect());
@@ -2696,10 +2705,13 @@ impl SolutionAgentStore {
         {
             let weak = cx.weak_entity();
             connection.set_store_pull(std::rc::Rc::new(
-                move |acp_sid: &acp::SessionId, is_end_of_turn: bool, cx: &mut AsyncApp| {
+                move |acp_sid: &acp::SessionId,
+                      agent_id: Option<&str>,
+                      is_end_of_turn: bool,
+                      cx: &mut AsyncApp| {
                     weak.update(cx, |store, cx| {
                         let session_id = store.session_id_for_acp(acp_sid, cx)?;
-                        store.take_pending_for_delivery(session_id, is_end_of_turn, cx)
+                        store.take_pending_for_delivery(session_id, agent_id, is_end_of_turn, cx)
                     })
                     .ok()
                     .flatten()

@@ -46,12 +46,16 @@ use crate::translate::{
 use crate::watchdog::{AnalyzerContext, ClaudeAnalyzer, Watchdog};
 
 /// Store-provided pull invoked at each hook to fetch the next queued follow-up
-/// for `session_id`. `is_end_of_turn` is true for the `Stop` hook (the agent
-/// has produced a complete message). Returns the formatted agent-facing text,
-/// or `None` when the queue is empty. Type-erased so `claude_native` needs no
-/// dependency on `solution_agent`.
-pub type HookPull =
-    std::rc::Rc<dyn Fn(&acp::SessionId, bool, &mut gpui::AsyncApp) -> Option<String>>;
+/// for `session_id`. `agent_id` is `Some` when the firing hook belongs to an
+/// Agent Teams subagent (its hook input carries `agent_id`/`agent_type`) and
+/// `None` for the main agent — the store uses it to route a queued message to
+/// the tab it was typed into. `is_end_of_turn` is true for the `Stop` hook
+/// (the agent has produced a complete message). Returns the formatted
+/// agent-facing text, or `None` when nothing is queued for that addressee.
+/// Type-erased so `claude_native` needs no dependency on `solution_agent`.
+pub type HookPull = std::rc::Rc<
+    dyn Fn(&acp::SessionId, Option<&str>, bool, &mut gpui::AsyncApp) -> Option<String>,
+>;
 
 /// Stable id for the `PostToolUse` hook callback registered in `initialize`.
 const HOOK_CALLBACK_POST_TOOL_USE: &str = "pti";
@@ -493,11 +497,12 @@ impl ClaudeNativeConnection {
     pub fn invoke_store_pull_for_test(
         &self,
         session_id: &acp::SessionId,
+        agent_id: Option<&str>,
         is_end_of_turn: bool,
         cx: &mut gpui::AsyncApp,
     ) -> Option<String> {
         let pull = self.store_pull.borrow().clone();
-        pull.and_then(|p| p(session_id, is_end_of_turn, cx))
+        pull.and_then(|p| p(session_id, agent_id, is_end_of_turn, cx))
     }
 
     /// Extract the `--append-system-prompt` text from the ACP `_meta` extension
@@ -1137,16 +1142,24 @@ async fn run_update_pump(
 
         if let OutputMessage::ControlRequest(envelope) = message {
             match &envelope.request {
-                ControlRequestKind::HookCallback { callback_id, .. } => {
+                ControlRequestKind::HookCallback {
+                    callback_id, input, ..
+                } => {
                     // Ask the store for the next queued follow-up (when a pull is
                     // registered), falling back to the local `pending_inject`
                     // buffer (kept for tests with no registered pull). Ship it
                     // back as `additionalContext` (or, for Stop, also as `reason`
                     // with `decision: "block"`). No pending → empty success no-op.
                     let is_end_of_turn = callback_id.as_str() == HOOK_CALLBACK_STOP;
+                    // Agent Teams: a subagent's hook input carries `agent_id`
+                    // (the main agent's does not). Forward it so the store can
+                    // route the queued follow-up to the agent the user aimed it
+                    // at — without this, a running subagent's hook swallows a
+                    // message meant for the main agent.
+                    let agent_id = input.get("agent_id").and_then(|v| v.as_str());
                     let pull = shared.pending_pull.borrow().clone();
                     let pending = match pull {
-                        Some(pull) => pull(&shared.session_id, is_end_of_turn, cx),
+                        Some(pull) => pull(&shared.session_id, agent_id, is_end_of_turn, cx),
                         None => shared.pending_inject.borrow_mut().take(),
                     };
                     let response = build_hook_response(&envelope.request_id, callback_id, pending);
@@ -1880,14 +1893,16 @@ mod tests {
         }
         let first_dropped = std::rc::Rc::new(Cell::new(false));
         let guard = DropFlag(first_dropped.clone());
-        connection.set_store_pull(std::rc::Rc::new(move |_id, _eot, _cx| {
+        connection.set_store_pull(std::rc::Rc::new(move |_id, _agent_id, _eot, _cx| {
             let _ = &guard;
             Some("FIRST".to_string())
         }));
         assert!(connection.store_pull_registered_for_test());
 
         // Second registration must be a no-op: the first closure stays retained.
-        connection.set_store_pull(std::rc::Rc::new(|_id, _eot, _cx| Some("SECOND".to_string())));
+        connection.set_store_pull(std::rc::Rc::new(|_id, _agent_id, _eot, _cx| {
+            Some("SECOND".to_string())
+        }));
         assert!(connection.store_pull_registered_for_test());
         assert!(
             !first_dropped.get(),
