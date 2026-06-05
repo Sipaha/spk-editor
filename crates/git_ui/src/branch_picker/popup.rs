@@ -1254,7 +1254,7 @@ impl Render for BranchesPopup {
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::handle_toggle_favorite))
             .elevation_2(cx)
-            .w(rems(48.))
+            .w(rems(32.))
             // Definite height (not just `max_h`): as an anchored popover the
             // container is content-sized, so the `flex_1` scroll list below
             // would collapse to zero height without a height basis here.
