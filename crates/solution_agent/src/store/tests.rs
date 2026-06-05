@@ -920,7 +920,7 @@ async fn queued_messages_get_per_message_timestamp_prefix(cx: &mut TestAppContex
             let s = session.read(cx);
             assert_eq!(s.pending_messages.len(), 1, "one queued bundle after first enqueue");
             let bundle = &s.pending_messages[0];
-            let first = match &bundle[0] {
+            let first = match &bundle.blocks[0] {
                 agent_client_protocol::schema::ContentBlock::Text(t) => t.text.as_str(),
                 other => panic!("first block must be Text, got {other:?}"),
             };
@@ -931,6 +931,7 @@ async fn queued_messages_get_per_message_timestamp_prefix(cx: &mut TestAppContex
                 "expected [HH:MM:SS] prefix, got {first:?}"
             );
             let payload: String = bundle
+                .blocks
                 .iter()
                 .filter_map(|b| match b {
                     agent_client_protocol::schema::ContentBlock::Text(t) => Some(t.text.clone()),
@@ -970,6 +971,7 @@ async fn queued_messages_get_per_message_timestamp_prefix(cx: &mut TestAppContex
             assert_eq!(s.pending_messages.len(), 1, "still one bundle after second enqueue");
             let bundle = &s.pending_messages[0];
             let payload: String = bundle
+                .blocks
                 .iter()
                 .filter_map(|b| match b {
                     agent_client_protocol::schema::ContentBlock::Text(t) => Some(t.text.clone()),
@@ -982,6 +984,7 @@ async fn queued_messages_get_per_message_timestamp_prefix(cx: &mut TestAppContex
                 "both messages preserved, got {payload:?}"
             );
             let stamp_count = bundle
+                .blocks
                 .iter()
                 .filter(|b| matches!(b,
                     agent_client_protocol::schema::ContentBlock::Text(t)
@@ -1079,6 +1082,192 @@ async fn take_pending_for_delivery_drains_pushes_and_formats(cx: &mut TestAppCon
         end.contains(crate::store::queue::QUEUE_HINT_LINE),
         "Stop/idle delivery carries the hint, got {end:?}"
     );
+}
+
+/// Pure contract tests for the routing predicates — cheap, no GPUI needed.
+#[test]
+fn queue_target_matches_hook_routes_by_agent_id() {
+    use crate::model::QueueTarget;
+    // Main bundles drain on the main agent's hook (no agent_id), never on a
+    // teammate's hook.
+    assert!(QueueTarget::Main.matches_hook(None));
+    assert!(!QueueTarget::Main.matches_hook(Some("agent-1")));
+    // Subagent bundles drain ONLY on their own teammate's hook.
+    let sub = QueueTarget::Subagent(SharedString::from("agent-1"));
+    assert!(sub.matches_hook(Some("agent-1")));
+    assert!(!sub.matches_hook(Some("agent-2")));
+    assert!(!sub.matches_hook(None));
+}
+
+#[test]
+fn subagent_view_queue_target_only_background_is_a_subagent() {
+    use crate::background_agent::BackgroundAgentId;
+    use crate::background_shell::BackgroundShellId;
+    use crate::model::QueueTarget;
+    use crate::store::SubagentView;
+    assert_eq!(SubagentView::Main.queue_target(), QueueTarget::Main);
+    assert_eq!(
+        SubagentView::Task(SharedString::from("toolu_1")).queue_target(),
+        QueueTarget::Main
+    );
+    assert_eq!(
+        SubagentView::Shell(BackgroundShellId::new("sh-1")).queue_target(),
+        QueueTarget::Main
+    );
+    assert_eq!(
+        SubagentView::Background(BackgroundAgentId::new("agent-1")).queue_target(),
+        QueueTarget::Subagent(SharedString::from("agent-1"))
+    );
+}
+
+/// A `Subagent`-targeted follow-up drains only on the matching teammate's
+/// hook; a non-matching teammate hook and the main agent's hook leave it
+/// queued, and the main agent's own bundle is independent.
+#[gpui::test]
+async fn take_pending_routes_by_target(cx: &mut TestAppContext) {
+    let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+
+    // Force Running, then queue one Main-targeted and one Subagent-targeted
+    // follow-up (distinct addressees ⇒ two bundles, not a merge).
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            store.session(session_id).unwrap().update(cx, |s, _| {
+                s.state = SessionState::Running {
+                    started_at: std::time::Instant::now(),
+                    notified: false,
+                };
+            });
+            store
+                .send_message(session_id, "for main".to_string(), cx)
+                .detach_and_log_err(cx);
+            store
+                .send_message_blocks_targeted(
+                    session_id,
+                    vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "for teammate".to_string(),
+                    ))],
+                    crate::model::QueueTarget::Subagent(SharedString::from("agent-1")),
+                    cx,
+                )
+                .detach_and_log_err(cx);
+        });
+    });
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            assert_eq!(
+                store.session(session_id).unwrap().read(cx).pending_messages.len(),
+                2,
+                "distinct targets must NOT merge into one bundle"
+            );
+        });
+    });
+
+    // A non-matching teammate hook drains nothing and leaves both bundles.
+    let miss = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            store.take_pending_for_delivery(session_id, Some("agent-2"), false, cx)
+        })
+    });
+    assert!(miss.is_none(), "non-matching teammate hook drains nothing");
+
+    // The matching teammate hook drains ONLY its own bundle (the Main bundle
+    // stays queued).
+    let sub = cx
+        .update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| {
+                store.take_pending_for_delivery(session_id, Some("agent-1"), false, cx)
+            })
+        })
+        .expect("teammate bundle delivered");
+    assert!(sub.contains("for teammate"), "got {sub:?}");
+    assert!(!sub.contains("for main"), "must not leak the Main bundle, got {sub:?}");
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            assert_eq!(
+                store.session(session_id).unwrap().read(cx).pending_messages.len(),
+                1,
+                "Main bundle stays queued after the teammate drains its own"
+            );
+        });
+    });
+
+    // The main agent's hook now drains the remaining Main bundle.
+    let main = cx
+        .update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| {
+                store.take_pending_for_delivery(session_id, None, false, cx)
+            })
+        })
+        .expect("main bundle delivered");
+    assert!(main.contains("for main"), "got {main:?}");
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            assert_eq!(
+                store.session(session_id).unwrap().read(cx).pending_messages.len(),
+                0,
+                "queue empty after both addressees drained"
+            );
+        });
+    });
+}
+
+/// A `Subagent`-targeted follow-up enqueued while running, then never drained
+/// by its teammate (the teammate finishes), is DROPPED — not delivered — when
+/// the parent turn ends. We can't easily fire the real `Stopped` event in a
+/// unit test, so assert the inverse half of the contract directly: the main
+/// agent's hook must never drain a subagent-targeted bundle.
+#[gpui::test]
+async fn main_hook_never_drains_subagent_bundle(cx: &mut TestAppContext) {
+    let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            store.session(session_id).unwrap().update(cx, |s, _| {
+                s.state = SessionState::Running {
+                    started_at: std::time::Instant::now(),
+                    notified: false,
+                };
+            });
+            store
+                .send_message_blocks_targeted(
+                    session_id,
+                    vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "orphan".to_string(),
+                    ))],
+                    crate::model::QueueTarget::Subagent(SharedString::from("ghost")),
+                    cx,
+                )
+                .detach_and_log_err(cx);
+        });
+    });
+    // Main agent's hook fires — must NOT swallow the teammate's bundle.
+    let pulled = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            store.take_pending_for_delivery(session_id, None, true, cx)
+        })
+    });
+    assert!(
+        pulled.is_none(),
+        "main hook must not drain a subagent-targeted bundle, got {pulled:?}"
+    );
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            assert_eq!(
+                store.session(session_id).unwrap().read(cx).pending_messages.len(),
+                1,
+                "subagent bundle stays queued for its own (now-gone) addressee"
+            );
+        });
+    });
 }
 
 #[gpui::test]
@@ -2848,6 +3037,7 @@ async fn send_during_running_on_native_connection_routes_to_queue(cx: &mut TestA
                 "native-backed Running send must queue into pending_messages"
             );
             let payload: String = s.pending_messages[0]
+                .blocks
                 .iter()
                 .filter_map(|b| match b {
                     acp::ContentBlock::Text(t) => Some(t.text.clone()),

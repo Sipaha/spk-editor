@@ -239,7 +239,7 @@ pub struct SolutionSessionView {
     /// the queued bubble"). Cleared the moment the user submits the
     /// modified draft (Send/Queue) — the original is lost intentionally;
     /// the new submission supersedes it.
-    recalled_bundle: Option<Vec<acp::ContentBlock>>,
+    recalled_bundle: Option<crate::model::PendingBundle>,
     /// Cached `Markdown` widget for the pending-message ghost bubble.
     /// Pending bundles render as live markdown (selectable text +
     /// clickable `[image #N]` links) — but `Markdown::new` parses the
@@ -926,15 +926,28 @@ impl SolutionSessionView {
         }
     }
 
-    /// `true` when the compose row should be view-only (no input, no
-    /// send, no Submit). Currently fires for `Background` views — the
-    /// user is looking at a Managed Agent's JSONL transcript that has
-    /// no live agent attached on the parent thread, so any input would
-    /// be sent to the parent agent instead of the background one and
-    /// produce a confusing UX. The fix is to flip the view back to
-    /// `Main` first. Delegates to a pure free fn for unit-testability,
-    /// mirroring `next_selection_after_background_change`.
-    fn compose_disabled(&self) -> bool {
+    /// `true` when the compose row should be view-only (no input, no send,
+    /// no Submit).
+    ///
+    /// A live Agent Teams teammate's `Background` tab is now composable: a
+    /// follow-up typed there is routed to that teammate via its hook
+    /// (`QueueTarget::Subagent`, see `submit_compose_now`). A FINISHED (or
+    /// already-removed) teammate's tab stays view-only — there is no live
+    /// agent to receive input, so it would mis-route to the parent thread;
+    /// the fix there is still to flip back to `Main`. `Shell` tabs are never
+    /// composable. The structural (liveness-agnostic) part delegates to the
+    /// pure `compose_disabled_for` for unit-testability.
+    fn compose_disabled(&self, cx: &App) -> bool {
+        if let crate::store::SubagentView::Background(id) = &self.selected_subagent
+            && self
+                .session
+                .read(cx)
+                .background_agents
+                .get(id)
+                .is_some_and(|agent| agent.is_messageable())
+        {
+            return false;
+        }
         compose_disabled_for(&self.selected_subagent)
     }
 
@@ -1142,24 +1155,35 @@ impl SolutionSessionView {
     /// since the previous render); `cx.new`s a fresh widget when the
     /// bundle's preview text changes (enqueue / merge / recall);
     /// clears the cache when the queue becomes empty.
-    fn ensure_pending_markdown(&mut self, cx: &mut Context<Self>) {
-        let bundles = self
-            .session
+    /// The queued bundles addressed to the currently-selected tab — the only
+    /// ones the ghost bubble and Up-arrow recall should surface. `Main` /
+    /// `Task` / `Shell` tabs see `Main`-targeted bundles; a teammate's
+    /// `Background` tab sees only that teammate's bundles. The full queue can
+    /// hold bundles for several addressees at once, so without this filter the
+    /// Main ghost would show a follow-up meant for a teammate (and vice-versa).
+    pub(super) fn visible_pending_bundles(&self, cx: &App) -> Vec<crate::model::PendingBundle> {
+        let target = self.selected_subagent.queue_target();
+        self.session
             .read(cx)
             .pending_messages
             .iter()
+            .filter(|bundle| bundle.target == target)
             .cloned()
-            .collect::<Vec<_>>();
+            .collect()
+    }
+
+    fn ensure_pending_markdown(&mut self, cx: &mut Context<Self>) {
+        let bundles = self.visible_pending_bundles(cx);
         if bundles.is_empty() {
             self.pending_markdown = None;
             self.pending_markdown_source = SharedString::default();
             return;
         }
-        // At most one bundle per the queue's merge invariant — but
+        // At most one bundle per addressee per the merge invariant — but
         // join with a paragraph break if multiple ever appear.
         let mut combined = String::new();
-        for blocks in &bundles {
-            let raw = crate::conversation_render::pending_blocks_preview(blocks, cx);
+        for bundle in &bundles {
+            let raw = crate::conversation_render::pending_blocks_preview(&bundle.blocks, cx);
             if raw.is_empty() {
                 continue;
             }
@@ -1690,7 +1714,7 @@ impl SolutionSessionView {
     }
 
     fn submit_compose_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.compose_disabled() {
+        if self.compose_disabled(cx) {
             // Background view: parent thread has no live agent for the
             // selected Managed Agent. Silently drop — the UI also hides
             // the Send button, this guard catches keybinding paths.
@@ -1801,11 +1825,16 @@ impl SolutionSessionView {
         self.list_state.set_follow_mode(FollowMode::Tail);
         self.list_state.scroll_to_end();
         let session_id = self.session_id;
+        // Route the follow-up to the tab it was typed on: the parent agent
+        // for `Main`/`Task`/`Shell`, or the specific Agent Teams teammate for
+        // a live `Background` tab (its hook, not the main agent's, drains it).
+        let target = self.selected_subagent.queue_target();
 
         if self.pending_images.is_empty() {
+            let blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(content))];
             SolutionAgentStore::global(cx).update(cx, |store, cx| {
                 store
-                    .send_message(session_id, content, cx)
+                    .send_message_blocks_targeted(session_id, blocks, target, cx)
                     .detach_and_log_err(cx);
             });
             return;
@@ -1824,7 +1853,7 @@ impl SolutionSessionView {
         }
         SolutionAgentStore::global(cx).update(cx, |store, cx| {
             store
-                .send_message_blocks(session_id, blocks, cx)
+                .send_message_blocks_targeted(session_id, blocks, target, cx)
                 .detach_and_log_err(cx);
         });
     }
@@ -2015,7 +2044,7 @@ impl SolutionSessionView {
     /// button stays useful if the agent flips to Idle between render
     /// and click.
     fn submit_compose_and_interrupt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.compose_disabled() {
+        if self.compose_disabled(cx) {
             // Background view: see `submit_compose_now`. Skip both the
             // send AND the interrupt — interrupting the parent thread
             // while the user is viewing a Managed Agent transcript
@@ -3118,7 +3147,7 @@ impl Render for SolutionSessionView {
                 crate::status_row::render_status_row(self, is_resuming, cx)
             })
             .when_some(task_subagent_strip, |this, strip| this.child(strip))
-            .child(if self.compose_disabled() {
+            .child(if self.compose_disabled(cx) {
                 // Background view: the parent thread has no agent
                 // attached to the selected Managed Agent, so any
                 // input would be misrouted to the parent. Render a

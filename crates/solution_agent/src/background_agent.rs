@@ -107,6 +107,19 @@ pub struct BackgroundAgent {
     pub last_offset: u64,
 }
 
+impl BackgroundAgent {
+    /// True while the managed agent is still running — no terminal
+    /// `stop_reason` has been observed in its JSONL yet (or it has only
+    /// just registered, before any snapshot). A follow-up typed on its tab
+    /// can still reach it via its next hook; a finished agent's tab is
+    /// read-only. Drives `session_view::compose_disabled`.
+    pub fn is_messageable(&self) -> bool {
+        self.latest
+            .as_ref()
+            .map_or(true, |snapshot| snapshot.stop_reason.is_none())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BackgroundAgentSnapshot {
     pub mtime: SystemTime,

@@ -37,13 +37,7 @@ impl SolutionSessionView {
         window: &mut gpui::Window,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
-        let bundles = self
-            .session
-            .read(cx)
-            .pending_messages
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
+        let bundles = self.visible_pending_bundles(cx);
         if bundles.is_empty() {
             return None;
         }
@@ -65,8 +59,8 @@ impl SolutionSessionView {
                 // the live-user-message path in
                 // `render_user_message`.
                 let mut images: Vec<Arc<gpui::Image>> = Vec::new();
-                for blocks in &bundles {
-                    for block in blocks {
+                for bundle in &bundles {
+                    for block in &bundle.blocks {
                         if let agent_client_protocol::schema::ContentBlock::Image(img) = block
                             && let Some(decoded) = decode_image_local(img)
                         {

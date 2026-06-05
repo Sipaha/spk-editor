@@ -222,6 +222,20 @@ impl SubagentView {
         matches!(self, Self::Main | Self::Task(_))
     }
 
+    /// The follow-up [`crate::model::QueueTarget`] for a message typed on
+    /// this tab. Only `Background` (an Agent Teams teammate) routes to a
+    /// subagent — `Task` (an inline filtered slice of the parent thread)
+    /// and `Shell` (a background shell) are not messageable, so they fall
+    /// back to `Main` like the parent view does.
+    pub fn queue_target(&self) -> crate::model::QueueTarget {
+        match self {
+            Self::Background(id) => {
+                crate::model::QueueTarget::Subagent(SharedString::from(id.as_str().to_string()))
+            }
+            Self::Main | Self::Task(_) | Self::Shell(_) => crate::model::QueueTarget::Main,
+        }
+    }
+
     /// Predicate for parent-thread entry filtering. `Main` matches
     /// only entries with no `subagent_id`; `Task(id)` matches only
     /// entries stamped with exactly that id; `Background` matches
@@ -1395,7 +1409,7 @@ impl SolutionAgentStore {
                             let previews: Vec<String> = session
                                 .pending_messages
                                 .iter()
-                                .map(|b| queue::summarize_blocks_for_log(b))
+                                .map(|b| queue::summarize_blocks_for_log(&b.blocks))
                                 .collect();
                             log::warn!(
                                 target: "solution_agent::queue",
@@ -1559,21 +1573,31 @@ impl SolutionAgentStore {
         is_end_of_turn: bool,
         cx: &mut Context<Self>,
     ) -> Option<String> {
-        // Agent Teams: a subagent's hook carries an `agent_id`; the main
-        // agent's does not. Step 1 routes everything to the MAIN agent — only
-        // its hooks drain the queue, so a running subagent can't swallow a
-        // follow-up the user typed for the main thread. (Per-tab routing to a
-        // specific subagent lands in step 2, keyed on this `agent_id`.)
-        if agent_id.is_some() {
-            return None;
-        }
+        // Per-tab routing: drain only the bundles addressed to the firing
+        // hook. The main agent's hook carries no `agent_id` and drains
+        // `QueueTarget::Main` bundles; an Agent Teams teammate's hook carries
+        // its `agent_id` and drains only its own `QueueTarget::Subagent(id)`
+        // bundles. Differently-targeted bundles stay queued for their own
+        // addressee's hook (or get dropped at turn end if that addressee is
+        // already gone — see the `Stopped` idle-flush).
         let session = self.session(session_id)?;
-        let drained: Vec<Vec<acp::ContentBlock>> =
-            session.update(cx, |s, _| s.pending_messages.drain(..).collect());
-        if drained.is_empty() {
+        let combined: Vec<acp::ContentBlock> = session.update(cx, |s, _| {
+            let mut taken: Vec<acp::ContentBlock> = Vec::new();
+            let mut kept: std::collections::VecDeque<crate::model::PendingBundle> =
+                std::collections::VecDeque::with_capacity(s.pending_messages.len());
+            for bundle in s.pending_messages.drain(..) {
+                if bundle.target.matches_hook(agent_id) {
+                    taken.extend(bundle.blocks);
+                } else {
+                    kept.push_back(bundle);
+                }
+            }
+            s.pending_messages = kept;
+            taken
+        });
+        if combined.is_empty() {
             return None;
         }
-        let combined: Vec<acp::ContentBlock> = drained.into_iter().flatten().collect();
 
         // Agent-facing text: text-only (additionalContext is text-only; images
         // degrade to `[image #N]`). Prepend the hint only at end-of-turn.
@@ -1587,8 +1611,17 @@ impl SolutionAgentStore {
         };
 
         // Timeline entry = the raw (timestamp-baked) blocks; the baked stamp is
-        // stripped at render time, so the bubble shows clean user text.
-        if let Some(thread) = session.read(cx).acp_thread().cloned() {
+        // stripped at render time, so the bubble shows clean user text. Only
+        // do this for a MAIN delivery (`agent_id` is None): the parent
+        // `AcpThread` IS the Main-view timeline, so a subagent-targeted
+        // message pushed here would wrongly surface in the Main conversation
+        // rather than the teammate's tab (which is sourced from the teammate's
+        // own on-disk JSONL, not the parent thread). The message is still
+        // delivered to the teammate via `additionalContext`; only the
+        // optimistic bubble is skipped for the subagent case.
+        if agent_id.is_none()
+            && let Some(thread) = session.read(cx).acp_thread().cloned()
+        {
             thread.update(cx, |thread, cx| {
                 thread.push_user_message_entry(None, combined, cx);
             });
@@ -2048,7 +2081,7 @@ impl SolutionAgentStore {
             let previews: Vec<String> = session_read
                 .pending_messages
                 .iter()
-                .map(|b| queue::summarize_blocks_for_log(b))
+                .map(|b| queue::summarize_blocks_for_log(&b.blocks))
                 .collect();
             log::warn!(
                 target: "solution_agent::queue",
@@ -2433,7 +2466,7 @@ impl SolutionAgentStore {
                         let previews: Vec<String> = s
                             .pending_messages
                             .iter()
-                            .map(|b| queue::summarize_blocks_for_log(b))
+                            .map(|b| queue::summarize_blocks_for_log(&b.blocks))
                             .collect();
                         log::warn!(
                             target: "solution_agent::queue",
@@ -4126,7 +4159,7 @@ impl SolutionAgentStore {
                                         .pending_messages
                                         .iter()
                                         .map(|bundle| {
-                                            queue::summarize_blocks_for_log(bundle)
+                                            queue::summarize_blocks_for_log(&bundle.blocks)
                                         })
                                         .collect();
                                     log::warn!(
@@ -4146,49 +4179,76 @@ impl SolutionAgentStore {
                             cx.emit(SolutionAgentStoreEvent::SessionQueueChanged(session_id));
                         }
                     } else {
-                        let drained: Vec<_> = self
+                        // Idle / flush-after-cancel. Deliver the MAIN-targeted
+                        // bundles as a new turn. Any Subagent-targeted leftover
+                        // belongs to a teammate that the now-ending parent turn
+                        // has finished — per design it is LOST (a follow-up for
+                        // teammate X is meaningless to the parent), so drop it
+                        // with a WARN rather than mis-route it to the main
+                        // thread. Partition the queue in one update.
+                        let (main_blocks, dropped_subagent) = self
                             .sessions
                             .get(&session_id)
                             .cloned()
                             .map(|s| {
                                 s.update(cx, |s, _| {
-                                    s.pending_messages.drain(..).collect::<Vec<_>>()
+                                    let mut main: Vec<acp::ContentBlock> = Vec::new();
+                                    let mut dropped: Vec<crate::model::PendingBundle> = Vec::new();
+                                    for bundle in s.pending_messages.drain(..) {
+                                        match bundle.target {
+                                            crate::model::QueueTarget::Main => {
+                                                main.extend(bundle.blocks)
+                                            }
+                                            crate::model::QueueTarget::Subagent(_) => {
+                                                dropped.push(bundle)
+                                            }
+                                        }
+                                    }
+                                    (main, dropped)
                                 })
                             })
                             .unwrap_or_default();
-                        let had_pending = !drained.is_empty();
+                        if !dropped_subagent.is_empty() {
+                            let previews: Vec<String> = dropped_subagent
+                                .iter()
+                                .map(|b| {
+                                    let to = match &b.target {
+                                        crate::model::QueueTarget::Subagent(id) => id.as_ref(),
+                                        crate::model::QueueTarget::Main => "main",
+                                    };
+                                    format!("→{to}: {}", queue::summarize_blocks_for_log(&b.blocks))
+                                })
+                                .collect();
+                            log::warn!(
+                                target: "solution_agent::queue",
+                                "session={session_id} dropped {} subagent-targeted bundle(s) on turn end \
+                                 (addressee teammate finished without draining; no fallback to main) — content: [{}]",
+                                dropped_subagent.len(),
+                                previews.join(" | "),
+                            );
+                        }
+                        let had_pending = !main_blocks.is_empty() || !dropped_subagent.is_empty();
                         if had_pending {
                             cx.emit(SolutionAgentStoreEvent::SessionQueueChanged(session_id));
                         }
-                        if !drained.is_empty() {
-                            let bundle_count = drained.len();
-                            // Flatten N queued messages into one Vec.
-                            // Each was its own send-press, but we coalesce
-                            // them so the agent gets a single prompt.
-                            let combined: Vec<_> = drained.into_iter().flatten().collect();
-                            if !combined.is_empty() {
-                                log::info!(
-                                    target: "solution_agent::queue",
-                                    "session={session_id} flushing {bundle_count} queued bundle(s) \
-                                     ({} blocks total, flush_after_cancel={flush_after_cancel}) preview={}",
-                                    combined.len(),
-                                    queue::summarize_blocks_for_log(&combined),
-                                );
-                                // Idle-flush is always end-of-turn: the agent
-                                // already produced a complete message, so
-                                // prepend the "not a reply" hint (stripped on
-                                // render, like the per-message timestamps
-                                // already in `combined`).
-                                let mut with_hint = Vec::with_capacity(combined.len() + 1);
-                                with_hint.push(acp::ContentBlock::Text(
-                                    acp::TextContent::new(format!(
-                                        "{}\n\n",
-                                        queue::QUEUE_HINT_LINE
-                                    )),
-                                ));
-                                with_hint.extend(combined);
-                                self.send_message_blocks(session_id, with_hint, cx).detach();
-                            }
+                        if !main_blocks.is_empty() {
+                            log::info!(
+                                target: "solution_agent::queue",
+                                "session={session_id} flushing {} Main block(s) \
+                                 (flush_after_cancel={flush_after_cancel}) preview={}",
+                                main_blocks.len(),
+                                queue::summarize_blocks_for_log(&main_blocks),
+                            );
+                            // Idle-flush is always end-of-turn: the agent
+                            // already produced a complete message, so prepend
+                            // the "not a reply" hint (stripped on render, like
+                            // the per-message timestamps already in the blocks).
+                            let mut with_hint = Vec::with_capacity(main_blocks.len() + 1);
+                            with_hint.push(acp::ContentBlock::Text(acp::TextContent::new(
+                                format!("{}\n\n", queue::QUEUE_HINT_LINE),
+                            )));
+                            with_hint.extend(main_blocks);
+                            self.send_message_blocks(session_id, with_hint, cx).detach();
                         }
                     }
                 }

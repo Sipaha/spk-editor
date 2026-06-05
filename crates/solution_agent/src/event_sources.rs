@@ -270,10 +270,11 @@ pub(crate) fn build_queue_changed_payload(
                     .pending_messages
                     .iter()
                     .map(|bundle| {
-                        let csids = acp_thread::csids_from_blocks(bundle);
+                        let csids = acp_thread::csids_from_blocks(&bundle.blocks);
                         let preview =
-                            crate::conversation_render::pending_blocks_preview(bundle, cx);
+                            crate::conversation_render::pending_blocks_preview(&bundle.blocks, cx);
                         let image_count: usize = bundle
+                            .blocks
                             .iter()
                             .filter(|b| {
                                 matches!(b, agent_client_protocol::schema::ContentBlock::Image(_))
@@ -523,12 +524,15 @@ mod tests {
             let store = SolutionAgentStore::global(cx);
             let session = store.read(cx).session(session_id).expect("session");
             session.update(cx, |s, _| {
-                s.pending_messages.push_back(vec![
-                    stamped_text("hello world", 111),
-                    image_block(),
-                    stamped_text("more", 222),
-                    image_block(),
-                ]);
+                s.pending_messages.push_back(crate::model::PendingBundle {
+                    target: crate::model::QueueTarget::Main,
+                    blocks: vec![
+                        stamped_text("hello world", 111),
+                        image_block(),
+                        stamped_text("more", 222),
+                        image_block(),
+                    ],
+                });
             });
         });
 

@@ -243,6 +243,52 @@ pub struct SubagentTab {
 /// rather than fabricating one.
 pub(crate) const NO_TIMESTAMP_MS: i64 = -1;
 
+/// Which agent a queued follow-up is addressed to. Stamped at enqueue from
+/// the tab the user typed it on (`session_view::selected_subagent`). The
+/// firing hook's `agent_id` selects which bundles drain: the MAIN agent's
+/// hook (`agent_id == None`) drains [`QueueTarget::Main`] bundles; an Agent
+/// Teams teammate's hook (`agent_id == Some(x)`) drains only
+/// [`QueueTarget::Subagent`]`(x)` bundles.
+///
+/// A `Subagent` bundle whose addressee finishes without draining it is
+/// DROPPED at turn end — never re-routed to the main agent (a follow-up
+/// written for teammate X is meaningless to the parent). Lives only in
+/// memory alongside [`SolutionSession::pending_messages`], so no
+/// serialization compatibility is required.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QueueTarget {
+    Main,
+    /// `claude` `agent_id` of the addressee teammate — equal to its
+    /// [`background_agent::BackgroundAgentId`] (same managed-agent id
+    /// namespace), so the hook's `agent_id` matches it byte-for-byte.
+    Subagent(SharedString),
+}
+
+impl QueueTarget {
+    /// True when a hook firing with the given `agent_id` should drain a
+    /// bundle addressed to this target. `Main` bundles drain on the main
+    /// agent's hook (which carries no `agent_id`); `Subagent(x)` bundles
+    /// drain only on the matching teammate's hook.
+    pub fn matches_hook(&self, agent_id: Option<&str>) -> bool {
+        match (self, agent_id) {
+            (QueueTarget::Main, None) => true,
+            (QueueTarget::Subagent(id), Some(hook_id)) => id.as_ref() == hook_id,
+            _ => false,
+        }
+    }
+}
+
+/// One queued follow-up bundle: the (timestamp-baked) content blocks plus
+/// the agent they're addressed to. Consecutive same-target follow-ups merge
+/// into one bundle's `blocks` (so the agent gets a single prompt); a
+/// differently-targeted follow-up starts a new bundle, letting the queue
+/// hold e.g. one `Main` bundle and one `Subagent` bundle simultaneously.
+#[derive(Clone, Debug)]
+pub struct PendingBundle {
+    pub target: QueueTarget,
+    pub blocks: Vec<acp::ContentBlock>,
+}
+
 /// Live, in-memory representation of one Solution-scoped AI session.
 ///
 /// `acp_thread` is `Option` because a `SolutionSession` may exist briefly
@@ -292,7 +338,7 @@ pub struct SolutionSession {
     /// already running. The store flushes the queue on `Stopped` —
     /// matches the Claude Code CLI experience where you can keep
     /// typing follow-ups while the agent is still working.
-    pub pending_messages: VecDeque<Vec<acp::ContentBlock>>,
+    pub pending_messages: VecDeque<PendingBundle>,
     /// One-shot signal set by `interrupt_and_flush_pending`: tells the
     /// next `Stopped(Cancelled)` handler to FLUSH `pending_messages`
     /// instead of clearing them. Without it, `Cancelled` (the user

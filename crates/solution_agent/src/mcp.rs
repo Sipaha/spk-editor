@@ -1390,9 +1390,10 @@ fn build_pending_bundle_summaries(
         .pending_messages
         .iter()
         .map(|bundle| {
-            let csids = acp_thread::csids_from_blocks(bundle);
-            let preview = crate::conversation_render::pending_blocks_preview(bundle, _cx);
+            let csids = acp_thread::csids_from_blocks(&bundle.blocks);
+            let preview = crate::conversation_render::pending_blocks_preview(&bundle.blocks, _cx);
             let image_count: u32 = bundle
+                .blocks
                 .iter()
                 .filter(|b| matches!(b, acp::ContentBlock::Image(_)))
                 .count() as u32;

@@ -26,7 +26,9 @@ use acp_thread::{AcpThread, AgentThreadEntry, SelectedPermissionOutcome, ToolCal
 use agent_client_protocol::schema as acp;
 
 use super::{SolutionAgentStore, SolutionAgentStoreEvent};
-use crate::model::{SessionState, SolutionSessionId, SolutionSessionMetadata};
+use crate::model::{
+    PendingBundle, QueueTarget, SessionState, SolutionSessionId, SolutionSessionMetadata,
+};
 
 /// How long `Stopping` may persist before the safety net kicks in and
 /// force-flips the session back to `Idle`. Chosen larger than the
@@ -366,10 +368,36 @@ impl SolutionAgentStore {
     /// immediately, then forwards the prompt to the underlying ACP connection.
     /// On success, schedules a persistence write of the session snapshot. On
     /// failure, transitions the session to `Errored`.
+    ///
+    /// Targets the MAIN agent — the common case (compose row on the parent
+    /// tab, MCP sends, idle-flush re-sends, cold-wake). A follow-up typed on
+    /// an Agent Teams teammate's tab goes through
+    /// [`send_message_blocks_targeted`] instead.
     pub fn send_message_blocks(
         &mut self,
         session_id: SolutionSessionId,
         blocks: Vec<agent_client_protocol::schema::ContentBlock>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        self.send_message_blocks_targeted(session_id, blocks, QueueTarget::Main, cx)
+    }
+
+    /// Like [`send_message_blocks`], but stamps the queued follow-up with an
+    /// explicit [`QueueTarget`] derived from the active tab. Only the
+    /// already-running enqueue branch consults `target`: it routes the
+    /// follow-up to the bundle for that addressee (the main agent, or a
+    /// specific teammate), so the teammate's own hook — not the main agent's
+    /// — drains it.
+    ///
+    /// When the session is idle/cold there is no live subagent to receive a
+    /// `Subagent`-targeted message, so it is dropped with a warning rather
+    /// than mis-delivered to the main thread (a follow-up written for
+    /// teammate X is meaningless to the parent — no fallback to Main).
+    pub fn send_message_blocks_targeted(
+        &mut self,
+        session_id: SolutionSessionId,
+        blocks: Vec<agent_client_protocol::schema::ContentBlock>,
+        target: QueueTarget,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
         let Some(session_entity) = self.session(session_id) else {
@@ -441,17 +469,32 @@ impl SolutionAgentStore {
                 .chain(blocks)
                 .collect();
             let merged = session_entity.update(cx, |s, _| {
-                let merged = s.pending_messages.back().is_some();
-                if let Some(last) = s.pending_messages.back_mut() {
-                    last.push(agent_client_protocol::schema::ContentBlock::Text(
+                // Merge into the trailing bundle only when it's addressed to
+                // the SAME target — consecutive same-tab follow-ups coalesce
+                // into one prompt, but a differently-targeted follow-up (e.g.
+                // a teammate message after a main-agent one) starts its own
+                // bundle so each addressee's hook drains only its own.
+                let merge = s
+                    .pending_messages
+                    .back()
+                    .is_some_and(|last| last.target == target);
+                if merge {
+                    let last = s
+                        .pending_messages
+                        .back_mut()
+                        .expect("back() was Some immediately above");
+                    last.blocks.push(agent_client_protocol::schema::ContentBlock::Text(
                         agent_client_protocol::schema::TextContent::new("\n\n".to_string()),
                     ));
-                    last.extend(stamped);
+                    last.blocks.extend(stamped);
                 } else {
-                    s.pending_messages.push_back(stamped);
+                    s.pending_messages.push_back(PendingBundle {
+                        target: target.clone(),
+                        blocks: stamped,
+                    });
                 }
                 s.last_activity_at = Utc::now();
-                merged
+                merge
             });
             let queue_len = session_entity.read(cx).pending_messages.len();
             log::info!(
@@ -466,6 +509,23 @@ impl SolutionAgentStore {
             // eventual flush.
             cx.emit(SolutionAgentStoreEvent::SessionQueueChanged(session_id));
             cx.notify();
+            return Task::ready(Ok(()));
+        }
+
+        // Not already running, so this would start a fresh turn on the MAIN
+        // thread. A `Subagent`-targeted follow-up has no live teammate to
+        // receive it here (teammates exist only inside a running parent turn),
+        // and routing it to the parent would be wrong (decision: no fallback
+        // to Main). Drop it with a warning rather than mis-deliver. The
+        // compose row is gated on teammate liveness, so this is a defensive
+        // backstop for a race (the teammate finished between render and send).
+        if let QueueTarget::Subagent(agent_id) = &target {
+            log::warn!(
+                target: "solution_agent::queue",
+                "session={session_id} dropping subagent-targeted follow-up for agent_id={agent_id} \
+                 — session is not running, no live teammate to receive it; content={}",
+                summarize_blocks_for_log(&blocks),
+            );
             return Task::ready(Ok(()));
         }
 

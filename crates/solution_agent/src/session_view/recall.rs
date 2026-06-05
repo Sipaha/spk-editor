@@ -84,23 +84,29 @@ impl SolutionSessionView {
             return;
         }
         let session_id = self.session_id;
-        // `pending_messages` carries at most one bundle: the second `send`
-        // while the agent is Running merges into the existing back entry
-        // via `back_mut().push(...)` (see
-        // `SolutionAgentStore::send_message_blocks`), so `back()` and
-        // `front()` reference the same element when one exists.
+        // Recall the most-recent bundle addressed to the CURRENT tab. The
+        // queue can hold bundles for several addressees at once (main agent +
+        // a teammate), and the ghost the user is looking at is the per-tab
+        // filtered one, so recall must pull the matching bundle — not blindly
+        // the back of the queue (which might belong to another tab).
         //
-        // Peek before pop: `unpack_recalled_bundle` can produce empty
-        // `(text, images)` if the bundle is somehow marker-only
-        // (defensive — shouldn't happen since `submit_compose_now`
-        // rejects empty submissions). Keeping the queue intact instead
-        // of silently draining it is the safer default if that
-        // invariant ever breaks.
-        let peeked = self.session.read(cx).pending_messages.back().cloned();
-        let Some(bundle) = peeked else {
+        // Peek before remove: `unpack_recalled_bundle` can produce empty
+        // `(text, images)` if the bundle is somehow marker-only (defensive —
+        // shouldn't happen since `submit_compose_now` rejects empty
+        // submissions). Keeping the queue intact instead of silently draining
+        // it is the safer default if that invariant ever breaks.
+        let target = self.selected_subagent.queue_target();
+        let idx = self
+            .session
+            .read(cx)
+            .pending_messages
+            .iter()
+            .rposition(|bundle| bundle.target == target);
+        let Some(idx) = idx else {
             return;
         };
-        let (text, images) = unpack_recalled_bundle(bundle.clone());
+        let bundle = self.session.read(cx).pending_messages[idx].clone();
+        let (text, images) = unpack_recalled_bundle(bundle.blocks.clone());
         if text.is_empty() && images.is_empty() {
             return;
         }
@@ -108,7 +114,7 @@ impl SolutionSessionView {
         // editor can put it back into the queue (cancel-edit).
         self.recalled_bundle = Some(bundle);
         self.session.update(cx, |session, _| {
-            session.pending_messages.pop_back();
+            session.pending_messages.remove(idx);
         });
         if !text.is_empty() {
             self.compose_editor.update(cx, |editor, cx| {
