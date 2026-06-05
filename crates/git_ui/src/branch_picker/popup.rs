@@ -131,6 +131,10 @@ enum PopupRow {
         key: &'static str,
         label: SharedString,
         collapsed: bool,
+        /// Number of items in the section (counted from source, so branches
+        /// hidden inside collapsed groups still count) — shown as a badge so
+        /// `0` makes an empty section obvious without expanding it.
+        count: usize,
     },
 }
 
@@ -214,7 +218,11 @@ impl BranchesPopup {
             workspace,
             repository: repository.clone(),
             work_dir,
-            collapsed_sections: std::collections::HashSet::new(),
+            // Every section starts collapsed — the popup opens as a compact
+            // list of section headers (each with a count badge); the user
+            // expands what they need. A search query force-expands (see
+            // `rebuild_rows`).
+            collapsed_sections: SECTION_ORDER.iter().map(|(key, _)| *key).collect(),
             query,
             rows: Vec::new(),
             selected_index: 0,
@@ -328,12 +336,64 @@ impl BranchesPopup {
 
         self.rows.clear();
 
+        let q = lower_query.as_str();
         for (key, label) in SECTION_ORDER {
-            let collapsed = self.collapsed_sections.contains(key);
+            // Item count for the badge — counted directly from source so the
+            // total is right even when branches sit inside collapsed groups.
+            // These filters MUST mirror the matching `*_rows` builders below.
+            let count = match key {
+                "recent" => self
+                    .branches
+                    .iter()
+                    .filter(|b| {
+                        !b.is_remote
+                            && recent_order.contains_key(b.name.as_ref())
+                            && (q.is_empty() || b.name.to_lowercase().contains(q))
+                    })
+                    .count(),
+                "favorites" => self
+                    .branches
+                    .iter()
+                    .filter(|b| {
+                        favorites.contains(b.name.as_ref())
+                            && (q.is_empty() || b.name.to_lowercase().contains(q))
+                    })
+                    .count(),
+                "local" => self
+                    .branches
+                    .iter()
+                    .filter(|b| !b.is_remote && (q.is_empty() || b.name.to_lowercase().contains(q)))
+                    .count(),
+                "remote" => self
+                    .branches
+                    .iter()
+                    .filter(|b| b.is_remote && (q.is_empty() || b.name.to_lowercase().contains(q)))
+                    .count(),
+                "tags" => self
+                    .tags
+                    .iter()
+                    .filter(|t| q.is_empty() || t.to_lowercase().contains(q))
+                    .count(),
+                "backups" => self
+                    .backups
+                    .iter()
+                    .filter(|b| {
+                        q.is_empty()
+                            || b.branch.to_lowercase().contains(q)
+                            || b.op.to_lowercase().contains(q)
+                    })
+                    .count(),
+                _ => 0,
+            };
+
+            // Collapsed by default; an active search query force-expands so
+            // matches stay visible without manual toggling.
+            let collapsed = q.is_empty() && self.collapsed_sections.contains(key);
             self.rows.push(PopupRow::Section {
                 key,
                 label: SharedString::from(label),
                 collapsed,
+                count,
             });
             if !collapsed {
                 let body = match key {
@@ -827,9 +887,15 @@ impl BranchesPopup {
     fn render_row(&self, ix: usize, row: &PopupRow, cx: &mut Context<Self>) -> AnyElement {
         let selected = ix == self.selected_index;
         match row {
-            PopupRow::Empty { message } => Label::new(message.clone())
-                .color(Color::Muted)
-                .size(LabelSize::Small)
+            PopupRow::Empty { message } => h_flex()
+                .pl(rems(1.75))
+                .py_0p5()
+                .child(
+                    Label::new(message.clone())
+                        .color(Color::Muted)
+                        .size(LabelSize::Small)
+                        .italic(),
+                )
                 .into_any_element(),
             PopupRow::Group {
                 path,
@@ -846,11 +912,20 @@ impl BranchesPopup {
                     .inset(true)
                     .spacing(ListItemSpacing::Sparse)
                     .toggle_state(selected)
-                    .start_slot(Icon::new(chevron).size(IconSize::Small))
+                    .start_slot(Icon::new(chevron).size(IconSize::Small).color(Color::Muted))
                     .child(
                         h_flex()
-                            .pl(rems(*depth as f32 * 1.0))
-                            .child(Label::new(path.clone()).color(Color::Muted)),
+                            // Indent one level deeper than the raw tree depth so a
+                            // group nests visibly under its section header.
+                            .pl(rems((*depth as f32 + 1.0) * 1.0))
+                            // Show only this group's own segment ("feature"), not
+                            // the full prefix path ("origin/feature").
+                            .child(
+                                Label::new(SharedString::from(
+                                    path.rsplit('/').next().unwrap_or(path.as_ref()),
+                                ))
+                                .color(Color::Muted),
+                            ),
                     )
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         if this.expanded_groups.contains(path.as_ref()) {
@@ -866,6 +941,7 @@ impl BranchesPopup {
                 key,
                 label,
                 collapsed,
+                count,
             } => {
                 let key = *key;
                 let chevron = if *collapsed {
@@ -877,8 +953,21 @@ impl BranchesPopup {
                     .inset(true)
                     .spacing(ListItemSpacing::Sparse)
                     .toggle_state(selected)
-                    .start_slot(Icon::new(chevron).size(IconSize::Small))
-                    .child(Label::new(label.clone()).color(Color::Muted))
+                    .start_slot(Icon::new(chevron).size(IconSize::Small).color(Color::Muted))
+                    // Section headers read as structure (clearer than the muted
+                    // body rows); the count badge sits on the right.
+                    .child(Label::new(label.clone()).color(Color::Default))
+                    .end_slot(
+                        h_flex()
+                            .px_1()
+                            .rounded_sm()
+                            .bg(cx.theme().colors().element_background)
+                            .child(
+                                Label::new(count.to_string())
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            ),
+                    )
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.toggle_section(key, cx);
                     }))
@@ -1053,7 +1142,9 @@ impl BranchesPopup {
             .child(
                 h_flex()
                     .w_full()
-                    .pl(rems(depth as f32 * 1.0))
+                    // Indent one level deeper than the raw tree depth so a branch
+                    // nests under its section/group header (matches the group rows).
+                    .pl(rems((depth as f32 + 1.0) * 1.0))
                     .gap_2()
                     .child(
                         v_flex()
@@ -1457,39 +1548,7 @@ mod tests {
             assert_eq!(headers.len(), 6);
         });
 
-        // Toggle "recent" section — it should become collapsed.
-        window_handle
-            .update(cx, |_mw, _window, cx| {
-                popup.update(cx, |popup, cx| {
-                    popup.toggle_section("recent", cx);
-                });
-            })
-            .unwrap();
-        cx.run_until_parked();
-
-        popup.update(cx, |popup, _cx| {
-            let collapsed = popup
-                .rows
-                .iter()
-                .find_map(|r| {
-                    if let PopupRow::Section {
-                        key: "recent",
-                        collapsed,
-                        ..
-                    } = r
-                    {
-                        Some(*collapsed)
-                    } else {
-                        None
-                    }
-                })
-                .expect("recent section header must exist");
-            assert!(collapsed, "recent section should be collapsed after toggle");
-            // All 6 section headers still present regardless of collapsed state.
-            assert_eq!(section_headers(&popup.rows).len(), 6);
-        });
-
-        // Toggle "recent" section again — it should expand back to false.
+        // Sections start collapsed by default, so toggling "recent" expands it.
         window_handle
             .update(cx, |_mw, _window, cx| {
                 popup.update(cx, |popup, cx| {
@@ -1518,7 +1577,42 @@ mod tests {
                 .expect("recent section header must exist");
             assert!(
                 !collapsed,
-                "recent section should be expanded after second toggle"
+                "recent section should expand on first toggle (collapsed by default)"
+            );
+            // All 6 section headers still present regardless of collapsed state.
+            assert_eq!(section_headers(&popup.rows).len(), 6);
+        });
+
+        // Toggle "recent" again — it should collapse back.
+        window_handle
+            .update(cx, |_mw, _window, cx| {
+                popup.update(cx, |popup, cx| {
+                    popup.toggle_section("recent", cx);
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        popup.update(cx, |popup, _cx| {
+            let collapsed = popup
+                .rows
+                .iter()
+                .find_map(|r| {
+                    if let PopupRow::Section {
+                        key: "recent",
+                        collapsed,
+                        ..
+                    } = r
+                    {
+                        Some(*collapsed)
+                    } else {
+                        None
+                    }
+                })
+                .expect("recent section header must exist");
+            assert!(
+                collapsed,
+                "recent section should collapse again after second toggle"
             );
         });
     }
@@ -1554,6 +1648,7 @@ mod tests {
                             key: "recent",
                             label: "Recent".into(),
                             collapsed: false,
+                            count: 0,
                         },
                         PopupRow::Empty {
                             message: "none".into(),
@@ -1563,6 +1658,7 @@ mod tests {
                             key: "tags",
                             label: "Tags".into(),
                             collapsed: false,
+                            count: 1,
                         },
                         PopupRow::Tag { name: "v2".into() },
                     ];
