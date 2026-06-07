@@ -2987,10 +2987,11 @@ impl<'de> Deserialize<'de> for StartCompactParams {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct StartCompactResult {
-    /// `true` when the compact prompt was enqueued on the agent.
+    /// `true` when the compact prompt was enqueued on the agent. A cold
+    /// (sleeping) session is woken first, then the prompt is queued.
     /// `false` when a precondition wasn't met (e.g. session busy,
-    /// context below 20%, less than 30k tokens of headroom, or session
-    /// is cold) — `message` carries the reason.
+    /// context below 20%, or less than 30k tokens of headroom) — `message`
+    /// carries the reason.
     pub queued: bool,
     /// Human-readable explanation when `queued == false`. `None` on
     /// success.

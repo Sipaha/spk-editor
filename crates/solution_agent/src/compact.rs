@@ -48,20 +48,14 @@ pub(crate) fn start_compact_for_session(
     // race with the in-flight turn (claude-acp queues prompts in
     // `pending_messages`, which would deliver the compact instructions
     // AFTER the active turn — possibly minutes later — and surprise
-    // the user). Cold sessions can't be compacted via MCP either
-    // (no Window to drive the wake-flush hook).
+    // the user). Cold (sleeping) sessions ARE compactable here: they read
+    // as `Idle`, and the `store.send_message` below wakes them windowless
+    // via `send_message_blocks_with_wake` (the desktop UI's
+    // `start_compact_from_cold` does the same with a `&mut Window`; the MCP
+    // path doesn't need one). This is what lets a paired phone compact a
+    // sleeping session in one tap.
     {
         let s = session_entity.read(cx);
-        if s.is_cold() {
-            return Ok(StartCompactOutcome {
-                queued: false,
-                reason: Some(
-                    "session is cold; open it in the editor first so the agent can receive the \
-                     compact prompt"
-                        .into(),
-                ),
-            });
-        }
         if !matches!(s.state, SessionState::Idle) {
             return Ok(StartCompactOutcome {
                 queued: false,
@@ -459,5 +453,60 @@ mod tests {
                 assert!(view.is_resuming(), "resuming flag set after enqueue");
             });
         });
+    }
+
+    /// The MCP `start_compact` path (a paired phone tapping "Compact" on a
+    /// sleeping session) must wake the session and queue the compact prompt
+    /// rather than declining. `store.send_message` already wakes cold
+    /// sessions windowless via `send_message_blocks_with_wake`, so the
+    /// orchestrator no longer needs a `&mut Window` for the cold case.
+    #[gpui::test]
+    async fn cold_session_above_gate_queues_compact_via_mcp(cx: &mut TestAppContext) {
+        let (solution_id, _tmp, project) =
+            crate::store::tests::setup_solution_and_project(cx).await;
+        let agent_id = gpui::SharedString::from("mock-agent");
+
+        cx.update(|cx| {
+            let registry = Arc::new(AdapterRegistry::new());
+            SolutionAgentStore::init_global(cx, registry);
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, _| {
+                store.register_agent_server(
+                    agent_id.clone(),
+                    Rc::new(crate::test_support::MockAgentServer::new(Arc::new(
+                        AtomicUsize::new(0),
+                    ))),
+                );
+            });
+        });
+
+        let session_id = SolutionSessionId::new();
+
+        cx.update(|cx| {
+            let store = SolutionAgentStore::global(cx);
+            store.update(cx, |store, cx| {
+                crate::store::tests::insert_cold_session(
+                    session_id,
+                    solution_id.clone(),
+                    agent_id.clone(),
+                    // 50% of the 1.0M default window → comfortably above the
+                    // 20% COMPACT_BUTTON_MIN_PCT gate, with ample headroom.
+                    Some(500_000),
+                    Some(project.clone()),
+                    store,
+                    cx,
+                );
+            });
+        });
+
+        let outcome = cx
+            .update(|cx| start_compact_for_session(session_id, cx))
+            .expect("start_compact_for_session dispatches");
+
+        assert!(
+            outcome.queued,
+            "cold session above the usage gate must queue a compact; got reason={:?}",
+            outcome.reason
+        );
     }
 }
