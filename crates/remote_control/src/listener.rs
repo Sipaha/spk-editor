@@ -750,8 +750,8 @@ async fn handle_conn(
         }
     };
 
-    let response_bytes = match parse_handshake_response(response_text.as_ref()) {
-        Ok(bytes) => bytes,
+    let parsed = match parse_handshake_response(response_text.as_ref()) {
+        Ok(parsed) => parsed,
         Err(err) => {
             // Malformed handshake response counts as an auth failure —
             // ban the subnet (escalating backoff) so a scanner that's
@@ -778,7 +778,7 @@ async fn handle_conn(
 
     // 3. Snapshot the client list at handshake time.
     let clients = clients_rx.borrow().clone();
-    let identified = auth::identify_client(&challenge, &response_bytes, &clients);
+    let identified = auth::identify_client(&challenge, &parsed.response, &clients);
     let Some(client) = identified else {
         log::info!(
             target: "remote_control",
@@ -868,8 +868,17 @@ async fn handle_conn(
         last_activity: last_activity.clone(),
     };
 
-    // 5. Welcome.
-    let welcome = serde_json::json!({ "type": "welcome", "client": client_name });
+    // 5. Welcome. Echo the negotiated compression so the client knows whether
+    //    to expect (and produce) compressed binary frames.
+    let welcome = match parsed.compress_dict {
+        Some(dict) => serde_json::json!({
+            "type": "welcome",
+            "client": client_name,
+            "compress": crate::wire_codec::CODEC_DEFLATE,
+            "dict": dict,
+        }),
+        None => serde_json::json!({ "type": "welcome", "client": client_name }),
+    };
     ws.send(Message::Text(welcome.to_string().into()))
         .await
         .context("sending welcome")?;
@@ -881,17 +890,37 @@ async fn handle_conn(
         dispatcher.as_ref(),
         last_activity,
         kill_rx,
+        parsed.compress_dict,
     )
     .await?;
     Ok(())
 }
 
-fn parse_handshake_response(text: &str) -> Result<[u8; 32]> {
+/// Highest preset-dictionary id the server implements. Negotiation picks
+/// `min(client_dict, SERVER_MAX_DICT)` so a newer client downgrades cleanly.
+const SERVER_MAX_DICT: u8 = crate::wire_dict::WIRE_DICT_PROTO_V1;
+
+/// Parsed handshake response: the 32-byte HMAC plus the negotiated outbound
+/// compression dictionary id (`Some(dict)` when the client advertised a codec
+/// we support, `None` otherwise — older clients omit the field entirely).
+struct ParsedHandshake {
+    response: [u8; 32],
+    compress_dict: Option<u8>,
+}
+
+fn parse_handshake_response(text: &str) -> Result<ParsedHandshake> {
     #[derive(serde::Deserialize)]
-    struct ResponseFrame<'a> {
+    struct ResponseFrame {
         #[serde(rename = "type")]
-        kind: &'a str,
-        response: &'a str,
+        kind: String,
+        response: String,
+        /// Wire-compression codecs the client understands. Absent on older
+        /// clients → compression stays off.
+        #[serde(default)]
+        compress: Vec<String>,
+        /// Highest preset-dictionary id the client implements.
+        #[serde(default)]
+        dict: u8,
     }
     let frame: ResponseFrame =
         serde_json::from_str(text).context("decoding response frame as JSON")?;
@@ -906,9 +935,21 @@ fn parse_handshake_response(text: &str) -> Result<[u8; 32]> {
             raw.len()
         ));
     }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&raw);
-    Ok(out)
+    let mut response = [0u8; 32];
+    response.copy_from_slice(&raw);
+
+    // Negotiate compression: only if the client offered our codec. The chosen
+    // dictionary is the lower of what each side supports.
+    let compress_dict = frame
+        .compress
+        .iter()
+        .any(|c| c == crate::wire_codec::CODEC_DEFLATE)
+        .then(|| frame.dict.min(SERVER_MAX_DICT));
+
+    Ok(ParsedHandshake {
+        response,
+        compress_dict,
+    })
 }
 
 async fn run_request_loop<S>(
@@ -917,6 +958,7 @@ async fn run_request_loop<S>(
     dispatcher: &dyn RemoteDispatcher,
     last_activity: Arc<AtomicI64>,
     mut kill_rx: oneshot::Receiver<()>,
+    compress_dict: Option<u8>,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -971,46 +1013,52 @@ where
                 // eviction purposes — a client mid-conversation
                 // shouldn't lose its slot to a fresh connection.
                 last_activity.store(now_millis(), Ordering::Relaxed);
-                match frame {
-                    Message::Text(text) => {
-                        let response = match parse_request(text.as_ref()) {
-                            Ok(req) => {
-                                // Lazily open the proxy. On first call we
-                                // also grab the notifications receiver.
-                                if conn.is_none() {
-                                    match dispatcher.open_connection().await {
-                                        Ok(mut c) => {
-                                            notifications_rx = c.take_notifications();
-                                            conn = Some(c);
-                                        }
-                                        Err(err) => {
-                                            let response = JsonRpcResponse::error(
-                                                req.id.clone(),
-                                                -32603,
-                                                format!("opening local MCP proxy: {err}"),
-                                            );
-                                            write_response(ws, &response).await?;
-                                            continue;
-                                        }
-                                    }
-                                }
-                                // Safe: `conn` is Some here.
-                                let dispatcher_ref = conn
-                                    .as_mut()
-                                    .ok_or_else(|| anyhow!("connection dispatcher disappeared"))?;
-                                dispatcher_ref.dispatch(client_name, req).await
-                            }
-                            Err(parse_err_response) => *parse_err_response,
-                        };
-                        write_response(ws, &response).await?;
-                    }
+                // A JSON-RPC request arrives either as a TEXT frame or, when
+                // compression was negotiated, as a compressed BINARY frame.
+                // Extract its text here; non-request frames (ping/upload/close)
+                // are handled inline and leave `request_text` as None.
+                let request_text: Option<String> = match frame {
+                    Message::Text(text) => Some(text.to_string()),
                     Message::Ping(payload) => {
                         ws.send(Message::Pong(payload))
                             .await
                             .context("sending pong")?;
+                        None
                     }
-                    Message::Pong(_) => {}
+                    Message::Pong(_) => None,
+                    Message::Close(frame) => {
+                        log::debug!(
+                            target: "remote_control",
+                            "client {client_name:?} sent close frame: {frame:?}",
+                        );
+                        let _ = ws.send(Message::Close(None)).await;
+                        return Ok(());
+                    }
+                    Message::Frame(_) => None,
                     Message::Binary(bytes) => {
+                        // Compressed JSON-RPC request (negotiated)? Decode and
+                        // route it through the same dispatch path as text.
+                        if crate::wire_codec::is_compressed(&bytes) {
+                            match crate::wire_codec::decompress(&bytes) {
+                                Ok(raw) => match String::from_utf8(raw) {
+                                    Ok(text) => Some(text),
+                                    Err(err) => {
+                                        log::warn!(
+                                            target: "remote_control",
+                                            "client {client_name:?} sent a compressed frame that wasn't UTF-8: {err}; dropping",
+                                        );
+                                        None
+                                    }
+                                },
+                                Err(err) => {
+                                    log::warn!(
+                                        target: "remote_control",
+                                        "client {client_name:?} sent an undecodable compressed frame: {err}; dropping",
+                                    );
+                                    None
+                                }
+                            }
+                        } else {
                         // Chunked-upload frame: 16-byte header
                         // (u64 upload_id BE | u64 offset BE) + raw payload.
                         // See `docs/plans/2026-05-19-chunked-upload-binary-frames.md`.
@@ -1072,16 +1120,45 @@ where
                                 );
                             }
                         }
+                            None
+                        }
                     }
-                    Message::Close(frame) => {
-                        log::debug!(
-                            target: "remote_control",
-                            "client {client_name:?} sent close frame: {frame:?}",
-                        );
-                        let _ = ws.send(Message::Close(None)).await;
-                        return Ok(());
-                    }
-                    Message::Frame(_) => {}
+                };
+
+                // A JSON-RPC request extracted from a text or compressed-binary
+                // frame — dispatch it and reply (compressing the reply when
+                // negotiated).
+                if let Some(text) = request_text {
+                    let response = match parse_request(&text) {
+                        Ok(req) => {
+                            // Lazily open the proxy. On first call we
+                            // also grab the notifications receiver.
+                            if conn.is_none() {
+                                match dispatcher.open_connection().await {
+                                    Ok(mut c) => {
+                                        notifications_rx = c.take_notifications();
+                                        conn = Some(c);
+                                    }
+                                    Err(err) => {
+                                        let response = JsonRpcResponse::error(
+                                            req.id.clone(),
+                                            -32603,
+                                            format!("opening local MCP proxy: {err}"),
+                                        );
+                                        write_response(ws, &response, compress_dict).await?;
+                                        continue;
+                                    }
+                                }
+                            }
+                            // Safe: `conn` is Some here.
+                            let dispatcher_ref = conn
+                                .as_mut()
+                                .ok_or_else(|| anyhow!("connection dispatcher disappeared"))?;
+                            dispatcher_ref.dispatch(client_name, req).await
+                        }
+                        Err(parse_err_response) => *parse_err_response,
+                    };
+                    write_response(ws, &response, compress_dict).await?;
                 }
             }
             SelectOutcome::Notification(None) => {
@@ -1129,7 +1206,7 @@ where
                         continue;
                     }
                 };
-                if let Err(err) = ws.send(Message::Text(serialized.into())).await {
+                if let Err(err) = send_text_frame(ws, serialized, compress_dict).await {
                     return Err(anyhow!(
                         "sending notification to client {client_name:?}: {err}"
                     ));
@@ -1177,15 +1254,45 @@ enum SelectOutcome {
 async fn write_response<S>(
     ws: &mut tokio_tungstenite::WebSocketStream<S>,
     response: &JsonRpcResponse,
+    compress_dict: Option<u8>,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let payload =
         serde_json::to_string(response).map_err(|err| anyhow!("serialising response: {err}"))?;
-    ws.send(Message::Text(payload.into()))
+    send_text_frame(ws, payload, compress_dict)
         .await
-        .context("sending response")?;
+        .context("sending response")
+}
+
+/// Send one JSON text frame, compressing it to a binary frame when the client
+/// negotiated compression (`compress_dict`) and the payload is large enough to
+/// benefit. A frame is never inflated, and a client that didn't negotiate
+/// compression only ever receives text.
+async fn send_text_frame<S>(
+    ws: &mut tokio_tungstenite::WebSocketStream<S>,
+    text: String,
+    compress_dict: Option<u8>,
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    if let Some(dict) = compress_dict {
+        if let Some(frame) = crate::wire_codec::compress_if_worthwhile(
+            text.as_bytes(),
+            dict,
+            crate::wire_codec::DEFAULT_COMPRESS_THRESHOLD_BYTES,
+        ) {
+            ws.send(Message::Binary(frame.into()))
+                .await
+                .context("sending compressed frame")?;
+            return Ok(());
+        }
+    }
+    ws.send(Message::Text(text.into()))
+        .await
+        .context("sending text frame")?;
     Ok(())
 }
 
@@ -1193,6 +1300,44 @@ where
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    const HMAC_HEX: &str =
+        "abababababababababababababababababababababababababababababababab";
+
+    #[test]
+    fn handshake_negotiates_compression_when_client_advertises_deflate() {
+        let frame = format!(
+            r#"{{"type":"response","response":"{HMAC_HEX}","compress":["deflate"],"dict":1}}"#
+        );
+        let parsed = parse_handshake_response(&frame).expect("parses");
+        assert_eq!(parsed.compress_dict, Some(1));
+    }
+
+    #[test]
+    fn handshake_leaves_compression_off_for_legacy_client() {
+        // No `compress`/`dict` fields — an older client.
+        let frame = format!(r#"{{"type":"response","response":"{HMAC_HEX}"}}"#);
+        let parsed = parse_handshake_response(&frame).expect("parses");
+        assert_eq!(parsed.compress_dict, None);
+    }
+
+    #[test]
+    fn handshake_downgrades_dict_to_server_max() {
+        let frame = format!(
+            r#"{{"type":"response","response":"{HMAC_HEX}","compress":["deflate"],"dict":9}}"#
+        );
+        let parsed = parse_handshake_response(&frame).expect("parses");
+        assert_eq!(parsed.compress_dict, Some(SERVER_MAX_DICT));
+    }
+
+    #[test]
+    fn handshake_ignores_unknown_codec() {
+        let frame = format!(
+            r#"{{"type":"response","response":"{HMAC_HEX}","compress":["zstd"],"dict":1}}"#
+        );
+        let parsed = parse_handshake_response(&frame).expect("parses");
+        assert_eq!(parsed.compress_dict, None);
+    }
 
     /// Returns the remaining ban duration (in whole seconds) for `ip`'s
     /// subnet, or `None` if the record carries no active ban. Reads the

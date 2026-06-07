@@ -14,6 +14,8 @@ pub(crate) const WIRE_DICT_PROTO_V1: u8 = 1;
 pub(crate) const WIRE_DICT_NONE: u8 = 0;
 
 /// Adler-32 of [`WIRE_DICT_PROTO_V1_BYTES`]. Pinned identically in Kotlin.
+/// Consumed only by the cross-language parity test.
+#[allow(dead_code)]
 pub(crate) const WIRE_DICT_PROTO_V1_ADLER32: u32 = 639723996;
 
 pub(crate) const WIRE_DICT_PROTO_V1_BYTES: &[u8] = concat!(

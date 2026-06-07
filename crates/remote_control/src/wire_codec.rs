@@ -22,6 +22,9 @@ use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, 
 
 use crate::wire_dict::{WIRE_DICT_NONE, dictionary_for};
 
+/// Handshake codec token negotiated in the `compress`/`welcome` frames.
+pub(crate) const CODEC_DEFLATE: &str = "deflate";
+
 const MAGIC: [u8; 4] = [0x73, 0x70, 0x6B, 0x7A];
 const FORMAT_DEFLATE: u8 = 1;
 pub(crate) const HEADER_BYTES: usize = 10;
