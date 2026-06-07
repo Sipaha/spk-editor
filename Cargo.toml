@@ -606,6 +606,9 @@ env_logger = "0.11"
 encoding_rs = "0.8"
 exec = "0.3.1"
 fancy-regex = "0.17.0"
+# `zlib-rs` backend (pure Rust, no C build): needed for deflate/inflate preset
+# dictionary support, which the default `miniz_oxide` backend doesn't expose.
+flate2 = { version = "1.1", features = ["zlib-rs"] }
 fork = "0.4.0"
 fs2 = "0.4"
 futures = "0.3.32"

@@ -16,6 +16,8 @@ mod model;
 pub mod proxy;
 mod settings;
 mod store;
+mod wire_codec;
+mod wire_dict;
 
 pub use model::{AuthorizedClient, RemoteControlSettings};
 pub use store::{RemoteControlStore, RemoteControlStoreEvent};
