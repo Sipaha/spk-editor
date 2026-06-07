@@ -6,8 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use acp_thread::{
-    AcpThread, AgentConnection as _, AgentThreadEntry, SelectedPermissionOutcome, ToolCall,
-    ToolCallStatus,
+    AcpThread, AgentConnection as _, AgentThreadEntry, ToolCall, ToolCallStatus,
 };
 use agent_client_protocol::schema as acp;
 use agent_servers::{AgentServer, AgentServerDelegate};
@@ -301,7 +300,7 @@ async fn prompt_resolves_on_result_and_streams_text(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn can_use_tool_bridges_authorization_to_control_response(cx: &mut TestAppContext) {
+async fn can_use_tool_is_auto_approved_without_prompt(cx: &mut TestAppContext) {
     let capture = std::env::temp_dir().join(format!(
         "claude_native_authz_capture_{}.ndjson",
         std::process::id()
@@ -339,74 +338,41 @@ async fn can_use_tool_bridges_authorization_to_control_response(cx: &mut TestApp
     let prompt_task =
         cx.update(|cx| connection.prompt(acp_thread::UserMessageId::new(), request, cx));
 
-    // The mock emits a `can_use_tool` control request; the connection's
-    // update-pump must surface it as a pending tool-call authorization.
-    let tool_call_id = wait_for_authorization(&thread, cx).await;
-
-    // Simulate the user approving the tool call. The connection must translate
-    // the approval into a `control_response{behavior:"allow"}` on claude's stdin,
-    // which lets the mock finish the turn.
-    thread.update(cx, |thread, cx| {
-        thread.authorize_tool_call(
-            tool_call_id,
-            SelectedPermissionOutcome::new(
-                acp::PermissionOptionId::new("allow"),
-                acp::PermissionOptionKind::AllowOnce,
-            ),
-            cx,
-        );
-    });
-
-    let response = {
-        let timeout = cx.background_executor.timer(Duration::from_secs(10)).fuse();
-        let prompt_task = prompt_task.fuse();
-        futures::pin_mut!(timeout, prompt_task);
-        futures::select! {
-            response = prompt_task => response.expect("prompt resolved Ok"),
-            _ = timeout => panic!("prompt did not resolve after authorization"),
-        }
-    };
+    // The mock emits a `can_use_tool` control request. The connection
+    // AUTO-APPROVES it (the fork's bypass stance — see
+    // `connection::spawn_tool_authorization`): the thread must NEVER surface a
+    // confirmation prompt, and the turn completes on its own without any user
+    // interaction.
+    let response = await_prompt(prompt_task, cx, Duration::from_secs(10)).await;
     assert_eq!(response.stop_reason, acp::StopReason::EndTurn);
 
+    // No gate was ever shown — the auto-approve path skips
+    // `request_tool_call_authorization` entirely.
+    let gated = thread.read_with(cx, |thread, _| {
+        thread.entries().iter().any(|entry| {
+            matches!(
+                entry,
+                AgentThreadEntry::ToolCall(ToolCall {
+                    status: ToolCallStatus::WaitingForConfirmation { .. },
+                    ..
+                })
+            )
+        })
+    });
+    assert!(
+        !gated,
+        "auto-approval must not surface a WaitingForConfirmation prompt"
+    );
+
+    // The connection still wrote `control_response{behavior:"allow"}` to
+    // claude's stdin — that's what lets the mock finish the turn.
     let captured = std::fs::read_to_string(&capture).expect("read capture");
     assert!(
         captured.contains(r#""type":"control_response""#)
             && captured.contains(r#""behavior":"allow""#),
-        "captured stdin missing allow control_response: {captured}"
+        "captured stdin missing auto-approve control_response: {captured}"
     );
     let _ = std::fs::remove_file(&capture);
-}
-
-/// Pump the executor until the thread has a tool call awaiting confirmation,
-/// returning its id. Fails the test on timeout so a missing bridge is a failure
-/// rather than a hang.
-async fn wait_for_authorization(
-    thread: &Entity<AcpThread>,
-    cx: &mut TestAppContext,
-) -> acp::ToolCallId {
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        cx.run_until_parked();
-        let pending = thread.read_with(cx, |thread, _| {
-            thread.entries().iter().find_map(|entry| match entry {
-                AgentThreadEntry::ToolCall(ToolCall {
-                    id,
-                    status: ToolCallStatus::WaitingForConfirmation { .. },
-                    ..
-                }) => Some(id.clone()),
-                _ => None,
-            })
-        });
-        if let Some(id) = pending {
-            return id;
-        }
-        if std::time::Instant::now() >= deadline {
-            panic!("thread never entered WaitingForConfirmation");
-        }
-        cx.background_executor
-            .timer(Duration::from_millis(20))
-            .await;
-    }
 }
 
 /// Race a prompt task against a timer, returning the prompt's response if it

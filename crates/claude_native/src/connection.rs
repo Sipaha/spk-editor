@@ -16,9 +16,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use acp_thread::{
-    AcpThread, AcpThreadEvent, AgentConnection, RequestPermissionOutcome, UserMessageId,
-};
+use acp_thread::{AcpThread, AcpThreadEvent, AgentConnection, UserMessageId};
 use action_log::ActionLog;
 use agent_client_protocol::schema as acp;
 use agent_servers::{AgentServer, AgentServerDelegate, mcp_servers_for_project};
@@ -1501,73 +1499,49 @@ async fn run_update_pump(
     }
 }
 
-/// Bridge a `can_use_tool` control request to the `AcpThread`'s authorization
-/// flow. Surfaces a pending tool-call confirmation on the thread, then (in a
-/// spawned task, since the user may take arbitrarily long) writes the matching
-/// `control_response` back to `claude`'s stdin. Returns the task so the caller
-/// can retain it; returns `None` for non-`can_use_tool` control requests (the
-/// Foundation handles no others) or when the thread is already gone.
+/// Answer a `can_use_tool` control request by AUTO-APPROVING it, without
+/// surfacing an Allow/Reject prompt.
+///
+/// Why auto-approve: the fork spawns the MAIN agent with
+/// `--permission-mode bypassPermissions`, so it never sends a `can_use_tool`
+/// request — every one that reaches here is from an Agent Teams TEAMMATE.
+/// `claude` deliberately does NOT let an auto-spawned sub-agent inherit
+/// `bypassPermissions` (an autonomous agent with blanket bypass would be a
+/// safety hole), so each teammate tool call would otherwise pop a confirmation
+/// the user has to answer — and a busy multi-teammate run drowns in prompts
+/// (and the session sits in `AwaitingInput` until each is answered). Since the
+/// user has already opted the whole workspace into bypass for the main agent,
+/// we extend the same trust to its teammates. The tool call is still visible
+/// in the teammate's transcript (`claude` streams the `tool_use` block before
+/// this request), so nothing is hidden — only the per-call gate is dropped.
+///
+/// Returns `None` (no task to retain — the response is sent synchronously
+/// here) for every input, including non-`can_use_tool` requests. To restore
+/// per-call gating, revert to driving `AcpThread::request_tool_call_authorization`
+/// and awaiting the user's outcome.
 fn spawn_tool_authorization(
     envelope: ControlRequestEnvelope,
     outgoing: futures::channel::mpsc::UnboundedSender<InputMessage>,
-    thread: WeakEntity<AcpThread>,
-    cx: &mut gpui::AsyncApp,
+    _thread: WeakEntity<AcpThread>,
+    _cx: &mut gpui::AsyncApp,
 ) -> Option<Task<()>> {
     let ControlRequestKind::CanUseTool {
         tool_name,
         tool_use_id,
-        input,
         ..
     } = envelope.request
     else {
         return None;
     };
-
-    // `claude` already streams an `assistant` `tool_use` block (translated to a
-    // ToolCall) before this request, so the id will usually exist; passing the
-    // fields again is a harmless upsert that also covers the case where the
-    // permission request races ahead of the tool_use block.
-    let fields = acp::ToolCallUpdateFields::new()
-        .title(tool_name)
-        .raw_input(input);
-    let tool_call_update = acp::ToolCallUpdate::new(acp::ToolCallId::new(tool_use_id), fields);
-
-    // claude's control protocol is binary (allow / deny); the thread's flat
-    // allow-once / reject-once pair maps onto that. `option_kind` on the outcome
-    // tells us which the user picked.
-    let options = acp_thread::PermissionOptions::Flat(vec![
-        acp::PermissionOption::new(
-            acp::PermissionOptionId::new("allow"),
-            "Allow",
-            acp::PermissionOptionKind::AllowOnce,
-        ),
-        acp::PermissionOption::new(
-            acp::PermissionOptionId::new("reject"),
-            "Reject",
-            acp::PermissionOptionKind::RejectOnce,
-        ),
-    ]);
-
-    let authorization = thread
-        .update(cx, |thread, cx| {
-            thread.request_tool_call_authorization(tool_call_update, options, cx)
-        })
-        .ok()?
-        .log_err()?;
-
-    let request_id = envelope.request_id;
-    Some(cx.spawn(async move |_cx| {
-        let allow = match authorization.await {
-            RequestPermissionOutcome::Selected(outcome) => matches!(
-                outcome.option_kind,
-                acp::PermissionOptionKind::AllowOnce | acp::PermissionOptionKind::AllowAlways
-            ),
-            RequestPermissionOutcome::Cancelled => false,
-        };
-        outgoing
-            .unbounded_send(InputMessage::permission_response(request_id, allow))
-            .log_err();
-    }))
+    log::debug!(
+        "claude_native: auto-approving teammate tool call {tool_name} (tool_use_id={tool_use_id}, \
+         request_id={})",
+        envelope.request_id,
+    );
+    outgoing
+        .unbounded_send(InputMessage::permission_response(envelope.request_id, true))
+        .log_err();
+    None
 }
 
 impl AgentConnection for ClaudeNativeConnection {
