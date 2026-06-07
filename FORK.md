@@ -312,6 +312,23 @@ How to apply:
 - Layout: the tab bar was replaced by a single list — search → action header (`render_action_header`) → collapsible section nodes in order `recent / favorites / local / remote / tags / backups` (`SECTION_ORDER`, `collapsed_sections: HashSet<&'static str>`, `PopupRow::Section`).
 - S-DST (rebase/merge) and S-PSH (force push) context-menu entries now wire to existing infra (`handlers::{rebase,merge}::run` under `OpRunner` w/ auto backup-ref + `git_conflict_ui::OpenConflictResolver` routing; `git::ForcePush` → push dialog in force mode).
 
+### 25. Agent Teams teammate tool calls are AUTO-APPROVED, not gated
+
+Why: the fork spawns the main `claude` agent with `--permission-mode bypassPermissions` (+ `--allow-dangerously-skip-permissions`, `command.rs`), so it never sends a `can_use_tool` control request. Enabling Agent Teams (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, decision in `command.rs`) means the agent delegates to teammates — and `claude` deliberately does NOT let an auto-spawned sub-agent inherit `bypassPermissions` (an autonomous sub-agent with blanket bypass is a safety hole). So every teammate tool call would pop an Allow/Reject prompt, the session would sit in `AwaitingInput` until each is answered, and answering from a paired mobile could leave the turn looking hung. Since the user already opted the whole workspace into bypass for the main agent, we extend the same trust to its teammates.
+
+How to apply:
+- `claude_native::connection::spawn_tool_authorization` answers `can_use_tool` with `behavior:"allow"` **synchronously** and returns `None` — it no longer drives `AcpThread::request_tool_call_authorization`. The tool call stays visible in the teammate's transcript (claude streams the `tool_use` block before the request), so nothing is hidden; only the per-call gate is dropped.
+- This is a **deliberate, security-reviewed choice** (an automated review flags it HIGH "permission bypass" — that finding is acknowledged and accepted: it matches the existing main-agent bypass posture, it is NOT a new exposure). Do not "fix" it back to a gated prompt without the maintainer's say-so.
+- The gating machinery (`request_tool_call_authorization`, the Allow/Reject UI, the `ToolAuthorizationRequested/Received` store events) stays in tree. To re-enable per-call prompts, re-point `spawn_tool_authorization` at it; for defense-in-depth, gate auto-approval behind a `tool_name`/`input` classifier (allow read-only, prompt for `Bash`/`Write`/network) — explicitly declined for now since it would re-introduce prompts for exactly the `Bash` case this removes.
+
+### 26. Mid-turn follow-ups route to the active tab (`QueueTarget`)
+
+Why: with Agent Teams, a user can watch a specific teammate's tab and type a follow-up meant for that teammate, not the parent. `SolutionSession::pending_messages` holds `PendingBundle { target: QueueTarget, blocks }` (in-memory only — not persisted, so no serde compat). `QueueTarget::Subagent(agent_id)` equals the teammate's `BackgroundAgentId` == its `claude` hook `agent_id`.
+
+How to apply:
+- Enqueue stamps the target from `SubagentView::queue_target()` (only `Background` → `Subagent`; `Main`/`Task`/`Shell` → `Main`). `take_pending_for_delivery` drains only bundles whose `target.matches_hook(agent_id)` matches the firing hook (main hook = no `agent_id`); other-target bundles stay queued.
+- A `Subagent` bundle whose teammate finishes without draining it is DROPPED at turn end (idle-flush) — never re-routed to the parent. Compose is enabled on a **live** teammate's `Background` tab (`BackgroundAgent::is_messageable`); the ghost + up-arrow recall are filtered to the selected tab's target.
+
 ## Where specs and plans live
 
 `docs/superpowers/{specs,plans}/` is in `.gitignore` — these are personal working notes, not committed. Each major fork feature has a design spec + step-by-step implementation plan there. They're append-only history; the canonical state of the code lives in code + this file + `.rules`.
