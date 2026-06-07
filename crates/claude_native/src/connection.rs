@@ -62,6 +62,28 @@ const HOOK_CALLBACK_POST_TOOL_USE: &str = "pti";
 /// `decision: "block"` so the agent keeps generating to address it.
 const HOOK_CALLBACK_STOP: &str = "stop_inj";
 
+/// Max times within a single turn we'll nudge the agent after it emitted a
+/// tool call as literal `<invoke …>` text (a known opus degradation — it
+/// writes the function-calling XML as prose, ends the turn, and nothing
+/// runs). Bounded so a model that keeps doing it can't wedge the turn in an
+/// infinite Stop→nudge loop; after this many, we let the turn end (Idle) as
+/// before.
+const MAX_DEGENERATE_NUDGES: u8 = 2;
+
+/// Injected via the Stop hook (with `decision: "block"`) when the agent wrote
+/// a tool call as text and tried to stop — so it retries as a real tool call
+/// in the same turn instead of halting the whole run on one bad message.
+const DEGENERATE_TOOL_CALL_NUDGE: &str = "Your last message wrote a tool call as literal text (an `<invoke name=…>…</invoke>` block) instead of actually invoking the tool, so nothing ran. Re-issue it now as a real tool call.";
+
+/// True when an assistant message body looks like a tool call written as
+/// literal text — the `<invoke name=…>…</invoke>` function-calling format the
+/// model is supposed to emit as a structured `tool_use` block, not prose.
+/// Requires both the opening `invoke name=` and a closing `invoke>` so a
+/// passing mention of the word "invoke" doesn't trigger a spurious nudge.
+fn looks_like_text_tool_call(text: &str) -> bool {
+    text.contains("invoke name=") && text.contains("invoke>")
+}
+
 /// Default grace period after a soft `interrupt` before the Stop escalates to
 /// a hard kill + `--resume` respawn. Overridable for tests via
 /// [`ClaudeNativeConnection::set_escalation_timeout_for_test`].
@@ -933,6 +955,13 @@ async fn run_update_pump(
     // thinking-only turns lose their `thinking` blocks the same way.
     let mut text_streamed_for_current_message: bool = false;
     let mut thinking_streamed_for_current_message: bool = false;
+    // Accumulates the current assistant message's streamed TEXT (not
+    // thinking), cleared on each `message_start`. Read at the Stop hook to
+    // self-heal a degraded turn where the model wrote a tool call as text —
+    // see `looks_like_text_tool_call` / `MAX_DEGENERATE_NUDGES`. The counter
+    // bounds the retries and resets at each turn's `result`.
+    let mut current_message_text = String::new();
+    let mut degenerate_tool_call_nudges: u8 = 0;
     loop {
         let message = select_biased! {
             message = incoming.next().fuse() => message,
@@ -1096,6 +1125,7 @@ async fn run_update_pump(
                 );
             }
             turn_stats = TurnStats::default();
+            degenerate_tool_call_nudges = 0;
             if let Some(sender) = shared.prompt_tx.borrow_mut().take() {
                 log::debug!(
                     target: "claude_native::prompt_tx",
@@ -1156,10 +1186,39 @@ async fn run_update_pump(
                     // message meant for the main agent.
                     let agent_id = input.get("agent_id").and_then(|v| v.as_str());
                     let pull = shared.pending_pull.borrow().clone();
-                    let pending = match pull {
+                    let mut pending = match pull {
                         Some(pull) => pull(&shared.session_id, agent_id, is_end_of_turn, cx),
                         None => shared.pending_inject.borrow_mut().take(),
                     };
+                    // Self-heal a degraded turn: the main agent occasionally
+                    // emits a tool call as literal `<invoke name=…>` text and
+                    // then stops, so nothing runs and the session would sit
+                    // Idle on one bad message. When the Stop hook fires with
+                    // nothing else to deliver and the just-finished assistant
+                    // text looks like a text-form tool call, inject a bounded
+                    // one-line nudge (build_hook_response adds decision:block)
+                    // so the agent retries as a real tool call in the SAME
+                    // turn. Main agent only — `current_message_text` holds the
+                    // main stream, not a teammate's (whose hook carries an
+                    // `agent_id`), so it must not be matched against a
+                    // teammate's Stop.
+                    if is_end_of_turn
+                        && pending.is_none()
+                        && agent_id.is_none()
+                        && degenerate_tool_call_nudges < MAX_DEGENERATE_NUDGES
+                        && looks_like_text_tool_call(&current_message_text)
+                    {
+                        degenerate_tool_call_nudges += 1;
+                        log::warn!(
+                            target: "claude_native",
+                            "session={:?} degraded turn: assistant wrote a tool call as text; \
+                             nudging retry ({}/{})",
+                            shared.session_id,
+                            degenerate_tool_call_nudges,
+                            MAX_DEGENERATE_NUDGES,
+                        );
+                        pending = Some(DEGENERATE_TOOL_CALL_NUDGE.to_string());
+                    }
                     let response = build_hook_response(&envelope.request_id, callback_id, pending);
                     outgoing
                         .unbounded_send(InputMessage::ControlResponse {
@@ -1198,6 +1257,7 @@ async fn run_update_pump(
                     if let Some(t) = delta.get("text").and_then(|v| v.as_str()) {
                         turn_stats.text_chars_streamed += t.chars().count();
                         text_streamed_for_current_message = true;
+                        current_message_text.push_str(t);
                     }
                 }
                 Some("thinking_delta") => {
@@ -1217,6 +1277,7 @@ async fn run_update_pump(
         {
             text_streamed_for_current_message = false;
             thinking_streamed_for_current_message = false;
+            current_message_text.clear();
         }
 
         // Mid-turn usage: `message_start` snapshots `event.message.usage`
@@ -1796,6 +1857,21 @@ mod tests {
         let stop = hooks.get("Stop").expect("Stop registered");
         assert_eq!(stop.len(), 1);
         assert_eq!(stop[0].hook_callback_ids, vec!["stop_inj".to_string()]);
+    }
+
+    #[test]
+    fn detects_tool_call_written_as_text() {
+        // The exact degraded shape opus emits (leaked function-calling XML).
+        let degraded = "card\n<invoke name=\"Bash\">\n<parameter name=\"command\">echo hi</parameter>\n</invoke>";
+        assert!(looks_like_text_tool_call(degraded));
+        // Closing-only / opening-only or a bare mention must NOT trigger.
+        assert!(!looks_like_text_tool_call(
+            "I'll invoke the build now and check the output."
+        ));
+        assert!(!looks_like_text_tool_call(
+            "Done — the offscreen smoke test passed with no panics."
+        ));
+        assert!(!looks_like_text_tool_call("<invoke name=\"Bash\""));
     }
 
     #[test]
