@@ -484,6 +484,60 @@ pub(crate) fn render_status_row(
             .into_any_element()
     };
 
+    // The status row reflects the SELECTED tab, not always Main. A
+    // `Background`/`Shell` subagent has its own liveness/activity, so the
+    // badge shows THAT; `Main`/`Task` fold into the parent session state (a
+    // Task runs inside the parent turn, so the parent's Running/Idle is its
+    // status). On a subagent tab the token meter + compact/clear are
+    // session/Main-only concepts (we don't track a background agent's own
+    // tokens), so they're hidden from the row below.
+    let subagent_status: Option<(SharedString, bool)> = {
+        use crate::store::SubagentView;
+        let session_entity = SolutionAgentStore::global(cx)
+            .read(cx)
+            .session(view.session_id());
+        let session = session_entity.as_ref().map(|s| s.read(cx));
+        match (&view.selected_subagent, session) {
+            (SubagentView::Background(id), Some(session)) => {
+                session.background_agents.get(id).map(|agent| {
+                    let running = agent
+                        .latest
+                        .as_ref()
+                        .map_or(true, |snap| snap.stop_reason.is_none());
+                    let label = if running {
+                        agent
+                            .latest
+                            .as_ref()
+                            .map(|snap| snap.activity_label.clone())
+                            .unwrap_or_else(|| SharedString::new_static("Starting…"))
+                    } else {
+                        SharedString::new_static("Done")
+                    };
+                    (label, running)
+                })
+            }
+            (SubagentView::Shell(id), Some(session)) => {
+                session.background_shells.get(id).map(|shell| {
+                    use crate::background_shell::ShellRuntimeState;
+                    match &shell.state {
+                        ShellRuntimeState::Running => (SharedString::new_static("Running"), true),
+                        ShellRuntimeState::Exited(Some(code)) => {
+                            (SharedString::from(format!("Exited ({code})")), false)
+                        }
+                        ShellRuntimeState::Exited(None) => {
+                            (SharedString::new_static("Exited"), false)
+                        }
+                        ShellRuntimeState::Killed => (SharedString::new_static("Killed"), false),
+                    }
+                })
+            }
+            // Main / Task fold into the parent session state; a gone session
+            // (None) also falls through to the Main-derived badge.
+            _ => None,
+        }
+    };
+    let is_subagent_tab = subagent_status.is_some();
+
     // State badge ("Thinking… 3m05s" / "Done in 12s" / "Error: …")
     // anchors the LEFT of the row — that's where the user's eye
     // lands first, and the row sits directly above the compose
@@ -493,6 +547,13 @@ pub(crate) fn render_status_row(
     // status — putting them after the badge gives a clean
     // "what's happening" → "where it's running" reading order.
     let state_badge: gpui::AnyElement = {
+        // On a subagent tab the badge reflects the subagent (computed
+        // above); shadow the Main-derived inputs so the rest of this block
+        // is unchanged. `cold`/`resuming`/`error` don't apply to a subagent.
+        let (state_text, is_running, is_resuming, is_cold, error_text) = match subagent_status {
+            Some((label, running)) => (label, running, false, false, None),
+            None => (state_text, is_running, is_resuming, is_cold, error_text),
+        };
         let mut label = Label::new(state_text).size(LabelSize::Small);
         if error_text.is_some() {
             label = label.color(Color::Error);
@@ -621,29 +682,35 @@ pub(crate) fn render_status_row(
                     .child(badge)
             })
             .child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
-            .child(
-                div().flex_none().child(
-                    Label::new(meter_text)
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                ),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(72.0))
-                    .h(px(4.0))
-                    .rounded_full()
-                    .bg(cx.theme().colors().border)
-                    .child(
-                        div()
-                            .h_full()
-                            .w(relative((pct as f32).clamp(0.0, 1.0)))
-                            .rounded_full()
-                            .bg(bar_color),
+            // Token meter + compact/clear are session/Main concepts — hidden
+            // on a subagent tab (we don't track a background agent's own
+            // tokens, and you don't compact a subagent). The `·` above stays
+            // as the separator before the agent/cwd labels either way.
+            .when(!is_subagent_tab, |this| {
+                this.child(
+                    div().flex_none().child(
+                        Label::new(meter_text)
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
                     ),
-            )
-            .child(div().flex_none().child(cleanup_button))
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(72.0))
+                        .h(px(4.0))
+                        .rounded_full()
+                        .bg(cx.theme().colors().border)
+                        .child(
+                            div()
+                                .h_full()
+                                .w(relative((pct as f32).clamp(0.0, 1.0)))
+                                .rounded_full()
+                                .bg(bar_color),
+                        ),
+                )
+                .child(div().flex_none().child(cleanup_button))
+            })
             .child(
                 Label::new(agent_id)
                     .color(Color::Muted)

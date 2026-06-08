@@ -283,7 +283,7 @@ pub struct SolutionSessionView {
     /// wired off `SessionSubagentsChanged`. `Background` selections
     /// pass through unchanged since their lifecycle is bound to the
     /// JSONL file on disk, not the parent thread.
-    selected_subagent: crate::store::SubagentView,
+    pub(crate) selected_subagent: crate::store::SubagentView,
     /// Background tick that wakes the view once a second while any
     /// visible tool call sits in `InProgress`, so the per-tool elapsed
     /// "Xs" badge in `render_tool_call` advances even when the agent
@@ -487,6 +487,24 @@ impl SolutionSessionView {
                 crate::store::SolutionAgentStoreEvent::SessionBackgroundShellsChanged(sid) => {
                     if *sid == this.session.read(cx).id {
                         this.on_background_shells_changed(cx);
+                    }
+                }
+                crate::store::SolutionAgentStoreEvent::SessionContextReset { id, .. } => {
+                    if *id == this.session.read(cx).id {
+                        // Compact / `/clear` rotated the context — the prior
+                        // token peak belongs to the now-archived conversation.
+                        // Reset the meter's ratchet so it reflects the fresh
+                        // (much smaller) context instead of holding the
+                        // pre-compact high. `smooth_used_tokens` only ratchets
+                        // DOWN on a ≤10% collapse, which a compact-to-summary
+                        // (often ~20-40% of peak) doesn't hit — so the peak
+                        // must be cleared explicitly on the reset event, not
+                        // left to the magnitude heuristic. `cached_max` is
+                        // cleared too so the denominator re-resolves from the
+                        // new context's first usage report.
+                        this.status_peak_used_tokens = 0;
+                        this.status_cached_max_tokens = None;
+                        cx.notify();
                     }
                 }
                 _ => {}
