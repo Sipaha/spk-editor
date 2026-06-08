@@ -982,6 +982,23 @@ pub struct GetSessionParams {
     /// newest N entries, not the oldest. `None` = unbounded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count: Option<usize>,
+    /// Per-tab filter, applied BEFORE `count`/`after_index`/`before_index`
+    /// windowing so each tab's window contains that tab's entries (a tail
+    /// window taken over ALL entries then filtered client-side could leave a
+    /// tab empty — the bug this fixes). Mirrors the desktop
+    /// `session_view::should_render_entry` rule so the wire is the single
+    /// source of truth for tab membership:
+    ///   * `None` / absent → no filter (every entry; back-compat).
+    ///   * `"__main__"` → the Main thread: entries with no `subagent_id`,
+    ///     UNLESS the session has zero active subagents, in which case every
+    ///     entry is returned (the desktop "no subagent strip → show all"
+    ///     bypass, so historical subagent entries don't vanish).
+    ///   * any other value → only entries whose `subagent_id` equals it (a
+    ///     specific Task/Agent subagent tab).
+    /// `total_count` on the result reflects the FILTERED total so the client
+    /// can paginate the tab correctly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_filter: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for GetSessionParams {
@@ -995,6 +1012,7 @@ impl<'de> Deserialize<'de> for GetSessionParams {
             before_index: Option<usize>,
             after_index: Option<usize>,
             count: Option<usize>,
+            subagent_filter: Option<String>,
         }
         let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
         Ok(Self {
@@ -1004,6 +1022,7 @@ impl<'de> Deserialize<'de> for GetSessionParams {
             before_index: inner.before_index,
             after_index: inner.after_index,
             count: inner.count,
+            subagent_filter: inner.subagent_filter,
         })
     }
 }
@@ -1206,9 +1225,11 @@ pub struct GetSessionResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     pub entries: Vec<EntrySummary>,
-    /// R-6e: total entry count of the underlying thread, regardless of
-    /// pagination filters applied to `entries`. Lets the client render a
-    /// "Load older" affordance and detect resume-time gaps.
+    /// R-6e: total entry count regardless of the `count`/`after_index`/
+    /// `before_index` pagination window applied to `entries`. Lets the client
+    /// render a "Load older" affordance and detect resume-time gaps. When a
+    /// `subagent_filter` is supplied this is the FILTERED total (entries of
+    /// that tab), so the client paginates the tab — not the whole session.
     pub total_count: usize,
     /// Server-side `pending_messages` queue, one descriptor per bundle.
     /// Empty when the agent isn't holding any follow-up sends from
@@ -1297,7 +1318,6 @@ impl McpServerTool for GetSessionTool {
                 session.cold_entries.iter().collect();
             entries_ref.extend(live_entries);
             let (entries, total_count) = {
-                let total = entries_ref.len();
                 // R-6e: index-anchored slice. `after_index` /
                 // `before_index` are exclusive bounds and `count`
                 // takes the LAST n entries within the bound (so the
@@ -1312,11 +1332,32 @@ impl McpServerTool for GetSessionTool {
                 // rely on `spk-image://N` URLs in markdown.
                 let after = input.after_index;
                 let before = input.before_index;
+                // Per-tab filter applied BEFORE the index window so the tab's
+                // window is taken over the tab's OWN entries (see
+                // `GetSessionParams::subagent_filter`). Mirrors the desktop
+                // `session_view::should_render_entry`: when the session has no
+                // active subagent strip, every entry passes regardless of the
+                // requested filter (the "don't hide history" bypass).
+                let subagent_filter = input.subagent_filter.as_deref();
+                let active_empty = session.active_subagents.is_empty();
                 let mut image_cursor = 0usize;
                 let mut kept: Vec<EntrySummary> = Vec::new();
+                // `total_count` reflects the FILTERED set so the client
+                // paginates the tab, not the whole session.
+                let mut filtered_total = 0usize;
                 for (index, entry) in entries_ref.iter().enumerate() {
-                    let in_range =
-                        after.map_or(true, |a| index > a) && before.map_or(true, |b| index < b);
+                    let passes_filter = match subagent_filter {
+                        None => true,
+                        Some(_) if active_empty => true,
+                        Some("__main__") => entry.subagent_id().is_none(),
+                        Some(id) => entry.subagent_id().map(|s| s.as_ref()) == Some(id),
+                    };
+                    if passes_filter {
+                        filtered_total += 1;
+                    }
+                    let in_range = passes_filter
+                        && after.map_or(true, |a| index > a)
+                        && before.map_or(true, |b| index < b);
                     if in_range {
                         let created_ms = session
                             .entry_created_ms
@@ -1346,7 +1387,7 @@ impl McpServerTool for GetSessionTool {
                         kept.drain(..drop_count);
                     }
                 }
-                (kept, total)
+                (kept, filtered_total)
             };
             let summary = session_summary(session, cx);
             let pending_bundles = build_pending_bundle_summaries(session, cx);
@@ -5807,6 +5848,116 @@ mod tests {
             assistant.subagent_id.as_deref(),
             Some("toolu_parent_xyz"),
             "EntrySummary must carry the parent tool_use id"
+        );
+    }
+
+    /// Seed `[user(Main), assistant(Main), assistant(sub1), user(Main)]` so a
+    /// subagent dominates the recent tail (the empty-Main scenario) and return
+    /// the session id. The single `sub1` assistant carries the subagent_id via
+    /// the same `_meta` claude_native stamps.
+    async fn seed_mixed_subagent_session(
+        cx: &mut gpui::TestAppContext,
+    ) -> (crate::model::SolutionSessionId, gpui::Entity<acp_thread::AcpThread>, tempfile::TempDir)
+    {
+        let (session_id, acp_thread, tmp) = create_session_with_thread(cx).await;
+        cx.update(|cx| {
+            acp_thread.update(cx, |thread, cx| {
+                thread.push_user_content_block(
+                    None,
+                    acp::ContentBlock::Text(acp::TextContent::new("u0".to_string())),
+                    cx,
+                );
+                thread.push_assistant_content_block(
+                    acp::ContentBlock::Text(acp::TextContent::new("a1-main".to_string())),
+                    false,
+                    cx,
+                );
+                let mut meta = serde_json::Map::new();
+                meta.insert(
+                    "claudeCode".into(),
+                    serde_json::json!({ "parentToolUseId": "sub1" }),
+                );
+                let mut chunk = acp::ContentChunk::new(acp::ContentBlock::Text(
+                    acp::TextContent::new("s2-sub".to_string()),
+                ));
+                chunk.meta = Some(meta);
+                thread
+                    .handle_session_update(acp::SessionUpdate::AgentMessageChunk(chunk), cx)
+                    .expect("handle_session_update");
+                thread.push_user_content_block(
+                    None,
+                    acp::ContentBlock::Text(acp::TextContent::new("u3".to_string())),
+                    cx,
+                );
+            });
+        });
+        cx.executor().run_until_parked();
+        (session_id, acp_thread, tmp)
+    }
+
+    async fn get_session_filtered(
+        session_id: crate::model::SolutionSessionId,
+        filter: Option<&str>,
+        cx: &mut gpui::TestAppContext,
+    ) -> (Vec<Option<String>>, usize) {
+        let result = GetSessionTool
+            .run(
+                GetSessionParams {
+                    session_id: session_id.to_string(),
+                    subagent_filter: filter.map(|s| s.to_string()),
+                    ..Default::default()
+                },
+                &mut cx.to_async(),
+            )
+            .await
+            .expect("get_session");
+        let ids = result
+            .structured_content
+            .entries
+            .iter()
+            .map(|e| e.subagent_id.clone())
+            .collect();
+        (ids, result.structured_content.total_count)
+    }
+
+    #[gpui::test]
+    async fn get_session_subagent_filter_main_keeps_only_parent_entries(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (session_id, _thread, _tmp) = seed_mixed_subagent_session(cx).await;
+        // A subagent strip is present ⇒ Main hides subagent entries.
+        seed_subagent_tabs(session_id, &[("sub1", "Sub One")], cx);
+
+        let (main_ids, main_total) = get_session_filtered(session_id, Some("__main__"), cx).await;
+        assert!(
+            main_ids.iter().all(|id| id.is_none()),
+            "Main filter must keep only parent (subagent_id == None) entries, got {main_ids:?}"
+        );
+        assert_eq!(main_ids.len(), 3, "u0 / a1-main / u3 are the Main entries");
+        assert_eq!(main_total, 3, "total_count reflects the FILTERED Main set");
+
+        let (sub_ids, sub_total) = get_session_filtered(session_id, Some("sub1"), cx).await;
+        assert_eq!(
+            sub_ids,
+            vec![Some("sub1".to_string())],
+            "sub1 filter keeps only that subagent's entry"
+        );
+        assert_eq!(sub_total, 1);
+    }
+
+    #[gpui::test]
+    async fn get_session_subagent_filter_main_bypass_when_no_active_subagents(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (session_id, _thread, _tmp) = seed_mixed_subagent_session(cx).await;
+        // NO active subagents seeded ⇒ desktop "no strip → show all" bypass:
+        // even a `__main__` filter returns every entry so history doesn't vanish.
+        let (ids, total) = get_session_filtered(session_id, Some("__main__"), cx).await;
+        assert_eq!(ids.len(), 4, "bypass returns all 4 entries");
+        assert_eq!(total, 4);
+        assert!(
+            ids.iter().any(|id| id.as_deref() == Some("sub1")),
+            "bypass keeps the historical subagent entry, got {ids:?}"
         );
     }
 
