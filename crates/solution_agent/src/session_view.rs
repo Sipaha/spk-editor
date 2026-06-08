@@ -1303,6 +1303,11 @@ impl SolutionSessionView {
         let subscription = cx.subscribe(&editor, |this: &mut Self, _, event, cx| {
             if let editor::EditorEvent::BufferEdited = event {
                 this.recompute_matches(cx);
+                // As-you-type: follow the first hit into view. Only on a
+                // query edit (this subscription) — NOT on the streaming
+                // `recompute_matches` calls in `on_thread_event`, which would
+                // yank the viewport to match #0 on every token mid-turn.
+                this.scroll_to_selected_match(cx);
                 cx.notify();
             }
         });
@@ -1326,18 +1331,39 @@ impl SolutionSessionView {
     }
 
     fn next_match(&mut self, _: &FindNextMatch, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(find) = self.find.as_mut() else {
-            return;
-        };
-        if find.matches.is_empty() {
-            return;
+        {
+            let Some(find) = self.find.as_mut() else {
+                return;
+            };
+            if find.matches.is_empty() {
+                return;
+            }
+            let next = match find.selected {
+                Some(i) => (i + 1) % find.matches.len(),
+                None => 0,
+            };
+            find.selected = Some(next);
         }
-        let next = match find.selected {
-            Some(i) => (i + 1) % find.matches.len(),
-            None => 0,
-        };
-        find.selected = Some(next);
+        self.scroll_to_selected_match(cx);
         cx.notify();
+    }
+
+    /// Scroll the conversation list so the currently-selected find match is
+    /// in view. The match's `entry_idx` is a LIVE-thread index, but the
+    /// virtualized `list_state` is sized over the cold+live concatenation, so
+    /// offset by the cold-entry count — exactly as the render path and
+    /// `on_thread_event` do. Without this, Enter / the ↑↓ buttons move the
+    /// counter and the active-match highlight but never bring an off-screen
+    /// match into view, so iterating "does nothing" visually.
+    fn scroll_to_selected_match(&mut self, cx: &mut Context<Self>) {
+        let Some(entry_idx) = self.find.as_ref().and_then(|find| {
+            let selected = find.selected?;
+            find.matches.get(selected).map(|m| m.entry_idx)
+        }) else {
+            return;
+        };
+        let cold_offset = self.session.read(cx).cold_entries.len();
+        self.list_state.scroll_to_reveal_item(cold_offset + entry_idx);
     }
 
     fn previous_match(
@@ -1346,19 +1372,22 @@ impl SolutionSessionView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(find) = self.find.as_mut() else {
-            return;
-        };
-        if find.matches.is_empty() {
-            return;
+        {
+            let Some(find) = self.find.as_mut() else {
+                return;
+            };
+            if find.matches.is_empty() {
+                return;
+            }
+            let len = find.matches.len();
+            let prev = match find.selected {
+                Some(0) => len - 1,
+                Some(i) => i - 1,
+                None => 0,
+            };
+            find.selected = Some(prev);
         }
-        let len = find.matches.len();
-        let prev = match find.selected {
-            Some(0) => len - 1,
-            Some(i) => i - 1,
-            None => 0,
-        };
-        find.selected = Some(prev);
+        self.scroll_to_selected_match(cx);
         cx.notify();
     }
 

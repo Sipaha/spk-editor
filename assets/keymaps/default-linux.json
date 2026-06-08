@@ -1563,10 +1563,19 @@
   {
     "context": "SolutionSessionFindEditor",
     "bindings": {
-      "enter": "solution_agent::FindNextMatch",
-      "shift-enter": "solution_agent::FindPreviousMatch",
       "escape": "solution_agent::FindClose",
       "ctrl-f": "solution_agent::FindInSession",
+    },
+  },
+  {
+    // enter/shift-enter must bind on the find *Editor* node (not the bar
+    // div) or `SolutionSessionView > Editor` (enter→menu::Confirm,
+    // shift-enter→editor::Newline) shadows them: it matches at the same
+    // editor node, and a binding on a shallower context node can't win there.
+    "context": "SolutionSessionFindEditor > Editor",
+    "bindings": {
+      "enter": "solution_agent::FindNextMatch",
+      "shift-enter": "solution_agent::FindPreviousMatch",
     },
   },
 ]
