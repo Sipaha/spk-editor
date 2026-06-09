@@ -1270,6 +1270,63 @@ async fn main_hook_never_drains_subagent_bundle(cx: &mut TestAppContext) {
     });
 }
 
+/// A queued bundle carrying an IMAGE must not be delivered via the mid-turn
+/// hook (its `additionalContext` is text-only — the image bytes would be lost
+/// and the agent would never see the screenshot). It stays queued for the
+/// `Stopped` idle-flush, which re-sends the full content blocks.
+#[gpui::test]
+async fn take_pending_holds_image_bundle_for_idle_flush(cx: &mut TestAppContext) {
+    let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            store.session(session_id).unwrap().update(cx, |s, _| {
+                s.state = SessionState::Running {
+                    started_at: std::time::Instant::now(),
+                    notified: false,
+                };
+            });
+            store
+                .send_message_blocks(
+                    session_id,
+                    vec![
+                        acp::ContentBlock::Text(acp::TextContent::new(
+                            "look at [image #1]".to_string(),
+                        )),
+                        acp::ContentBlock::Image(acp::ImageContent::new(
+                            "ZGF0YQ==".to_string(),
+                            "image/png".to_string(),
+                        )),
+                    ],
+                    cx,
+                )
+                .detach_and_log_err(cx);
+        });
+    });
+    // The main hook fires (even at end-of-turn) — the image bundle is NOT
+    // drained text-only; it stays queued for the idle-flush.
+    let pulled = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            store.take_pending_for_delivery(session_id, None, true, cx)
+        })
+    });
+    assert!(
+        pulled.is_none(),
+        "image bundle must not be delivered via the text-only hook, got {pulled:?}"
+    );
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            assert_eq!(
+                store.session(session_id).unwrap().read(cx).pending_messages.len(),
+                1,
+                "image bundle stays queued for the idle-flush (full-content re-send)"
+            );
+        });
+    });
+}
+
 #[gpui::test]
 async fn reset_context_swaps_acp_thread_without_bumping_count(cx: &mut TestAppContext) {
     let (session_id, old_thread, _tmp) = create_session_with_thread(cx).await;

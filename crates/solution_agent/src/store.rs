@@ -1586,7 +1586,19 @@ impl SolutionAgentStore {
             let mut kept: std::collections::VecDeque<crate::model::PendingBundle> =
                 std::collections::VecDeque::with_capacity(s.pending_messages.len());
             for bundle in s.pending_messages.drain(..) {
-                if bundle.target.matches_hook(agent_id) {
+                // Mid-turn hook delivery rides `additionalContext`, which is
+                // TEXT-ONLY — an image block would degrade to a bare
+                // `[image #N]` placeholder and the agent would never see the
+                // pixels (reported: "I don't see your screenshot"). So a
+                // bundle that carries any image is NOT drained here; it stays
+                // queued and the `Stopped` idle-flush re-sends it as a fresh
+                // turn via `send_message_blocks`, which carries the full
+                // content blocks (image bytes included).
+                let has_image = bundle
+                    .blocks
+                    .iter()
+                    .any(|b| matches!(b, acp::ContentBlock::Image(_)));
+                if bundle.target.matches_hook(agent_id) && !has_image {
                     taken.extend(bundle.blocks);
                 } else {
                     kept.push_back(bundle);

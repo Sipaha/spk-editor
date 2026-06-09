@@ -403,16 +403,36 @@ pub(crate) fn render_entry(
 /// `[HH:MM:SS] ` timestamp prefixes) from the assembled output so the
 /// ghost shows only what the user typed.
 pub(crate) fn pending_blocks_preview(blocks: &[acp::ContentBlock], _cx: &App) -> String {
+    // A desktop-pasted image already carries its OWN `[image #N]` paste-
+    // placeholder in the text block. Synthesizing another `[image #N]` per
+    // Image block on top of that rendered each attachment TWICE — e.g.
+    // "image #3 image #1", and the synthesized second link was dead (it
+    // pointed past the end of the decoded-image list). So we only synthesize a
+    // placeholder for images BEYOND the count already labelled in the text:
+    // the common desktop case has one paste-placeholder per image (so nothing
+    // is synthesized and nothing doubles), a mobile/MCP "text + unlabelled
+    // attachments" bundle has zero (so every image gets one), and a mismatch
+    // (fewer placeholders than images) still labels the surplus. Keeps the
+    // `[image #N]` shape the wire + mobile queued-bubble renderer expect.
+    let labelled_in_text: usize = blocks
+        .iter()
+        .map(|block| match block {
+            acp::ContentBlock::Text(t) => IMAGE_PLACEHOLDER_RE.find_iter(&t.text).count(),
+            _ => 0,
+        })
+        .sum();
     let mut out = String::new();
-    let mut image_idx = 1usize;
+    let mut image_ordinal = 0usize;
     for block in blocks {
         match block {
             acp::ContentBlock::Text(t) => {
                 out.push_str(&t.text);
             }
             acp::ContentBlock::Image(_) => {
-                out.push_str(&format!("[image #{image_idx}]"));
-                image_idx += 1;
+                if image_ordinal >= labelled_in_text {
+                    out.push_str(&format!("[image #{}]", image_ordinal + 1));
+                }
+                image_ordinal += 1;
             }
             _ => {}
         }
