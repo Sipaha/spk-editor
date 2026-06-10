@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -42,6 +43,12 @@ pub struct SolutionAgentStore {
     /// table that production wiring will populate at app init and tests
     /// populate manually. Held in an `Rc` because `dyn AgentServer` is `!Sync`.
     server_registry: HashMap<AgentServerId, Rc<dyn agent_servers::AgentServer>>,
+    /// Last-known model list per agent, shared across that agent's sessions so
+    /// a fresh session (no turn yet → empty per-session list) still offers a
+    /// model picker. Filled on the first live capture and by a probe at create.
+    agent_models: HashMap<AgentServerId, Vec<claude_native::ModelInfo>>,
+    /// Agents with an in-flight `ensure_agent_models` probe (dedupe).
+    agent_models_probing: HashSet<AgentServerId>,
     /// Set by the navigator (Phase 6) so `mutate_state` can ask "is this
     /// session currently focused in the UI?" before deciding whether to
     /// fire an OS notification. Stored as `Fn(&App) -> bool` rather than
@@ -773,6 +780,8 @@ impl SolutionAgentStore {
             persistence: None,
             adapters,
             server_registry: HashMap::new(),
+            agent_models: HashMap::new(),
+            agent_models_probing: HashSet::new(),
             focus_resolver: None,
             entry_update_throttles: HashMap::new(),
             background_agent_watchers: HashMap::new(),
@@ -978,6 +987,11 @@ impl SolutionAgentStore {
                     .ok_or_else(|| anyhow!("session vanished after insert"))?
                     .update(cx, |s, _| s._acp_subscription = Some(sub));
                 store.persist_session_row(session_id, cx);
+                // Best-effort pre-turn probe so the new session's status-row /
+                // new-chat picker has a model list before its first turn lands
+                // the live `initialize` response. Deduped per agent, so this is
+                // a no-op once any session of this agent has captured a list.
+                store.ensure_agent_models(solution_id.clone(), agent_id.clone(), cx);
                 cx.emit(SolutionAgentStoreEvent::SessionCreated {
                     id: session_id,
                     parent_session_id,
@@ -1607,8 +1621,16 @@ impl SolutionAgentStore {
         session_id: SolutionSessionId,
         cx: &App,
     ) -> Vec<claude_native::ModelInfo> {
-        self.session(session_id)
-            .map(|s| s.read(cx).cached_models.clone())
+        let Some(session) = self.session(session_id) else {
+            return Vec::new();
+        };
+        let session = session.read(cx);
+        if !session.cached_models.is_empty() {
+            return session.cached_models.clone();
+        }
+        self.agent_models
+            .get(&session.agent_id)
+            .cloned()
             .unwrap_or_default()
     }
 
@@ -1652,10 +1674,14 @@ impl SolutionAgentStore {
             })
             .max_by_key(|s| s.read(cx).last_activity_at)
             .map(|s| s.read(cx).id);
-        match latest {
+        let (mut models, default) = match latest {
             Some(id) => (self.session_models(id, cx), self.selected_model(id, cx)),
             None => (Vec::new(), None),
+        };
+        if models.is_empty() {
+            models = self.agent_models.get(agent_id).cloned().unwrap_or_default();
         }
+        (models, default)
     }
 
     /// Probe `claude` for its current model list for `(solution_id, agent_id)`
@@ -1688,6 +1714,50 @@ impl SolutionAgentStore {
             return Task::ready(Ok(Vec::new()));
         };
         native.probe_models(work_dir, &cx.to_async())
+    }
+
+    /// If we have no model list for `agent_id` yet, fire a one-shot probe to fill
+    /// the global cache (so fresh sessions show a picker before their first turn).
+    /// Deduped per agent. No-op if a list is already known or a probe is running.
+    pub fn ensure_agent_models(
+        &mut self,
+        solution_id: SolutionId,
+        agent_id: AgentServerId,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .agent_models
+            .get(&agent_id)
+            .map_or(false, |m| !m.is_empty())
+            || self.agent_models_probing.contains(&agent_id)
+        {
+            return;
+        }
+        self.agent_models_probing.insert(agent_id.clone());
+        let task = self.probe_models_for_agent(&solution_id, &agent_id, cx);
+        cx.spawn(async move |this, cx| {
+            let models = task.await.log_err().unwrap_or_default();
+            this.update(cx, |this, cx| {
+                this.agent_models_probing.remove(&agent_id);
+                if !models.is_empty() {
+                    this.agent_models.insert(agent_id.clone(), models);
+                    // Re-render every session of this agent so its status-row
+                    // dropdown appears now that a list exists.
+                    let ids: Vec<_> = this
+                        .sessions
+                        .values()
+                        .filter(|s| s.read(cx).agent_id == agent_id)
+                        .map(|s| s.read(cx).id)
+                        .collect();
+                    for id in ids {
+                        cx.emit(SolutionAgentStoreEvent::SessionStateChanged(id));
+                    }
+                    cx.notify();
+                }
+            })
+            .log_err();
+        })
+        .detach();
     }
 
     /// Record + apply a model choice. Persists `desired_model`; if the session
@@ -1732,13 +1802,20 @@ impl SolutionAgentStore {
                 .downcast::<claude_native::ClaudeNativeConnection>()
                 .map(|c| c.available_models(&acp_sid))
         });
+        // Live-non-empty → update the per-session + global cache and persist.
+        // Otherwise (the session is live but its list is still empty — a fresh
+        // session that hasn't taken its first turn yet — OR the session is
+        // cold) fall through to the probe path, which fills the caches by
+        // spawning a throwaway `claude` keyed by server + cwd.
         if let Some(models) = live {
             if !models.is_empty() {
+                let agent_id = session.read(cx).agent_id.clone();
+                self.agent_models.insert(agent_id, models.clone());
                 session.update(cx, |s, _| s.cached_models = models);
                 self.persist_session_blob(session_id, cx);
                 cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+                return;
             }
-            return;
         }
         self.refresh_models_cold(session_id, cx);
     }
@@ -1770,6 +1847,7 @@ impl SolutionAgentStore {
                 return;
             }
             this.update(cx, |this, cx| {
+                this.agent_models.insert(agent_id, models.clone());
                 if let Some(session) = this.session(session_id) {
                     session.update(cx, |s, _| s.cached_models = models);
                     this.persist_session_blob(session_id, cx);
@@ -4559,9 +4637,13 @@ impl SolutionAgentStore {
                             .map(|c| c.available_models(t.session_id()))
                     });
                     if let Some(models) = live_models {
-                        if !models.is_empty() && s.read(cx).cached_models != models {
-                            s.update(cx, |s, _| s.cached_models = models);
-                            self.persist_session_blob(session_id, cx);
+                        if !models.is_empty() {
+                            let agent_id = s.read(cx).agent_id.clone();
+                            self.agent_models.insert(agent_id, models.clone());
+                            if s.read(cx).cached_models != models {
+                                s.update(cx, |s, _| s.cached_models = models);
+                                self.persist_session_blob(session_id, cx);
+                            }
                         }
                     }
                     // Throttled non-sequenced notification — at most one

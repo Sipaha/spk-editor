@@ -5248,3 +5248,57 @@ fn new_chat_model_options_from_latest_session(cx: &mut TestAppContext) {
         });
     });
 }
+
+/// A FRESH session (no turn yet → empty `cached_models`) must still offer a
+/// model picker by falling back to the GLOBAL per-agent cache (`agent_models`),
+/// which is filled by the first live capture / create-time probe of any session
+/// of that agent. Mirrors the live capture by seeding `agent_models` directly.
+#[gpui::test]
+fn session_models_falls_back_to_global_agent_cache(cx: &mut TestAppContext) {
+    let registry = Arc::new(AdapterRegistry::new());
+    cx.update(|cx| SolutionAgentStore::init_global(cx, registry));
+
+    let sol = SolutionId("sol-a".into());
+    let agent: AgentServerId = SharedString::from("claude-acp");
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            // Stand in for the first live capture: a sibling session of this
+            // agent populated the global cache.
+            store.agent_models.insert(
+                agent.clone(),
+                vec![
+                    claude_native::ModelInfo {
+                        value: "opus".into(),
+                        display_name: "Opus".into(),
+                        description: "".into(),
+                    },
+                    claude_native::ModelInfo {
+                        value: "sonnet".into(),
+                        display_name: "Sonnet".into(),
+                        description: "".into(),
+                    },
+                ],
+            );
+
+            // A brand-new session with an empty per-session list.
+            let fresh_id = SolutionSessionId::new();
+            let fresh =
+                insert_cold_session(fresh_id, sol.clone(), agent.clone(), None, None, store, cx);
+            assert!(
+                fresh.read(cx).cached_models.is_empty(),
+                "precondition: fresh session has no per-session model list"
+            );
+
+            let models = store.session_models(fresh_id, cx);
+            assert_eq!(
+                models.len(),
+                2,
+                "fresh session must surface the global agent model list"
+            );
+            assert_eq!(models[0].value, "opus");
+            assert_eq!(models[1].value, "sonnet");
+        });
+    });
+}
