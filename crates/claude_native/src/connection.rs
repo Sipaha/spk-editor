@@ -34,7 +34,7 @@ use crate::command::{ClaudeCommandSpec, SessionArg, mcp_config_json};
 use crate::process::ClaudeProcess;
 use crate::protocol::{
     ControlRequestEnvelope, ControlRequestKind, ControlRequestOut, HookConfig, InputMessage,
-    OutputMessage,
+    ModelInfo, OutputMessage,
 };
 use crate::translate::{
     DEFAULT_CONTEXT_WINDOW, TurnEnd, apply_stream_usage, apply_usage, assistant_usage_update,
@@ -405,6 +405,35 @@ fn parse_available_commands(payload: &serde_json::Value) -> Vec<acp::AvailableCo
                 }
             }
             Some(command)
+        })
+        .collect()
+}
+
+/// Map the `models` array of an `initialize` control_response payload to
+/// [`ModelInfo`]s. Each element is shaped
+/// `{ value: string, displayName?: string, description?: string }`
+/// (SDK `SDKControlInitializeResponse.models`). Entries without a `value`
+/// are skipped; `displayName` falls back to `value`.
+fn parse_available_models(payload: &serde_json::Value) -> Vec<ModelInfo> {
+    let Some(models) = payload.get("models").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    models
+        .iter()
+        .filter_map(|entry| {
+            let value = entry.get("value").and_then(|v| v.as_str())?.to_string();
+            let display_name = entry
+                .get("displayName")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&value)
+                .to_string();
+            let description = entry
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Some(ModelInfo { value, display_name, description })
         })
         .collect()
 }
@@ -2010,5 +2039,28 @@ mod tests {
         let commands = parse_available_commands(&payload);
         let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["context"]);
+    }
+
+    #[test]
+    fn parse_available_models_extracts_value_displayname_description() {
+        let payload = serde_json::json!({
+            "models": [
+                {"value": "opus", "displayName": "Opus 4.8", "description": "Most capable"},
+                {"value": "sonnet", "displayName": "Sonnet 4.6", "description": ""},
+                {"displayName": "no value — skipped"},
+            ]
+        });
+        let models = parse_available_models(&payload);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].value, "opus");
+        assert_eq!(models[0].display_name, "Opus 4.8");
+        assert_eq!(models[0].description, "Most capable");
+        assert_eq!(models[1].display_name, "Sonnet 4.6");
+    }
+
+    #[test]
+    fn parse_available_models_handles_missing_array() {
+        assert!(parse_available_models(&serde_json::json!({})).is_empty());
+        assert!(parse_available_models(&serde_json::json!({"models": 5})).is_empty());
     }
 }
