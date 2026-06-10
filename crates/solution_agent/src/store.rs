@@ -890,7 +890,9 @@ impl SolutionAgentStore {
             let (connection_task, acp_meta) = this.update(cx, |store, cx| {
                 let task =
                     store.get_or_spawn_connection(pair.clone(), &solution, project.clone(), cx);
-                let meta = store.build_session_meta(&pair.1, &solution);
+                // Brand-new session — no entity exists yet, so there is no
+                // persisted `desired_model` to thread in.
+                let meta = store.build_session_meta(&pair.1, &solution, None, cx);
                 (task, meta)
             })?;
             let connection = connection_task.await?;
@@ -1019,18 +1021,32 @@ impl SolutionAgentStore {
         &self,
         agent_id: &AgentServerId,
         solution: &Solution,
+        session_id: Option<SolutionSessionId>,
+        cx: &App,
     ) -> Option<acp::Meta> {
-        let prompt = self
-            .adapters
-            .get(agent_id)?
-            .build_initial_system_prompt(solution);
-        if prompt.is_empty() {
+        let mut meta = acp::Meta::new();
+        if let Some(adapter) = self.adapters.get(agent_id) {
+            let prompt = adapter.build_initial_system_prompt(solution);
+            if !prompt.is_empty() {
+                meta.insert(
+                    "systemPrompt".to_string(),
+                    serde_json::json!({ "append": prompt }),
+                );
+            }
+        }
+        // The native side reads the chosen model from a TOP-LEVEL `"modelId"`
+        // string key (`model_from_meta` → `meta.get("modelId")?.as_str()`), so
+        // a session that picked a model while cold wakes onto it.
+        let desired_model = session_id
+            .and_then(|id| self.sessions.get(&id))
+            .and_then(|session| session.read(cx).desired_model.clone());
+        if let Some(model) = desired_model {
+            meta.insert("modelId".to_string(), serde_json::Value::String(model));
+        }
+        if meta.is_empty() {
             return None;
         }
-        Some(acp::Meta::from_iter([(
-            "systemPrompt".to_string(),
-            serde_json::json!({ "append": prompt }),
-        )]))
+        Some(meta)
     }
 
     /// Persist the row for `session_id` to the DB so the History popover and
@@ -1279,8 +1295,9 @@ impl SolutionAgentStore {
             // the navigator stay aligned with claude-acp on the next
             // round-trip.
             if attached.is_none() && all_resource_gone {
-                let acp_meta = this
-                    .update(cx, |store, _| store.build_session_meta(&pair.1, &solution))?;
+                let acp_meta = this.update(cx, |store, cx| {
+                    store.build_session_meta(&pair.1, &solution, Some(meta.id), cx)
+                })?;
                 let fallback_cwd = if primary_cwd != solution.root {
                     primary_cwd.clone()
                 } else {
@@ -1550,6 +1567,94 @@ impl SolutionAgentStore {
     pub fn session(&self, id: SolutionSessionId) -> Option<Entity<SolutionSession>> {
         self.sessions.get(&id).cloned()
     }
+
+    /// Models to offer for `session_id`: the cached list (live-captured or
+    /// persisted). Empty → the status row shows a read-only label.
+    pub fn session_models(
+        &self,
+        session_id: SolutionSessionId,
+        cx: &App,
+    ) -> Vec<claude_native::ModelInfo> {
+        self.session(session_id)
+            .map(|s| s.read(cx).cached_models.clone())
+            .unwrap_or_default()
+    }
+
+    /// Currently-selected model `value`: explicit `desired_model`, else the
+    /// live `active_model` mapped to a known entry, else None.
+    pub fn selected_model(&self, session_id: SolutionSessionId, cx: &App) -> Option<String> {
+        let session = self.session(session_id)?;
+        let session = session.read(cx);
+        if session.desired_model.is_some() {
+            return session.desired_model.clone();
+        }
+        let active = session.acp_thread().and_then(|t| {
+            let t = t.read(cx);
+            t.connection().active_model(t.session_id())
+        })?;
+        let active_str = active.as_ref();
+        session
+            .cached_models
+            .iter()
+            .find(|m| active_str.contains(m.value.as_str()) || m.value.contains(active_str))
+            .map(|m| m.value.clone())
+            .or_else(|| Some(active.to_string()))
+    }
+
+    /// Record + apply a model choice. Persists `desired_model`; if the session
+    /// is live, also pushes a `set_model` control request.
+    pub fn select_model(
+        &mut self,
+        session_id: SolutionSessionId,
+        value: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session(session_id) else {
+            return;
+        };
+        let live = session.read(cx).acp_thread().and_then(|t| {
+            let t = t.read(cx);
+            let acp_sid = t.session_id().clone();
+            t.connection()
+                .clone()
+                .downcast::<claude_native::ClaudeNativeConnection>()
+                .map(|c| (c, acp_sid))
+        });
+        session.update(cx, |s, _| s.desired_model = Some(value.clone()));
+        if let Some((conn, acp_sid)) = live {
+            conn.select_model(&acp_sid, value);
+        }
+        self.persist_session_blob(session_id, cx);
+        cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+    }
+
+    /// Re-query the model list. Live → re-read the connection's captured list.
+    /// Cold → probe (wired in a later task). Updates `cached_models` + persists.
+    pub fn refresh_models(&mut self, session_id: SolutionSessionId, cx: &mut Context<Self>) {
+        let Some(session) = self.session(session_id) else {
+            return;
+        };
+        let live = session.read(cx).acp_thread().and_then(|t| {
+            let t = t.read(cx);
+            let acp_sid = t.session_id().clone();
+            t.connection()
+                .clone()
+                .downcast::<claude_native::ClaudeNativeConnection>()
+                .map(|c| c.available_models(&acp_sid))
+        });
+        if let Some(models) = live {
+            if !models.is_empty() {
+                session.update(cx, |s, _| s.cached_models = models);
+                self.persist_session_blob(session_id, cx);
+                cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+            }
+            return;
+        }
+        self.refresh_models_cold(session_id, cx);
+    }
+
+    /// Cold-session model refresh. Wired to a throwaway probe in a later task.
+    fn refresh_models_cold(&mut self, _session_id: SolutionSessionId, _cx: &mut Context<Self>) {}
 
     /// Reverse-lookup the `SolutionSessionId` owning a given ACP session id.
     /// The native hook pull-closure knows only the `acp::SessionId`, but the
@@ -2315,7 +2420,7 @@ impl SolutionAgentStore {
             let (connection_task, acp_meta) = this.update(cx, |store, cx| {
                 let task =
                     store.get_or_spawn_connection(pair.clone(), &solution, project.clone(), cx);
-                let meta = store.build_session_meta(&pair.1, &solution);
+                let meta = store.build_session_meta(&pair.1, &solution, Some(session_id), cx);
                 (task, meta)
             })?;
             let connection = connection_task.await?;
@@ -2461,7 +2566,7 @@ impl SolutionAgentStore {
             let (connection_task, acp_meta) = this.update(cx, |store, cx| {
                 let task =
                     store.get_or_spawn_connection(pair.clone(), &solution, project.clone(), cx);
-                let meta = store.build_session_meta(&pair.1, &solution);
+                let meta = store.build_session_meta(&pair.1, &solution, Some(session_id), cx);
                 (task, meta)
             })?;
             let connection = connection_task.await?;
@@ -4312,6 +4417,21 @@ impl SolutionAgentStore {
                         s.cached_total_tokens = total;
                         s.cached_max_tokens = max;
                     });
+                    // The initialize response (carrying `models`) only lands after the
+                    // first turn, so the first TokenUsageUpdated is the earliest capture.
+                    let live_models = s.read(cx).acp_thread().and_then(|t| {
+                        let t = t.read(cx);
+                        t.connection()
+                            .clone()
+                            .downcast::<claude_native::ClaudeNativeConnection>()
+                            .map(|c| c.available_models(t.session_id()))
+                    });
+                    if let Some(models) = live_models {
+                        if !models.is_empty() && s.read(cx).cached_models != models {
+                            s.update(cx, |s, _| s.cached_models = models);
+                            self.persist_session_blob(session_id, cx);
+                        }
+                    }
                     // Throttled non-sequenced notification — at most one
                     // emit per 2 s per session. The client treats a
                     // missed metric notify as "check on next snapshot

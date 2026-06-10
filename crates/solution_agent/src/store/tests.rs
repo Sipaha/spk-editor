@@ -2226,9 +2226,9 @@ fn build_session_meta_emits_correct_json_shape(cx: &mut TestAppContext) {
 
     cx.update(|cx| {
         let store = SolutionAgentStore::global(cx);
-        store.update(cx, |store, _| {
+        store.update(cx, |store, cx| {
             let meta = store
-                .build_session_meta(&SharedString::from(CLAUDE_ACP_AGENT_ID), &solution)
+                .build_session_meta(&SharedString::from(CLAUDE_ACP_AGENT_ID), &solution, None, cx)
                 .expect("registered ClaudeAcpAdapter produces a non-empty prompt");
             let system_prompt = meta
                 .get("systemPrompt")
@@ -2250,8 +2250,8 @@ fn build_session_meta_emits_correct_json_shape(cx: &mut TestAppContext) {
             );
 
             // Unknown agent → None (registry lookup fails)
-            let none_meta = store
-                .build_session_meta(&SharedString::from("not-registered"), &solution);
+            let none_meta =
+                store.build_session_meta(&SharedString::from("not-registered"), &solution, None, cx);
             assert!(none_meta.is_none(), "unknown agent yields None");
         });
     });
@@ -2281,8 +2281,9 @@ fn build_session_meta_emits_correct_json_shape(cx: &mut TestAppContext) {
         empty_registry.register(Arc::new(EmptyAdapter));
         SolutionAgentStore::init_global(cx, Arc::new(empty_registry));
         let store = SolutionAgentStore::global(cx);
-        store.update(cx, |store, _| {
-            let meta = store.build_session_meta(&SharedString::from("empty-adapter"), &solution);
+        store.update(cx, |store, cx| {
+            let meta =
+                store.build_session_meta(&SharedString::from("empty-adapter"), &solution, None, cx);
             assert!(meta.is_none(), "empty prompt yields None");
         });
     });
@@ -5121,4 +5122,63 @@ fn persisted_session_round_trips_models() {
     let back2: PersistedSession = serde_json::from_value(old).unwrap();
     assert!(back2.available_models.is_empty());
     assert!(back2.desired_model.is_none());
+}
+
+/// Cold path (no live `acp_thread`): `select_model` records `desired_model`
+/// and `selected_model` reflects it, without any live connection. This is the
+/// primary user scenario — picking a model on a cold tab before waking it.
+#[gpui::test]
+fn select_model_on_cold_session_records_desired(cx: &mut TestAppContext) {
+    let registry = Arc::new(AdapterRegistry::new());
+    cx.update(|cx| SolutionAgentStore::init_global(cx, registry));
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let id = SolutionSessionId::new();
+            let session = insert_cold_session(
+                id,
+                SolutionId("sol-a".into()),
+                SharedString::from("claude-acp"),
+                None,
+                None,
+                store,
+                cx,
+            );
+            session.update(cx, |s, _| {
+                s.cached_models = vec![
+                    claude_native::ModelInfo {
+                        value: "opus".into(),
+                        display_name: "Opus".into(),
+                        description: "".into(),
+                    },
+                    claude_native::ModelInfo {
+                        value: "sonnet".into(),
+                        display_name: "Sonnet".into(),
+                        description: "".into(),
+                    },
+                ];
+            });
+
+            let models = store.session_models(id, cx);
+            assert_eq!(models.len(), 2);
+            assert_eq!(models[0].value, "opus");
+            assert_eq!(models[1].value, "sonnet");
+
+            assert!(store.selected_model(id, cx).is_none());
+
+            store.select_model(id, "sonnet".into(), cx);
+
+            assert_eq!(
+                session.read(cx).desired_model.as_deref(),
+                Some("sonnet"),
+                "select_model must record desired_model on the cold session"
+            );
+            assert_eq!(
+                store.selected_model(id, cx).as_deref(),
+                Some("sonnet"),
+                "selected_model must reflect the explicit desired_model"
+            );
+        });
+    });
 }
