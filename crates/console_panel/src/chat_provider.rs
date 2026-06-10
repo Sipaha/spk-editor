@@ -109,7 +109,7 @@ impl ChatProvider {
 
             let session_id = store
                 .update(cx, |s, cx| {
-                    s.create_session_with_cwd(solution_id, agent_id, project, cwd, None, cx)
+                    s.create_session_with_cwd(solution_id, agent_id, project, cwd, None, None, cx)
                 })
                 .await?;
 

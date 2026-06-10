@@ -1579,6 +1579,7 @@ async fn restore_open_tabs_hydrates_cold_sessions(cx: &mut TestAppContext) {
         entry_created_ms: vec![],
         available_models: vec![],
         desired_model: None,
+        desired_effort: None,
     })
     .unwrap();
     db.save_blob(id_a, blob_a).await.expect("blob a");
@@ -1665,6 +1666,7 @@ async fn cold_entries_from_persisted_v2_reconstructs_per_entry(cx: &mut TestAppC
         entry_created_ms: vec![1_700_000_000_000, 1_700_000_001_000],
         available_models: vec![],
         desired_model: None,
+        desired_effort: None,
     };
     let (cold_entries, created_ms) =
         cx.update(|cx| crate::store::cold_entries_from_persisted(Some(persisted), cx));
@@ -1709,6 +1711,7 @@ fn persisted_session_roundtrips_with_structured_entries() {
         entry_created_ms: vec![],
         available_models: vec![],
         desired_model: None,
+        desired_effort: None,
     };
     let bytes = serde_json::to_vec(&original).unwrap();
     let decoded: PersistedSession = serde_json::from_slice(&bytes).unwrap();
@@ -4986,6 +4989,7 @@ async fn create_child_session_is_not_pinned(cx: &mut TestAppContext) {
                     None,
                     Some(parent),
                     None,
+                    None,
                     cx,
                 )
             })
@@ -5130,17 +5134,23 @@ fn persisted_session_round_trips_models() {
             description: "".into(),
         }],
         desired_model: Some("opus".into()),
+        desired_effort: Some("high".into()),
     };
     let bytes = serde_json::to_vec(&p).unwrap();
     let back: PersistedSession = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(back.available_models.len(), 1);
     assert_eq!(back.available_models[0].value, "opus");
     assert_eq!(back.desired_model.as_deref(), Some("opus"));
+    assert_eq!(back.desired_effort.as_deref(), Some("high"));
     // Old blobs without the new fields still decode (serde default).
     let old = serde_json::json!({"title":"t","entry_summaries":[]});
     let back2: PersistedSession = serde_json::from_value(old).unwrap();
     assert!(back2.available_models.is_empty());
     assert!(back2.desired_model.is_none());
+    assert!(
+        back2.desired_effort.is_none(),
+        "old blobs without desired_effort decode to None via serde default"
+    );
 }
 
 /// Cold path (no live `acp_thread`): `select_model` records `desired_model`
@@ -5197,6 +5207,62 @@ fn select_model_on_cold_session_records_desired(cx: &mut TestAppContext) {
                 store.selected_model(id, cx).as_deref(),
                 Some("sonnet"),
                 "selected_model must reflect the explicit desired_model"
+            );
+        });
+    });
+}
+
+/// Cold path (no live `acp_thread`): `select_effort` records `desired_effort`,
+/// `selected_effort` reflects it, and the chosen effort survives a persist
+/// round-trip (`serializable_snapshot` → decode). Mirrors the model cold test;
+/// this is the primary scenario — picking an effort on a cold tab before it
+/// wakes. Without a live connection the `apply_flag_settings` push is a no-op,
+/// so only the persisted `desired_effort` is asserted here.
+#[gpui::test]
+fn select_effort_on_cold_session_records_and_persists(cx: &mut TestAppContext) {
+    let registry = Arc::new(AdapterRegistry::new());
+    cx.update(|cx| SolutionAgentStore::init_global(cx, registry));
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            let id = SolutionSessionId::new();
+            let session = insert_cold_session(
+                id,
+                SolutionId("sol-a".into()),
+                SharedString::from("claude-acp"),
+                None,
+                None,
+                store,
+                cx,
+            );
+
+            assert!(
+                store.selected_effort(id, cx).is_none(),
+                "a fresh cold session has no chosen effort"
+            );
+
+            store.select_effort(id, "high".into(), cx);
+
+            assert_eq!(
+                session.read(cx).desired_effort.as_deref(),
+                Some("high"),
+                "select_effort must record desired_effort on the cold session"
+            );
+            assert_eq!(
+                store.selected_effort(id, cx).as_deref(),
+                Some("high"),
+                "selected_effort must reflect the explicit desired_effort"
+            );
+
+            // Persist round-trip: the chosen effort survives snapshot + decode,
+            // exercising both the snapshot converter and the serde field.
+            let bytes = serializable_snapshot(session.read(cx), cx);
+            let decoded: PersistedSession = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                decoded.desired_effort.as_deref(),
+                Some("high"),
+                "desired_effort must survive a persist round-trip"
             );
         });
     });

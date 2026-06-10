@@ -404,6 +404,11 @@ pub struct SolutionSession {
     /// at the next spawn; for a live session also pushed via `set_model`.
     /// `None` → claude's default.
     pub desired_model: Option<String>,
+    /// The user's chosen effort level (Claude Code's effort flag value, e.g.
+    /// `"high"`). Persisted. Seeded into the native respawn map so a cold
+    /// session wakes onto it; for a live session also pushed via
+    /// `apply_flag_settings`. `None` → claude's default.
+    pub desired_effort: Option<String>,
     /// F: parent session reference for sub-agent indication. `None` for
     /// top-level sessions. Set at creation time via
     /// `solution_agent.create_session({parent_session_id})` and
@@ -520,6 +525,7 @@ impl SolutionSession {
             cached_max_tokens: None,
             cached_models: Vec::new(),
             desired_model: None,
+            desired_effort: None,
             parent_session_id: None,
             stopping_safety_net: None,
             active_subagents: HashMap::new(),
@@ -639,6 +645,7 @@ mod tests {
             cached_max_tokens: None,
             cached_models: Vec::new(),
             desired_model: None,
+            desired_effort: None,
             parent_session_id: None,
             stopping_safety_net: None,
             active_subagents: HashMap::new(),

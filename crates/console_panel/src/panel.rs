@@ -1261,6 +1261,7 @@ impl ConsolePanel {
                 project,
                 cwd,
                 model,
+                None,
                 cx,
             )
         });

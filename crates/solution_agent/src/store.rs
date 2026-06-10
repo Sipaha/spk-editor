@@ -518,6 +518,10 @@ pub struct PersistedSession {
     /// The session's chosen model (SDK `value`). `#[serde(default)]`.
     #[serde(default)]
     pub desired_model: Option<String>,
+    /// The session's chosen effort level. `#[serde(default)]` → blobs written
+    /// before this feature decode to `None` (claude's default).
+    #[serde(default)]
+    pub desired_effort: Option<String>,
 }
 
 pub use crate::model::{PersistedEntry, PersistedRole};
@@ -717,6 +721,7 @@ fn serializable_snapshot(session: &SolutionSession, cx: &App) -> Vec<u8> {
         entry_created_ms,
         available_models: session.cached_models.clone(),
         desired_model: session.desired_model.clone(),
+        desired_effort: session.desired_effort.clone(),
     };
     serde_json::to_vec(&snapshot).unwrap_or_default()
 }
@@ -729,6 +734,10 @@ fn persisted_role_for(entry: &acp_thread::AgentThreadEntry) -> PersistedRole {
         acp_thread::AgentThreadEntry::CompletedPlan(_) => PersistedRole::Plan,
     }
 }
+
+/// The fixed effort options offered in the UI (no per-agent list — these are
+/// Claude Code's effort levels; `ultracode` = "xhigh + workflows").
+pub const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultracode"];
 
 impl SolutionAgentStore {
     pub fn global(cx: &App) -> Entity<Self> {
@@ -840,7 +849,7 @@ impl SolutionAgentStore {
         project: Entity<project::Project>,
         cx: &mut Context<Self>,
     ) -> Task<Result<SolutionSessionId>> {
-        self.create_session_with_cwd(solution_id, agent_id, project, None, None, cx)
+        self.create_session_with_cwd(solution_id, agent_id, project, None, None, None, cx)
     }
 
     /// Same as `create_session`, but lets the caller pin the session's
@@ -857,9 +866,19 @@ impl SolutionAgentStore {
         project: Entity<project::Project>,
         cwd: Option<PathBuf>,
         model: Option<String>,
+        effort: Option<String>,
         cx: &mut Context<Self>,
     ) -> Task<Result<SolutionSessionId>> {
-        self.create_session_with_parent(solution_id, agent_id, project, cwd, None, model, cx)
+        self.create_session_with_parent(
+            solution_id,
+            agent_id,
+            project,
+            cwd,
+            None,
+            model,
+            effort,
+            cx,
+        )
     }
 
     /// Full variant. `parent_session_id` (F: sub-agent indication) marks
@@ -876,6 +895,7 @@ impl SolutionAgentStore {
         cwd: Option<PathBuf>,
         parent_session_id: Option<SolutionSessionId>,
         model: Option<String>,
+        effort: Option<String>,
         cx: &mut Context<Self>,
     ) -> Task<Result<SolutionSessionId>> {
         let pair = (solution_id.clone(), agent_id.clone());
@@ -948,6 +968,24 @@ impl SolutionAgentStore {
             // 4. Register the session and emit `SessionCreated`.
             let session_id = this.update(cx, |store, cx| {
                 let acp_session_id = acp_thread.read(cx).session_id().clone();
+                // Apply the chosen effort to the now-live session. Unlike the
+                // model (threaded through `acp_meta`'s `modelId` so claude
+                // launches on it), effort has no spawn-time meta hook: the
+                // create path can't seed the native respawn map before spawn.
+                // So we push it to the live session directly — `set_desired_effort`
+                // for any future respawn, `select_effort` (`apply_flag_settings`)
+                // so the FIRST turn already uses it.
+                if let Some(e) = effort.clone() {
+                    if let Some(native) = acp_thread
+                        .read(cx)
+                        .connection()
+                        .clone()
+                        .downcast::<claude_native::ClaudeNativeConnection>()
+                    {
+                        native.set_desired_effort(&acp_session_id, Some(e.clone()));
+                        native.select_effort(&acp_session_id, e);
+                    }
+                }
                 let session_id = SolutionSessionId::new();
                 // Default tab title = name of the project that's the
                 // session's cwd: catalog name for a member, else the
@@ -972,6 +1010,8 @@ impl SolutionAgentStore {
                     // Persist the model the session was created on so it shows
                     // as selected in the status row and survives a cold reload.
                     s.desired_model = model.clone();
+                    // Same for the effort level chosen in the new-chat row.
+                    s.desired_effort = effort.clone();
                     s.set_acp_thread(Some(acp_thread.clone()), cx);
                     s
                 });
@@ -1255,6 +1295,10 @@ impl SolutionAgentStore {
                         .session(meta.id)
                         .and_then(|s| s.read(cx).desired_model.clone());
                     native.set_desired_model(&acp_session_id, desired);
+                    let effort = store
+                        .session(meta.id)
+                        .and_then(|s| s.read(cx).desired_effort.clone());
+                    native.set_desired_effort(&acp_session_id, effort);
                 }
             })?;
 
@@ -1788,6 +1832,40 @@ impl SolutionAgentStore {
         cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
     }
 
+    /// The session's chosen effort (`desired_effort`), if any.
+    pub fn selected_effort(&self, session_id: SolutionSessionId, cx: &App) -> Option<String> {
+        self.session(session_id)?.read(cx).desired_effort.clone()
+    }
+
+    /// Record + apply an effort choice. Persists `desired_effort`; seeds the
+    /// native respawn map; if the session is live, sends `apply_flag_settings`
+    /// so it takes effect on the next turn. Mirrors `select_model`.
+    pub fn select_effort(
+        &mut self,
+        session_id: SolutionSessionId,
+        value: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session(session_id) else {
+            return;
+        };
+        let live = session.read(cx).acp_thread().and_then(|t| {
+            let t = t.read(cx);
+            let acp_sid = t.session_id().clone();
+            t.connection()
+                .clone()
+                .downcast::<claude_native::ClaudeNativeConnection>()
+                .map(|c| (c, acp_sid))
+        });
+        session.update(cx, |s, _| s.desired_effort = Some(value.clone()));
+        if let Some((conn, acp_sid)) = live {
+            conn.set_desired_effort(&acp_sid, Some(value.clone()));
+            conn.select_effort(&acp_sid, value);
+        }
+        self.persist_session_blob(session_id, cx);
+        cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+    }
+
     /// Re-query the model list. Live → re-read the connection's captured list.
     /// Cold → probe (wired in a later task). Updates `cached_models` + persists.
     pub fn refresh_models(&mut self, session_id: SolutionSessionId, cx: &mut Context<Self>) {
@@ -2106,6 +2184,9 @@ impl SolutionAgentStore {
                     let restored_desired_model = persisted
                         .as_ref()
                         .and_then(|p| p.desired_model.clone());
+                    let restored_desired_effort = persisted
+                        .as_ref()
+                        .and_then(|p| p.desired_effort.clone());
                     let (cold_entries, restored_created_ms) =
                         cold_entries_from_persisted(persisted, cx);
                     let entity = cx.new(|_| {
@@ -2132,6 +2213,7 @@ impl SolutionAgentStore {
                         s.tab_order = tab_order;
                         s.cached_models = restored_available_models;
                         s.desired_model = restored_desired_model;
+                        s.desired_effort = restored_desired_effort;
                         s
                     });
                     this.sessions.insert(meta.id, entity);
@@ -2508,7 +2590,7 @@ impl SolutionAgentStore {
         let Some(session) = self.sessions.get(&session_id).cloned() else {
             return Task::ready(Err(anyhow!("unknown session {session_id}")));
         };
-        let (solution_id, agent_id, project, previous_cwd, previous_model) = {
+        let (solution_id, agent_id, project, previous_cwd, previous_model, previous_effort) = {
             let s = session.read(cx);
             let project = match s.project.clone() {
                 Some(project) => project,
@@ -2537,6 +2619,7 @@ impl SolutionAgentStore {
                 project,
                 cwd_override,
                 s.desired_model.clone(),
+                s.desired_effort.clone(),
             )
         };
         let pair = (solution_id.clone(), agent_id.clone());
@@ -2562,6 +2645,7 @@ impl SolutionAgentStore {
             project,
             previous_cwd,
             previous_model,
+            previous_effort,
             cx,
         );
         cx.spawn(async move |_this, _cx: &mut AsyncApp| create_task.await)
