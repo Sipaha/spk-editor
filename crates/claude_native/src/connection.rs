@@ -224,6 +224,7 @@ struct RespawnBlueprint {
     project: Entity<Project>,
     work_dirs: PathList,
     append_system_prompt: Option<String>,
+    model: Option<String>,
 }
 
 struct SessionState {
@@ -585,6 +586,17 @@ impl ClaudeNativeConnection {
             .map(|text| text.to_string())
     }
 
+    /// Extract the desired model from the ACP session meta the store passes.
+    /// The store sets `meta["modelId"] = "<value>"` for a session whose user
+    /// picked a model while it was cold.
+    fn model_from_meta(extra_meta: &Option<acp::Meta>) -> Option<String> {
+        extra_meta
+            .as_ref()?
+            .get("modelId")?
+            .as_str()
+            .map(|text| text.to_string())
+    }
+
     /// Shrink the Stop-escalation grace period so an integration test can drive
     /// the kill+resume path without waiting the real 30 seconds.
     pub fn set_escalation_timeout_for_test(&self, timeout: Duration) {
@@ -629,6 +641,7 @@ impl ClaudeNativeConnection {
         };
         let mcp_servers = mcp_servers_for_project(&project, cx);
         let append_system_prompt = Self::append_system_prompt_from_meta(&extra_meta);
+        let model = Self::model_from_meta(&extra_meta);
 
         // `claude --input-format stream-json` does NOT emit `init` on spawn — it
         // blocks on stdin and only emits `init` (echoing this id) after the first
@@ -640,6 +653,7 @@ impl ClaudeNativeConnection {
             project: project.clone(),
             work_dirs: work_dirs.clone(),
             append_system_prompt: append_system_prompt.clone(),
+            model: model.clone(),
         };
 
         let spec = ClaudeCommandSpec {
@@ -649,7 +663,7 @@ impl ClaudeNativeConnection {
             mcp_servers_json: mcp_config_json(&mcp_servers),
             append_system_prompt,
             extra_env: self.extra_env.clone(),
-            model: None,
+            model,
         };
 
         let mut process = match ClaudeProcess::spawn(spec, cx) {
@@ -866,7 +880,7 @@ impl ClaudeNativeConnection {
                 mcp_servers_json: mcp_config_json(&mcp_servers_for_project(&blueprint.project, cx)),
                 append_system_prompt: blueprint.append_system_prompt.clone(),
                 extra_env: self.extra_env.clone(),
-                model: None,
+                model: blueprint.model.clone(),
             });
 
             let mut process = match cx.update(|cx| ClaudeProcess::spawn(spec, cx)) {
