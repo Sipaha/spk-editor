@@ -11,3 +11,4 @@ mod translate;
 mod watchdog;
 
 pub use connection::{ClaudeNativeAgentServer, ClaudeNativeConnection};
+pub use protocol::ModelInfo;

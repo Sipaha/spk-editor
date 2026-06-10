@@ -527,6 +527,27 @@ impl ClaudeNativeConnection {
             .unwrap_or_default()
     }
 
+    /// Switch a live session's model via the SDK `set_model` control request
+    /// (applied by claude on the next turn). No-op (error-logged) if the
+    /// session is gone or stdin is closed.
+    pub fn select_model(&self, session_id: &acp::SessionId, value: String) {
+        let sessions = self.sessions.borrow();
+        let Some(session) = sessions.get(session_id) else {
+            log::warn!(
+                "claude_native: select_model for unknown session {}",
+                session_id.0
+            );
+            return;
+        };
+        match session
+            .process
+            .send_control(ControlRequestOut::SetModel { model: value })
+        {
+            Ok(_receiver) => {}
+            Err(error) => log::warn!("claude_native: set_model write failed: {error}"),
+        }
+    }
+
     /// Buffer a user-typed follow-up to be injected into the running turn at
     /// the next safe boundary (next `PostToolUse` hook firing, or the `Stop`
     /// hook if no tool fires before end-of-turn). Idempotent on repeated calls
