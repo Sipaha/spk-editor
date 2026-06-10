@@ -287,6 +287,10 @@ pub(crate) fn render_status_row(
         })
         .or_else(|| view.status_cached_model.clone());
 
+    let store = SolutionAgentStore::global(cx);
+    let model_options = store.read(cx).session_models(view.session_id(), cx);
+    let selected_value = store.read(cx).selected_model(view.session_id(), cx);
+
     let raw_used = usage.as_ref().map(|u| u.used_tokens).unwrap_or(0);
     let peak = view.status_peak_used_tokens;
     let used = smooth_used_tokens(raw_used, peak);
@@ -537,6 +541,7 @@ pub(crate) fn render_status_row(
         }
     };
     let is_subagent_tab = subagent_status.is_some();
+    let show_model_dropdown = !is_subagent_tab && !model_options.is_empty();
 
     // State badge ("Thinking… 3m05s" / "Done in 12s" / "Error: …")
     // anchors the LEFT of the row — that's where the user's eye
@@ -722,9 +727,79 @@ pub(crate) fn render_status_row(
                     .color(Color::Muted)
                     .size(LabelSize::Small),
             )
-            .when_some(model_text, |this, model| {
+            .when(show_model_dropdown, |this| {
+                let session_id = view.session_id();
+                let options = model_options.clone();
+                let selected = selected_value.clone();
+                let label: SharedString = model_text
+                    .clone()
+                    .or_else(|| selected_value.clone().map(SharedString::from))
+                    .unwrap_or_else(|| "model".into());
+                let trigger = ui::Button::new("solution-status-model-trigger", label)
+                    .label_size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .end_icon(
+                        Icon::new(IconName::ChevronDown)
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
+                    );
                 this.child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
-                    .child(Label::new(model).color(Color::Muted).size(LabelSize::Small))
+                    .child(
+                        PopoverMenu::new("solution-status-model-menu")
+                            .trigger(trigger)
+                            .menu(move |window, cx| {
+                                let options = options.clone();
+                                let selected = selected.clone();
+                                Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
+                                    for model in &options {
+                                        let is_current =
+                                            selected.as_deref() == Some(model.value.as_str());
+                                        let value = model.value.clone();
+                                        let entry =
+                                            ui::ContextMenuEntry::new(model.display_name.clone())
+                                                .when(is_current, |entry| {
+                                                    entry
+                                                        .icon(IconName::Check)
+                                                        .icon_color(Color::Accent)
+                                                })
+                                                .handler(move |_window, cx| {
+                                                    let value = value.clone();
+                                                    SolutionAgentStore::global(cx).update(
+                                                        cx,
+                                                        |store, cx| {
+                                                            store.select_model(
+                                                                session_id, value, cx,
+                                                            );
+                                                        },
+                                                    );
+                                                });
+                                        menu = menu.item(entry);
+                                    }
+                                    menu = menu.separator();
+                                    menu = menu.item(
+                                        ui::ContextMenuEntry::new("Refresh models")
+                                            .icon(IconName::RotateCw)
+                                            .icon_color(Color::Muted)
+                                            .handler(move |_window, cx| {
+                                                SolutionAgentStore::global(cx).update(
+                                                    cx,
+                                                    |store, cx| {
+                                                        store.refresh_models(session_id, cx);
+                                                    },
+                                                );
+                                            }),
+                                    );
+                                    menu
+                                }))
+                            })
+                            .anchor(gpui::Anchor::TopRight),
+                    )
+            })
+            .when(!show_model_dropdown, |this| {
+                this.when_some(model_text, |this, model| {
+                    this.child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
+                        .child(Label::new(model).color(Color::Muted).size(LabelSize::Small))
+                })
             })
             .when_some(mode_text, |this, mode| {
                 this.child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
