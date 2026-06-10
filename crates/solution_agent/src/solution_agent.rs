@@ -31,6 +31,7 @@ pub(crate) mod status_row;
 pub mod store;
 pub mod upload;
 
+pub use claude_native::ModelInfo;
 pub use metrics_emitter::MetricsEmitter;
 
 #[cfg(any(feature = "test-support", test))]

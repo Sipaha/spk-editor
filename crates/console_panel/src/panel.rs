@@ -143,6 +143,12 @@ pub struct ConsolePanel {
     /// orderings wins (the tab landing vs. the create future resolving)
     /// performs the activation and clears this.
     chat_tab_to_activate: Option<SolutionSessionId>,
+    /// Model the next new AI chat will start on (the "+" popover sets this).
+    /// `None` → fall back to the latest session's model (see effective_new_chat_model).
+    pending_new_chat_model: Option<String>,
+    /// Probe result for the "+" popover's "Refresh models" — overrides the
+    /// derived list when present.
+    refreshed_new_chat_models: Option<Vec<solution_agent::ModelInfo>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -200,6 +206,8 @@ impl ConsolePanel {
             deferred_tasks: HashMap::default(),
             assistant_enabled: false,
             chat_tab_to_activate: None,
+            pending_new_chat_model: None,
+            refreshed_new_chat_models: None,
             _subscriptions: vec![chat_event_sub],
         }
     }
@@ -695,6 +703,25 @@ impl ConsolePanel {
                     .map(chat_cwd_options)
             })
             .unwrap_or_default();
+        let (model_options, model_default): (Vec<solution_agent::ModelInfo>, Option<String>) =
+            active_solution_id
+                .as_ref()
+                .map(|id| {
+                    let store = SolutionAgentStore::global(cx);
+                    store.read(cx).new_chat_model_options(
+                        id,
+                        &SharedString::from(CLAUDE_ACP_AGENT_ID),
+                        cx,
+                    )
+                })
+                .unwrap_or_default();
+        // "Refresh" override wins over the derived list.
+        let model_options = self
+            .refreshed_new_chat_models
+            .clone()
+            .filter(|m| !m.is_empty())
+            .unwrap_or(model_options);
+        let effective_model = self.pending_new_chat_model.clone().or(model_default);
         let weak_self = cx.weak_entity();
 
         let plus_container = div()
@@ -717,6 +744,8 @@ impl ConsolePanel {
                     let cwd_options = cwd_options.clone();
                     let active_solution_id = active_solution_id.clone();
                     let weak_self = weak_self.clone();
+                    let model_options = model_options.clone();
+                    let effective_model = effective_model.clone();
                     Some(ContextMenu::build(window, cx, move |menu, _, _| {
                         let menu = menu.action("New Terminal", NewTerminal.boxed_clone());
                         let menu = if cwd_options.len() <= 1 {
@@ -775,6 +804,51 @@ impl ConsolePanel {
                                         }
                                     }),
                             )
+                        };
+                        // Model section for the next new chat. Flattened (no
+                        // submenu) for the same hover-trigger reason as the cwd
+                        // list above (panel.rs note near "New AI Chat in:").
+                        let menu = if !model_options.is_empty() {
+                            let mut menu = menu.separator().header("Model");
+                            for m in model_options.iter().cloned() {
+                                let weak_self = weak_self.clone();
+                                let is_current =
+                                    effective_model.as_deref() == Some(m.value.as_str());
+                                let entry = ui::ContextMenuEntry::new(m.display_name.clone())
+                                    .when(is_current, |e| {
+                                        e.icon(IconName::Check).icon_color(Color::Accent)
+                                    })
+                                    .handler(move |_window, cx| {
+                                        if let Some(panel) = weak_self.upgrade() {
+                                            panel.update(cx, |panel, cx| {
+                                                panel.pending_new_chat_model = Some(m.value.clone());
+                                                cx.notify();
+                                            });
+                                        }
+                                    });
+                                menu = menu.item(entry);
+                            }
+                            if let Some(solution_id) = active_solution_id.clone() {
+                                let weak_self = weak_self.clone();
+                                menu = menu.item(
+                                    ui::ContextMenuEntry::new("Refresh models")
+                                        .icon(IconName::RotateCw)
+                                        .icon_color(Color::Muted)
+                                        .handler(move |_window, cx| {
+                                            if let Some(panel) = weak_self.upgrade() {
+                                                panel.update(cx, |panel, cx| {
+                                                    panel.refresh_new_chat_models(
+                                                        solution_id.clone(),
+                                                        cx,
+                                                    );
+                                                });
+                                            }
+                                        }),
+                                );
+                            }
+                            menu
+                        } else {
+                            menu
                         };
                         menu.action("Spawn Task…", zed_actions::Spawn::modal().boxed_clone())
                     }))
@@ -1130,6 +1204,36 @@ impl ConsolePanel {
         self.add_chat_tab_with_cwd(solution_id, None, window, cx);
     }
 
+    /// The model a new chat should start on: the explicit "+"-popover choice if
+    /// set, else the latest session's model for this solution+agent.
+    fn effective_new_chat_model(&self, solution_id: &SolutionId, cx: &App) -> Option<String> {
+        if self.pending_new_chat_model.is_some() {
+            return self.pending_new_chat_model.clone();
+        }
+        let agent_id = SharedString::from(CLAUDE_ACP_AGENT_ID);
+        SolutionAgentStore::global(cx)
+            .read(cx)
+            .new_chat_model_options(solution_id, &agent_id, cx)
+            .1
+    }
+
+    fn refresh_new_chat_models(&mut self, solution_id: SolutionId, cx: &mut Context<Self>) {
+        let agent_id = SharedString::from(CLAUDE_ACP_AGENT_ID);
+        let store = SolutionAgentStore::global(cx);
+        let task = store.update(cx, |store, cx| {
+            store.probe_models_for_agent(&solution_id, &agent_id, cx)
+        });
+        cx.spawn(async move |this, cx| {
+            let models = task.await.log_err().unwrap_or_default();
+            this.update(cx, |this, cx| {
+                this.refreshed_new_chat_models = Some(models);
+                cx.notify();
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
     pub fn add_chat_tab_with_cwd(
         &mut self,
         solution_id: SolutionId,
@@ -1148,6 +1252,7 @@ impl ConsolePanel {
         // only need to remember which session to activate once its tab
         // lands. This is the same path a mobile-driven create takes, so the
         // two surfaces can't diverge.
+        let model = self.effective_new_chat_model(&solution_id, cx);
         let store = SolutionAgentStore::global(cx);
         let task = store.update(cx, |store, cx| {
             store.create_session_with_cwd(
@@ -1155,7 +1260,7 @@ impl ConsolePanel {
                 SharedString::from(CLAUDE_ACP_AGENT_ID),
                 project,
                 cwd,
-                None,
+                model,
                 cx,
             )
         });
