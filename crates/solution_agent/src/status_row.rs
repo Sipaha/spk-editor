@@ -566,10 +566,14 @@ pub(crate) fn render_status_row(
     // model dropdown would (main tab, not running/resuming). It does NOT depend
     // on a captured list.
     let show_effort_dropdown = !is_subagent_tab && model_select_enabled;
+    // Claude doesn't stream the current effort level (unlike the model, which
+    // it reports every turn), so when the user hasn't set an explicit override
+    // we show "auto" — i.e. Claude Code's own default effort, no override —
+    // rather than a bare "effort" placeholder. Picking a level overrides it.
     let effort_label: SharedString = effort_value
         .clone()
         .map(SharedString::from)
-        .unwrap_or_else(|| "effort".into());
+        .unwrap_or_else(|| "auto".into());
 
     // State badge ("Thinking… 3m05s" / "Done in 12s" / "Error: …")
     // anchors the LEFT of the row — that's where the user's eye
