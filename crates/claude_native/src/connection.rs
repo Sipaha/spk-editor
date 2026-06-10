@@ -145,6 +145,7 @@ impl AgentServer for ClaudeNativeAgentServer {
             binary: self.binary.clone(),
             extra_env: self.extra_env.clone(),
             sessions: RefCell::new(HashMap::new()),
+            desired_models: RefCell::new(HashMap::new()),
             escalation_timeout: Cell::new(DEFAULT_ESCALATION_TIMEOUT),
             silence_window: Cell::new(DEFAULT_SILENCE_WINDOW),
             self_handle: RefCell::new(std::rc::Weak::new()),
@@ -251,6 +252,10 @@ pub struct ClaudeNativeConnection {
     binary: PathBuf,
     extra_env: Vec<(String, String)>,
     sessions: RefCell<HashMap<acp::SessionId, SessionState>>,
+    /// Model a session should (re)spawn on, seeded by the store before the
+    /// resume/load wake (which doesn't carry session meta). Consulted by
+    /// `open_session` when `extra_meta` has no `modelId`.
+    desired_models: RefCell<HashMap<acp::SessionId, String>>,
     /// Grace period between a soft `interrupt` and the hard kill+resume
     /// escalation. A `Cell` so tests can shrink it to milliseconds.
     escalation_timeout: Cell<Duration>,
@@ -548,6 +553,21 @@ impl ClaudeNativeConnection {
         }
     }
 
+    /// Seed (or clear with `None`) the model a session should (re)spawn on.
+    /// Consulted by `open_session` when the ACP meta has no `modelId` — i.e.
+    /// the resume/load wake path, which doesn't thread session meta.
+    pub fn set_desired_model(&self, session_id: &acp::SessionId, value: Option<String>) {
+        let mut map = self.desired_models.borrow_mut();
+        match value {
+            Some(v) => {
+                map.insert(session_id.clone(), v);
+            }
+            None => {
+                map.remove(session_id);
+            }
+        }
+    }
+
     /// Buffer a user-typed follow-up to be injected into the running turn at
     /// the next safe boundary (next `PostToolUse` hook firing, or the `Stop`
     /// hook if no tool fires before end-of-turn). Idempotent on repeated calls
@@ -662,13 +682,15 @@ impl ClaudeNativeConnection {
         };
         let mcp_servers = mcp_servers_for_project(&project, cx);
         let append_system_prompt = Self::append_system_prompt_from_meta(&extra_meta);
-        let model = Self::model_from_meta(&extra_meta);
 
         // `claude --input-format stream-json` does NOT emit `init` on spawn — it
         // blocks on stdin and only emits `init` (echoing this id) after the first
         // user message. So we adopt the id we pass via `--session-id`/`--resume`
         // up front; waiting for `init` here would deadlock session creation.
         let session_id = acp::SessionId::new(session.session_id().to_string());
+
+        let model = Self::model_from_meta(&extra_meta)
+            .or_else(|| self.desired_models.borrow().get(&session_id).cloned());
 
         let blueprint = RespawnBlueprint {
             project: project.clone(),
@@ -2010,6 +2032,7 @@ mod tests {
             binary: PathBuf::from("claude"),
             extra_env: Vec::new(),
             sessions: RefCell::new(HashMap::new()),
+            desired_models: RefCell::new(HashMap::new()),
             escalation_timeout: Cell::new(DEFAULT_ESCALATION_TIMEOUT),
             silence_window: Cell::new(DEFAULT_SILENCE_WINDOW),
             self_handle: RefCell::new(std::rc::Weak::new()),

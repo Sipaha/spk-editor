@@ -1212,6 +1212,23 @@ impl SolutionAgentStore {
                     .map(|p| p.to_string_lossy().into_owned())
                     .collect::<Vec<_>>(),
             );
+            // Seed the native connection's desired-model fallback before the
+            // wake dispatch. `resume_session`/`load_session` thread no session
+            // meta into `open_session`, so a model the user picked while this
+            // session was cold would otherwise be lost — `open_session`
+            // consults `desired_models` when the ACP meta has no `modelId`.
+            this.update(cx, |store, cx| {
+                if let Some(native) = connection
+                    .clone()
+                    .downcast::<claude_native::ClaudeNativeConnection>()
+                {
+                    let desired = store
+                        .session(meta.id)
+                        .and_then(|s| s.read(cx).desired_model.clone());
+                    native.set_desired_model(&acp_session_id, desired);
+                }
+            })?;
+
             let mut last_err: Option<anyhow::Error> = None;
             let mut attached: Option<(Entity<acp_thread::AcpThread>, PathBuf)> = None;
             // `true` only while EVERY cwd candidate so far has failed
@@ -1622,7 +1639,8 @@ impl SolutionAgentStore {
         });
         session.update(cx, |s, _| s.desired_model = Some(value.clone()));
         if let Some((conn, acp_sid)) = live {
-            conn.select_model(&acp_sid, value);
+            conn.select_model(&acp_sid, value.clone());
+            conn.set_desired_model(&acp_sid, Some(value));
         }
         self.persist_session_blob(session_id, cx);
         cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
