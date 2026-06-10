@@ -601,6 +601,7 @@ impl ClaudeNativeConnection {
             mcp_servers_json: mcp_config_json(&mcp_servers),
             append_system_prompt,
             extra_env: self.extra_env.clone(),
+            model: None,
         };
 
         let mut process = match ClaudeProcess::spawn(spec, cx) {
@@ -816,6 +817,7 @@ impl ClaudeNativeConnection {
                 mcp_servers_json: mcp_config_json(&mcp_servers_for_project(&blueprint.project, cx)),
                 append_system_prompt: blueprint.append_system_prompt.clone(),
                 extra_env: self.extra_env.clone(),
+                model: None,
             });
 
             let mut process = match cx.update(|cx| ClaudeProcess::spawn(spec, cx)) {

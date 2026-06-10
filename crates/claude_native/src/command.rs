@@ -42,6 +42,10 @@ pub struct ClaudeCommandSpec {
     /// Appended to the default system prompt via `--append-system-prompt`.
     pub append_system_prompt: Option<String>,
     pub extra_env: Vec<(String, String)>,
+    /// Model alias or full id passed as `--model`. `None` → claude uses
+    /// its default. Used both for the initial spawn and every respawn so
+    /// a chosen model survives kill+resume.
+    pub model: Option<String>,
 }
 
 impl ClaudeCommandSpec {
@@ -87,6 +91,9 @@ impl ClaudeCommandSpec {
         if let Some(prompt) = &self.append_system_prompt {
             cmd.args(["--append-system-prompt", prompt]);
         }
+        if let Some(model) = &self.model {
+            cmd.args(["--model", model]);
+        }
         cmd
     }
 }
@@ -131,6 +138,7 @@ mod tests {
             mcp_servers_json: r#"{"mcpServers":{}}"#.into(),
             append_system_prompt: Some("SYS".into()),
             extra_env: vec![("K".into(), "V".into())],
+            model: None,
         };
         let cmd = spec.to_std_command();
         let args: Vec<String> = cmd
@@ -177,6 +185,7 @@ mod tests {
             mcp_servers_json: "{}".into(),
             append_system_prompt: None,
             extra_env: vec![],
+            model: None,
         };
         let args: Vec<String> = spec
             .to_std_command()
@@ -189,6 +198,38 @@ mod tests {
         );
         assert!(!args.iter().any(|a| a == "--resume"));
         assert!(!args.iter().any(|a| a == "--append-system-prompt"));
+    }
+
+    #[test]
+    fn passes_model_flag_when_set() {
+        let spec = ClaudeCommandSpec {
+            binary: "claude".into(),
+            work_dir: "/w".into(),
+            session: SessionArg::New("uuid".into()),
+            mcp_servers_json: "{}".into(),
+            append_system_prompt: None,
+            extra_env: vec![],
+            model: Some("opus".into()),
+        };
+        let args: Vec<String> = spec.to_std_command().get_args()
+            .map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(args.windows(2).any(|w| w[0] == "--model" && w[1] == "opus"));
+    }
+
+    #[test]
+    fn omits_model_flag_when_none() {
+        let spec = ClaudeCommandSpec {
+            binary: "claude".into(),
+            work_dir: "/w".into(),
+            session: SessionArg::New("uuid".into()),
+            mcp_servers_json: "{}".into(),
+            append_system_prompt: None,
+            extra_env: vec![],
+            model: None,
+        };
+        let args: Vec<String> = spec.to_std_command().get_args()
+            .map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(!args.iter().any(|a| a == "--model"));
     }
 
     #[test]
