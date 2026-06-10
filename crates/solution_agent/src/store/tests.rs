@@ -1577,6 +1577,8 @@ async fn restore_open_tabs_hydrates_cold_sessions(cx: &mut TestAppContext) {
         entry_summaries: vec!["first prompt".into()],
         entries_v2: vec![],
         entry_created_ms: vec![],
+        available_models: vec![],
+        desired_model: None,
     })
     .unwrap();
     db.save_blob(id_a, blob_a).await.expect("blob a");
@@ -1661,6 +1663,8 @@ async fn cold_entries_from_persisted_v2_reconstructs_per_entry(cx: &mut TestAppC
             }),
         ],
         entry_created_ms: vec![1_700_000_000_000, 1_700_000_001_000],
+        available_models: vec![],
+        desired_model: None,
     };
     let (cold_entries, created_ms) =
         cx.update(|cx| crate::store::cold_entries_from_persisted(Some(persisted), cx));
@@ -1703,6 +1707,8 @@ fn persisted_session_roundtrips_with_structured_entries() {
         entry_summaries: vec!["Hello".into(), "Hi there!".into(), "ran tool x".into()],
         entries_v2: vec![],
         entry_created_ms: vec![],
+        available_models: vec![],
+        desired_model: None,
     };
     let bytes = serde_json::to_vec(&original).unwrap();
     let decoded: PersistedSession = serde_json::from_slice(&bytes).unwrap();
@@ -5088,4 +5094,31 @@ async fn idle_flush_prepends_not_a_reply_hint(cx: &mut TestAppContext) {
         found,
         "idle-flush new turn must carry the not-a-reply hint and the follow-up text"
     );
+}
+
+#[test]
+fn persisted_session_round_trips_models() {
+    let p = PersistedSession {
+        title: "t".into(),
+        entries: vec![],
+        entry_summaries: vec![],
+        entries_v2: vec![],
+        entry_created_ms: vec![],
+        available_models: vec![claude_native::ModelInfo {
+            value: "opus".into(),
+            display_name: "Opus".into(),
+            description: "".into(),
+        }],
+        desired_model: Some("opus".into()),
+    };
+    let bytes = serde_json::to_vec(&p).unwrap();
+    let back: PersistedSession = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(back.available_models.len(), 1);
+    assert_eq!(back.available_models[0].value, "opus");
+    assert_eq!(back.desired_model.as_deref(), Some("opus"));
+    // Old blobs without the new fields still decode (serde default).
+    let old = serde_json::json!({"title":"t","entry_summaries":[]});
+    let back2: PersistedSession = serde_json::from_value(old).unwrap();
+    assert!(back2.available_models.is_empty());
+    assert!(back2.desired_model.is_none());
 }

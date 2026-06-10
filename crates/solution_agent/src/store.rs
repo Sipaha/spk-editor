@@ -504,6 +504,13 @@ pub struct PersistedSession {
     /// empty vec, which the loader treats as "no captured times".
     #[serde(default)]
     pub entry_created_ms: Vec<i64>,
+    /// Models advertised for this session (`ModelInfo`). `#[serde(default)]`
+    /// → blobs written before this feature decode to an empty vec.
+    #[serde(default)]
+    pub available_models: Vec<claude_native::ModelInfo>,
+    /// The session's chosen model (SDK `value`). `#[serde(default)]`.
+    #[serde(default)]
+    pub desired_model: Option<String>,
 }
 
 pub use crate::model::{PersistedEntry, PersistedRole};
@@ -701,6 +708,8 @@ fn serializable_snapshot(session: &SolutionSession, cx: &App) -> Vec<u8> {
         entry_summaries,
         entries_v2,
         entry_created_ms,
+        available_models: session.cached_models.clone(),
+        desired_model: session.desired_model.clone(),
     };
     serde_json::to_vec(&snapshot).unwrap_or_default()
 }
@@ -1780,6 +1789,15 @@ impl SolutionAgentStore {
                     let persisted = blobs
                         .remove(id)
                         .and_then(|bytes| serde_json::from_slice::<PersistedSession>(&bytes).ok());
+                    // Extract model fields before moving `persisted` into
+                    // `cold_entries_from_persisted` (which consumes the Option).
+                    let restored_available_models = persisted
+                        .as_ref()
+                        .map(|p| p.available_models.clone())
+                        .unwrap_or_default();
+                    let restored_desired_model = persisted
+                        .as_ref()
+                        .and_then(|p| p.desired_model.clone());
                     let (cold_entries, restored_created_ms) =
                         cold_entries_from_persisted(persisted, cx);
                     let entity = cx.new(|_| {
@@ -1804,6 +1822,8 @@ impl SolutionAgentStore {
                         s.cached_total_tokens = meta.total_tokens;
                         s.parent_session_id = meta.parent_session_id;
                         s.tab_order = tab_order;
+                        s.cached_models = restored_available_models;
+                        s.desired_model = restored_desired_model;
                         s
                     });
                     this.sessions.insert(meta.id, entity);
