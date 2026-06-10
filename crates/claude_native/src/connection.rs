@@ -859,6 +859,17 @@ impl ClaudeNativeConnection {
             // AcpThread whenever the response eventually arrives.
             dispatch_initialize(&process, thread.downgrade(), shared.clone(), cx);
 
+            // A resumed `claude` IGNORES `--model` (it keeps the model recorded
+            // in the session transcript), so a model picked while this session
+            // was cold/sleeping must be (re)applied via the runtime `set_model`
+            // control request right after spawn — same mechanism as effort.
+            // The map is only seeded for resume/live sessions (new sessions get
+            // their model via `--model`, which a fresh spawn DOES honor).
+            if let Some(model) = self.desired_models.borrow().get(&session_id).cloned() {
+                process
+                    .send_control(ControlRequestOut::SetModel { model })
+                    .log_err();
+            }
             if let Some(effort) = self.desired_efforts.borrow().get(&session_id).cloned() {
                 process
                     .send_control(ControlRequestOut::ApplyFlagSettings {
@@ -1071,6 +1082,13 @@ impl ClaudeNativeConnection {
             // task, just like the initial spawn.
             dispatch_initialize(&process, thread.clone(), shared.clone(), cx);
 
+            // A resumed `claude` ignores `--model`; re-apply the desired model
+            // via `set_model` after respawn (see `open_session`).
+            if let Some(model) = self.desired_models.borrow().get(&session_id).cloned() {
+                process
+                    .send_control(ControlRequestOut::SetModel { model })
+                    .log_err();
+            }
             if let Some(effort) = self.desired_efforts.borrow().get(&session_id).cloned() {
                 process
                     .send_control(ControlRequestOut::ApplyFlagSettings {
