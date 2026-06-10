@@ -123,6 +123,59 @@ impl ClaudeNativeAgentServer {
             extra_env,
         }
     }
+
+    /// Spawn a throwaway `claude`, run the `initialize` handshake to read its
+    /// advertised model list, then kill it. Used to refresh the model list for
+    /// a COLD session (no live process, no project) WITHOUT waking it. Returns
+    /// an empty vec on any failure/timeout.
+    pub fn probe_models(
+        &self,
+        work_dir: PathBuf,
+        cx: &gpui::AsyncApp,
+    ) -> Task<Result<Vec<ModelInfo>>> {
+        let binary = self.binary.clone();
+        let extra_env = self.extra_env.clone();
+        cx.spawn(async move |cx| {
+            let spec = ClaudeCommandSpec {
+                binary,
+                work_dir,
+                session: SessionArg::New(uuid::Uuid::new_v4().to_string()),
+                mcp_servers_json: "{\"mcpServers\":{}}".to_string(),
+                append_system_prompt: None,
+                extra_env,
+                model: None,
+            };
+            let mut process = cx.update(|cx| ClaudeProcess::spawn(spec, cx))?;
+            let receiver = process.send_control(ControlRequestOut::Initialize {
+                hooks: build_default_hooks(),
+            })?;
+            // The real `claude` only emits the initialize response after the first
+            // stdin message. `/context` is a LOCAL slash command (no model API
+            // call), enough to flush the response. PHASE-6 VERIFICATION: if the
+            // response never carries `models` after `/context`, change this to a
+            // tiny real prompt (e.g. `"hi"`).
+            const PROBE_FLUSH_MESSAGE: &str = "/context";
+            process
+                .outgoing
+                .unbounded_send(InputMessage::user_text(PROBE_FLUSH_MESSAGE))?;
+
+            // Race the response against a timeout so a wedged probe can't hang.
+            // The receiver is a `oneshot::Receiver` awaited directly on the
+            // foreground executor (this `cx.spawn` body already runs there),
+            // mirroring `dispatch_initialize`'s `receiver.await`.
+            let timeout = cx
+                .background_executor()
+                .timer(std::time::Duration::from_secs(20));
+            let payload = select_biased! {
+                res = receiver.fuse() => res.ok(),
+                _ = timeout.fuse() => None,
+            };
+            process.kill().log_err();
+            Ok(payload
+                .map(|p| parse_available_models(&p))
+                .unwrap_or_default())
+        })
+    }
 }
 
 impl AgentServer for ClaudeNativeAgentServer {

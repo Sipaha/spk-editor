@@ -1671,8 +1671,43 @@ impl SolutionAgentStore {
         self.refresh_models_cold(session_id, cx);
     }
 
-    /// Cold-session model refresh. Wired to a throwaway probe in a later task.
-    fn refresh_models_cold(&mut self, _session_id: SolutionSessionId, _cx: &mut Context<Self>) {}
+    /// Cold-session model refresh: a COLD session has no live process AND
+    /// `project: None`, so the normal connection path is unavailable. Instead
+    /// ask the registered server to spawn a throwaway `claude`, read its
+    /// advertised model list, and kill it — without waking the real session.
+    fn refresh_models_cold(&mut self, session_id: SolutionSessionId, cx: &mut Context<Self>) {
+        let Some(session) = self.session(session_id) else {
+            return;
+        };
+        let agent_id = session.read(cx).agent_id.clone();
+        let work_dir = session.read(cx).cwd.clone();
+        let Some(server) = self.server_registry.get(&agent_id).cloned() else {
+            return;
+        };
+        let Some(native) = server
+            .into_any()
+            .downcast::<claude_native::ClaudeNativeAgentServer>()
+            .ok()
+        else {
+            return;
+        };
+        let task = native.probe_models(work_dir, &cx.to_async());
+        cx.spawn(async move |this, cx| {
+            let models = task.await.log_err().unwrap_or_default();
+            if models.is_empty() {
+                return;
+            }
+            this.update(cx, |this, cx| {
+                if let Some(session) = this.session(session_id) {
+                    session.update(cx, |s, _| s.cached_models = models);
+                    this.persist_session_blob(session_id, cx);
+                    cx.emit(SolutionAgentStoreEvent::SessionStateChanged(session_id));
+                }
+            })
+            .log_err();
+        })
+        .detach();
+    }
 
     /// Reverse-lookup the `SolutionSessionId` owning a given ACP session id.
     /// The native hook pull-closure knows only the `acp::SessionId`, but the
