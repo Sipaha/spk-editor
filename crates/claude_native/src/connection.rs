@@ -199,6 +199,7 @@ impl AgentServer for ClaudeNativeAgentServer {
             extra_env: self.extra_env.clone(),
             sessions: RefCell::new(HashMap::new()),
             desired_models: RefCell::new(HashMap::new()),
+            desired_efforts: RefCell::new(HashMap::new()),
             escalation_timeout: Cell::new(DEFAULT_ESCALATION_TIMEOUT),
             silence_window: Cell::new(DEFAULT_SILENCE_WINDOW),
             self_handle: RefCell::new(std::rc::Weak::new()),
@@ -309,6 +310,10 @@ pub struct ClaudeNativeConnection {
     /// resume/load wake (which doesn't carry session meta). Consulted by
     /// `open_session` when `extra_meta` has no `modelId`.
     desired_models: RefCell<HashMap<acp::SessionId, String>>,
+    /// Effort level a session should (re)spawn on, seeded by the store before
+    /// the wake; applied via `apply_flag_settings` right after spawn. Mirrors
+    /// `desired_models`.
+    desired_efforts: RefCell<HashMap<acp::SessionId, String>>,
     /// Grace period between a soft `interrupt` and the hard kill+resume
     /// escalation. A `Cell` so tests can shrink it to milliseconds.
     escalation_timeout: Cell<Duration>,
@@ -501,6 +506,17 @@ fn parse_available_models(payload: &serde_json::Value) -> Vec<ModelInfo> {
         .collect()
 }
 
+/// Build the `apply_flag_settings` payload for one of the 6 effort options.
+/// `ultracode` is its own boolean flag ("xhigh + workflows"); the other five
+/// are plain `effortLevel` values.
+fn effort_settings_json(value: &str) -> serde_json::Value {
+    if value == "ultracode" {
+        serde_json::json!({ "effortLevel": "xhigh", "ultracode": true })
+    } else {
+        serde_json::json!({ "effortLevel": value, "ultracode": false })
+    }
+}
+
 /// Send the `initialize` control_request and spawn a detached task that
 /// awaits its response, parses out the agent's slash-command list, and
 /// pushes it to the `AcpThread` as an `AvailableCommandsUpdate`. Used by
@@ -618,6 +634,42 @@ impl ClaudeNativeConnection {
             None => {
                 map.remove(session_id);
             }
+        }
+    }
+
+    /// Seed (or clear) the effort a session should (re)spawn on. Consulted by
+    /// `open_session`/`recover_session` to apply it via `apply_flag_settings`
+    /// right after spawn.
+    pub fn set_desired_effort(&self, session_id: &acp::SessionId, value: Option<String>) {
+        let mut map = self.desired_efforts.borrow_mut();
+        match value {
+            Some(v) => {
+                map.insert(session_id.clone(), v);
+            }
+            None => {
+                map.remove(session_id);
+            }
+        }
+    }
+
+    /// Switch a live session's effort via the `apply_flag_settings` control
+    /// request (applied on the next turn).
+    pub fn select_effort(&self, session_id: &acp::SessionId, value: String) {
+        let sessions = self.sessions.borrow();
+        let Some(session) = sessions.get(session_id) else {
+            log::warn!(
+                "claude_native: select_effort for unknown session {}",
+                session_id.0
+            );
+            return;
+        };
+        let settings = effort_settings_json(&value);
+        match session
+            .process
+            .send_control(ControlRequestOut::ApplyFlagSettings { settings })
+        {
+            Ok(_receiver) => {}
+            Err(error) => log::warn!("claude_native: apply_flag_settings write failed: {error}"),
         }
     }
 
@@ -806,6 +858,14 @@ impl ClaudeNativeConnection {
             // a detached task that fires `AvailableCommandsUpdate` on the
             // AcpThread whenever the response eventually arrives.
             dispatch_initialize(&process, thread.downgrade(), shared.clone(), cx);
+
+            if let Some(effort) = self.desired_efforts.borrow().get(&session_id).cloned() {
+                process
+                    .send_control(ControlRequestOut::ApplyFlagSettings {
+                        settings: effort_settings_json(&effort),
+                    })
+                    .log_err();
+            }
 
             let incoming = process.take_incoming();
             let critical_stderr = process.take_critical_stderr();
@@ -1010,6 +1070,15 @@ impl ClaudeNativeConnection {
             // the slash-command list to the (preserved) AcpThread. Detached
             // task, just like the initial spawn.
             dispatch_initialize(&process, thread.clone(), shared.clone(), cx);
+
+            if let Some(effort) = self.desired_efforts.borrow().get(&session_id).cloned() {
+                process
+                    .send_control(ControlRequestOut::ApplyFlagSettings {
+                        settings: effort_settings_json(&effort),
+                    })
+                    .log_err();
+            }
+
             let incoming = process.take_incoming();
             let critical_stderr = process.take_critical_stderr();
             let exited = process.wait_status();
@@ -2086,6 +2155,7 @@ mod tests {
             extra_env: Vec::new(),
             sessions: RefCell::new(HashMap::new()),
             desired_models: RefCell::new(HashMap::new()),
+            desired_efforts: RefCell::new(HashMap::new()),
             escalation_timeout: Cell::new(DEFAULT_ESCALATION_TIMEOUT),
             silence_window: Cell::new(DEFAULT_SILENCE_WINDOW),
             self_handle: RefCell::new(std::rc::Weak::new()),

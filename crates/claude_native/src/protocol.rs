@@ -265,6 +265,10 @@ pub enum ControlRequestOut {
     /// `setModel()`; applied by `claude` on the next turn. Wire:
     /// `{"subtype":"set_model","model":"<value>"}`.
     SetModel { model: String },
+    /// Apply runtime flag settings (effort level / ultracode). Mirrors the
+    /// SDK's `applyFlagSettings`; applied by `claude` on the next turn. Wire:
+    /// `{"subtype":"apply_flag_settings","settings":{...}}`.
+    ApplyFlagSettings { settings: serde_json::Value },
 }
 
 impl InputMessage {
@@ -498,5 +502,18 @@ mod tests {
         assert_eq!(v["type"], "control_request");
         assert_eq!(v["request"]["subtype"], "set_model");
         assert_eq!(v["request"]["model"], "sonnet");
+    }
+    #[test]
+    fn apply_flag_settings_control_request_wire_shape() {
+        let msg = InputMessage::ControlRequest {
+            request_id: "r1".into(),
+            request: ControlRequestOut::ApplyFlagSettings {
+                settings: serde_json::json!({"effortLevel":"high","ultracode":false}),
+            },
+        };
+        let v = serde_json::to_value(&msg).unwrap();
+        assert_eq!(v["request"]["subtype"], "apply_flag_settings");
+        assert_eq!(v["request"]["settings"]["effortLevel"], "high");
+        assert_eq!(v["request"]["settings"]["ultracode"], false);
     }
 }
