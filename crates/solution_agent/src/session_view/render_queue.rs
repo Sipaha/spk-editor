@@ -19,7 +19,7 @@ use agent_client_protocol::schema as acp;
 use gpui::{Context, Div, IntoElement, ParentElement, SharedString, Styled};
 use markdown::MarkdownElement;
 use ui::prelude::*;
-use ui::{Color, Icon, IconName, IconSize, Label, LabelSize, Tooltip};
+use ui::{Color, IconName, IconSize, Label, LabelSize, Tooltip};
 
 use super::SolutionSessionView;
 use crate::conversation_render::{decode_image_local, open_image_preview};
@@ -97,34 +97,24 @@ impl SolutionSessionView {
                 )
         })();
 
-        // Footer strip — always rendered. A "queued message" label + the
-        // send-now Bolt button (when running). Hover tooltip carries the
-        // "Queued — sends when the agent finishes" explanation + the recall
-        // hint, surfaced only on intent-to-learn-more.
-        let strip = h_flex()
-            .id("solution-session-queue-header")
-            .gap_2()
-            .px_2()
-            .py_1()
-            .items_center()
-            .child(
-                Icon::new(IconName::CountdownTimer)
-                    .size(IconSize::Small)
-                    .color(Color::Accent),
-            )
-            .child(
-                Label::new(SharedString::from("queued message"))
-                    .size(LabelSize::Default)
-                    .color(Color::Default),
-            )
-            .child(div().flex_1())
-            .when(is_running, |this| {
-                // Send-now bolt: cancels the current turn and
-                // immediately flushes the queue. Same affordance as
-                // the Bolt button next to Stop in the compose row,
-                // duplicated here so the user can interrupt straight
-                // from the queue UI without leaving the bubble.
-                this.child(
+        // Footer — no icon/label: the dashed bubble border already signals
+        // "queued/unsent". While the agent is running, surface the send-now
+        // Bolt so the user can flush the queue straight from the bubble;
+        // otherwise there's nothing to show, so the footer is omitted.
+        let strip = is_running.then(|| {
+            h_flex()
+                .id("solution-session-queue-header")
+                .gap_2()
+                .px_2()
+                .py_1()
+                .items_center()
+                .child(div().flex_1())
+                // Send-now bolt: cancels the current turn and immediately
+                // flushes the queue. Same affordance as the Bolt button next
+                // to Stop in the compose row, duplicated here so the user can
+                // interrupt straight from the queue UI without leaving the
+                // bubble.
+                .child(
                     ui::IconButton::new("solution-queue-send-now", IconName::BoltFilled)
                         .icon_size(IconSize::Small)
                         .icon_color(Color::Accent)
@@ -135,21 +125,18 @@ impl SolutionSessionView {
                             this.submit_compose_and_interrupt(window, cx);
                         })),
                 )
-            })
-            .tooltip(Tooltip::text(
-                "Queued — sends when the agent finishes. Up arrow in an empty \
-                 compose recalls; Esc cancels recall.",
-            ));
+        });
 
-        // Compose: ghost bubble FIRST, then the strip beneath it — the
-        // "queued message" label + send-now bolt sit at the bottom of the
-        // queue UI, right above the status row.
+        // Compose: ghost bubble FIRST, then (only while running) the send-now
+        // bolt strip beneath it, right above the status row.
         let _ = window;
         let mut section = v_flex().w_full().px_1();
         if let Some(bubble) = bubble {
             section = section.child(bubble);
         }
-        section = section.child(strip);
+        if let Some(strip) = strip {
+            section = section.child(strip);
+        }
         Some(section)
     }
 
