@@ -290,6 +290,20 @@ pub(crate) fn render_status_row(
     let store = SolutionAgentStore::global(cx);
     let model_options = store.read(cx).session_models(view.session_id(), cx);
     let selected_value = store.read(cx).selected_model(view.session_id(), cx);
+    // Display name for the trigger / read-only label. Prefer the user's
+    // explicit choice (so the panel reflects a selection IMMEDIATELY — before
+    // the agent's next `message_start` refreshes the observed `active_model`),
+    // then the live active model, then the raw selected value.
+    let model_label: Option<SharedString> = selected_value
+        .as_ref()
+        .and_then(|v| {
+            model_options
+                .iter()
+                .find(|m| &m.value == v)
+                .map(|m| SharedString::from(m.display_name.clone()))
+        })
+        .or_else(|| model_text.clone())
+        .or_else(|| selected_value.clone().map(SharedString::from));
 
     let raw_used = usage.as_ref().map(|u| u.used_tokens).unwrap_or(0);
     let peak = view.status_peak_used_tokens;
@@ -541,7 +555,11 @@ pub(crate) fn render_status_row(
         }
     };
     let is_subagent_tab = subagent_status.is_some();
-    let show_model_dropdown = !is_subagent_tab && !model_options.is_empty();
+    // Block model switching while the agent is mid-turn (or resuming) — a
+    // `set_model` then only lands on the *next* turn and reads as a no-op.
+    let model_select_enabled = !is_running && !is_resuming;
+    let show_model_dropdown =
+        !is_subagent_tab && !model_options.is_empty() && model_select_enabled;
 
     // State badge ("Thinking… 3m05s" / "Done in 12s" / "Error: …")
     // anchors the LEFT of the row — that's where the user's eye
@@ -731,10 +749,8 @@ pub(crate) fn render_status_row(
                 let session_id = view.session_id();
                 let options = model_options.clone();
                 let selected = selected_value.clone();
-                let label: SharedString = model_text
-                    .clone()
-                    .or_else(|| selected_value.clone().map(SharedString::from))
-                    .unwrap_or_else(|| "model".into());
+                let label: SharedString =
+                    model_label.clone().unwrap_or_else(|| "model".into());
                 let trigger = ui::Button::new("solution-status-model-trigger", label)
                     .label_size(LabelSize::Small)
                     .color(Color::Muted)
@@ -796,7 +812,7 @@ pub(crate) fn render_status_row(
                     )
             })
             .when(!show_model_dropdown, |this| {
-                this.when_some(model_text, |this, model| {
+                this.when_some(model_label.clone(), |this, model| {
                     this.child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
                         .child(Label::new(model).color(Color::Muted).size(LabelSize::Small))
                 })
