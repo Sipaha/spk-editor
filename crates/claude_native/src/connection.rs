@@ -203,6 +203,10 @@ struct SessionShared {
     /// been seen yet (`inferContextWindowFromModel` in JS:`acp-agent.js:716`).
     /// Reset on session restart but persists across turns within a session.
     active_model: RefCell<Option<String>>,
+    /// Models advertised by `claude` in the `initialize` control-response
+    /// (only arrives after the first turn — see `dispatch_initialize`).
+    /// Read by the store to refresh the session's persisted cache.
+    available_models: RefCell<Vec<ModelInfo>>,
     /// The session's own id, so the hook arm can pass it to the store pull.
     session_id: acp::SessionId,
     /// Shared cell holding the store's follow-up pull (see `ClaudeNativeConnection::store_pull`).
@@ -448,6 +452,7 @@ fn parse_available_models(payload: &serde_json::Value) -> Vec<ModelInfo> {
 fn dispatch_initialize(
     process: &ClaudeProcess,
     thread: WeakEntity<AcpThread>,
+    shared: Rc<SessionShared>,
     cx: &mut gpui::AsyncApp,
 ) {
     let Ok(receiver) = process.send_control(ControlRequestOut::Initialize {
@@ -470,6 +475,10 @@ fn dispatch_initialize(
                 return;
             }
         };
+        let models = parse_available_models(&payload);
+        if !models.is_empty() {
+            *shared.available_models.borrow_mut() = models;
+        }
         let commands = parse_available_commands(&payload);
         log::debug!(
             target: "claude_native::initialize",
@@ -505,6 +514,16 @@ impl ClaudeNativeConnection {
         if slot.is_none() {
             *slot = Some(pull);
         }
+    }
+
+    /// The models `claude` advertised for this session's last `initialize`
+    /// response, if any. Empty until the session has run at least one turn.
+    pub fn available_models(&self, session_id: &acp::SessionId) -> Vec<ModelInfo> {
+        self.sessions
+            .borrow()
+            .get(session_id)
+            .map(|s| s.shared.available_models.borrow().clone())
+            .unwrap_or_default()
     }
 
     /// Buffer a user-typed follow-up to be injected into the running turn at
@@ -648,6 +667,7 @@ impl ClaudeNativeConnection {
                 stream_usage: RefCell::new(None),
                 stream_used_total: Cell::new(None),
                 active_model: RefCell::new(None),
+                available_models: RefCell::new(Vec::new()),
                 session_id: session_id.clone(),
                 pending_pull: self.store_pull.clone(),
             });
@@ -675,7 +695,7 @@ impl ClaudeNativeConnection {
             // `dispatch_initialize` does NOT block session creation — it spawns
             // a detached task that fires `AvailableCommandsUpdate` on the
             // AcpThread whenever the response eventually arrives.
-            dispatch_initialize(&process, thread.downgrade(), cx);
+            dispatch_initialize(&process, thread.downgrade(), shared.clone(), cx);
 
             let incoming = process.take_incoming();
             let critical_stderr = process.take_critical_stderr();
@@ -857,13 +877,6 @@ impl ClaudeNativeConnection {
                 }
             };
 
-            // Same `initialize` as `open_session`: the resumed process needs
-            // its hook callbacks re-registered or live injection would stop
-            // working after any escalation/respawn, AND it needs to re-pump
-            // the slash-command list to the (preserved) AcpThread. Detached
-            // task, just like the initial spawn.
-            dispatch_initialize(&process, thread.clone(), cx);
-
             // No `init` wait: the resumed `claude` only emits `init` after its
             // next user turn, and we already know the (unchanged) session id.
 
@@ -876,9 +889,17 @@ impl ClaudeNativeConnection {
                 stream_usage: RefCell::new(None),
                 stream_used_total: Cell::new(None),
                 active_model: RefCell::new(None),
+                available_models: RefCell::new(Vec::new()),
                 session_id: session_id.clone(),
                 pending_pull: self.store_pull.clone(),
             });
+
+            // Same `initialize` as `open_session`: the resumed process needs
+            // its hook callbacks re-registered or live injection would stop
+            // working after any escalation/respawn, AND it needs to re-pump
+            // the slash-command list to the (preserved) AcpThread. Detached
+            // task, just like the initial spawn.
+            dispatch_initialize(&process, thread.clone(), shared.clone(), cx);
             let incoming = process.take_incoming();
             let critical_stderr = process.take_critical_stderr();
             let exited = process.wait_status();
