@@ -831,22 +831,26 @@ impl SolutionAgentStore {
         project: Entity<project::Project>,
         cx: &mut Context<Self>,
     ) -> Task<Result<SolutionSessionId>> {
-        self.create_session_with_cwd(solution_id, agent_id, project, None, cx)
+        self.create_session_with_cwd(solution_id, agent_id, project, None, None, cx)
     }
 
     /// Same as `create_session`, but lets the caller pin the session's
     /// working directory to a specific path inside the solution (e.g.
     /// a member project root) instead of defaulting to `solution.root`.
-    /// Pass `None` for the default behavior.
+    /// Pass `None` for the default behavior. `model` (when set) is the
+    /// model the new session should start on — it's threaded into the
+    /// `NewSessionRequest` `_meta` so `claude` launches with `--model` and
+    /// is persisted as the session's `desired_model`.
     pub fn create_session_with_cwd(
         &mut self,
         solution_id: SolutionId,
         agent_id: AgentServerId,
         project: Entity<project::Project>,
         cwd: Option<PathBuf>,
+        model: Option<String>,
         cx: &mut Context<Self>,
     ) -> Task<Result<SolutionSessionId>> {
-        self.create_session_with_parent(solution_id, agent_id, project, cwd, None, cx)
+        self.create_session_with_parent(solution_id, agent_id, project, cwd, None, model, cx)
     }
 
     /// Full variant. `parent_session_id` (F: sub-agent indication) marks
@@ -862,6 +866,7 @@ impl SolutionAgentStore {
         project: Entity<project::Project>,
         cwd: Option<PathBuf>,
         parent_session_id: Option<SolutionSessionId>,
+        model: Option<String>,
         cx: &mut Context<Self>,
     ) -> Task<Result<SolutionSessionId>> {
         let pair = (solution_id.clone(), agent_id.clone());
@@ -891,8 +896,10 @@ impl SolutionAgentStore {
                 let task =
                     store.get_or_spawn_connection(pair.clone(), &solution, project.clone(), cx);
                 // Brand-new session — no entity exists yet, so there is no
-                // persisted `desired_model` to thread in.
-                let meta = store.build_session_meta(&pair.1, &solution, None, cx);
+                // persisted `desired_model` to thread in. An explicit `model`
+                // chosen in the new-chat row is passed as the override so
+                // `claude` launches on it immediately.
+                let meta = store.build_session_meta(&pair.1, &solution, None, model.clone(), cx);
                 (task, meta)
             })?;
             let connection = connection_task.await?;
@@ -953,6 +960,9 @@ impl SolutionAgentStore {
                     s.project = Some(project.clone());
                     s.cwd = session_cwd.clone();
                     s.parent_session_id = parent_session_id;
+                    // Persist the model the session was created on so it shows
+                    // as selected in the status row and survives a cold reload.
+                    s.desired_model = model.clone();
                     s.set_acp_thread(Some(acp_thread.clone()), cx);
                     s
                 });
@@ -1022,6 +1032,7 @@ impl SolutionAgentStore {
         agent_id: &AgentServerId,
         solution: &Solution,
         session_id: Option<SolutionSessionId>,
+        model_override: Option<String>,
         cx: &App,
     ) -> Option<acp::Meta> {
         let mut meta = acp::Meta::new();
@@ -1036,10 +1047,14 @@ impl SolutionAgentStore {
         }
         // The native side reads the chosen model from a TOP-LEVEL `"modelId"`
         // string key (`model_from_meta` → `meta.get("modelId")?.as_str()`), so
-        // a session that picked a model while cold wakes onto it.
-        let desired_model = session_id
-            .and_then(|id| self.sessions.get(&id))
-            .and_then(|session| session.read(cx).desired_model.clone());
+        // a session that picked a model while cold wakes onto it. An explicit
+        // `model_override` (e.g. the model chosen in the new-chat row) wins;
+        // otherwise fall back to the session's persisted `desired_model`.
+        let desired_model = model_override.or_else(|| {
+            session_id
+                .and_then(|id| self.sessions.get(&id))
+                .and_then(|session| session.read(cx).desired_model.clone())
+        });
         if let Some(model) = desired_model {
             meta.insert("modelId".to_string(), serde_json::Value::String(model));
         }
@@ -1313,7 +1328,7 @@ impl SolutionAgentStore {
             // round-trip.
             if attached.is_none() && all_resource_gone {
                 let acp_meta = this.update(cx, |store, cx| {
-                    store.build_session_meta(&pair.1, &solution, Some(meta.id), cx)
+                    store.build_session_meta(&pair.1, &solution, Some(meta.id), None, cx)
                 })?;
                 let fallback_cwd = if primary_cwd != solution.root {
                     primary_cwd.clone()
@@ -1616,6 +1631,63 @@ impl SolutionAgentStore {
             .find(|m| active_str.contains(m.value.as_str()) || m.value.contains(active_str))
             .map(|m| m.value.clone())
             .or_else(|| Some(active.to_string()))
+    }
+
+    /// Models to offer (and the default to pre-select) when creating a NEW
+    /// session for `(solution_id, agent_id)`, derived from that pair's most-
+    /// recently-active session (its captured/persisted list + chosen model).
+    /// Empty list + None when the pair has no sessions yet.
+    pub fn new_chat_model_options(
+        &self,
+        solution_id: &SolutionId,
+        agent_id: &AgentServerId,
+        cx: &App,
+    ) -> (Vec<claude_native::ModelInfo>, Option<String>) {
+        let latest = self
+            .sessions
+            .values()
+            .filter(|s| {
+                let s = s.read(cx);
+                &s.solution_id == solution_id && &s.agent_id == agent_id
+            })
+            .max_by_key(|s| s.read(cx).last_activity_at)
+            .map(|s| s.read(cx).id);
+        match latest {
+            Some(id) => (self.session_models(id, cx), self.selected_model(id, cx)),
+            None => (Vec::new(), None),
+        }
+    }
+
+    /// Probe `claude` for its current model list for `(solution_id, agent_id)`
+    /// without a session — used by the new-chat "Refresh models". Resolves the
+    /// registered server + the solution root as work_dir. Empty on any failure.
+    pub fn probe_models_for_agent(
+        &self,
+        solution_id: &SolutionId,
+        agent_id: &AgentServerId,
+        cx: &mut App,
+    ) -> Task<Result<Vec<claude_native::ModelInfo>>> {
+        let Some(server) = self.server_registry.get(agent_id).cloned() else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let Some(native) = server
+            .into_any()
+            .downcast::<claude_native::ClaudeNativeAgentServer>()
+            .ok()
+        else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let work_dir = SolutionStore::try_global(cx).and_then(|st| {
+            st.read(cx)
+                .solutions()
+                .iter()
+                .find(|s| &s.id == solution_id)
+                .map(|s| s.root.clone())
+        });
+        let Some(work_dir) = work_dir else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        native.probe_models(work_dir, &cx.to_async())
     }
 
     /// Record + apply a model choice. Persists `desired_model`; if the session
@@ -2358,7 +2430,7 @@ impl SolutionAgentStore {
         let Some(session) = self.sessions.get(&session_id).cloned() else {
             return Task::ready(Err(anyhow!("unknown session {session_id}")));
         };
-        let (solution_id, agent_id, project, previous_cwd) = {
+        let (solution_id, agent_id, project, previous_cwd, previous_model) = {
             let s = session.read(cx);
             let project = match s.project.clone() {
                 Some(project) => project,
@@ -2386,6 +2458,7 @@ impl SolutionAgentStore {
                 s.agent_id.clone(),
                 project,
                 cwd_override,
+                s.desired_model.clone(),
             )
         };
         let pair = (solution_id.clone(), agent_id.clone());
@@ -2405,8 +2478,14 @@ impl SolutionAgentStore {
         if let Err(err) = self.close_session(session_id, cx) {
             log::warn!("restart_agent: close_session({session_id}) failed: {err:?}");
         }
-        let create_task =
-            self.create_session_with_cwd(solution_id, agent_id, project, previous_cwd, cx);
+        let create_task = self.create_session_with_cwd(
+            solution_id,
+            agent_id,
+            project,
+            previous_cwd,
+            previous_model,
+            cx,
+        );
         cx.spawn(async move |_this, _cx: &mut AsyncApp| create_task.await)
     }
 
@@ -2473,7 +2552,7 @@ impl SolutionAgentStore {
             let (connection_task, acp_meta) = this.update(cx, |store, cx| {
                 let task =
                     store.get_or_spawn_connection(pair.clone(), &solution, project.clone(), cx);
-                let meta = store.build_session_meta(&pair.1, &solution, Some(session_id), cx);
+                let meta = store.build_session_meta(&pair.1, &solution, Some(session_id), None, cx);
                 (task, meta)
             })?;
             let connection = connection_task.await?;
@@ -2619,7 +2698,7 @@ impl SolutionAgentStore {
             let (connection_task, acp_meta) = this.update(cx, |store, cx| {
                 let task =
                     store.get_or_spawn_connection(pair.clone(), &solution, project.clone(), cx);
-                let meta = store.build_session_meta(&pair.1, &solution, Some(session_id), cx);
+                let meta = store.build_session_meta(&pair.1, &solution, Some(session_id), None, cx);
                 (task, meta)
             })?;
             let connection = connection_task.await?;

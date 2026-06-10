@@ -1155,6 +1155,7 @@ impl ConsolePanel {
                 SharedString::from(CLAUDE_ACP_AGENT_ID),
                 project,
                 cwd,
+                None,
                 cx,
             )
         });

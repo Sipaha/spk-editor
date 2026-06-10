@@ -2027,6 +2027,7 @@ impl McpServerTool for CreateSessionTool {
                     project,
                     cwd,
                     parent_session_id,
+                    None,
                     cx,
                 )
             })
@@ -4547,6 +4548,7 @@ mod tests {
                     project,
                     None,
                     Some(parent_id),
+                    None,
                     cx,
                 )
             })

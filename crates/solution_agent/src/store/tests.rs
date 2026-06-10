@@ -2228,7 +2228,13 @@ fn build_session_meta_emits_correct_json_shape(cx: &mut TestAppContext) {
         let store = SolutionAgentStore::global(cx);
         store.update(cx, |store, cx| {
             let meta = store
-                .build_session_meta(&SharedString::from(CLAUDE_ACP_AGENT_ID), &solution, None, cx)
+                .build_session_meta(
+                    &SharedString::from(CLAUDE_ACP_AGENT_ID),
+                    &solution,
+                    None,
+                    None,
+                    cx,
+                )
                 .expect("registered ClaudeAcpAdapter produces a non-empty prompt");
             let system_prompt = meta
                 .get("systemPrompt")
@@ -2251,7 +2257,13 @@ fn build_session_meta_emits_correct_json_shape(cx: &mut TestAppContext) {
 
             // Unknown agent → None (registry lookup fails)
             let none_meta =
-                store.build_session_meta(&SharedString::from("not-registered"), &solution, None, cx);
+                store.build_session_meta(
+                    &SharedString::from("not-registered"),
+                    &solution,
+                    None,
+                    None,
+                    cx,
+                );
             assert!(none_meta.is_none(), "unknown agent yields None");
         });
     });
@@ -2283,7 +2295,13 @@ fn build_session_meta_emits_correct_json_shape(cx: &mut TestAppContext) {
         let store = SolutionAgentStore::global(cx);
         store.update(cx, |store, cx| {
             let meta =
-                store.build_session_meta(&SharedString::from("empty-adapter"), &solution, None, cx);
+                store.build_session_meta(
+                    &SharedString::from("empty-adapter"),
+                    &solution,
+                    None,
+                    None,
+                    cx,
+                );
             assert!(meta.is_none(), "empty prompt yields None");
         });
     });
@@ -4967,6 +4985,7 @@ async fn create_child_session_is_not_pinned(cx: &mut TestAppContext) {
                     project,
                     None,
                     Some(parent),
+                    None,
                     cx,
                 )
             })
@@ -5179,6 +5198,53 @@ fn select_model_on_cold_session_records_desired(cx: &mut TestAppContext) {
                 Some("sonnet"),
                 "selected_model must reflect the explicit desired_model"
             );
+        });
+    });
+}
+
+/// `new_chat_model_options` derives the model list + default selection for a
+/// brand-new session from the pair's most-recently-active existing session:
+/// its captured `cached_models` and chosen `desired_model`.
+#[gpui::test]
+fn new_chat_model_options_from_latest_session(cx: &mut TestAppContext) {
+    let registry = Arc::new(AdapterRegistry::new());
+    cx.update(|cx| SolutionAgentStore::init_global(cx, registry));
+
+    let sol = SolutionId("sol-a".into());
+    let agent: AgentServerId = SharedString::from("claude-acp");
+
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            // No sessions yet for the pair → empty list + None.
+            let (models, selected) = store.new_chat_model_options(&sol, &agent, cx);
+            assert!(models.is_empty());
+            assert!(selected.is_none());
+
+            let id = SolutionSessionId::new();
+            let session =
+                insert_cold_session(id, sol.clone(), agent.clone(), None, None, store, cx);
+            session.update(cx, |s, _| {
+                s.cached_models = vec![
+                    claude_native::ModelInfo {
+                        value: "opus".into(),
+                        display_name: "Opus".into(),
+                        description: "".into(),
+                    },
+                    claude_native::ModelInfo {
+                        value: "sonnet".into(),
+                        display_name: "Sonnet".into(),
+                        description: "".into(),
+                    },
+                ];
+                s.desired_model = Some("opus".into());
+            });
+
+            let (models, selected) = store.new_chat_model_options(&sol, &agent, cx);
+            assert_eq!(models.len(), 2);
+            assert_eq!(models[0].value, "opus");
+            assert_eq!(models[1].value, "sonnet");
+            assert_eq!(selected.as_deref(), Some("opus"));
         });
     });
 }
