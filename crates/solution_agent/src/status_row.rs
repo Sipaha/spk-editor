@@ -561,6 +561,16 @@ pub(crate) fn render_status_row(
     let show_model_dropdown =
         !is_subagent_tab && !model_options.is_empty() && model_select_enabled;
 
+    let effort_value = store.read(cx).selected_effort(view.session_id(), cx);
+    // Effort always has a fixed option list, so the dropdown shows whenever the
+    // model dropdown would (main tab, not running/resuming). It does NOT depend
+    // on a captured list.
+    let show_effort_dropdown = !is_subagent_tab && model_select_enabled;
+    let effort_label: SharedString = effort_value
+        .clone()
+        .map(SharedString::from)
+        .unwrap_or_else(|| "effort".into());
+
     // State badge ("Thinking… 3m05s" / "Done in 12s" / "Error: …")
     // anchors the LEFT of the row — that's where the user's eye
     // lands first, and the row sits directly above the compose
@@ -816,6 +826,53 @@ pub(crate) fn render_status_row(
                     this.child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
                         .child(Label::new(model).color(Color::Muted).size(LabelSize::Small))
                 })
+            })
+            .when(show_effort_dropdown, |this| {
+                let session_id = view.session_id();
+                let effort_value = effort_value.clone();
+                let trigger =
+                    ui::Button::new("solution-status-effort-trigger", effort_label.clone())
+                        .label_size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .end_icon(
+                            Icon::new(IconName::ChevronDown)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        );
+                this.child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
+                    .child(
+                        PopoverMenu::new("solution-status-effort-menu")
+                            .trigger(trigger)
+                            .menu(move |window, cx| {
+                                let effort_value = effort_value.clone();
+                                Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
+                                    for level in crate::store::EFFORT_LEVELS {
+                                        let is_current = effort_value.as_deref() == Some(*level);
+                                        let value = level.to_string();
+                                        let entry =
+                                            ui::ContextMenuEntry::new(SharedString::from(*level))
+                                                .when(is_current, |e| {
+                                                    e.icon(IconName::Check)
+                                                        .icon_color(Color::Accent)
+                                                })
+                                                .handler(move |_window, cx| {
+                                                    let value = value.clone();
+                                                    SolutionAgentStore::global(cx).update(
+                                                        cx,
+                                                        |store, cx| {
+                                                            store.select_effort(
+                                                                session_id, value, cx,
+                                                            );
+                                                        },
+                                                    );
+                                                });
+                                        menu = menu.item(entry);
+                                    }
+                                    menu
+                                }))
+                            })
+                            .anchor(gpui::Anchor::TopRight),
+                    )
             })
             .when_some(mode_text, |this, mode| {
                 this.child(Label::new("·").color(Color::Muted).size(LabelSize::Small))

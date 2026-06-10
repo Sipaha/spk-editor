@@ -146,6 +146,10 @@ pub struct ConsolePanel {
     /// Model the next new AI chat will start on (the "+" popover sets this).
     /// `None` → fall back to the latest session's model (see effective_new_chat_model).
     pending_new_chat_model: Option<String>,
+    /// Effort the next new AI chat will start on (the "+" popover sets this).
+    /// `None` → the session takes its own default. Effort has a fixed option
+    /// list, so there's no "refreshed" cache to mirror.
+    pending_new_chat_effort: Option<String>,
     /// Probe result for the "+" popover's "Refresh models" — overrides the
     /// derived list when present.
     refreshed_new_chat_models: Option<Vec<solution_agent::ModelInfo>>,
@@ -207,6 +211,7 @@ impl ConsolePanel {
             assistant_enabled: false,
             chat_tab_to_activate: None,
             pending_new_chat_model: None,
+            pending_new_chat_effort: None,
             refreshed_new_chat_models: None,
             _subscriptions: vec![chat_event_sub],
         }
@@ -722,6 +727,7 @@ impl ConsolePanel {
             .filter(|m| !m.is_empty())
             .unwrap_or(model_options);
         let effective_model = self.pending_new_chat_model.clone().or(model_default);
+        let effective_effort = self.pending_new_chat_effort.clone();
         let weak_self = cx.weak_entity();
 
         let plus_container = div()
@@ -746,6 +752,7 @@ impl ConsolePanel {
                     let weak_self = weak_self.clone();
                     let model_options = model_options.clone();
                     let effective_model = effective_model.clone();
+                    let effective_effort = effective_effort.clone();
                     Some(ContextMenu::build(window, cx, move |menu, _, _| {
                         let menu = menu.action("New Terminal", NewTerminal.boxed_clone());
                         let menu = if cwd_options.len() <= 1 {
@@ -848,6 +855,31 @@ impl ConsolePanel {
                             }
                             menu
                         } else {
+                            menu
+                        };
+                        // Effort section for the next new chat. Fixed option
+                        // list (no probe / refresh), mirroring the Model section.
+                        let menu = {
+                            let mut menu = menu.separator().header("Effort");
+                            for level in solution_agent::EFFORT_LEVELS {
+                                let weak_self = weak_self.clone();
+                                let is_current = effective_effort.as_deref() == Some(*level);
+                                let value = level.to_string();
+                                let entry = ui::ContextMenuEntry::new(SharedString::from(*level))
+                                    .when(is_current, |e| {
+                                        e.icon(IconName::Check).icon_color(Color::Accent)
+                                    })
+                                    .handler(move |_window, cx| {
+                                        if let Some(panel) = weak_self.upgrade() {
+                                            let value = value.clone();
+                                            panel.update(cx, |panel, cx| {
+                                                panel.pending_new_chat_effort = Some(value);
+                                                cx.notify();
+                                            });
+                                        }
+                                    });
+                                menu = menu.item(entry);
+                            }
                             menu
                         };
                         menu.action("Spawn Task…", zed_actions::Spawn::modal().boxed_clone())
@@ -1217,6 +1249,10 @@ impl ConsolePanel {
             .1
     }
 
+    fn effective_new_chat_effort(&self) -> Option<String> {
+        self.pending_new_chat_effort.clone()
+    }
+
     fn refresh_new_chat_models(&mut self, solution_id: SolutionId, cx: &mut Context<Self>) {
         let agent_id = SharedString::from(CLAUDE_ACP_AGENT_ID);
         let store = SolutionAgentStore::global(cx);
@@ -1253,6 +1289,7 @@ impl ConsolePanel {
         // lands. This is the same path a mobile-driven create takes, so the
         // two surfaces can't diverge.
         let model = self.effective_new_chat_model(&solution_id, cx);
+        let effort = self.effective_new_chat_effort();
         let store = SolutionAgentStore::global(cx);
         let task = store.update(cx, |store, cx| {
             store.create_session_with_cwd(
@@ -1261,7 +1298,7 @@ impl ConsolePanel {
                 project,
                 cwd,
                 model,
-                None,
+                effort,
                 cx,
             )
         });
