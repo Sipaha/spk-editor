@@ -223,6 +223,18 @@ pub struct UserPayload {
     pub content: serde_json::Value,
 }
 
+/// Descriptor for one selectable model, mirroring the SDK `ModelInfo`
+/// (`SDKControlInitializeResponse.models[]`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelInfo {
+    /// Alias or full id passed to `set_model` / `--model` (SDK `value`).
+    pub value: String,
+    /// Human-facing label (SDK `displayName`).
+    pub display_name: String,
+    /// One-line description (SDK `description`).
+    pub description: String,
+}
+
 /// One entry in the `hooks` map of an `initialize` control_request: a matcher
 /// pattern (or `null` for "all"), the list of callback ids the SDK should
 /// invoke when this event fires (we pick stable names like `pti`/`stop_inj`),
@@ -249,6 +261,10 @@ pub enum ControlRequestOut {
     Initialize {
         hooks: std::collections::BTreeMap<String, Vec<HookConfig>>,
     },
+    /// Switch the session's model mid-conversation. Mirrors the SDK's
+    /// `setModel()`; applied by `claude` on the next turn. Wire:
+    /// `{"subtype":"set_model","model":"<value>"}`.
+    SetModel { model: String },
 }
 
 impl InputMessage {
@@ -471,5 +487,16 @@ mod tests {
         assert!(allow.contains(r#""behavior":"allow""#));
         let deny = serde_json::to_string(&InputMessage::permission_response("r1", false)).unwrap();
         assert!(deny.contains(r#""behavior":"deny""#));
+    }
+    #[test]
+    fn set_model_control_request_wire_shape() {
+        let msg = InputMessage::ControlRequest {
+            request_id: "r1".into(),
+            request: ControlRequestOut::SetModel { model: "sonnet".into() },
+        };
+        let v = serde_json::to_value(&msg).unwrap();
+        assert_eq!(v["type"], "control_request");
+        assert_eq!(v["request"]["subtype"], "set_model");
+        assert_eq!(v["request"]["model"], "sonnet");
     }
 }
