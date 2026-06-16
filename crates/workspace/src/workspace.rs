@@ -169,6 +169,31 @@ use crate::{
 
 pub const SERIALIZATION_THROTTLE_TIME: Duration = Duration::from_millis(200);
 
+/// Fixed width of the vertical dock toggle strips that flank the workspace
+/// (`render_left_dock_strip` / `render_right_dock_strip`). The strips sit
+/// outside the docks but inside `self.bounds`, so the horizontal dock-resize
+/// math must subtract this to keep the resize handle under the cursor.
+pub(crate) const DOCK_STRIP_WIDTH: Pixels = px(40.);
+
+/// New size for a dock while its resize handle is dragged to `pointer`
+/// (a window-relative position), given the workspace content `bounds`.
+///
+/// The left/right docks are inset from `bounds` by [`DOCK_STRIP_WIDTH`]
+/// (the fixed toggle strips flank them), so that width is subtracted to keep
+/// the handle exactly under the cursor. The bottom dock has no strip below it,
+/// so its height is measured straight from `bounds.bottom()`.
+pub(crate) fn dock_resize_target_size(
+    position: DockPosition,
+    bounds: Bounds<Pixels>,
+    pointer: Point<Pixels>,
+) -> Pixels {
+    match position {
+        DockPosition::Left => pointer.x - bounds.left() - DOCK_STRIP_WIDTH,
+        DockPosition::Right => bounds.right() - pointer.x - DOCK_STRIP_WIDTH,
+        DockPosition::Bottom => bounds.bottom() - pointer.y,
+    }
+}
+
 static ZED_WINDOW_SIZE: LazyLock<Option<Size<Pixels>>> = LazyLock::new(|| {
     env::var("ZED_WINDOW_SIZE")
         .ok()
@@ -7755,7 +7780,7 @@ impl Workspace {
         let colors = cx.theme().colors();
         v_flex()
             .flex_none()
-            .w(px(40.))
+            .w(DOCK_STRIP_WIDTH)
             .h_full()
             .px_1()
             .py_2()
@@ -7773,7 +7798,7 @@ impl Workspace {
         let colors = cx.theme().colors();
         v_flex()
             .flex_none()
-            .w(px(40.))
+            .w(DOCK_STRIP_WIDTH)
             .h_full()
             .px_1()
             .py_2()
@@ -8570,30 +8595,24 @@ impl Render for Workspace {
                                             workspace.previous_dock_drag_coordinates =
                                                 Some(e.event.position);
 
-                                            match e.drag(cx).0 {
+                                            let position = e.drag(cx).0;
+                                            let target = dock_resize_target_size(
+                                                position,
+                                                workspace.bounds,
+                                                e.event.position,
+                                            );
+                                            match position {
                                                 DockPosition::Left => {
-                                                    workspace.resize_left_dock(
-                                                        e.event.position.x
-                                                            - workspace.bounds.left(),
-                                                        window,
-                                                        cx,
-                                                    );
+                                                    workspace
+                                                        .resize_left_dock(target, window, cx);
                                                 }
                                                 DockPosition::Right => {
-                                                    workspace.resize_right_dock(
-                                                        workspace.bounds.right()
-                                                            - e.event.position.x,
-                                                        window,
-                                                        cx,
-                                                    );
+                                                    workspace
+                                                        .resize_right_dock(target, window, cx);
                                                 }
                                                 DockPosition::Bottom => {
-                                                    workspace.resize_bottom_dock(
-                                                        workspace.bounds.bottom()
-                                                            - e.event.position.y,
-                                                        window,
-                                                        cx,
-                                                    );
+                                                    workspace
+                                                        .resize_bottom_dock(target, window, cx);
                                                 }
                                             };
                                             workspace.serialize_workspace(window, cx);
@@ -10921,6 +10940,34 @@ mod tests {
     use settings::SettingsStore;
     use util::path;
     use util::rel_path::rel_path;
+
+    #[test]
+    fn test_dock_resize_handle_tracks_cursor() {
+        // Workspace content area with a non-zero origin so a missing
+        // `bounds.left()` term would be caught.
+        let bounds = Bounds {
+            origin: point(px(10.), px(20.)),
+            size: size(px(1000.), px(800.)),
+        };
+
+        // For each dock the resize handle must land exactly under the cursor
+        // (the bug was a `DOCK_STRIP_WIDTH` gap between edge and cursor). The
+        // dock occupies the span from its inner edge to the strip-inset outer
+        // edge; the handle is at `outer_edge -/+ size`.
+        let left_pointer = point(px(300.), px(400.));
+        let left_size = dock_resize_target_size(DockPosition::Left, bounds, left_pointer);
+        assert_eq!(bounds.left() + DOCK_STRIP_WIDTH + left_size, left_pointer.x);
+
+        let right_pointer = point(px(700.), px(400.));
+        let right_size = dock_resize_target_size(DockPosition::Right, bounds, right_pointer);
+        assert_eq!(bounds.right() - DOCK_STRIP_WIDTH - right_size, right_pointer.x);
+
+        // The bottom dock has no strip beneath it, so its handle is measured
+        // straight from `bounds.bottom()`.
+        let bottom_pointer = point(px(400.), px(600.));
+        let bottom_size = dock_resize_target_size(DockPosition::Bottom, bounds, bottom_pointer);
+        assert_eq!(bounds.bottom() - bottom_size, bottom_pointer.y);
+    }
 
     #[gpui::test]
     async fn test_tab_disambiguation(cx: &mut TestAppContext) {
