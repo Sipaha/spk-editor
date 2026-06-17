@@ -268,6 +268,34 @@ fn tool_name_is_agent(name: Option<&str>) -> bool {
     matches!(name, Some(n) if n.eq_ignore_ascii_case("agent"))
 }
 
+/// Don't GC session archives until a solution has more than this many sessions
+/// (closed ones included) — small workspaces keep their full history on disk.
+const ARCHIVE_REAP_MIN_SESSIONS: usize = 10;
+/// A session's `.agents/<sid>/` archive is eligible for GC once its last
+/// activity is older than this.
+const ARCHIVE_REAP_MAX_AGE_DAYS: i64 = 30;
+
+/// Pure half of [`SolutionAgentStore::reap_stale_session_archives`]: given a
+/// solution `root` and the metadata for ALL its sessions (closed included),
+/// return the `.agents/<sid>/` dirs eligible for reaping. Empty unless the
+/// session count exceeds [`ARCHIVE_REAP_MIN_SESSIONS`]; then it's every session
+/// whose `last_activity_at` predates the [`ARCHIVE_REAP_MAX_AGE_DAYS`] cutoff.
+fn stale_archive_dirs(
+    root: &std::path::Path,
+    metas: &[SolutionSessionMetadata],
+    now: chrono::DateTime<Utc>,
+) -> Vec<PathBuf> {
+    if metas.len() <= ARCHIVE_REAP_MIN_SESSIONS {
+        return Vec::new();
+    }
+    let cutoff = now - chrono::Duration::days(ARCHIVE_REAP_MAX_AGE_DAYS);
+    metas
+        .iter()
+        .filter(|m| m.last_activity_at < cutoff)
+        .map(|m| root.join(".agents").join(m.id.to_string()))
+        .collect()
+}
+
 /// `~/.claude/projects/<encoded-cwd>/` — the per-project root claude
 /// writes session transcripts and subagent dirs under. `None` when `cwd`
 /// is empty (legacy session) or `home_dir()` can't be resolved.
@@ -2292,11 +2320,50 @@ impl SolutionAgentStore {
     /// path was the only thing populating the in-memory store before,
     /// which left closed sessions invisible to MCP regardless of how
     /// much data was on disk.
+    /// Best-effort GC of on-disk per-session archive dirs
+    /// (`<solution_root>/.agents/<sid>/` — compact handoff dumps + the
+    /// mid-turn image inbox). Only kicks in once a solution has accumulated
+    /// more than [`ARCHIVE_REAP_MIN_SESSIONS`] sessions (counting closed ones),
+    /// and only removes those whose last activity was over
+    /// [`ARCHIVE_REAP_MAX_AGE_DAYS`] days ago — small or active workspaces keep
+    /// everything. Runs off the foreground thread; failures are logged, not
+    /// surfaced.
+    fn reap_stale_session_archives(&self, solution_id: SolutionId, cx: &mut Context<Self>) {
+        let Some(db) = self.persistence.clone() else {
+            return;
+        };
+        let Some(root) = SolutionStore::try_global(cx).and_then(|store| {
+            store
+                .read(cx)
+                .solutions()
+                .iter()
+                .find(|sol| sol.id == solution_id)
+                .map(|sol| sol.root.clone())
+        }) else {
+            return;
+        };
+        cx.background_spawn(async move {
+            let metas = match db.list_for_solution(solution_id).await {
+                Ok(metas) => metas,
+                Err(_) => return,
+            };
+            for dir in stale_archive_dirs(&root, &metas, Utc::now()) {
+                if dir.exists() {
+                    std::fs::remove_dir_all(&dir).log_err();
+                }
+            }
+        })
+        .detach();
+    }
+
     pub fn hydrate_all_for_solution(
         &self,
         solution_id: SolutionId,
         cx: &mut Context<Self>,
     ) -> Task<Result<Vec<SolutionSessionId>>> {
+        // Opening a solution is a natural, infrequent point to garbage-collect
+        // stale on-disk session archives under `.agents/`.
+        self.reap_stale_session_archives(solution_id.clone(), cx);
         let Some(db) = self.persistence.clone() else {
             return Task::ready(Ok(Vec::new()));
         };

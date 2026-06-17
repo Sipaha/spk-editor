@@ -1408,6 +1408,58 @@ async fn take_pending_delivers_image_as_readable_path_mid_turn(cx: &mut TestAppC
     });
 }
 
+#[test]
+fn stale_archive_dirs_gates_on_count_then_age() {
+    let now = Utc::now();
+    let root = std::path::Path::new("/sol/root");
+    let make = |n: usize, days_ago: i64| crate::model::SolutionSessionMetadata {
+        id: crate::model::SolutionSessionId::new(),
+        solution_id: SolutionId("sol".into()),
+        agent_id: SharedString::from("claude-acp"),
+        acp_session_id: agent_client_protocol::schema::SessionId::new(format!("acp-{n}")),
+        title: SharedString::from("s"),
+        created_at: now,
+        last_activity_at: now - chrono::Duration::days(days_ago),
+        preview: None,
+        total_tokens: None,
+        context_count: 1,
+        cwd: PathBuf::new(),
+        parent_session_id: None,
+    };
+
+    // <= the min-session gate: keep everything, even ancient archives.
+    let small: Vec<_> = (0..ARCHIVE_REAP_MIN_SESSIONS).map(|n| make(n, 999)).collect();
+    assert!(
+        stale_archive_dirs(root, &small, now).is_empty(),
+        "small workspaces keep their full history"
+    );
+
+    // Over the gate: reap only the sessions inactive past the age cutoff.
+    let recent: Vec<_> = (0..8).map(|n| make(n, 1)).collect();
+    let stale: Vec<_> = (8..14)
+        .map(|n| make(n, ARCHIVE_REAP_MAX_AGE_DAYS + 5))
+        .collect();
+    let mut metas = recent.clone();
+    metas.extend(stale.iter().cloned());
+
+    let reaped = stale_archive_dirs(root, &metas, now);
+    assert_eq!(reaped.len(), stale.len(), "only the stale sessions are reaped");
+    for m in &stale {
+        assert!(
+            reaped.contains(&root.join(".agents").join(m.id.to_string())),
+            "stale session {} must be reaped",
+            m.id
+        );
+    }
+    for m in &recent {
+        assert!(
+            !reaped.contains(&root.join(".agents").join(m.id.to_string())),
+            "recently-active session {} must be kept",
+            m.id
+        );
+    }
+}
+
 #[gpui::test]
 async fn reset_context_swaps_acp_thread_without_bumping_count(cx: &mut TestAppContext) {
     let (session_id, old_thread, _tmp) = create_session_with_thread(cx).await;
