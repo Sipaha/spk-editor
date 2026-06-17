@@ -593,7 +593,10 @@ pub(crate) fn render_status_row(
         };
         let mut label = Label::new(state_text).size(LabelSize::Small);
         if error_text.is_some() {
-            label = label.color(Color::Error);
+            // Truncate long server errors (e.g. the multi-sentence 529
+            // Overloaded blurb) with an ellipsis so they can't blow the status
+            // row out to full panel width — the full text is in the tooltip.
+            label = label.color(Color::Error).truncate();
         } else if is_running || is_resuming {
             label = label.color(Color::Accent);
         } else if is_cold {
@@ -665,6 +668,8 @@ pub(crate) fn render_status_row(
         match error_text {
             Some(full) => div()
                 .id("solution-status-error-text")
+                .max_w(px(400.))
+                .overflow_hidden()
                 .tooltip(ui::Tooltip::text(full))
                 .child(inner)
                 .into_any_element(),
