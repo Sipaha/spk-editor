@@ -1327,6 +1327,87 @@ async fn take_pending_holds_image_bundle_for_idle_flush(cx: &mut TestAppContext)
     });
 }
 
+/// MID-TURN (a `PostToolUse` hook, `is_end_of_turn = false`), a queued bundle
+/// carrying an image IS delivered: the bytes are written to an inbox file and
+/// the agent-facing text points at that path with a `Read`-tool instruction,
+/// instead of being deferred to the next turn end. This is the fix for
+/// "image follow-ups don't reach the agent until the (long) turn finishes".
+#[gpui::test]
+async fn take_pending_delivers_image_as_readable_path_mid_turn(cx: &mut TestAppContext) {
+    let (session_id, _thread, _tmp) = create_session_with_thread(cx).await;
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            store.session(session_id).unwrap().update(cx, |s, _| {
+                s.state = SessionState::Running {
+                    started_at: std::time::Instant::now(),
+                    notified: false,
+                };
+            });
+            store
+                .send_message_blocks(
+                    session_id,
+                    vec![
+                        acp::ContentBlock::Text(acp::TextContent::new(
+                            "look at this".to_string(),
+                        )),
+                        // base64 "ZGF0YQ==" decodes to the bytes b"data".
+                        acp::ContentBlock::Image(acp::ImageContent::new(
+                            "ZGF0YQ==".to_string(),
+                            "image/png".to_string(),
+                        )),
+                    ],
+                    cx,
+                )
+                .detach_and_log_err(cx);
+        });
+    });
+
+    // Mid-turn hook (is_end_of_turn = false) — the image bundle is delivered.
+    let pulled = cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            store.take_pending_for_delivery(session_id, None, false, cx)
+        })
+    });
+    let text = pulled.expect("image bundle must be delivered mid-turn as a path reference");
+    assert!(
+        text.contains("Use the Read tool"),
+        "delivered text must instruct the agent to Read the saved image, got: {text:?}"
+    );
+    assert!(
+        text.contains("look at this"),
+        "delivered text must keep the user's words, got: {text:?}"
+    );
+
+    // The referenced file must exist on disk and hold the decoded bytes.
+    let path_str = text
+        .split("saved to ")
+        .nth(1)
+        .and_then(|rest| rest.split(". Use the Read tool").next())
+        .expect("delivered text must carry the saved path")
+        .to_string();
+    let path = std::path::PathBuf::from(&path_str);
+    assert!(
+        path.extension().is_some_and(|e| e == "png"),
+        "path {path:?} keeps the png extension"
+    );
+    let written = std::fs::read(&path).expect("inbox image file must exist");
+    assert_eq!(written, b"data", "inbox file must hold the decoded image bytes");
+    let _ = std::fs::remove_file(&path);
+
+    // Queue is drained — nothing left for the idle-flush to re-send.
+    cx.update(|cx| {
+        let store = SolutionAgentStore::global(cx);
+        store.update(cx, |store, cx| {
+            assert!(
+                store.session(session_id).unwrap().read(cx).pending_messages.is_empty(),
+                "image bundle must be drained after mid-turn delivery"
+            );
+        });
+    });
+}
+
 #[gpui::test]
 async fn reset_context_swaps_acp_thread_without_bumping_count(cx: &mut TestAppContext) {
     let (session_id, old_thread, _tmp) = create_session_with_thread(cx).await;

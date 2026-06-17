@@ -1981,19 +1981,19 @@ impl SolutionAgentStore {
             let mut kept: std::collections::VecDeque<crate::model::PendingBundle> =
                 std::collections::VecDeque::with_capacity(s.pending_messages.len());
             for bundle in s.pending_messages.drain(..) {
-                // Mid-turn hook delivery rides `additionalContext`, which is
-                // TEXT-ONLY — an image block would degrade to a bare
-                // `[image #N]` placeholder and the agent would never see the
-                // pixels (reported: "I don't see your screenshot"). So a
-                // bundle that carries any image is NOT drained here; it stays
-                // queued and the `Stopped` idle-flush re-sends it as a fresh
-                // turn via `send_message_blocks`, which carries the full
-                // content blocks (image bytes included).
+                // `additionalContext` is TEXT-ONLY, so an image block's bytes
+                // can't ride it. MID-TURN we still drain image bundles and hand
+                // the agent a saved-file path (it `Read`s the pixels — see
+                // `save_inbox_image` below); that's the whole point of this
+                // path. AT END-OF-TURN we keep deferring them so the `Stopped`
+                // idle-flush re-sends the full multimodal blocks as a fresh
+                // turn (richer, and the turn is ending anyway).
                 let has_image = bundle
                     .blocks
                     .iter()
                     .any(|b| matches!(b, acp::ContentBlock::Image(_)));
-                if bundle.target.matches_hook(agent_id) && !has_image {
+                let defer_image = has_image && is_end_of_turn;
+                if bundle.target.matches_hook(agent_id) && !defer_image {
                     taken.extend(bundle.blocks);
                 } else {
                     kept.push_back(bundle);
@@ -2006,11 +2006,21 @@ impl SolutionAgentStore {
             return None;
         }
 
-        // Agent-facing text: text-only (additionalContext is text-only; images
-        // degrade to `[image #N]`). Prepend the hint only at end-of-turn.
+        // Save any image attachments to inbox files and reference them by path
+        // in the agent-facing text (the agent opens them with `Read`). The
+        // timeline push below keeps the ORIGINAL image blocks, so the user's
+        // conversation bubble still shows the picture. At end-of-turn there are
+        // no images in `combined` (they were deferred above), so this collapses
+        // to plain text.
+        let mut image_paths: Vec<Option<std::path::PathBuf>> = Vec::new();
+        for block in &combined {
+            if let acp::ContentBlock::Image(img) = block {
+                image_paths.push(queue::save_inbox_image(session_id, image_paths.len(), img));
+            }
+        }
         // Computed before the timeline push so `combined` can be moved into it
-        // (no clone) below.
-        let body = queue::inject_text_from_blocks(&combined);
+        // (no clone) below. Prepend the hint only at end-of-turn.
+        let body = queue::inject_text_from_blocks_with_image_paths(&combined, &image_paths);
         let text = if is_end_of_turn {
             format!("{}\n\n{}", queue::QUEUE_HINT_LINE, body)
         } else {

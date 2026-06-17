@@ -118,14 +118,19 @@ pub(crate) fn queue_timestamp_prefix(at: chrono::DateTime<Utc>) -> String {
 }
 
 /// Flatten a content-block bundle into a single human-readable string the
-/// native backend can hand to the agent as `additionalContext`. Text blocks
-/// are concatenated verbatim; image blocks collapse to numbered placeholders
-/// (`[image #1]`, `[image #2]`, …) so a text-only side channel can still
-/// signal "the user attached an image" without trying to ship the bytes.
-/// Other variants are silently dropped — the inject side channel is text-only.
-pub(crate) fn inject_text_from_blocks(blocks: &[acp::ContentBlock]) -> String {
+/// native backend can hand to the agent as `additionalContext` (text-only).
+/// Text blocks are concatenated verbatim. Each image block renders as a
+/// pointer to its saved inbox file (so the agent can `Read` the actual pixels
+/// mid-turn) — `image_paths` is indexed by image-occurrence order; a missing /
+/// `None` entry (no path, or the save failed) falls back to the pixel-losing
+/// `[image #N]` placeholder. Passing `&[]` is the placeholder-only behaviour.
+/// Other variants are silently dropped — the side channel is text-only.
+pub(crate) fn inject_text_from_blocks_with_image_paths(
+    blocks: &[acp::ContentBlock],
+    image_paths: &[Option<std::path::PathBuf>],
+) -> String {
     let mut out = String::new();
-    let mut image_idx = 1usize;
+    let mut image_idx = 0usize;
     for block in blocks {
         match block {
             acp::ContentBlock::Text(t) => {
@@ -139,20 +144,58 @@ pub(crate) fn inject_text_from_blocks(blocks: &[acp::ContentBlock]) -> String {
                 out.push_str(&t.text);
             }
             acp::ContentBlock::Image(_) => {
-                // Skip the join-newline when the prior block already ends in
-                // whitespace — keeps the `[HH:MM:SS] ` stamp block on the same
-                // line as the user text that follows it (the stamp ends in a
-                // space), instead of breaking the timestamp onto its own line.
                 if !out.is_empty() && !out.ends_with(char::is_whitespace) {
                     out.push('\n');
                 }
-                out.push_str(&format!("[image #{image_idx}]"));
+                match image_paths.get(image_idx).and_then(|p| p.as_ref()) {
+                    Some(path) => out.push_str(&format!(
+                        "[The user attached an image, saved to {}. Use the Read tool to view it.]",
+                        path.display()
+                    )),
+                    None => out.push_str(&format!("[image #{}]", image_idx + 1)),
+                }
                 image_idx += 1;
             }
             _ => {}
         }
     }
     out.trim().to_string()
+}
+
+/// Write a queued image attachment to a per-session inbox file so a mid-turn
+/// follow-up can hand the agent a real path (which it opens with the `Read`
+/// tool) instead of a `[image #N]` placeholder that loses the pixels — the
+/// `additionalContext` side channel is text-only, so the bytes themselves
+/// can't ride along. Returns the absolute path on success; a base64-decode or
+/// write failure returns `None` so the caller degrades to the placeholder
+/// rather than dropping the bundle. Files land under the OS temp dir (no repo
+/// pollution; the OS reclaims them) keyed by session id.
+pub(crate) fn save_inbox_image(
+    session_id: SolutionSessionId,
+    index: usize,
+    image: &acp::ImageContent,
+) -> Option<std::path::PathBuf> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(image.data.as_bytes())
+        .ok()?;
+    let ext = match image.mime_type.as_str() {
+        "image/png" => "png",
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "img",
+    };
+    let dir = std::env::temp_dir()
+        .join("spk-editor-inbox")
+        .join(session_id.to_string());
+    std::fs::create_dir_all(&dir).ok()?;
+    // `index` disambiguates multiple images delivered in the same hook;
+    // the timestamp keeps successive deliveries from clobbering each other.
+    let stamp = Utc::now().format("%Y%m%d-%H%M%S%3f");
+    let path = dir.join(format!("{stamp}-{index}.{ext}"));
+    std::fs::write(&path, &bytes).ok()?;
+    Some(path)
 }
 
 /// Compact one-line summary of a content-block bundle for the audit log
@@ -751,6 +794,9 @@ mod tests {
             acp::ContentBlock::Text(acp::TextContent::new("[10:39:12] ".to_string())),
             acp::ContentBlock::Text(acp::TextContent::new("hello".to_string())),
         ];
-        assert_eq!(inject_text_from_blocks(&blocks), "[10:39:12] hello");
+        assert_eq!(
+            inject_text_from_blocks_with_image_paths(&blocks, &[]),
+            "[10:39:12] hello"
+        );
     }
 }
