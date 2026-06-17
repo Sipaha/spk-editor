@@ -21,6 +21,10 @@ pub type AddProgressCallback = Box<dyn FnMut(&str, Option<u8>, &mut App) + 'stat
 /// overkill. Best-effort by design — the caller `.log_err()`s the result so
 /// a missing/old `git` binary degrades to "plain folder, no VCS" rather
 /// than failing project creation outright.
+// Sync `std::process::Command` is deliberate — see the doc comment above: the
+// call site is sync and `git init` is a sub-100ms one-shot, so the async
+// `smol::process::Command` the lint suggests would be pure overhead here.
+#[allow(clippy::disallowed_methods)]
 fn init_empty_git_repo(local_path: &std::path::Path) -> Result<()> {
     let status = std::process::Command::new("git")
         .arg("init")

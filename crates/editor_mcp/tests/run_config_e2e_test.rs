@@ -16,9 +16,9 @@
 //! No real files are written. Lock + socket are pinned to a tempdir via
 //! `editor_mcp::set_runtime_dir_for_test`.
 
-use gpui::{TestAppContext, UpdateGlobal as _};
+use gpui::TestAppContext;
 use serde_json::{Value, json};
-use settings::{Settings as _, SettingsStore};
+use settings::SettingsStore;
 use smol::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use smol::net::unix::UnixStream;
 use std::time::Duration;

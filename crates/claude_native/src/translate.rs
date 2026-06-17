@@ -750,7 +750,7 @@ pub fn strip_local_command_metadata(text: &str) -> String {
             out.push_str(&rest[..lt]);
             let tail = &rest[lt + 1..];
             for tag in TAGS {
-                if tail.len() >= tag.len() + 1
+                if tail.len() > tag.len()
                     && tail.starts_with(tag)
                     && matches!(tail.as_bytes().get(tag.len()), Some(b'>') | Some(b' '))
                 {

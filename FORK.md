@@ -82,6 +82,7 @@ This fork no longer constrains itself to additive-only modifications of upstream
 | `assets/settings/default.json` | Default `solutions.root`; default `icon_theme: "Material Icon Theme"` + auto-install of the matching extension (colored project tree, IDEA-like, vs upstream's monochrome `Zed (Default)`); default `bottom_dock_layout: "full"` (IDEA-style — the bottom dock spans the full window width, with the left/right docks docked above it, vs upstream's `"contained"`; `Workspace::render` already implements the `Full` arm, only the default flips). | `solutions` / rebrand |
 | `crates/zed/Cargo.toml` `[[bin]]` | Binary name overridden to `spk-editor` (cargo crate `zed` unchanged). | rebrand |
 | `.cargo/config.toml` | `[target.x86_64-unknown-linux-gnu]` block forcing `-fuse-ld=mold`. See decision 15. | build |
+| `crates/terminal_view/src/terminal_panel.rs` | Dropped the now-unused `TerminalDockPosition` import (a local edit had removed its only use, leaving a dead import that failed `clippy -D warnings`). | upstream-fix |
 
 Locked rebrand identifiers (display name, bundle ids, URL scheme, config dirs, etc.) — see `.rules` § "Locked rebrand identifiers". Changing any requires explicit approval — they're cross-referenced in spec docs.
 

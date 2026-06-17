@@ -414,7 +414,7 @@ fn handle_post_op(
 fn run_rebase(ctx: BranchContext, window: &mut Window, cx: &mut App) {
     let work_dir = ctx.repository.read(cx).work_directory_abs_path.clone();
     let workspace = ctx.workspace.clone();
-    let target = ctx.branch_name.clone();
+    let target = ctx.branch_name;
     let success_message = format!("Rebased onto {target}");
     let task = rebase_handler::run(work_dir.to_path_buf(), target.to_string(), true, cx);
     window
@@ -435,7 +435,7 @@ fn run_rebase(ctx: BranchContext, window: &mut Window, cx: &mut App) {
 fn run_merge(ctx: BranchContext, window: &mut Window, cx: &mut App) {
     let work_dir = ctx.repository.read(cx).work_directory_abs_path.clone();
     let workspace = ctx.workspace.clone();
-    let target = ctx.branch_name.clone();
+    let target = ctx.branch_name;
     let success_message = format!("Merged {target} into current branch");
     let task = merge_handler::run(
         work_dir.to_path_buf(),

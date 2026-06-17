@@ -18,7 +18,7 @@ use gpui::{
 use itertools::Itertools;
 use project::{Fs, Project};
 
-use settings::{Settings, TerminalDockPosition};
+use settings::Settings;
 use task::{RevealStrategy, RevealTarget, Shell, ShellBuilder, SpawnInTerminal, TaskId};
 use terminal::{Terminal, terminal_settings::TerminalSettings};
 use ui::{

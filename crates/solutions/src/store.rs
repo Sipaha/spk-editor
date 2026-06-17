@@ -776,7 +776,7 @@ impl SolutionStore {
                 }),
             );
         }
-        cx.emit(SolutionStoreEvent::Opened { id: id.clone() });
+        cx.emit(SolutionStoreEvent::Opened { id });
         cx.emit(SolutionStoreEvent::Changed);
         cx.notify();
     }

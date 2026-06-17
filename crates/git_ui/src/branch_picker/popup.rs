@@ -840,7 +840,7 @@ impl BranchesPopup {
             )
             // Push — solution-wide if provider is active, else single-repo push dialog
             .child({
-                let workspace_for_push = workspace.clone();
+                let workspace_for_push = workspace;
                 make_row("popup-action-push")
                     .child(icon_slot(IconName::ArrowUp))
                     .child(Label::new("Push").size(LabelSize::Small))
