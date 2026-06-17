@@ -62,6 +62,36 @@ fn unpack_recalled_bundle_recovers_images_with_labels_from_text() {
     assert_eq!(images[1].label.as_ref(), "image #7");
 }
 
+#[test]
+fn retain_images_with_live_placeholder_drops_removed_attachments() {
+    use super::{PendingImage, retain_images_with_live_placeholder};
+    let img = |label: &str| PendingImage {
+        mime_type: "image/png".to_string(),
+        data_base64: "x".to_string(),
+        label: SharedString::from(label),
+    };
+    let labels = |imgs: &[PendingImage]| {
+        imgs.iter()
+            .map(|i| i.label.to_string())
+            .collect::<Vec<_>>()
+    };
+
+    // User kept #1 and #3 but deleted #2's placeholder → #2 must be dropped.
+    let mut images = vec![img("image #1"), img("image #2"), img("image #3")];
+    retain_images_with_live_placeholder("here is [image #1] and [image #3] only", &mut images);
+    assert_eq!(labels(&images), ["image #1", "image #3"]);
+
+    // The closing bracket disambiguates #1 from #10.
+    let mut two = vec![img("image #1"), img("image #10")];
+    retain_images_with_live_placeholder("only [image #10] here", &mut two);
+    assert_eq!(labels(&two), ["image #10"]);
+
+    // Every placeholder deleted → nothing is sent.
+    let mut all = vec![img("image #1")];
+    retain_images_with_live_placeholder("no images now", &mut all);
+    assert!(all.is_empty());
+}
+
 fn make_tab(label: &str) -> SubagentTab {
     SubagentTab {
         label: SharedString::from(label.to_string()),

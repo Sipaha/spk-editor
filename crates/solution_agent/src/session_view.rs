@@ -48,6 +48,15 @@ struct PendingImage {
     label: SharedString,
 }
 
+/// Keep only the staged attachments whose `[image #N]` placeholder is still
+/// present in the compose text. Deleting the placeholder is how the user backs
+/// out an attachment they no longer want, so an absent placeholder means "don't
+/// send this image" — without this, a removed `[image #N]` still shipped its
+/// bytes on submit.
+fn retain_images_with_live_placeholder(content: &str, images: &mut Vec<PendingImage>) {
+    images.retain(|img| content.contains(&format!("[{}]", img.label)));
+}
+
 struct FindState {
     editor: Entity<editor::Editor>,
     matches: Vec<FindMatch>,
@@ -1768,6 +1777,10 @@ impl SolutionSessionView {
             return;
         }
         let content = self.compose_editor.read(cx).text(cx);
+        // Reconcile attachments against the text: an attachment whose
+        // `[image #N]` placeholder the user deleted is a removed attachment and
+        // must not be sent.
+        retain_images_with_live_placeholder(&content, &mut self.pending_images);
         if content.trim().is_empty() && self.pending_images.is_empty() {
             return;
         }
