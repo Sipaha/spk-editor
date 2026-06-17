@@ -1956,6 +1956,33 @@ impl SolutionAgentStore {
         self.sessions.values().cloned()
     }
 
+    /// Per-session inbox dir for image attachments delivered mid-turn:
+    /// `<solution_root>/.agents/<sid>/inbox/` when the owning solution
+    /// resolves (co-located with the session's compact handoff dumps, sits at
+    /// the solution root — outside the member git repos — and is reaped with
+    /// the session). Falls back to the OS temp dir when there is no
+    /// `SolutionStore` or the solution isn't registered (headless / test).
+    fn session_inbox_dir(&self, session_id: SolutionSessionId, cx: &App) -> std::path::PathBuf {
+        let solution_root = self.sessions.get(&session_id).and_then(|s| {
+            let solution_id = s.read(cx).solution_id.clone();
+            SolutionStore::try_global(cx)?
+                .read(cx)
+                .solutions()
+                .iter()
+                .find(|sol| sol.id == solution_id)
+                .map(|sol| sol.root.clone())
+        });
+        match solution_root {
+            Some(root) => root
+                .join(".agents")
+                .join(session_id.to_string())
+                .join("inbox"),
+            None => std::env::temp_dir()
+                .join("spk-editor-inbox")
+                .join(session_id.to_string()),
+        }
+    }
+
     /// Drain the session's queued follow-ups, push them into the live thread as
     /// one user entry, and return the agent-facing text (per-message timestamps
     /// already baked in; a leading hint line when `is_end_of_turn`). Returns
@@ -2013,9 +2040,17 @@ impl SolutionAgentStore {
         // no images in `combined` (they were deferred above), so this collapses
         // to plain text.
         let mut image_paths: Vec<Option<std::path::PathBuf>> = Vec::new();
-        for block in &combined {
-            if let acp::ContentBlock::Image(img) = block {
-                image_paths.push(queue::save_inbox_image(session_id, image_paths.len(), img));
+        if combined
+            .iter()
+            .any(|b| matches!(b, acp::ContentBlock::Image(_)))
+        {
+            // Resolve the inbox dir only when a bundle actually carries an
+            // image (the common text-only path pays nothing).
+            let dir = self.session_inbox_dir(session_id, cx);
+            for block in &combined {
+                if let acp::ContentBlock::Image(img) = block {
+                    image_paths.push(queue::save_inbox_image(&dir, image_paths.len(), img));
+                }
             }
         }
         // Computed before the timeline push so `combined` can be moved into it

@@ -162,16 +162,16 @@ pub(crate) fn inject_text_from_blocks_with_image_paths(
     out.trim().to_string()
 }
 
-/// Write a queued image attachment to a per-session inbox file so a mid-turn
-/// follow-up can hand the agent a real path (which it opens with the `Read`
-/// tool) instead of a `[image #N]` placeholder that loses the pixels — the
-/// `additionalContext` side channel is text-only, so the bytes themselves
-/// can't ride along. Returns the absolute path on success; a base64-decode or
-/// write failure returns `None` so the caller degrades to the placeholder
-/// rather than dropping the bundle. Files land under the OS temp dir (no repo
-/// pollution; the OS reclaims them) keyed by session id.
+/// Write a queued image attachment to `dir` so a mid-turn follow-up can hand
+/// the agent a real path (which it opens with the `Read` tool) instead of a
+/// `[image #N]` placeholder that loses the pixels — the `additionalContext`
+/// side channel is text-only, so the bytes themselves can't ride along.
+/// Returns the absolute path on success; a base64-decode or write failure
+/// returns `None` so the caller degrades to the placeholder rather than
+/// dropping the bundle. `dir` is the per-session inbox the caller resolved
+/// (`<solution_root>/.agents/<sid>/inbox/`, temp-dir fallback).
 pub(crate) fn save_inbox_image(
-    session_id: SolutionSessionId,
+    dir: &std::path::Path,
     index: usize,
     image: &acp::ImageContent,
 ) -> Option<std::path::PathBuf> {
@@ -186,10 +186,7 @@ pub(crate) fn save_inbox_image(
         "image/gif" => "gif",
         _ => "img",
     };
-    let dir = std::env::temp_dir()
-        .join("spk-editor-inbox")
-        .join(session_id.to_string());
-    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::create_dir_all(dir).ok()?;
     // `index` disambiguates multiple images delivered in the same hook;
     // the timestamp keeps successive deliveries from clobbering each other.
     let stamp = Utc::now().format("%Y%m%d-%H%M%S%3f");
