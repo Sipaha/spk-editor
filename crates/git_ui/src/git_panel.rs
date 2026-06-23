@@ -7447,7 +7447,7 @@ mod tests {
             theme_settings::init(LoadThemes::JustBase, cx);
             editor::init(cx);
             crate::init(cx);
-            // GitPanel hosts ActiveProjectSelector which calls SolutionStore::global.
+            // GitPanel subscribes to SolutionStore::global for the active member.
             // Install a minimal store so all tests construct without panic.
             let store = solutions::SolutionStore::for_test(std::path::PathBuf::new(), cx);
             solutions::install_global_for_test(store, cx);

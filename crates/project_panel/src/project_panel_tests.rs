@@ -10145,9 +10145,9 @@ pub(crate) fn init_test(cx: &mut TestAppContext) {
         theme_settings::init(theme::LoadThemes::JustBase, cx);
         crate::init(cx);
 
-        // ProjectPanel now hosts ActiveProjectSelector which calls
-        // SolutionStore::global(cx). Install a minimal store so tests
-        // that don't exercise solution filtering still construct cleanly.
+        // ProjectPanel reads SolutionStore::global(cx) for the active member.
+        // Install a minimal store so tests that don't exercise solution
+        // filtering still construct cleanly.
         let store = solutions::SolutionStore::for_test(PathBuf::new(), cx);
         solutions::install_global_for_test(store, cx);
 

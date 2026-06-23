@@ -1443,7 +1443,7 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn set_active_member_emits_and_persists(cx: &mut TestAppContext) {
+    async fn set_active_member_emits(cx: &mut TestAppContext) {
         let dir = tempdir().expect("tempdir");
         let store = cx.update(|cx| SolutionStore::for_test(dir.path().join("s.json"), cx));
         let sol = SolutionId("s1".into());
