@@ -442,15 +442,17 @@ mod tests {
     #[test]
     fn search_row_has_magnifier_after_editor_and_uses_editor_background() {
         let src = include_str!("solution_picker_dropdown.rs");
-        // The search row spans from its m_1p5 marker (the first occurrence
-        // after the `// Compact search row` comment) up to the next sibling
-        // child — a `div().h_px()` divider.
+        // The search row spans from the `// Compact search row` comment up to
+        // the next sibling child — a 1px divider. The divider is the first
+        // `.h_px()` after the comment (the search row itself never calls it),
+        // so we use that as the end boundary — whitespace-insensitive, unlike
+        // matching the divider's exact multi-line layout.
         let row_start = src
             .find("// Compact search row")
             .expect("search row comment exists");
         let row_segment = &src[row_start..];
         let end_marker = row_segment
-            .find(".child(\n                div()\n                    .h_px()")
+            .find(".h_px()")
             .expect("search row ends before the divider div");
         let row = &row_segment[..end_marker];
         let editor_pos = row
