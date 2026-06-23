@@ -1,6 +1,6 @@
 use gpui::{
-    Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, WeakEntity, Window,
-    div, px,
+    App, Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, WeakEntity,
+    Window, div, px,
 };
 use project::Project;
 use solutions_ui::project_tab_strip::ProjectTabStrip;
@@ -51,6 +51,15 @@ impl ProjectToolbar {
         if let Some(workspace_entity) = workspace.weak_handle().upgrade() {
             subscriptions.push(cx.observe(&workspace_entity, |_, _, cx| cx.notify()));
         }
+        // Re-render the branch widget when the solution-wide active project
+        // changes so it follows the active member's repository.
+        if let Some(store) = solutions::SolutionStore::try_global(cx) {
+            subscriptions.push(cx.subscribe(&store, |_, _, event, cx| {
+                if let solutions::SolutionStoreEvent::ActiveMemberChanged { .. } = event {
+                    cx.notify();
+                }
+            }));
+        }
 
         Self {
             workspace: workspace.weak_handle(),
@@ -82,13 +91,54 @@ impl ProjectToolbar {
         self.project_tab_strip.clone()
     }
 
+    /// Resolve the repository the branch widget should display. Prefers the
+    /// solution-wide active member's repository (the repo whose
+    /// `work_directory_abs_path` is under the active member's `local_path` —
+    /// mirroring `git_panel::refresh_active_repository_for_selector`), and falls
+    /// back to `project.active_repository(cx)` when there is no active solution,
+    /// no active member, or no matching repo (so a plain non-solution project
+    /// still shows its branch). Both the display and the popover menu use this
+    /// single resolution.
+    fn resolve_repository(
+        project: &Entity<Project>,
+        cx: &App,
+    ) -> Option<Entity<project::git_store::Repository>> {
+        if let Some(repo) = Self::active_member_repository(project, cx) {
+            return Some(repo);
+        }
+        project.read(cx).active_repository(cx)
+    }
+
+    /// The repository of this toolbar's solution-wide active member, if any.
+    fn active_member_repository(
+        project: &Entity<Project>,
+        cx: &App,
+    ) -> Option<Entity<project::git_store::Repository>> {
+        let store = solutions::SolutionStore::try_global(cx)?;
+        let store = store.read(cx);
+        let solution = project
+            .read(cx)
+            .worktrees(cx)
+            .find_map(|worktree| store.solution_for_path(&worktree.read(cx).abs_path()))?;
+        let catalog = store.active_member(&solution.id)?;
+        let member = solution
+            .members
+            .iter()
+            .find(|member| &member.catalog_id == catalog)?;
+        project
+            .read(cx)
+            .repositories(cx)
+            .values()
+            .find(|repo| {
+                repo.read(cx)
+                    .work_directory_abs_path
+                    .starts_with(&member.local_path)
+            })
+            .cloned()
+    }
+
     fn render_branch_widget(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let workspace = self.workspace.upgrade()?;
-        let repository = workspace
-            .read(cx)
-            .project()
-            .read(cx)
-            .active_repository(cx)?;
+        let repository = Self::resolve_repository(&self.project, cx)?;
         let snapshot = repository.read(cx);
         let (name, ahead, behind) = match &snapshot.branch {
             Some(branch) => {
@@ -105,6 +155,7 @@ impl ProjectToolbar {
             }
         };
         let workspace_weak = self.workspace.clone();
+        let project = self.project.clone();
         Some(
             PopoverMenu::new("branch-widget")
                 .with_handle(self.branch_popover_handle.clone())
@@ -135,7 +186,7 @@ impl ProjectToolbar {
                 )
                 .menu(move |window, cx| {
                     let workspace = workspace_weak.upgrade()?;
-                    let repository = workspace.read(cx).project().read(cx).active_repository(cx);
+                    let repository = Self::resolve_repository(&project, cx);
                     let weak = workspace.downgrade();
                     Some(cx.new(|cx| {
                         git_ui::branch_picker::BranchesPopup::new(weak, repository, window, cx)
@@ -158,10 +209,6 @@ impl Render for ProjectToolbar {
                 self.multi_workspace = Some(mw);
             }
         }
-        // Touch `project` so the field is considered used even when the branch
-        // widget renders nothing (no active repository).
-        let _ = &self.project;
-
         let toolbar_background = cx.theme().colors().toolbar_background;
         let border_color = cx.theme().colors().border;
         let project_tab_strip = self.ensure_project_tab_strip(cx);

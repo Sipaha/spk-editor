@@ -226,6 +226,12 @@ impl RunController {
         }
     }
 
+    /// The project this controller's workspace is bound to. Used by the
+    /// run-config strip to resolve the solution-wide active member's worktree.
+    pub fn project(&self) -> &Entity<Project> {
+        &self.project
+    }
+
     // --- selection ---
 
     pub fn selected_id(&self) -> Option<&RunConfigId> {

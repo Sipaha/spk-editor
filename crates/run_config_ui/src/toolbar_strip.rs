@@ -1,6 +1,8 @@
 use gpui::{Action as _, App, Entity, IntoElement, ParentElement, Render, Styled, Window, div};
+use project::WorktreeId;
 use run_config::{
-    Executor, RunCommand, RunConfigId, RunConfigSettings, RunConfigStore, RunConfigStoreEvent,
+    ConfigScope, Executor, RunCommand, RunConfigId, RunConfigSettings, RunConfigStore,
+    RunConfigStoreEvent, RunConfiguration,
 };
 use settings::Settings as _;
 use ui::{
@@ -18,6 +20,30 @@ pub struct RunConfigStrip {
     controller: Entity<RunController>,
     menu_handle: PopoverMenuHandle<ContextMenu>,
     _subscriptions: Vec<gpui::Subscription>,
+}
+
+/// Keep only the configs visible for the solution-wide active worktree:
+/// the active member's `Project`-scoped configs plus all `Global` configs.
+///
+/// `Ephemeral` configs are always kept: `RunConfiguration` carries no worktree
+/// information separate from its `scope`, and `ConfigScope::Ephemeral` itself
+/// holds no `WorktreeId`, so there is nothing to filter them by here.
+///
+/// When `active_worktree` is `None` (no resolvable active member), `Project`-scoped
+/// configs are hidden and only `Global`/`Ephemeral` remain.
+pub(crate) fn filter_configs_for_active_worktree(
+    configs: &[RunConfiguration],
+    active_worktree: Option<WorktreeId>,
+) -> Vec<RunConfiguration> {
+    configs
+        .iter()
+        .filter(|c| match c.scope {
+            ConfigScope::Project { worktree } => Some(worktree) == active_worktree,
+            ConfigScope::Global => true,
+            ConfigScope::Ephemeral => true,
+        })
+        .cloned()
+        .collect()
 }
 
 /// Create the `RunController`, register it on the workspace, build the strip
@@ -41,6 +67,15 @@ pub fn install(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
         }
         subscriptions
             .push(cx.subscribe(&controller, |_, _, _: &RunControllerEvent, cx| cx.notify()));
+        // Re-render when the solution-wide active project changes so the strip
+        // follows the active member's project-scoped configs.
+        if let Some(solution_store) = solutions::SolutionStore::try_global(cx) {
+            subscriptions.push(cx.subscribe(&solution_store, |_, _, event, cx| {
+                if let solutions::SolutionStoreEvent::ActiveMemberChanged { .. } = event {
+                    cx.notify();
+                }
+            }));
+        }
         RunConfigStrip {
             controller: controller.clone(),
             menu_handle: PopoverMenuHandle::default(),
@@ -120,13 +155,34 @@ pub fn with_controller(
     }
 }
 
+impl RunConfigStrip {
+    /// Resolve the solution-wide active member's `WorktreeId` for this strip's
+    /// project, or `None` if there is no active solution / member / matching
+    /// worktree (a plain non-solution project, or a solution with no recorded
+    /// active member). `None` means "show only Global/Ephemeral configs".
+    fn active_worktree(&self, cx: &App) -> Option<WorktreeId> {
+        let project = self.controller.read(cx).project().clone();
+        let store = solutions::SolutionStore::try_global(cx)?;
+        let store = store.read(cx);
+        let solution = project
+            .read(cx)
+            .worktrees(cx)
+            .find_map(|worktree| store.solution_for_path(&worktree.read(cx).abs_path()))?
+            .clone();
+        store
+            .active_member_worktree(&solution, &project, cx)
+            .map(|(_catalog, worktree)| worktree)
+    }
+}
+
 impl Render for RunConfigStrip {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(store_entity) = RunConfigStore::try_global(cx) else {
             return div().id("run-config-widget-empty").into_any_element();
         };
+        let active_worktree = self.active_worktree(cx);
         let store = store_entity.read(cx);
-        let configs = store.configs();
+        let configs = filter_configs_for_active_worktree(&store.configs(), active_worktree);
         if configs.is_empty() {
             // No run configurations defined yet — show an "Add Configuration…"
             // affordance (IDEA-style) instead of hiding the widget entirely, so
@@ -310,6 +366,10 @@ mod tests {
     }
 
     fn mock_config(name: &str) -> RunConfiguration {
+        mock_config_scoped(name, ConfigScope::Global)
+    }
+
+    fn mock_config_scoped(name: &str, scope: ConfigScope) -> RunConfiguration {
         RunConfiguration {
             id: RunConfigId::from_raw(format!("mock:{name}")),
             name: name.into(),
@@ -318,8 +378,35 @@ mod tests {
             executors: vec![Executor::Run],
             before_launch: vec![],
             folder: None,
-            scope: ConfigScope::Global,
+            scope,
         }
+    }
+
+    #[test]
+    fn filter_keeps_active_project_and_global_hides_other_project() {
+        use project::WorktreeId;
+
+        let w_a = WorktreeId::from_usize(1);
+        let w_b = WorktreeId::from_usize(2);
+        let a = mock_config_scoped("a", ConfigScope::Project { worktree: w_a });
+        let b = mock_config_scoped("b", ConfigScope::Project { worktree: w_b });
+        let g = mock_config_scoped("g", ConfigScope::Global);
+
+        let out =
+            filter_configs_for_active_worktree(&[a.clone(), b.clone(), g.clone()], Some(w_a));
+        assert!(out.iter().any(|c| c.id == a.id));
+        assert!(out.iter().any(|c| c.id == g.id));
+        assert!(!out.iter().any(|c| c.id == b.id));
+
+        // With no active worktree, Project-scoped configs are hidden, Global kept.
+        let none = filter_configs_for_active_worktree(&[a.clone(), g.clone()], None);
+        assert!(!none.iter().any(|c| c.id == a.id));
+        assert!(none.iter().any(|c| c.id == g.id));
+
+        // Ephemeral (no worktree info on RunConfiguration) is always kept.
+        let e = mock_config_scoped("e", ConfigScope::Ephemeral);
+        let with_eph = filter_configs_for_active_worktree(&[e.clone()], Some(w_a));
+        assert!(with_eph.iter().any(|c| c.id == e.id));
     }
 
     #[gpui::test]
