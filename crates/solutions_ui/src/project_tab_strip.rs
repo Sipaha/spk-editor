@@ -39,14 +39,13 @@ use crate::project_tab::ProjectTab;
 const MAX_VISIBLE_TABS: usize = 6;
 
 pub struct ProjectTabStrip {
-    workspace: WeakEntity<Workspace>,
     multi_workspace: WeakEntity<MultiWorkspace>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl ProjectTabStrip {
     pub fn new(
-        workspace: WeakEntity<Workspace>,
+        _workspace: WeakEntity<Workspace>,
         multi_workspace: WeakEntity<MultiWorkspace>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -62,7 +61,6 @@ impl ProjectTabStrip {
         }
 
         Self {
-            workspace,
             multi_workspace,
             _subscriptions: subscriptions,
         }

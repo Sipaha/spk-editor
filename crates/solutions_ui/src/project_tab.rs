@@ -152,7 +152,7 @@ impl RenderOnce for ProjectTab {
             .on_drop({
                 let solution_id = self.solution_id.clone();
                 let target = self.catalog_id.clone();
-                let order = self.order.clone();
+                let order = self.order;
                 move |dragged: &DraggedProjectTab, _window, cx| {
                     let new_order = reorder_to(&order, &dragged.catalog_id, &target);
                     SolutionStore::global(cx)

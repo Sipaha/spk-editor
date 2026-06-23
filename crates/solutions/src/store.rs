@@ -1497,7 +1497,7 @@ mod tests {
         );
         // Already set to a member → returns existing without change.
         let result2 = store.update(cx, |s, cx| s.ensure_active_member(&sol, &members, cx));
-        assert_eq!(result2, Some(cat_a.clone()));
+        assert_eq!(result2, Some(cat_a));
         // Existing selection removed from members → reseeds to first remaining.
         let members2 = vec![SolutionMember {
             catalog_id: cat_b.clone(),

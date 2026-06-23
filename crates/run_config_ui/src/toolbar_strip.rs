@@ -430,7 +430,7 @@ mod tests {
 
         // Ephemeral (no worktree info on RunConfiguration) is always kept.
         let e = mock_config_scoped("e", ConfigScope::Ephemeral);
-        let with_eph = filter_configs_for_active_worktree(&[e.clone()], Some(w_a));
+        let with_eph = filter_configs_for_active_worktree(std::slice::from_ref(&e), Some(w_a));
         assert!(with_eph.iter().any(|c| c.id == e.id));
     }
 
