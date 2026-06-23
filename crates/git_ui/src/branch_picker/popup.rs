@@ -781,11 +781,40 @@ impl BranchesPopup {
         }
     }
 
+    /// Number of members in the active Solution (resolved via `SolutionStore`
+    /// from the workspace's project worktrees + `solution_for_path`). Returns
+    /// `None` when there's no active Solution. Used to gate the
+    /// "Update All Projects" row — that row only makes sense when the solution
+    /// spans ≥2 projects (a 0/1-member solution is already covered by the
+    /// single-repo "Update Project").
+    fn active_solution_member_count(&self, cx: &App) -> Option<usize> {
+        let workspace = self.workspace.upgrade()?;
+        let store = solutions::SolutionStore::try_global(cx)?;
+        let store = store.read(cx);
+        let project = workspace.read(cx).project().clone();
+        let solution = project
+            .read(cx)
+            .worktrees(cx)
+            .find_map(|worktree| store.solution_for_path(&worktree.read(cx).abs_path()))?;
+        Some(solution.members.len())
+    }
+
     /// Render the IDEA-style action header rows that appear between the search
-    /// field and the first section node. Rows: Update Project / Commit / Push /
+    /// field and the first section node. Rows: Update Project /
+    /// Update All Projects (solution-wide, ≥2 members only) / Commit / Push /
     /// separator / New Branch / Checkout Tag or Revision… / separator.
     fn render_action_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let workspace = self.workspace.clone();
+
+        // "Update All Projects" is shown only when a solution-wide update is
+        // meaningful: the provider is registered AND active AND the active
+        // Solution spans ≥2 members. For a 0/1-member solution the single-repo
+        // "Update Project" already covers everything.
+        let show_update_all = crate::providers::solution_update_provider()
+            .is_some_and(|provider| provider.is_active())
+            && self
+                .active_solution_member_count(cx)
+                .is_some_and(|count| count >= 2);
 
         // Pre-compute theme colors so the closures below don't need to borrow cx.
         let hover_bg = cx.theme().colors().ghost_element_hover;
@@ -806,24 +835,44 @@ impl BranchesPopup {
         let sep = || div().h_px().mx_3().bg(border_color);
 
         v_flex()
-            // Update Project — solution-wide fetch+pull if provider is
-            // active, else single-repo fetch.
-            .child({
-                let workspace_for_update = workspace.clone();
+            // Update Project — fetch + pull ONLY the active project's repo
+            // (`self.repository`). We dispatch the `git::Fetch` then `git::Pull`
+            // window actions: both route through the git panel's
+            // `active_repository`, which is kept scoped to the active member's
+            // repo by `refresh_active_repository_for_selector` — and that repo
+            // IS `self.repository`. Going through the actions reuses the panel's
+            // askpass delegate, remote selection, and error-toast plumbing
+            // (rather than re-deriving FetchOptions / AskPassDelegate / remote
+            // here). `git::Fetch` fetches all remotes; `git::Pull` pulls the
+            // upstream — mirroring the per-member fetch+pull the old
+            // solution-wide update did.
+            .child(
                 make_row("popup-action-update-project")
                     .child(icon_slot(IconName::ArrowCircle))
                     .child(Label::new("Update Project").size(LabelSize::Small))
-                    .on_click(cx.listener(move |_, _, window, cx| {
-                        if let Some(provider) = crate::providers::solution_update_provider() {
-                            if provider.is_active() {
-                                provider.update_solution(workspace_for_update.clone(), cx);
-                                cx.emit(DismissEvent);
-                                return;
-                            }
-                        }
+                    .on_click(cx.listener(|_, _, window, cx| {
                         window.dispatch_action(Box::new(git::Fetch), cx);
+                        window.dispatch_action(Box::new(git::Pull), cx);
                         cx.emit(DismissEvent);
-                    }))
+                    })),
+            )
+            // Update All Projects — the explicit solution-wide entry: fetch +
+            // pull every git member of the active Solution via the
+            // `SolutionUpdateProvider`. Shown only when the provider is active
+            // and the solution spans ≥2 members (see `show_update_all`).
+            .when(show_update_all, |this| {
+                let workspace_for_update = workspace.clone();
+                this.child(
+                    make_row("popup-action-update-all")
+                        .child(icon_slot(IconName::ArrowCircle))
+                        .child(Label::new("Update All Projects").size(LabelSize::Small))
+                        .on_click(cx.listener(move |_, _, _window, cx| {
+                            if let Some(provider) = crate::providers::solution_update_provider() {
+                                provider.update_solution(workspace_for_update.clone(), cx);
+                            }
+                            cx.emit(DismissEvent);
+                        })),
+                )
             })
             // Commit — routes to the git panel, which commits the single
             // active repository (the active member's repo).
@@ -836,24 +885,19 @@ impl BranchesPopup {
                         cx.emit(DismissEvent);
                     })),
             )
-            // Push — solution-wide if provider is active, else single-repo push dialog
-            .child({
-                let workspace_for_push = workspace;
+            // Push — push ONLY the active project's repo. `git::Push` opens the
+            // single-repo push-preview dialog scoped to the git panel's
+            // `active_repository` (== `self.repository`). The solution-wide
+            // "Push All" path lives on the solution-git dashboard, not here.
+            .child(
                 make_row("popup-action-push")
                     .child(icon_slot(IconName::ArrowUp))
                     .child(Label::new("Push").size(LabelSize::Small))
-                    .on_click(cx.listener(move |_, _, window, cx| {
-                        if let Some(provider) = crate::providers::solution_push_provider() {
-                            if provider.is_active() {
-                                provider.open_solution_push_dialog(workspace_for_push.clone(), cx);
-                                cx.emit(DismissEvent);
-                                return;
-                            }
-                        }
+                    .on_click(cx.listener(|_, _, window, cx| {
                         window.dispatch_action(Box::new(git::Push), cx);
                         cx.emit(DismissEvent);
-                    }))
-            })
+                    })),
+            )
             // Separator between solution-wide ops and repo-local ops
             .child(sep().my_1())
             // New Branch — opens BranchList picker where typing a new name creates it
