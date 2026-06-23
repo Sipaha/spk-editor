@@ -3,6 +3,7 @@ pub mod collab;
 mod fork_height;
 mod onboarding_banner;
 mod plan_chip;
+mod project_toolbar;
 mod title_bar_settings;
 mod update_version;
 
@@ -35,6 +36,7 @@ use gpui::{
 };
 use onboarding_banner::OnboardingBanner;
 use project::{Project, git_store::GitStoreEvent, trusted_worktrees::TrustedWorktrees};
+use project_toolbar::ProjectToolbar;
 use settings::Settings as _;
 use solutions_ui::solution_tab_strip::SolutionTabStrip;
 
@@ -75,8 +77,17 @@ pub fn init(cx: &mut App) {
             return;
         };
         let multi_workspace = workspace.multi_workspace().cloned();
-        let item = cx.new(|cx| TitleBar::new("title-bar", workspace, multi_workspace, window, cx));
+        let item =
+            cx.new(|cx| TitleBar::new("title-bar", workspace, multi_workspace.clone(), window, cx));
         workspace.set_titlebar_item(item.into(), window, cx);
+
+        // SPK Editor fork: the full-width project toolbar row that sits below
+        // the title bar (hosts the project-tab strip + relocated branch widget
+        // + run-config strip). Created here alongside the title bar because the
+        // `workspace` crate can't depend on `solutions_ui`/`git_ui`/`run_config`.
+        let project_toolbar =
+            cx.new(|cx| ProjectToolbar::new(workspace, multi_workspace, cx));
+        workspace.set_project_toolbar_item(project_toolbar.into(), window, cx);
 
         workspace.register_action(|workspace, _: &SimulateUpdateAvailable, _window, cx| {
             if let Some(titlebar) = workspace
@@ -137,9 +148,11 @@ pub fn init(cx: &mut App) {
 
         workspace.register_action(
             |workspace, _: &git_ui::branch_picker::BranchesPopupOpen, window, cx| {
-                if let Some(titlebar) = workspace
-                    .titlebar_item()
-                    .and_then(|item| item.downcast::<TitleBar>().ok())
+                // SPK Editor fork: the branch widget moved from the title bar to
+                // the project toolbar row, so reach it via `project_toolbar_item`.
+                if let Some(toolbar) = workspace
+                    .project_toolbar_item()
+                    .and_then(|item| item.downcast::<ProjectToolbar>().ok())
                 {
                     // Defer via `Window::defer` (callback gets `&mut Window,
                     // &mut App` — crucially NOT `&mut Workspace`) so the popover's
@@ -147,8 +160,8 @@ pub fn init(cx: &mut App) {
                     // time, doesn't double-lease it. `cx.defer_in` would re-lease
                     // `Workspace` in its callback and panic just the same.
                     window.defer(cx, move |window, cx| {
-                        titlebar.update(cx, |titlebar, cx| {
-                            titlebar.toggle_branch_popover(window, cx);
+                        toolbar.update(cx, |toolbar, cx| {
+                            toolbar.toggle_branch_popover(window, cx);
                         });
                     });
                     return;
@@ -181,7 +194,6 @@ pub struct TitleBar {
     banner: Option<Entity<OnboardingBanner>>,
     update_version: Entity<UpdateVersion>,
     screen_share_popover_handle: PopoverMenuHandle<ContextMenu>,
-    branch_popover_handle: PopoverMenuHandle<git_ui::branch_picker::BranchesPopup>,
     _diagnostics_subscription: Option<gpui::Subscription>,
 }
 
@@ -284,16 +296,9 @@ impl Render for TitleBar {
                 })
                 .gap_1()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                // SPK Editor fork: IDEA-style branch widget (opens BranchesPopup
-                // anchored under the widget instead of the centered modal).
-                .children(self.render_branch_widget(cx))
-                // SPK Editor fork: IDEA-style run-config widget, right-aligned
-                // in the header (set by `run_config_ui`, read from the workspace).
-                .children(
-                    self.workspace
-                        .upgrade()
-                        .and_then(|workspace| workspace.read(cx).run_config_strip().cloned()),
-                )
+                // SPK Editor fork: the branch widget and run-config strip moved
+                // out of the title bar into the new project toolbar row
+                // (`ProjectToolbar`, mounted below the title bar by `Workspace`).
                 .children(self.render_call_controls(window, cx))
                 .children(self.render_connection_status(status, cx))
                 .child(self.update_version.clone())
@@ -451,7 +456,6 @@ impl TitleBar {
             banner: None,
             update_version,
             screen_share_popover_handle: PopoverMenuHandle::default(),
-            branch_popover_handle: PopoverMenuHandle::default(),
             _diagnostics_subscription: None,
         };
 
@@ -464,10 +468,6 @@ impl TitleBar {
         self.update_version
             .update(cx, |banner, cx| banner.update_simulation(cx));
         cx.notify();
-    }
-
-    pub fn toggle_branch_popover(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.branch_popover_handle.toggle(window, cx);
     }
 
     /// Build (or return the cached) `SolutionTabStrip` entity. Called from
@@ -588,68 +588,6 @@ impl TitleBar {
         active_call
             .update(cx, |call, cx| call.unshare_project(project, cx))
             .log_err();
-    }
-
-    fn render_branch_widget(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let workspace = self.workspace.upgrade()?;
-        let repository = workspace
-            .read(cx)
-            .project()
-            .read(cx)
-            .active_repository(cx)?;
-        let snapshot = repository.read(cx);
-        let (name, ahead, behind) = match &snapshot.branch {
-            Some(branch) => {
-                let (ahead, behind) = branch
-                    .tracking_status()
-                    .map(|s| (s.ahead, s.behind))
-                    .unwrap_or((0, 0));
-                (SharedString::from(branch.name().to_string()), ahead, behind)
-            }
-            None => {
-                // Detached HEAD: show short commit SHA, no upstream tracking indicators.
-                let sha = snapshot.head_commit.as_ref().map(|c| c.short_sha())?;
-                (sha, 0, 0)
-            }
-        };
-        let workspace_weak = self.workspace.clone();
-        Some(
-            PopoverMenu::new("branch-widget")
-                .with_handle(self.branch_popover_handle.clone())
-                .trigger(
-                    ui::ButtonLike::new("branch-widget-trigger")
-                        .child(
-                            h_flex()
-                                .gap_1()
-                                .child(Icon::new(IconName::GitBranch).size(IconSize::Small))
-                                .child(Label::new(name).size(LabelSize::Small))
-                                .when(ahead > 0, |this| {
-                                    this.child(
-                                        Label::new(format!("↑{ahead}"))
-                                            .size(LabelSize::Small)
-                                            .color(Color::Muted),
-                                    )
-                                })
-                                .when(behind > 0, |this| {
-                                    this.child(
-                                        Label::new(format!("↓{behind}"))
-                                            .size(LabelSize::Small)
-                                            .color(Color::Muted),
-                                    )
-                                })
-                                .child(Icon::new(IconName::ChevronDown).size(IconSize::XSmall)),
-                        )
-                        .toggle_state(self.branch_popover_handle.is_deployed()),
-                )
-                .menu(move |window, cx| {
-                    let workspace = workspace_weak.upgrade()?;
-                    let repository = workspace.read(cx).project().read(cx).active_repository(cx);
-                    let weak = workspace.downgrade();
-                    Some(cx.new(|cx| {
-                        git_ui::branch_picker::BranchesPopup::new(weak, repository, window, cx)
-                    }))
-                }),
-        )
     }
 
     fn render_connection_status(
