@@ -1,4 +1,4 @@
-use crate::db::{PanelKind, SolutionsDb};
+use crate::db::SolutionsDb;
 use crate::model::CatalogId;
 use gpui::TestAppContext;
 
@@ -95,9 +95,9 @@ async fn touch_last_opened_persists_timestamp(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn set_panel_selection_persists_and_emits(cx: &mut TestAppContext) {
+async fn set_active_member_persists_and_emits(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
-    let db = SolutionsDb::open_test_db("solutions_store_e2e_panel_sel").await;
+    let db = SolutionsDb::open_test_db("solutions_store_e2e_active_member").await;
     let tmp = tempfile::tempdir().unwrap();
     let db_for_init = db.clone();
     let id = cx.update(|cx| {
@@ -111,20 +111,15 @@ async fn set_panel_selection_persists_and_emits(cx: &mut TestAppContext) {
     cx.update(|cx| {
         let store = crate::store::SolutionStore::global(cx);
         store.update(cx, |s, cx| {
-            s.set_panel_member_selection(
-                id.clone(),
-                PanelKind::Tree,
-                CatalogId("cat-x".into()),
-                cx,
-            )
-            .unwrap();
+            s.set_active_member(id.clone(), CatalogId("cat-x".into()), cx);
         });
     });
+    // The DB write happens on a background task; let it complete.
+    cx.run_until_parked();
 
-    let rows = db.load_all_panel_selections().await.unwrap();
+    let rows = db.load_all_active_members().await.unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].1, "tree");
-    assert_eq!(rows[0].2, "cat-x");
+    assert_eq!(rows[0].1, "cat-x");
 }
 
 use std::fs;
@@ -172,9 +167,9 @@ async fn migration_imports_old_json_once(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-async fn panel_member_selections_persist_across_reinit(cx: &mut TestAppContext) {
+async fn active_member_persists_across_reinit(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
-    let db = SolutionsDb::open_test_db("solutions_panel_sel_reinit").await;
+    let db = SolutionsDb::open_test_db("solutions_active_member_reinit").await;
     let tmp = tempfile::tempdir().unwrap();
 
     let db_first = db.clone();
@@ -186,23 +181,20 @@ async fn panel_member_selections_persist_across_reinit(cx: &mut TestAppContext) 
                 .unwrap()
         });
         store.update(cx, |s, cx| {
-            s.set_panel_member_selection(
-                id.clone(),
-                PanelKind::Tree,
-                CatalogId("cat-x".into()),
-                cx,
-            )
-            .unwrap();
+            s.set_active_member(id.clone(), CatalogId("cat-x".into()), cx);
         });
         cx.remove_global::<crate::store::GlobalSolutionStore>();
         id
     });
 
+    // Allow the background DB write spawned by set_active_member to complete.
+    cx.run_until_parked();
+
     cx.update(|cx| {
         crate::store::SolutionStore::init_global_for_test(db, cx);
         let store = crate::store::SolutionStore::global(cx);
         store.read_with(cx, |s, _| {
-            let cat = s.panel_member_selection(&id, PanelKind::Tree);
+            let cat = s.active_member(&id);
             assert_eq!(cat.map(|c| c.as_str()), Some("cat-x"));
         });
     });

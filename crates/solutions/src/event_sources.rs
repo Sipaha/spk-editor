@@ -12,7 +12,7 @@
 //!
 //! Wired event kinds: `solution_changed`, `solution_active_changed`,
 //! `solution_member_add_progress`, `solution_member_add_completed`,
-//! `solution_panel_member_selection_changed`, `buffer_opened`, `buffer_closed`,
+//! `solution_active_member_changed`, `buffer_opened`, `buffer_closed`,
 //! `buffer_saved`, `buffer_dirty_changed`, `diagnostic_updated`,
 //! `lsp_started`, `lsp_stopped`, `window_focused`.
 //!
@@ -113,17 +113,12 @@ pub fn install(cx: &mut App) {
                             }),
                         );
                     }
-                    SolutionStoreEvent::PanelMemberSelectionChanged {
-                        solution,
-                        panel,
-                        catalog,
-                    } => {
+                    SolutionStoreEvent::ActiveMemberChanged { solution, catalog } => {
                         editor_mcp::emit_notification(
                             cx,
-                            "solution_panel_member_selection_changed",
+                            "solution_active_member_changed",
                             json!({
                                 "solution_id": solution.0,
-                                "panel": panel.as_sql_str(),
                                 "catalog_id": catalog.0,
                             }),
                         );

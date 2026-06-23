@@ -39,12 +39,11 @@ pub struct SolutionStore {
     /// `solutions.json` in sync with transient layout that the user can
     /// trivially re-establish.
     pub(crate) dock_snapshots: DockSnapshots,
-    /// Per-(solution, panel) catalog member selection. Hydrated from
-    /// the `panel_member_selections` DB table at init time and
-    /// updated through `set_panel_member_selection`. Lives only in the
-    /// DB (no JSON equivalent) — the cache field exists so panels
-    /// don't have to round-trip through SQL on every render.
-    pub(crate) panel_member_selections: HashMap<(SolutionId, crate::db::PanelKind), CatalogId>,
+    /// Solution-wide active catalog member selection. Hydrated from the
+    /// `active_member` DB table at init time and updated through
+    /// `set_active_member`. The cache exists so callers don't round-trip
+    /// through SQL on every render.
+    pub(crate) active_member: HashMap<SolutionId, CatalogId>,
     /// Runtime-only set of solutions whose desktop window is currently open.
     /// Populated by `event_sources::install` from MultiWorkspace lifecycle
     /// (observe_new fires on window creation; observe_release fires on close).
@@ -78,14 +77,12 @@ pub enum SolutionStoreEvent {
         /// `None` on success; `Some(msg)` on failure or cancellation.
         error: Option<String>,
     },
-    /// Emitted when `set_panel_member_selection` updates the
-    /// per-(solution, panel) catalog selection. UI listeners (e.g. the
-    /// `ActiveProjectSelector` from Phase 3) react to this so a
-    /// programmatic selection change in one window is reflected in
-    /// every other window that shows the same Solution.
-    PanelMemberSelectionChanged {
+    /// Emitted when `set_active_member` updates the solution-wide catalog
+    /// selection. UI listeners react to this so a programmatic selection
+    /// change in one window is reflected in every other window showing the
+    /// same Solution.
+    ActiveMemberChanged {
         solution: SolutionId,
-        panel: crate::db::PanelKind,
         catalog: CatalogId,
     },
     /// Emitted when a Solution is removed from the store. Carries the
@@ -149,21 +146,16 @@ impl SolutionStore {
                 }
             }
         };
-        let panel_rows = match gpui::block_on(db.load_all_panel_selections()) {
+        let active_member_rows = match gpui::block_on(db.load_all_active_members()) {
             Ok(rows) => rows,
             Err(err) => {
-                log::error!("solutions::store: failed to load panel_member_selections: {err}");
+                log::error!("solutions::store: failed to load active_member: {err}");
                 Vec::new()
             }
         };
-        let mut panel_member_selections: HashMap<(SolutionId, crate::db::PanelKind), CatalogId> =
-            HashMap::default();
-        for (sid, pk, cid) in panel_rows {
-            if let Some(panel) = crate::db::PanelKind::from_sql_str(&pk) {
-                panel_member_selections.insert((SolutionId(sid), panel), CatalogId(cid));
-            } else {
-                log::warn!("unknown panel_kind in panel_member_selections: {pk}");
-            }
+        let mut active_member: HashMap<SolutionId, CatalogId> = HashMap::default();
+        for (sid, cid) in active_member_rows {
+            active_member.insert(SolutionId(sid), CatalogId(cid));
         }
         let store = cx.new(|_| SolutionStore {
             config,
@@ -172,7 +164,7 @@ impl SolutionStore {
             in_flight_adds: HashMap::default(),
             tab_snapshots: TabSnapshots::default(),
             dock_snapshots: DockSnapshots::default(),
-            panel_member_selections,
+            active_member,
             open_solutions: HashSet::default(),
         });
         cx.set_global(GlobalSolutionStore(store));
@@ -245,7 +237,7 @@ impl SolutionStore {
             in_flight_adds: HashMap::default(),
             tab_snapshots: TabSnapshots::default(),
             dock_snapshots: DockSnapshots::default(),
-            panel_member_selections: HashMap::default(),
+            active_member: HashMap::default(),
             open_solutions: HashSet::default(),
         })
     }
@@ -306,49 +298,56 @@ impl SolutionStore {
         cx.notify();
     }
 
-    /// Read the catalog id currently selected for the given (solution,
-    /// panel) pair, or `None` if nothing has been recorded yet. Backed
-    /// by an in-memory cache hydrated from the
-    /// `panel_member_selections` DB table at init.
-    pub fn panel_member_selection(
-        &self,
-        solution: &SolutionId,
-        panel: crate::db::PanelKind,
-    ) -> Option<&CatalogId> {
-        self.panel_member_selections.get(&(solution.clone(), panel))
+    /// Read the solution-wide active catalog member, or `None` if nothing
+    /// has been recorded yet. Backed by an in-memory cache hydrated from
+    /// the `active_member` DB table at init.
+    pub fn active_member(&self, solution: &SolutionId) -> Option<&CatalogId> {
+        self.active_member.get(solution)
     }
 
-    /// Persist a per-(solution, panel) catalog selection through the
-    /// DB and update the in-memory cache. Emits
-    /// `PanelMemberSelectionChanged` so other windows observing the
-    /// store can mirror the change.
-    pub fn set_panel_member_selection(
+    /// Persist the solution-wide active catalog member through the DB and
+    /// update the in-memory cache. Emits `ActiveMemberChanged` so other
+    /// windows observing the store can mirror the change. No-op if the
+    /// given catalog is already the active member for this solution.
+    pub fn set_active_member(
         &mut self,
         solution: SolutionId,
-        panel: crate::db::PanelKind,
         catalog: CatalogId,
-        cx: &mut gpui::Context<Self>,
-    ) -> anyhow::Result<()> {
-        // Cache → DB → emit, matching every other mutator in this store.
-        // If the DB write fails the cache is briefly ahead of the DB, but
-        // a subsequent successful write reconciles them and a fresh init
-        // rebuilds the cache from the DB anyway.
-        self.panel_member_selections
-            .insert((solution.clone(), panel), catalog.clone());
-        if let Some(db) = self.db.as_ref() {
-            gpui::block_on(db.set_panel_selection(
-                solution.0.clone(),
-                panel.as_sql_str().to_string(),
-                catalog.0.clone(),
-            ))?;
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_member.get(&solution) == Some(&catalog) {
+            return;
         }
-        cx.emit(SolutionStoreEvent::PanelMemberSelectionChanged {
-            solution,
-            panel,
-            catalog,
-        });
+        self.active_member.insert(solution.clone(), catalog.clone());
+        if let Some(db) = self.db.clone() {
+            let (sid, cid) = (solution.0.clone(), catalog.0.clone());
+            cx.background_spawn(async move {
+                db.set_active_member(sid, cid).await.log_err();
+            })
+            .detach();
+        }
+        cx.emit(SolutionStoreEvent::ActiveMemberChanged { solution, catalog });
         cx.notify();
-        Ok(())
+    }
+
+    /// Return the active catalog member for the solution, seeding it to
+    /// the first member in `members` if no selection has been recorded
+    /// yet (or the recorded one is no longer a member). Returns `None`
+    /// if `members` is empty.
+    pub fn ensure_active_member(
+        &mut self,
+        solution: &SolutionId,
+        members: &[SolutionMember],
+        cx: &mut Context<Self>,
+    ) -> Option<CatalogId> {
+        if let Some(existing) = self.active_member.get(solution) {
+            if members.iter().any(|m| &m.catalog_id == existing) {
+                return Some(existing.clone());
+            }
+        }
+        let first = members.first()?.catalog_id.clone();
+        self.set_active_member(solution.clone(), first.clone(), cx);
+        Some(first)
     }
 
     pub fn catalog(&self) -> &[CatalogProject] {
@@ -626,10 +625,10 @@ impl SolutionStore {
             bail!("solution not found: {}", id.0);
         }
         self.db_delete_solution(id)?;
-        // DB rows for this solution's panel selections are removed by
+        // DB row for this solution's active_member is removed by
         // `ON DELETE CASCADE`; mirror that on the in-memory cache so
         // stale entries don't leak past the deletion.
-        self.panel_member_selections.retain(|(sid, _), _| sid != id);
+        self.active_member.remove(id);
         // Emit the sequenced workspace-level notification so the mobile snapshot
         // (and any other listener) updates regardless of who triggered the delete.
         // Reserve seq first, then drop the borrow, then emit — avoids holding
@@ -689,10 +688,11 @@ impl SolutionStore {
             bail!("member not in solution");
         }
         self.db_delete_member(solution_id, catalog_id)?;
-        // Drop any panel selection that pointed at the now-gone member
-        // so panels don't keep a dangling catalog id in their cache.
-        self.panel_member_selections
-            .retain(|(sid, _), cid| !(sid == solution_id && cid == catalog_id));
+        // Clear the active_member entry if it pointed at the now-gone member
+        // so callers don't keep a dangling catalog id in their cache.
+        if self.active_member.get(solution_id) == Some(catalog_id) {
+            self.active_member.remove(solution_id);
+        }
         cx.emit(SolutionStoreEvent::Changed);
         cx.notify();
         Ok(())
@@ -1419,6 +1419,78 @@ mod tests {
         });
         let recovered = store.read_with(cx, |s, _| s.dock_snapshot(&sol).cloned());
         assert_eq!(recovered, Some(SolutionDockSnapshot::default()));
+    }
+
+    #[gpui::test]
+    async fn set_active_member_emits_and_persists(cx: &mut TestAppContext) {
+        let dir = tempdir().expect("tempdir");
+        let store = cx.update(|cx| SolutionStore::for_test(dir.path().join("s.json"), cx));
+        let sol = SolutionId("s1".into());
+        let cat = CatalogId("cat-a".into());
+        let events: std::sync::Arc<std::sync::Mutex<Vec<SolutionStoreEvent>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _sub = cx.update(|cx| {
+            let events = events.clone();
+            cx.subscribe(&store, move |_store, ev: &SolutionStoreEvent, _cx| {
+                events.lock().expect("events lock").push(ev.clone());
+            })
+        });
+        store.update(cx, |s, cx| s.set_active_member(sol.clone(), cat.clone(), cx));
+        cx.run_until_parked();
+        assert_eq!(
+            store.read_with(cx, |s, _| s.active_member(&sol).cloned()),
+            Some(cat.clone())
+        );
+        let events = events.lock().expect("events lock");
+        assert!(
+            events.iter().any(|e| matches!(e,
+                SolutionStoreEvent::ActiveMemberChanged { solution, catalog }
+                    if *solution == sol && *catalog == cat)),
+            "expected ActiveMemberChanged event; got: {events:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn ensure_active_member_seeds_first_when_absent(cx: &mut TestAppContext) {
+        let dir = tempdir().expect("tempdir");
+        let store = cx.update(|cx| SolutionStore::for_test(dir.path().join("s.json"), cx));
+        let sol = SolutionId("s1".into());
+        let cat_a = CatalogId("cat-a".into());
+        let cat_b = CatalogId("cat-b".into());
+        let members = vec![
+            SolutionMember {
+                catalog_id: cat_a.clone(),
+                local_path: std::path::PathBuf::from("/tmp/a"),
+            },
+            SolutionMember {
+                catalog_id: cat_b.clone(),
+                local_path: std::path::PathBuf::from("/tmp/b"),
+            },
+        ];
+        // No selection yet → seeds first member.
+        let result = store.update(cx, |s, cx| s.ensure_active_member(&sol, &members, cx));
+        assert_eq!(result, Some(cat_a.clone()));
+        assert_eq!(
+            store.read_with(cx, |s, _| s.active_member(&sol).cloned()),
+            Some(cat_a.clone())
+        );
+        // Already set to a member → returns existing without change.
+        let result2 = store.update(cx, |s, cx| s.ensure_active_member(&sol, &members, cx));
+        assert_eq!(result2, Some(cat_a.clone()));
+        // Existing selection removed from members → reseeds to first remaining.
+        let members2 = vec![SolutionMember {
+            catalog_id: cat_b.clone(),
+            local_path: std::path::PathBuf::from("/tmp/b"),
+        }];
+        let result3 = store.update(cx, |s, cx| s.ensure_active_member(&sol, &members2, cx));
+        assert_eq!(result3, Some(cat_b.clone()));
+        assert_eq!(
+            store.read_with(cx, |s, _| s.active_member(&sol).cloned()),
+            Some(cat_b)
+        );
+        // Empty members → returns None.
+        let result4 = store.update(cx, |s, cx| s.ensure_active_member(&sol, &[], cx));
+        assert_eq!(result4, None);
     }
 
     #[gpui::test]

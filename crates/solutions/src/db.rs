@@ -63,31 +63,6 @@ impl Domain for SolutionsDb {
 
 db::static_connection!(SolutionsDb, []);
 
-/// Identifies which panel a panel_member_selections row belongs to.
-/// Stored as the literal string in the SQL panel_kind column.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PanelKind {
-    Tree,
-    Git,
-}
-
-impl PanelKind {
-    pub fn as_sql_str(self) -> &'static str {
-        match self {
-            PanelKind::Tree => "tree",
-            PanelKind::Git => "git",
-        }
-    }
-
-    pub fn from_sql_str(s: &str) -> Option<PanelKind> {
-        match s {
-            "tree" => Some(PanelKind::Tree),
-            "git" => Some(PanelKind::Git),
-            _ => None,
-        }
-    }
-}
-
 use db::query;
 
 impl SolutionsDb {
@@ -191,25 +166,6 @@ impl SolutionsDb {
     }
 
     query! {
-        pub async fn set_panel_selection(
-            solution_id: String,
-            panel_kind: String,
-            catalog_id: String
-        ) -> Result<()> {
-            INSERT OR REPLACE INTO panel_member_selections (solution_id, panel_kind, catalog_id)
-            VALUES (?, ?, ?)
-        }
-    }
-
-    query! {
-        pub async fn load_all_panel_selections()
-            -> Result<Vec<(String, String, String)>>
-        {
-            SELECT solution_id, panel_kind, catalog_id FROM panel_member_selections
-        }
-    }
-
-    query! {
         pub async fn set_active_member(solution_id: String, catalog_id: String) -> Result<()> {
             INSERT OR REPLACE INTO active_member (solution_id, catalog_id)
             VALUES (?, ?)
@@ -239,15 +195,6 @@ mod tests {
             .unwrap();
         })
         .await;
-    }
-
-    #[test]
-    fn panel_kind_round_trips_sql_str() {
-        assert_eq!(PanelKind::from_sql_str("tree"), Some(PanelKind::Tree));
-        assert_eq!(PanelKind::from_sql_str("git"), Some(PanelKind::Git));
-        assert_eq!(PanelKind::from_sql_str("xxx"), None);
-        assert_eq!(PanelKind::Tree.as_sql_str(), "tree");
-        assert_eq!(PanelKind::Git.as_sql_str(), "git");
     }
 
     #[gpui::test]
