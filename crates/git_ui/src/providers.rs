@@ -11,44 +11,25 @@
 
 pub mod log_data_source;
 pub mod push;
-pub mod solution_panel;
 pub mod update;
 
 use std::sync::OnceLock;
 
 pub use log_data_source::{AggregatedCommit, LogDataSource, LogQuery};
 pub use push::SolutionPushProvider;
-pub use solution_panel::{
-    CommitAllOutcome, CommitStatus, MemberCommitResult, SolutionPanelProvider,
-};
 pub use update::SolutionUpdateProvider;
 
 struct Providers {
-    solution_panel: OnceLock<Box<dyn SolutionPanelProvider>>,
     solution_push: OnceLock<Box<dyn SolutionPushProvider>>,
     solution_update: OnceLock<Box<dyn SolutionUpdateProvider>>,
     log_data_source: OnceLock<Box<dyn LogDataSource>>,
 }
 
 static PROVIDERS: Providers = Providers {
-    solution_panel: OnceLock::new(),
     solution_push: OnceLock::new(),
     solution_update: OnceLock::new(),
     log_data_source: OnceLock::new(),
 };
-
-/// Register the solution-panel provider exactly once. Subsequent calls are
-/// silently ignored (a debug log warns) to keep `solution_git::init` idempotent
-/// across hot-reload-style flows.
-pub fn set_solution_panel_provider(provider: Box<dyn SolutionPanelProvider>) {
-    if PROVIDERS.solution_panel.set(provider).is_err() {
-        log::warn!("git_ui::providers: solution_panel provider was already registered");
-    }
-}
-
-pub fn solution_panel_provider() -> Option<&'static dyn SolutionPanelProvider> {
-    PROVIDERS.solution_panel.get().map(|b| b.as_ref())
-}
 
 pub fn set_solution_push_provider(provider: Box<dyn SolutionPushProvider>) {
     if PROVIDERS.solution_push.set(provider).is_err() {

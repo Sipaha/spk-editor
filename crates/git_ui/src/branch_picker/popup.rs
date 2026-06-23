@@ -825,10 +825,8 @@ impl BranchesPopup {
                         cx.emit(DismissEvent);
                     }))
             })
-            // Commit — routes to the git panel, which renders the
-            // solution-wide commit surface (`render_solution_commit_panel`,
-            // via the registered `SolutionPanelProvider`) when a Solution
-            // is active and ≥2 members; otherwise the single-repo commit.
+            // Commit — routes to the git panel, which commits the single
+            // active repository (the active member's repo).
             .child(
                 make_row("popup-action-commit")
                     .child(icon_slot(IconName::GitCommit))

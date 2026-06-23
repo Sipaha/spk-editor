@@ -161,9 +161,6 @@ struct CredentialsWarningId;
 /// `CredentialsWarningId` so the two notifications can coexist.
 struct PreCommitFailureId;
 
-/// Marker type for the S-SOL-CMT solution-wide commit summary toast.
-struct SolutionCommitToastId;
-
 struct GitMenuState {
     has_tracked_changes: bool,
     has_staged_changes: bool,
@@ -694,17 +691,6 @@ pub struct GitPanel {
     pre_commit_loaded_for: Option<std::sync::Arc<std::path::Path>>,
     /// Toggling `--no-verify` bypasses BOTH our checks and git's hook.
     pre_commit_no_verify: bool,
-
-    /// S-SOL-CMT — when `true`, the central content area renders the
-    /// per-member file-grouped commit panel via the
-    /// [`crate::providers::SolutionPanelProvider`] and the Commit button
-    /// dispatches `commit_all` instead of single-repo commit. Visible
-    /// only when the provider is registered AND reports an active
-    /// Solution with ≥ 2 members.
-    solution_wide_commit: bool,
-    /// Whether to inject the auto-trailer `X-Spke-Solution: <name>` on a
-    /// solution-wide commit. Default `true`; toggled via the panel UI.
-    solution_wide_add_trailer: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -913,8 +899,6 @@ impl GitPanel {
                 pre_commit_config: pre_commit::PreCommitConfig::default(),
                 pre_commit_loaded_for: None,
                 pre_commit_no_verify: false,
-                solution_wide_commit: false,
-                solution_wide_add_trailer: true,
             };
 
             this.schedule_update(window, cx);
@@ -3726,188 +3710,6 @@ impl GitPanel {
         }
     }
 
-    /// S-SOL-CMT — true when the active Solution has ≥ 2 members AND a
-    /// `SolutionPanelProvider` is registered. Drives whether the
-    /// `Solution-wide` toggle is visible at all.
-    fn solution_wide_toggle_available(&self, cx: &App) -> bool {
-        if crate::providers::solution_panel_provider().is_none() {
-            return false;
-        }
-        let Some(store) = solutions::SolutionStore::try_global(cx) else {
-            return false;
-        };
-        let store = store.read(cx);
-        let mut best: Option<&solutions::Solution> = None;
-        for sol in store.solutions() {
-            best = Some(match best {
-                None => sol,
-                Some(prev) => match (prev.last_opened_at, sol.last_opened_at) {
-                    (Some(a), Some(b)) if b > a => sol,
-                    (None, Some(_)) => sol,
-                    _ => prev,
-                },
-            });
-        }
-        best.map(|s| s.members.len() >= 2).unwrap_or(false)
-    }
-
-    fn solution_wide_active(&self, cx: &App) -> bool {
-        self.solution_wide_commit && self.solution_wide_toggle_available(cx)
-    }
-
-    /// Toggle the Solution-wide commit mode. Caller is the panel button.
-    fn toggle_solution_wide_commit(&mut self, cx: &mut Context<Self>) {
-        if !self.solution_wide_toggle_available(cx) {
-            // Defensive: if the user clicks while the toggle is in
-            // transition (e.g. solution closed mid-render), bail out
-            // rather than enter a stuck state.
-            self.solution_wide_commit = false;
-            cx.notify();
-            return;
-        }
-        self.solution_wide_commit = !self.solution_wide_commit;
-        cx.notify();
-    }
-
-    fn toggle_solution_wide_trailer(&mut self, cx: &mut Context<Self>) {
-        self.solution_wide_add_trailer = !self.solution_wide_add_trailer;
-        cx.notify();
-    }
-
-    /// Dispatch a Solution-wide commit through the provider. Only called
-    /// when [`solution_wide_active`] is true.
-    fn dispatch_solution_wide_commit(&mut self, cx: &mut Context<Self>) {
-        if !self.solution_wide_active(cx) {
-            return;
-        }
-        let provider = match crate::providers::solution_panel_provider() {
-            Some(p) => p,
-            None => return,
-        };
-        let message = self.commit_editor.read(cx).text(cx);
-        if message.trim().is_empty() {
-            return;
-        }
-        let add_trailer = self.solution_wide_add_trailer;
-        let run_pre_commit = !self.pre_commit_no_verify;
-        // Run from `cx` so the task lives in the GPUI scheduler; the
-        // provider returns a background-spawned task internally.
-        let task = provider.commit_all(
-            SharedString::from(message),
-            add_trailer,
-            run_pre_commit,
-            None,
-            cx,
-        );
-        let workspace = self.workspace.clone();
-        let pending = cx.spawn(async move |this, cx| {
-            let outcome = match task.await {
-                Ok(outcome) => outcome,
-                Err(err) => {
-                    workspace
-                        .update(cx, |workspace, cx| {
-                            workspace.show_error(&err, cx);
-                        })
-                        .ok();
-                    let _ = this.update(cx, |this, _| {
-                        this.pending_commit.take();
-                    });
-                    return;
-                }
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.pending_commit.take();
-                cx.notify();
-            });
-            // Surface a summary toast so the user can tell whether the
-            // commit fully succeeded, partially rolled back, or needs
-            // manual recovery.
-            let toast_text = if outcome.partial_failure_count() > 0 {
-                let needing = outcome.members_needing_recovery();
-                let names: Vec<String> = needing.iter().map(|s| s.to_string()).collect();
-                format!(
-                    "Solution-wide commit partially failed; {} need recovery via refs/spke/backup/...: {}",
-                    names.len(),
-                    names.join(", ")
-                )
-            } else if outcome.rolled_back_count() > 0 {
-                format!(
-                    "Solution-wide commit aborted; rolled back {} member(s)",
-                    outcome.rolled_back_count()
-                )
-            } else if outcome.committed_count() > 0 {
-                format!(
-                    "Solution-wide commit completed in {}/{} members",
-                    outcome.committed_count(),
-                    outcome.member_results.len()
-                )
-            } else {
-                "Solution-wide commit: nothing to commit".to_string()
-            };
-            workspace
-                .update(cx, |workspace, cx| {
-                    let toast = workspace::Toast::new(
-                        workspace::notifications::NotificationId::unique::<
-                            SolutionCommitToastId,
-                        >(),
-                        toast_text,
-                    );
-                    workspace.show_toast(toast, cx);
-                })
-                .ok();
-        });
-        self.pending_commit = Some(pending);
-    }
-
-    /// Render the `Solution-wide` toggle bar — visible only when the
-    /// active Solution has ≥ 2 members and a `SolutionPanelProvider` is
-    /// registered. When toggled on, also exposes the auto-trailer
-    /// checkbox.
-    fn render_solution_wide_toggle(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        if !self.solution_wide_toggle_available(cx) {
-            return None;
-        }
-        let solution_wide = self.solution_wide_commit;
-        let add_trailer = self.solution_wide_add_trailer;
-        let row = h_flex()
-            .px_3()
-            .py_1()
-            .gap_2()
-            .border_b_1()
-            .border_color(cx.theme().colors().border_variant)
-            .child(
-                Checkbox::new(
-                    "git-panel-solution-wide-toggle",
-                    if solution_wide {
-                        ui::ToggleState::Selected
-                    } else {
-                        ui::ToggleState::Unselected
-                    },
-                )
-                .label("Solution-wide")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.toggle_solution_wide_commit(cx);
-                })),
-            )
-            .when(solution_wide, |this| {
-                this.child(
-                    Checkbox::new(
-                        "git-panel-solution-wide-trailer",
-                        if add_trailer {
-                            ui::ToggleState::Selected
-                        } else {
-                            ui::ToggleState::Unselected
-                        },
-                    )
-                    .label("Add X-Spke-Solution trailer")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.toggle_solution_wide_trailer(cx);
-                    })),
-                )
-            });
-        Some(row)
-    }
-
     fn schedule_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let handle = cx.entity().downgrade();
         self.reopen_commit_buffer(window, cx);
@@ -5143,19 +4945,15 @@ impl GitPanel {
                         telemetry::event!("Git Committed", source = "Git Panel");
                         git_panel
                             .update(cx, |git_panel, cx| {
-                                if git_panel.solution_wide_active(cx) {
-                                    git_panel.dispatch_solution_wide_commit(cx);
-                                } else {
-                                    git_panel.commit_changes(
-                                        CommitOptions {
-                                            amend,
-                                            signoff,
-                                            allow_empty: false,
-                                        },
-                                        window,
-                                        cx,
-                                    );
-                                }
+                                git_panel.commit_changes(
+                                    CommitOptions {
+                                        amend,
+                                        signoff,
+                                        allow_empty: false,
+                                    },
+                                    window,
+                                    cx,
+                                );
                             })
                             .ok();
                     }
@@ -6607,17 +6405,8 @@ impl Render for GitPanel {
                 v_flex()
                     .size_full()
                     .children(self.render_panel_header(window, cx))
-                    .children(self.render_solution_wide_toggle(cx))
                     .map(|this| {
-                        if self.solution_wide_active(cx) {
-                            // S-SOL-CMT: delegate central content to the
-                            // provider's per-member file-grouped panel.
-                            let provider = crate::providers::solution_panel_provider();
-                            match provider {
-                                Some(p) => this.child(p.render_solution_commit_panel(cx)),
-                                None => this.child(self.render_empty_state(cx).into_any_element()),
-                            }
-                        } else if let Some(repo) = self.active_repository.clone()
+                        if let Some(repo) = self.active_repository.clone()
                             && has_entries
                         {
                             this.child(self.render_entries(has_write_access, repo, window, cx))

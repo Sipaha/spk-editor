@@ -10,7 +10,6 @@
 pub mod aggregator;
 pub mod ai_cherry_pick_suggest;
 pub mod branch_protection;
-pub mod commit;
 pub mod cross_cherry_pick;
 pub mod dashboard;
 pub mod mcp;
@@ -69,20 +68,6 @@ pub fn init(cx: &mut App) {
         );
     }
 
-    // S-SOL-CMT: register the solution-wide commit orchestrator as the
-    // `SolutionPanelProvider`. `git_panel` reaches in through the trait
-    // when the user toggles `Solution-wide`. Registration is idempotent
-    // (`OnceLock`-backed) so re-running `init` is safe.
-    if let Some(orchestrator) = commit::build_global_orchestrator(cx) {
-        let boxed: Box<dyn git_ui::providers::SolutionPanelProvider> = Box::new(orchestrator);
-        git_ui::providers::set_solution_panel_provider(boxed);
-    } else {
-        log::debug!(
-            "solution_git::init: SolutionStore global not installed — \
-             SolutionPanelProvider not registered (likely a non-solution test context)"
-        );
-    }
-
     // S-SOL-PSH: register the solution-wide push orchestrator as the
     // `SolutionPushProvider`. `git_panel` (and the command-palette
     // `solution_git::PushAll` action) reach in through the trait when
@@ -112,7 +97,6 @@ pub fn init(cx: &mut App) {
 
     // Register MCP tools owned by this crate (`solution.git.*`).
     mcp::register(cx);
-    commit::mcp::register(cx);
     dashboard::register_mcp(cx);
     push::mcp::register(cx);
     cross_cherry_pick::mcp::register(cx);
