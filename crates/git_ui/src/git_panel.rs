@@ -60,7 +60,6 @@ use serde::{Deserialize, Serialize};
 use settings::{Settings, SettingsStore, StatusStyle};
 use smallvec::SmallVec;
 use solutions;
-use solutions_ui;
 use std::future::Future;
 use std::ops::Range;
 use std::path::Path;
@@ -682,9 +681,9 @@ pub struct GitPanel {
     _settings_subscription: Subscription,
     git_access: GitAccess,
 
-    // Phase 3: per-member project selector at the top of the panel
-    solution_selector: gpui::Entity<solutions_ui::ActiveProjectSelector>,
-    _selector_subscription: Subscription,
+    // Refreshes the active repository when the solution-wide active member
+    // flips (replaces the retired per-panel project selector).
+    _store_subscription: Subscription,
 
     // S-PCH-HK — per-repo before-commit checks state. `pre_commit_config`
     // is loaded lazily when the panel sees a new active repository
@@ -853,17 +852,20 @@ impl GitPanel {
             )
             .detach();
 
-            let solution_selector = cx.new(|cx| {
-                solutions_ui::ActiveProjectSelector::new(
-                    solutions::db::PanelKind::Git,
-                    workspace.weak_handle(),
-                    cx,
-                )
-            });
-            let _selector_subscription =
-                cx.observe_in(&solution_selector, window, |this, _, window, cx| {
-                    this.schedule_update(window, cx);
-                });
+            // Re-pick the active repository whenever the solution-wide active
+            // member flips so the panel tracks the newly-selected project.
+            let _store_subscription = cx.subscribe_in(
+                &solutions::SolutionStore::global(cx),
+                window,
+                |this, _store, event, window, cx| {
+                    if matches!(
+                        event,
+                        solutions::SolutionStoreEvent::ActiveMemberChanged { .. }
+                    ) {
+                        this.schedule_update(window, cx);
+                    }
+                },
+            );
 
             let mut this = Self {
                 active_repository,
@@ -907,8 +909,7 @@ impl GitPanel {
                 stash_entries: Default::default(),
                 _settings_subscription,
                 git_access: GitAccess::Yes,
-                solution_selector,
-                _selector_subscription,
+                _store_subscription,
                 pre_commit_config: pre_commit::PreCommitConfig::default(),
                 pre_commit_loaded_for: None,
                 pre_commit_no_verify: false,
@@ -3671,13 +3672,41 @@ impl GitPanel {
         message.push('\n');
     }
 
-    /// If the solution selector has a member selected, override `active_repository`
-    /// to the repo whose `work_directory_abs_path` is under the selected member's
+    /// First solution (if any) whose `root` is an ancestor of one of this
+    /// panel's project worktrees. Mirrors the resolution the retired
+    /// `ActiveProjectSelector` performed from the workspace, but reads the
+    /// panel's own `project` handle.
+    fn active_solution(&self, cx: &App) -> Option<solutions::Solution> {
+        let store = solutions::SolutionStore::try_global(cx)?;
+        let store = store.read(cx);
+        self.project
+            .read(cx)
+            .worktrees(cx)
+            .find_map(|worktree| store.solution_for_path(&worktree.read(cx).abs_path()))
+            .cloned()
+    }
+
+    /// The solution-wide active member of this panel's solution, joined from
+    /// the store's `active_member` selection and the solution's member list.
+    fn active_member(&self, cx: &App) -> Option<solutions::SolutionMember> {
+        let solution = self.active_solution(cx)?;
+        let store = solutions::SolutionStore::try_global(cx)?;
+        let store = store.read(cx);
+        let catalog = store.active_member(&solution.id)?;
+        solution
+            .members
+            .iter()
+            .find(|member| &member.catalog_id == catalog)
+            .cloned()
+    }
+
+    /// If the panel's solution has an active member, override `active_repository`
+    /// to the repo whose `work_directory_abs_path` is under that member's
     /// `local_path`. Called at the start of `update_visible_entries`, immediately
     /// after the upstream `project.active_repository(cx)` assignment, so the
-    /// selector-driven choice wins for all downstream logic in that fn.
+    /// member-driven choice wins for all downstream logic in that fn.
     fn refresh_active_repository_for_selector(&mut self, cx: &mut Context<Self>) {
-        let Some(member) = self.solution_selector.read(cx).selected_member().cloned() else {
+        let Some(member) = self.active_member(cx) else {
             return;
         };
         let project = self.project.read(cx);
@@ -3879,37 +3908,6 @@ impl GitPanel {
         Some(row)
     }
 
-    /// Compute per-member change counts across all project repositories and
-    /// push the map to the selector so the dropdown rows can render badges.
-    fn refresh_change_counts_for_selector(&mut self, cx: &mut Context<Self>) {
-        let Some(solution_id) = self.solution_selector.read(cx).solution_id().cloned() else {
-            return;
-        };
-        let store = solutions::SolutionStore::global(cx);
-        let members: Vec<solutions::SolutionMember> = store.read_with(cx, |s, _| {
-            s.solutions()
-                .iter()
-                .find(|sol| sol.id == solution_id)
-                .map(|sol| sol.members.clone())
-                .unwrap_or_default()
-        });
-        let project = self.project.read(cx);
-        let mut counts: collections::HashMap<solutions::CatalogId, usize> =
-            collections::HashMap::default();
-        for member in &members {
-            let mut count: usize = 0;
-            for repo in project.repositories(cx).values() {
-                let dir = repo.read(cx).work_directory_abs_path.clone();
-                if dir.starts_with(&member.local_path) {
-                    count += repo.read(cx).status_summary().count;
-                }
-            }
-            counts.insert(member.catalog_id.clone(), count);
-        }
-        self.solution_selector
-            .update(cx, |s, cx| s.set_change_counts(counts, cx));
-    }
-
     fn schedule_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let handle = cx.entity().downgrade();
         self.reopen_commit_buffer(window, cx);
@@ -4052,11 +4050,7 @@ impl GitPanel {
         let mut max_width_item_index = None;
 
         let Some(repo) = self.active_repository.as_ref() else {
-            // Just clear entries if no repository is active. Still refresh
-            // the per-member change counts before bailing — non-active
-            // members may still have repos with changes, and their badges
-            // would otherwise go stale.
-            self.refresh_change_counts_for_selector(cx);
+            // Just clear entries if no repository is active.
             cx.notify();
             return;
         };
@@ -4253,9 +4247,6 @@ impl GitPanel {
         self.commit_editor.update(cx, |editor, cx| {
             editor.set_placeholder_text(&placeholder_text, window, cx)
         });
-
-        // Phase 3: push per-member change counts to the selector for badge rendering.
-        self.refresh_change_counts_for_selector(cx);
 
         cx.notify();
     }
@@ -6615,7 +6606,6 @@ impl Render for GitPanel {
             .child(
                 v_flex()
                     .size_full()
-                    .child(self.solution_selector.clone()) // Phase 3: member selector
                     .children(self.render_panel_header(window, cx))
                     .children(self.render_solution_wide_toggle(cx))
                     .map(|this| {
@@ -8974,17 +8964,12 @@ mod tests {
         });
     }
 
-    /// Smoke test: GitPanel constructs with the ActiveProjectSelector wired in
-    /// and does not panic when no solution is active (the common case for
-    /// single-project use). The selector initializes deferred, so we park the
-    /// executor to let the deferred rebuild run.
-    ///
-    /// Choosing a minimal smoke test rather than a full selector-flip test
-    /// because the git_panel harness does not have a SolutionStore-with-members
-    /// setup helper, and wiring one up would require a substantial amount of
-    /// test scaffolding that is out of scope for Task 10.
+    /// Smoke test: GitPanel constructs and does not panic when no solution is
+    /// active (the common case for single-project use). The panel subscribes to
+    /// the SolutionStore for active-member changes, so we park the executor to
+    /// let any deferred store work run.
     #[gpui::test]
-    async fn test_git_panel_constructs_with_solution_selector(cx: &mut TestAppContext) {
+    async fn test_git_panel_constructs(cx: &mut TestAppContext) {
         init_test(cx);
         let fs = FakeFs::new(cx.background_executor.clone());
         fs.insert_tree(
@@ -9011,15 +8996,14 @@ mod tests {
         // Construct the panel — must not panic with SolutionStore initialized.
         let panel = workspace.update_in(cx, GitPanel::new);
 
-        // Allow the deferred selector rebuild to run.
         cx.executor().run_until_parked();
 
-        // The panel is alive and the selector is initialized.
+        // The panel is alive and resolves no active member when no solution is
+        // active.
         panel.read_with(cx, |panel, cx| {
-            // With no solution active, selected_member() returns None.
             assert!(
-                panel.solution_selector.read(cx).selected_member().is_none(),
-                "selector should have no selected member when no solution is active"
+                panel.active_member(cx).is_none(),
+                "no active member when no solution is active"
             );
         });
     }

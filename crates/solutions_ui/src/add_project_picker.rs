@@ -1,4 +1,4 @@
-//! "Add project to this solution" popover hosted by ActiveProjectSelector.
+//! "Add project to this solution" popover hosted by the project tab strip's + button.
 //!
 //! Shape: search input → "+ Create new empty project in solution…"
 //! entry → catalog rows (filtered to projects not already members).

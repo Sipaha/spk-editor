@@ -163,8 +163,7 @@ pub struct ProjectPanel {
     update_visible_entries_task: UpdateVisibleEntriesTask,
     undo_manager: UndoManager,
     state: State,
-    solution_selector: gpui::Entity<solutions_ui::ActiveProjectSelector>,
-    _selector_subscription: gpui::Subscription,
+    _store_subscription: gpui::Subscription,
 }
 
 struct UpdateVisibleEntriesTask {
@@ -801,18 +800,21 @@ impl ProjectPanel {
             let scroll_handle = UniformListScrollHandle::new();
             let weak_project_panel = cx.weak_entity();
 
-            let solution_selector = cx.new(|cx| {
-                solutions_ui::ActiveProjectSelector::new(
-                    solutions::db::PanelKind::Tree,
-                    workspace.weak_handle(),
-                    cx,
-                )
-            });
-            let selector_subscription =
-                cx.observe_in(&solution_selector, window, |this, _, window, cx| {
-                    this.update_visible_entries(None, false, false, window, cx);
-                    cx.notify();
-                });
+            // Rebuild the worktree view whenever the solution-wide active
+            // member flips so the panel renders the newly-selected project.
+            let store_subscription = cx.subscribe_in(
+                &solutions::SolutionStore::global(cx),
+                window,
+                |this, _store, event, window, cx| {
+                    if matches!(
+                        event,
+                        solutions::SolutionStoreEvent::ActiveMemberChanged { .. }
+                    ) {
+                        this.update_visible_entries(None, false, false, window, cx);
+                        cx.notify();
+                    }
+                },
+            );
 
             let mut this = Self {
                 project: project.clone(),
@@ -850,8 +852,7 @@ impl ProjectPanel {
                 },
                 update_visible_entries_task: Default::default(),
                 undo_manager: UndoManager::new(workspace.weak_handle(), weak_project_panel, &cx),
-                solution_selector,
-                _selector_subscription: selector_subscription,
+                _store_subscription: store_subscription,
             };
             this.update_visible_entries(None, false, false, window, cx);
 
@@ -3950,6 +3951,37 @@ impl ProjectPanel {
         }
     }
 
+    /// First solution (if any) whose `root` is an ancestor of one of this
+    /// panel's project worktrees. Mirrors the resolution the retired
+    /// `ActiveProjectSelector` performed from the workspace, but reads the
+    /// panel's own `project` handle since the panel doesn't carry a
+    /// `WeakEntity<Workspace>` for this purpose.
+    fn active_solution(&self, cx: &App) -> Option<solutions::Solution> {
+        let store = solutions::SolutionStore::try_global(cx)?;
+        let store = store.read(cx);
+        self.project
+            .read(cx)
+            .worktrees(cx)
+            .find_map(|worktree| store.solution_for_path(&worktree.read(cx).abs_path()))
+            .cloned()
+    }
+
+    /// Absolute path of the solution-wide active member for this panel's
+    /// solution, used to restrict the visible worktree to a single project.
+    /// `None` when no solution hosts the panel's worktrees, no active member
+    /// is recorded, or the active member is not in the solution.
+    fn active_member_path(&self, cx: &App) -> Option<std::path::PathBuf> {
+        let solution = self.active_solution(cx)?;
+        let store = solutions::SolutionStore::try_global(cx)?;
+        let store = store.read(cx);
+        let catalog = store.active_member(&solution.id)?;
+        solution
+            .members
+            .iter()
+            .find(|member| &member.catalog_id == catalog)
+            .map(|member| member.local_path.clone())
+    }
+
     fn update_visible_entries(
         &mut self,
         new_selected_entry: Option<(WorktreeId, ProjectEntryId)>,
@@ -3982,11 +4014,7 @@ impl ProjectPanel {
         // worktrees we know we're going to discard, and lets
         // `last_worktree_root_id` (used by context-menu / drag-drop
         // targeting) line up with the worktree that's actually visible.
-        let active_member_path = self
-            .solution_selector
-            .read(cx)
-            .selected_member()
-            .map(|m| m.local_path.clone());
+        let active_member_path = self.active_member_path(cx);
         let visible_worktrees: Vec<_> = project
             .visible_worktrees(cx)
             .filter(|worktree| match active_member_path.as_ref() {
@@ -6876,7 +6904,6 @@ impl Render for ProjectPanel {
                 .child(
                     v_flex()
                         .child(self.render_toolbar(cx))
-                        .child(self.solution_selector.clone())
                         .child(
                             uniform_list("entries", item_count, {
                                 cx.processor(|this, range: Range<usize>, window, cx| {
@@ -7282,13 +7309,11 @@ impl Render for ProjectPanel {
             // upstream "Open Project / Clone Repository" empty state is
             // never the right CTA. The toolbar's "Select Opened File"
             // button has nothing to act on with an empty pane, so it's
-            // dropped here; the selector sits at the top with the
-            // empty-state body in a centred block below it.
+            // dropped here; the empty-state body sits in a centred block.
             v_flex()
                 .id("empty-project_panel")
                 .size_full()
                 .track_focus(&self.focus_handle(cx))
-                .child(self.solution_selector.clone())
                 .child(
                     v_flex()
                         .flex_1()

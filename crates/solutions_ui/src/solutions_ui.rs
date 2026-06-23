@@ -2,7 +2,7 @@
 //! modals, status-bar widget, welcome integration.
 
 mod actions;
-pub mod active_project_selector;
+pub mod add_project_picker;
 mod add_member_picker;
 pub mod delete_confirm_modal;
 mod empty_solution_page;
@@ -18,7 +18,7 @@ mod welcome;
 mod welcome_trigger;
 pub mod window_helpers;
 
-pub use active_project_selector::ActiveProjectSelector;
+pub use add_project_picker::AddProjectPicker;
 pub use empty_solution_page::EmptySolutionPage;
 pub use open::{OpenIntent, open_solution};
 pub use status_bar::SolutionsStatusItem;
@@ -80,10 +80,10 @@ pub fn delete_solution_with_cleanup(id: SolutionId, root: PathBuf, cx: &mut App)
 /// Each new `Workspace` subscribes to `SolutionStore` so that adding
 /// or removing a member of an already-open solution mounts (or
 /// unmounts) the corresponding worktree without requiring a close /
-/// reopen. The `ActiveProjectSelector` keeps its own subscription
-/// for menu state; this observer's job is the workspace-level
-/// reconciliation (`Workspace::swap_worktrees_to`) that the selector
-/// can't do because it doesn't own a `Window`.
+/// reopen. The panels keep their own subscription to the store for
+/// their active-member filter; this observer's job is the
+/// workspace-level reconciliation (`Workspace::swap_worktrees_to`) that
+/// the panels can't do because they don't own a `Window`.
 ///
 /// Both `add_member` (catalog clone) and `add_empty_member` (no
 /// clone) emit `Changed`, while `MemberAddCompleted` is fired only
@@ -496,18 +496,13 @@ fn close_solution(
     .detach();
 }
 
-/// Advances or retreats the per-panel project selection for the active
-/// solution by `dir` steps (`+1` = next, `-1` = previous), wrapping at
-/// both ends. No-op if the workspace has no active solution, the
-/// solution has no members, or the panel kind isn't recognised.
-fn cycle_project_in_panel(workspace: &Workspace, panel_kind: &str, dir: isize, cx: &mut gpui::App) {
-    use util::ResultExt as _;
-
-    let panel = match panel_kind {
-        "tree" => solutions::db::PanelKind::Tree,
-        "git" => solutions::db::PanelKind::Git,
-        _ => return,
-    };
+/// Advances or retreats the solution-wide active-member selection for
+/// the active solution by `dir` steps (`+1` = next, `-1` = previous),
+/// wrapping at both ends. No-op if the workspace has no active solution
+/// or the solution has no members. The selection is now solution-wide
+/// (shared across project_panel and git_panel), so `_panel_kind` is
+/// retained only to keep the action payload stable for existing keymaps.
+fn cycle_project_in_panel(workspace: &Workspace, _panel_kind: &str, dir: isize, cx: &mut gpui::App) {
     let Some(sol_id) = crate::window_helpers::active_solution_in_workspace(workspace, cx) else {
         return;
     };
@@ -520,7 +515,7 @@ fn cycle_project_in_panel(workspace: &Workspace, panel_kind: &str, dir: isize, c
             return None;
         }
         let current = s
-            .panel_member_selection(&sol.id, panel)
+            .active_member(&sol.id)
             .cloned()
             .unwrap_or_else(|| members[0].clone());
         Some((members, current))
@@ -533,11 +528,9 @@ fn cycle_project_in_panel(workspace: &Workspace, panel_kind: &str, dir: isize, c
         dir,
     );
     let new_catalog = members[new_idx].clone();
-    store
-        .update(cx, |s, cx| {
-            s.set_panel_member_selection(sol_id, panel, new_catalog, cx)
-        })
-        .log_err();
+    store.update(cx, |s, cx| {
+        s.set_active_member(sol_id, new_catalog, cx);
+    });
 }
 
 fn refresh_cache_for_active_solution(workspace: &Workspace, cx: &mut gpui::App) {
