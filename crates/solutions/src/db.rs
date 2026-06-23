@@ -11,39 +11,54 @@ pub struct SolutionsDb(ThreadSafeConnection);
 impl Domain for SolutionsDb {
     const NAME: &str = stringify!(SolutionsDb);
 
-    const MIGRATIONS: &[&str] = &[sql!(
-        CREATE TABLE catalog_projects (
-            id             TEXT PRIMARY KEY,
-            name           TEXT NOT NULL,
-            remote_url     TEXT NOT NULL,
-            default_branch TEXT
-        );
+    const MIGRATIONS: &[&str] = &[
+        sql!(
+            CREATE TABLE catalog_projects (
+                id             TEXT PRIMARY KEY,
+                name           TEXT NOT NULL,
+                remote_url     TEXT NOT NULL,
+                default_branch TEXT
+            );
 
-        CREATE TABLE solutions (
-            id             TEXT PRIMARY KEY,
-            name           TEXT NOT NULL,
-            root           TEXT NOT NULL,
-            last_opened_at INTEGER
-        );
+            CREATE TABLE solutions (
+                id             TEXT PRIMARY KEY,
+                name           TEXT NOT NULL,
+                root           TEXT NOT NULL,
+                last_opened_at INTEGER
+            );
 
-        CREATE TABLE solution_members (
-            solution_id  TEXT    NOT NULL REFERENCES solutions(id) ON DELETE CASCADE,
-            catalog_id   TEXT    NOT NULL,
-            local_path   TEXT    NOT NULL,
-            position     INTEGER NOT NULL,
-            PRIMARY KEY (solution_id, catalog_id)
-        );
+            CREATE TABLE solution_members (
+                solution_id  TEXT    NOT NULL REFERENCES solutions(id) ON DELETE CASCADE,
+                catalog_id   TEXT    NOT NULL,
+                local_path   TEXT    NOT NULL,
+                position     INTEGER NOT NULL,
+                PRIMARY KEY (solution_id, catalog_id)
+            );
 
-        CREATE INDEX idx_solution_members_position
-            ON solution_members(solution_id, position);
+            CREATE INDEX idx_solution_members_position
+                ON solution_members(solution_id, position);
 
-        CREATE TABLE panel_member_selections (
-            solution_id  TEXT NOT NULL REFERENCES solutions(id) ON DELETE CASCADE,
-            panel_kind   TEXT NOT NULL,
-            catalog_id   TEXT NOT NULL,
-            PRIMARY KEY (solution_id, panel_kind)
-        );
-    )];
+            CREATE TABLE panel_member_selections (
+                solution_id  TEXT NOT NULL REFERENCES solutions(id) ON DELETE CASCADE,
+                panel_kind   TEXT NOT NULL,
+                catalog_id   TEXT NOT NULL,
+                PRIMARY KEY (solution_id, panel_kind)
+            );
+        ),
+        sql!(
+            CREATE TABLE active_member (
+                solution_id TEXT PRIMARY KEY REFERENCES solutions(id) ON DELETE CASCADE,
+                catalog_id  TEXT NOT NULL
+            );
+            INSERT INTO active_member (solution_id, catalog_id)
+                SELECT solution_id, catalog_id FROM panel_member_selections
+                WHERE panel_kind = "tree";
+            INSERT OR IGNORE INTO active_member (solution_id, catalog_id)
+                SELECT solution_id, catalog_id FROM panel_member_selections
+                WHERE panel_kind = "git";
+            DROP TABLE panel_member_selections;
+        ),
+    ];
 }
 
 db::static_connection!(SolutionsDb, []);
@@ -193,6 +208,19 @@ impl SolutionsDb {
             SELECT solution_id, panel_kind, catalog_id FROM panel_member_selections
         }
     }
+
+    query! {
+        pub async fn set_active_member(solution_id: String, catalog_id: String) -> Result<()> {
+            INSERT OR REPLACE INTO active_member (solution_id, catalog_id)
+            VALUES (?, ?)
+        }
+    }
+
+    query! {
+        pub async fn load_all_active_members() -> Result<Vec<(String, String)>> {
+            SELECT solution_id, catalog_id FROM active_member
+        }
+    }
 }
 
 #[cfg(test)]
@@ -307,31 +335,18 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn panel_selection_roundtrips() {
-        let db = SolutionsDb::open_test_db("solutions_db_panel_sel").await;
-        db.save_solution("s1".into(), "S1".into(), "/x".into(), None)
+    async fn active_member_roundtrips() {
+        let db = SolutionsDb::open_test_db("active_member_roundtrips").await;
+        db.save_solution("s1".into(), "S1".into(), "/tmp/s1".into(), None)
             .await
             .unwrap();
-        db.set_panel_selection("s1".into(), "tree".into(), "cat-a".into())
+        db.set_active_member("s1".into(), "cat-a".into())
             .await
             .unwrap();
-        db.set_panel_selection("s1".into(), "git".into(), "cat-b".into())
+        db.set_active_member("s1".into(), "cat-b".into())
             .await
             .unwrap();
-
-        let rows = db.load_all_panel_selections().await.unwrap();
-        assert_eq!(rows.len(), 2);
-
-        db.set_panel_selection("s1".into(), "tree".into(), "cat-c".into())
-            .await
-            .unwrap();
-        let rows = db.load_all_panel_selections().await.unwrap();
-        assert_eq!(rows.len(), 2);
-        let tree = rows.iter().find(|r| r.1 == "tree").unwrap();
-        assert_eq!(tree.2, "cat-c");
-
-        db.delete_solution_row("s1".into()).await.unwrap();
-        let rows = db.load_all_panel_selections().await.unwrap();
-        assert!(rows.is_empty(), "FK cascade should remove panel selections");
+        let rows = db.load_all_active_members().await.unwrap();
+        assert_eq!(rows, vec![("s1".to_string(), "cat-b".to_string())]);
     }
 }
