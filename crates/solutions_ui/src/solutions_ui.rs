@@ -9,6 +9,8 @@ mod empty_solution_page;
 mod modals;
 mod open;
 mod picker;
+pub mod project_tab;
+pub mod project_tab_strip;
 pub mod solution_picker_dropdown;
 pub mod solution_tab;
 pub mod solution_tab_strip;
@@ -21,6 +23,7 @@ pub mod window_helpers;
 pub use add_project_picker::AddProjectPicker;
 pub use empty_solution_page::EmptySolutionPage;
 pub use open::{OpenIntent, open_solution};
+pub use project_tab_strip::ProjectTabStrip;
 pub use status_bar::SolutionsStatusItem;
 pub use switch::switch_active_solution_in_place;
 

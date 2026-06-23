@@ -241,11 +241,17 @@ impl RenderOnce for SolutionTab {
 /// changes — and reasonably spread across the colour wheel for short
 /// id strings (the persistence layer uses uuid-shaped ids).
 fn dot_color(id: &SolutionId) -> Hsla {
-    // FNV-1a 32-bit. Stable across Rust toolchain upgrades unlike
-    // `DefaultHasher` (whose algorithm is explicitly unstable). The
-    // 360-mod means we don't care about higher-quality hashing.
+    dot_color_for_str(id.as_str())
+}
+
+/// FNV-1a 32-bit hue derivation shared by the solution tabs and the
+/// per-project tabs (which hash a `CatalogId` instead of a `SolutionId`).
+/// Stable across Rust toolchain upgrades unlike `DefaultHasher` (whose
+/// algorithm is explicitly unstable). The 360-mod means we don't care
+/// about higher-quality hashing.
+pub(crate) fn dot_color_for_str(s: &str) -> Hsla {
     let mut h: u32 = 2166136261;
-    for byte in id.as_str().bytes() {
+    for byte in s.bytes() {
         h ^= byte as u32;
         h = h.wrapping_mul(16777619);
     }
