@@ -10,6 +10,7 @@ use anyhow::{Context as _, Result, bail};
 use chrono::Utc;
 use collections::{HashMap, HashSet};
 use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Global};
+use project::WorktreeId;
 use std::path::PathBuf;
 use std::sync::Arc;
 use util::ResultExt as _;
@@ -348,6 +349,26 @@ impl SolutionStore {
         let first = members.first()?.catalog_id.clone();
         self.set_active_member(solution.clone(), first.clone(), cx);
         Some(first)
+    }
+
+    /// Resolve the active catalog member for `solution` to the matching
+    /// worktree in `project`, using prefix matching on `member.local_path`.
+    /// Returns `None` if no active member is set, the member is not found
+    /// in the solution, or no worktree's `abs_path` starts with the member's
+    /// `local_path`.
+    pub fn active_member_worktree(
+        &self,
+        solution: &Solution,
+        project: &Entity<project::Project>,
+        cx: &App,
+    ) -> Option<(CatalogId, WorktreeId)> {
+        let catalog = self.active_member.get(&solution.id)?;
+        let member = solution.members.iter().find(|m| &m.catalog_id == catalog)?;
+        let worktree = project
+            .read(cx)
+            .worktrees(cx)
+            .find(|w| w.read(cx).abs_path().starts_with(&member.local_path))?;
+        Some((catalog.clone(), worktree.read(cx).id()))
     }
 
     pub fn catalog(&self) -> &[CatalogProject] {
