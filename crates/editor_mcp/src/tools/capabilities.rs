@@ -111,7 +111,7 @@ pub(crate) const SUPPORTED_EVENT_KINDS: &[&str] = &[
     "diagnostic_updated",
     "solution_changed",
     "solution_active_changed",
-    "solution_panel_member_selection_changed",
+    "solution_active_member_changed",
     "window_focused",
     "lsp_started",
     "lsp_stopped",

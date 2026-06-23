@@ -106,20 +106,20 @@ pub struct RemoveMember {
     pub catalog_id: String,
 }
 
-/// Cycle the per-panel project selection forward (next member) within
-/// the active solution. `panel_kind` is `"tree"` or `"git"` — matches
-/// the `panel_member_selections.panel_kind` SQL string. Ships without
-/// a default keymap; users bind themselves.
+/// Cycle the solution-wide active project forward (next member) within
+/// the active solution. The `panel_kind` field is retained for keymap
+/// stability but is now ignored (selection is solution-wide, not
+/// per-panel). Ships without a default keymap; users bind themselves.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize, JsonSchema, Action)]
 #[action(namespace = solutions)]
 pub struct SwitchToNextProjectInPanel {
     pub panel_kind: String,
 }
 
-/// Cycle the per-panel project selection backward (previous member) within
-/// the active solution. `panel_kind` is `"tree"` or `"git"` — matches the
-/// `panel_member_selections.panel_kind` SQL string. Ships without a default
-/// keymap; users bind themselves.
+/// Cycle the solution-wide active project backward (previous member) within
+/// the active solution. The `panel_kind` field is retained for keymap
+/// stability but is now ignored (selection is solution-wide, not
+/// per-panel). Ships without a default keymap; users bind themselves.
 #[derive(PartialEq, Clone, Debug, Deserialize, Serialize, JsonSchema, Action)]
 #[action(namespace = solutions)]
 pub struct SwitchToPrevProjectInPanel {
