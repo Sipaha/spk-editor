@@ -67,14 +67,20 @@ pub fn install(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<
         }
         subscriptions
             .push(cx.subscribe(&controller, |_, _, _: &RunControllerEvent, cx| cx.notify()));
-        // Re-render when the solution-wide active project changes so the strip
-        // follows the active member's project-scoped configs.
+        // Re-render and re-validate the selection when the solution-wide active
+        // project changes, so the strip follows the active member's
+        // project-scoped configs and never keeps another project's config
+        // selected (the trigger label + Run/Debug/Stop act on `selected_id`).
         if let Some(solution_store) = solutions::SolutionStore::try_global(cx) {
-            subscriptions.push(cx.subscribe(&solution_store, |_, _, event, cx| {
-                if let solutions::SolutionStoreEvent::ActiveMemberChanged { .. } = event {
-                    cx.notify();
-                }
-            }));
+            subscriptions.push(cx.subscribe(
+                &solution_store,
+                |this: &mut RunConfigStrip, _, event, cx| {
+                    if let solutions::SolutionStoreEvent::ActiveMemberChanged { .. } = event {
+                        this.revalidate_selection(cx);
+                        cx.notify();
+                    }
+                },
+            ));
         }
         RunConfigStrip {
             controller: controller.clone(),
@@ -172,6 +178,25 @@ impl RunConfigStrip {
         store
             .active_member_worktree(&solution, &project, cx)
             .map(|(_catalog, worktree)| worktree)
+    }
+
+    /// Drop the controller's selection if it points at a config not visible for
+    /// the new active member, reselecting the first visible config (or clearing
+    /// when none remain). Keeps the trigger label + Run/Debug/Stop targets in
+    /// sync with the project switch.
+    fn revalidate_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = RunConfigStore::try_global(cx) else {
+            return;
+        };
+        let active_worktree = self.active_worktree(cx);
+        let allowed_ids: Vec<RunConfigId> =
+            filter_configs_for_active_worktree(&store.read(cx).configs(), active_worktree)
+                .into_iter()
+                .map(|config| config.id)
+                .collect();
+        self.controller.update(cx, |controller, cx| {
+            controller.revalidate_selection_against(&allowed_ids, cx);
+        });
     }
 }
 
@@ -446,6 +471,63 @@ mod tests {
                     "the first config should be auto-selected"
                 );
             });
+        });
+    }
+
+    #[gpui::test]
+    async fn revalidate_reselects_when_selection_not_allowed(cx: &mut TestAppContext) {
+        let app_state = cx.update(|cx| {
+            let app_state = AppState::test(cx);
+            cx.set_global(db::AppDatabase::test_new());
+            editor::init(cx);
+            RunConfigSettings::register(cx);
+            RunConfigStore::init_global(cx);
+            run_config::register_provider(cx, MockProvider);
+            app_state
+        });
+        let store = cx.update(|cx| RunConfigStore::global(cx));
+        for name in ["a", "b", "c"] {
+            store.update(cx, |store, cx| store.upsert(mock_config(name), cx));
+        }
+        let project = Project::test(app_state.fs.clone(), [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let controller = workspace.update(cx, |workspace, cx| cx.new(|cx| RunController::new(workspace, cx)));
+
+        let id_a = RunConfigId::from_raw("mock:a");
+        let id_b = RunConfigId::from_raw("mock:b");
+        let id_c = RunConfigId::from_raw("mock:c");
+
+        // Select `a`, then revalidate against a set that excludes it: reselects
+        // the first allowed id (`b`).
+        controller.update(cx, |c, cx| c.select(id_a.clone(), cx));
+        controller.update(cx, |c, cx| {
+            c.revalidate_selection_against(&[id_b.clone(), id_c.clone()], cx)
+        });
+        controller.read_with(cx, |c, _| {
+            assert_eq!(
+                c.selected_id().map(RunConfigId::as_str),
+                Some("mock:b"),
+                "selection not in the allowed set should reselect the first allowed id"
+            );
+        });
+
+        // Revalidate against a set that still contains the selection: unchanged.
+        controller.update(cx, |c, cx| {
+            c.revalidate_selection_against(&[id_b.clone(), id_c.clone()], cx)
+        });
+        controller.read_with(cx, |c, _| {
+            assert_eq!(c.selected_id().map(RunConfigId::as_str), Some("mock:b"));
+        });
+
+        // Revalidate against an empty set: selection is cleared.
+        controller.update(cx, |c, cx| c.revalidate_selection_against(&[], cx));
+        controller.read_with(cx, |c, _| {
+            assert_eq!(
+                c.selected_id(),
+                None,
+                "an empty allowed set should clear the selection"
+            );
         });
     }
 }

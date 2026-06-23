@@ -232,6 +232,33 @@ impl RunController {
         &self.project
     }
 
+    /// Re-validate the current selection against the set of ids visible for the
+    /// solution-wide active member. If the selected config is no longer in
+    /// `allowed_ids` (e.g. the active project changed and the selection belonged
+    /// to a different project), reselect the first allowed id, or clear the
+    /// selection if `allowed_ids` is empty. Mirrors the reselect path in
+    /// `on_store_event` (ConfigsChanged).
+    pub fn revalidate_selection_against(
+        &mut self,
+        allowed_ids: &[RunConfigId],
+        cx: &mut Context<Self>,
+    ) {
+        let selected_allowed = self
+            .selected
+            .as_ref()
+            .map(|id| allowed_ids.contains(id))
+            .unwrap_or(false);
+        if selected_allowed {
+            return;
+        }
+        let new_selection = allowed_ids.first().cloned();
+        if new_selection != self.selected {
+            self.selected = new_selection;
+            cx.emit(RunControllerEvent::SelectedChanged);
+            cx.notify();
+        }
+    }
+
     // --- selection ---
 
     pub fn selected_id(&self) -> Option<&RunConfigId> {
