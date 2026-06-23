@@ -51,11 +51,11 @@ impl Domain for SolutionsDb {
                 catalog_id  TEXT NOT NULL
             );
             INSERT INTO active_member (solution_id, catalog_id)
-                SELECT solution_id, catalog_id FROM panel_member_selections
-                WHERE panel_kind = "tree";
-            INSERT OR IGNORE INTO active_member (solution_id, catalog_id)
-                SELECT solution_id, catalog_id FROM panel_member_selections
-                WHERE panel_kind = "git";
+                SELECT solution_id, catalog_id FROM panel_member_selections pms
+                WHERE panel_kind = (
+                    SELECT MAX(panel_kind) FROM panel_member_selections
+                    WHERE solution_id = pms.solution_id
+                );
             DROP TABLE panel_member_selections;
         ),
     ];
