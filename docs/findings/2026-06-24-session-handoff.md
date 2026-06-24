@@ -43,14 +43,22 @@ rebrand**. Execution happens in a **fresh context**.
 (NOTE: `docs/superpowers` is gitignored — the plan is on local disk only, not in git. Read
 it from disk.) It contains the evidence, the single-patch 3-way transplant strategy, the
 divergence inventory (18 net-new crates, 911 modified files), the full `sawe` identifier
-map, and the verification ritual.
+map, the `zed`-strip scope (§6a), and the verification ritual.
 
-**Open decisions still needed from the maintainer** (plan §8): per-project dir `.spke` →
-`.sawe`? env vars `SPK_EDITOR_*` → `SAWE_*`? branch-name/default-branch swap coordination
-with the GitHub repo rename (maintainer does the rename). Target tag ≈ latest stable
-(`~v1.7.x` now); confirm at start. `~/.spk/spk-editor` → `~/.spk/sawe` confirmed (the
-`.config`/`Application Support` text in `paths.rs` doc-comments + `.rules` is STALE — real
-root is `~/.spk/<kebab>` on all platforms; fix during rebrand).
+**All decisions RESOLVED (maintainer, 2026-06-24)** — don't re-ask:
+- Target = the clean **`sawe` member repo** (`solutions/spk-solutions/sawe`), commit
+  straight to **`main`**, push to `Sipaha/sawe`. Configured this session: `origin` =
+  `git@github.com-sipaha:Sipaha/sawe.git` (pushes as Sipaha, ssh-verified),
+  `user.email=sipahabk@gmail.com`, `user.name=Pavel Simonov`. The `spk-editor` repo is the
+  donor of fork code. NOT a branch in spk-editor; no GitHub repo rename needed.
+- `.spke` → `.sawe`; `SPK_EDITOR_*` → `SAWE_*`; root `~/.spk/sawe`; target = latest stable
+  upstream tag (confirm exact at start).
+- **Strip `zed`/`Zed` from brand/user-visible surfaces**, keep only license-required
+  mentions (LICENSE-*, copyright, `Fork of Zed…` attribution, `legal/upstream-zed/`,
+  `.zed_server`) AND the internal `zed` cargo-crate / shared upstream identifiers (renaming
+  those would conflict on every future merge — see plan §6a).
+- `paths.rs` doc-comments + `.rules` claim config lives at `~/.config/spk-editor` — STALE;
+  real root is `~/.spk/<kebab>` on all platforms. Fix during rebrand.
 
 ## Upstream comparison context (already done)
 
