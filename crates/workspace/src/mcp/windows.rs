@@ -1,10 +1,10 @@
 //! `windows.*` MCP tools — list/focus/close/dispatch_action plus programmatic
-//! input (keystrokes, text, mouse click) for autonomous UI testing.
+//! input (keystrokes, text, mouse click, hover) for autonomous UI testing.
 use context_server::listener::{McpServerTool, ToolResponse};
 use context_server::types::ToolResponseContent;
 use gpui::{
-    App, AsyncApp, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Pixels,
-    PlatformInput, Point, px,
+    App, AsyncApp, Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, PlatformInput, Point, px,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -771,6 +771,198 @@ impl McpServerTool for ClickIdTool {
     }
 }
 
+// =====================================================================
+// windows.hover_at / windows.hover_id
+// =====================================================================
+
+/// Move the synthetic cursor to window-relative coordinates and leave it
+/// there, so the next render paints hover-driven UI (`visible_on_hover`
+/// timestamps / copy buttons, `:hover` styles, tooltips that fire on
+/// pointer-rest). There is no MouseDown/Up — purely a `MouseMove`, which
+/// updates `Window::mouse_position` AND flips the input modality back to
+/// mouse (so `Hitbox::is_hovered` stops short-circuiting to `false` after
+/// a prior keyboard event). Pair with `workspace.screenshot`: the
+/// screenshot forces a fresh paint that recomputes the mouse hit-test
+/// from the position left here, so hover-only elements show up in the PNG.
+///
+/// Coordinates are LOGICAL window pixels with `(0, 0)` at the top-left of
+/// the window's content area — same units as `windows.click_at`.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct HoverAtParams {
+    pub window_id: String,
+    pub x: f32,
+    pub y: f32,
+    /// Modifiers held while moving. Recognized: `"ctrl"`, `"alt"`,
+    /// `"shift"`, `"cmd"` / `"platform"`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifiers: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for HoverAtParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            window_id: String,
+            x: f32,
+            y: f32,
+            #[serde(default)]
+            modifiers: Vec<String>,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            window_id: inner.window_id,
+            x: inner.x,
+            y: inner.y,
+            modifiers: inner.modifiers,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct HoverAtResult {
+    pub hovered: bool,
+}
+
+#[derive(Clone)]
+pub struct HoverAtTool;
+
+impl McpServerTool for HoverAtTool {
+    type Input = HoverAtParams;
+    type Output = HoverAtResult;
+    const NAME: &'static str = "windows.hover_at";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        let modifiers = parse_modifiers(&input.modifiers)?;
+        let position = Point::new(px(input.x), px(input.y));
+        cx.update(|cx| -> anyhow::Result<()> {
+            let handle = find_window_by_id(&input.window_id, cx)?;
+            handle
+                .update(cx, |_view, window, cx| {
+                    dispatch_mouse_move(window, cx, position, modifiers);
+                })
+                .map_err(|err| anyhow::anyhow!("hover_at dispatch failed: {err}"))?;
+            Ok(())
+        })?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("hover at ({}, {})", input.x, input.y),
+            }],
+            structured_content: HoverAtResult { hovered: true },
+        })
+    }
+}
+
+/// Hover a clickable region by the stable `id` from
+/// `workspace.dump_visual_structure` / `windows.dump_visual_structure`.
+/// The `windows.hover_at` analogue of `windows.click_id` — moves the
+/// synthetic cursor to the matched item's centre without pressing, so a
+/// subsequent `workspace.screenshot` captures its hover state. Use this
+/// to reveal a `visible_on_hover` affordance (e.g. a message-bubble
+/// timestamp) the agent otherwise can't see in a static screenshot.
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+pub struct HoverIdParams {
+    pub window_id: String,
+    pub id: String,
+    /// Modifiers held while moving. Recognized: `"ctrl"`, `"alt"`,
+    /// `"shift"`, `"cmd"` / `"platform"`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modifiers: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for HoverIdParams {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize, Default)]
+        #[serde(default, deny_unknown_fields)]
+        struct Inner {
+            window_id: String,
+            id: String,
+            #[serde(default)]
+            modifiers: Vec<String>,
+        }
+        let inner = Option::<Inner>::deserialize(de)?.unwrap_or_default();
+        Ok(Self {
+            window_id: inner.window_id,
+            id: inner.id,
+            modifiers: inner.modifiers,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct HoverIdResult {
+    pub hovered: bool,
+    /// `[x, y, w, h]` of the matched clickable in logical pixels — echoed
+    /// so the caller can sanity-check what was actually hovered.
+    pub bounds: [i32; 4],
+}
+
+#[derive(Clone)]
+pub struct HoverIdTool;
+
+impl McpServerTool for HoverIdTool {
+    type Input = HoverIdParams;
+    type Output = HoverIdResult;
+    const NAME: &'static str = "windows.hover_id";
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        cx: &mut AsyncApp,
+    ) -> anyhow::Result<ToolResponse<Self::Output>> {
+        anyhow::ensure!(!input.id.is_empty(), "invalid_params: id is required");
+        let modifiers = parse_modifiers(&input.modifiers)?;
+        let id = input.id.clone();
+        let bounds = cx.update(|cx| -> anyhow::Result<[i32; 4]> {
+            let handle = find_window_by_id(&input.window_id, cx)?;
+            handle
+                .update(cx, |_view, window, cx| -> anyhow::Result<[i32; 4]> {
+                    let window_id = window.window_handle().window_id();
+                    let clickables =
+                        super::clickables::enumerate_window_clickables(window_id, window);
+                    let matched = clickables
+                        .iter()
+                        .find(|c| c.id == id)
+                        .ok_or_else(|| anyhow::anyhow!("clickable_not_found: id={id}"))?;
+                    let center = super::clickables::clickable_center(matched);
+                    let arr = matched.bounds;
+                    dispatch_mouse_move(window, cx, center, modifiers);
+                    Ok(arr)
+                })
+                .map_err(|err| anyhow::anyhow!("hover_id dispatch failed: {err}"))?
+        })?;
+        Ok(ToolResponse {
+            content: vec![ToolResponseContent::Text {
+                text: format!("hover_id {} -> bounds {:?}", input.id, bounds),
+            }],
+            structured_content: HoverIdResult {
+                hovered: true,
+                bounds,
+            },
+        })
+    }
+}
+
+fn dispatch_mouse_move(
+    window: &mut gpui::Window,
+    cx: &mut App,
+    position: Point<Pixels>,
+    modifiers: Modifiers,
+) {
+    window.dispatch_event(
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position,
+            pressed_button: None,
+            modifiers,
+        }),
+        cx,
+    );
+}
+
 fn find_window_by_id(window_id: &str, cx: &mut App) -> anyhow::Result<gpui::AnyWindowHandle> {
     // Mirror the iteration order used by `windows.list`: prefer Z-ordered
     // stack, fall back to the unstable slot-map iteration so both tools
@@ -912,5 +1104,30 @@ mod tests {
         assert_eq!(parse_button(Some("right")).unwrap(), MouseButton::Right);
         assert_eq!(parse_button(Some("middle")).unwrap(), MouseButton::Middle);
         assert!(parse_button(Some("scroll-down")).is_err());
+    }
+
+    #[test]
+    fn hover_at_params_default_modifiers() {
+        let p: HoverAtParams = serde_json::from_value(serde_json::json!({
+            "window_id": "window:1",
+            "x": 100.0,
+            "y": 50.0
+        }))
+        .expect("parse");
+        assert_eq!(p.x, 100.0);
+        assert_eq!(p.y, 50.0);
+        assert!(p.modifiers.is_empty());
+    }
+
+    #[test]
+    fn hover_id_params_round_trip() {
+        let p: HoverIdParams = serde_json::from_value(serde_json::json!({
+            "window_id": "window:1",
+            "id": "abc123",
+            "modifiers": ["shift"]
+        }))
+        .expect("parse");
+        assert_eq!(p.id, "abc123");
+        assert_eq!(p.modifiers, vec!["shift".to_string()]);
     }
 }
