@@ -21,16 +21,17 @@
 //! whose rows switch the active member on click.
 
 use gpui::{
-    Entity, IntoElement, ParentElement, Render, Styled, Subscription, WeakEntity, Window, div,
+    Entity, IntoElement, ParentElement, Render, Styled, Subscription, WeakEntity, Window, div, px,
 };
 use solutions::{
     CatalogId, Solution, SolutionId, SolutionMember, SolutionStore, SolutionStoreEvent,
 };
 use ui::{ContextMenu, IconButton, IconName, PopoverMenu, Tooltip, prelude::*};
+use util::ResultExt as _;
 use workspace::{MultiWorkspace, Workspace};
 
 use crate::AddProjectPicker;
-use crate::project_tab::ProjectTab;
+use crate::project_tab::{DraggedProjectTab, ProjectTab, move_to_end};
 
 /// How many project tabs render inline before the rest spill into the
 /// `more` popover. A simple fixed cap — the strip lives in the title bar
@@ -195,11 +196,41 @@ impl Render for ProjectTabStrip {
                 Some(cx.new(|cx| AddProjectPicker::new(solution_id, window, cx)))
             });
 
+        // Trailing drop zone: dropping a dragged tab here moves it to the
+        // very end of the member order — a position no per-tab drop target
+        // can express (each tab inserts the dragged member *before* itself).
+        // Only meaningful with at least two members. `flex_1` lets it absorb
+        // any slack to the right of the last tab as a generous catch area;
+        // `min_w` keeps it hittable even when the tabs already fill the strip.
+        let end_drop = (members.len() > 1).then(|| {
+            let solution_id = solution_id.clone();
+            let order = order.clone();
+            div()
+                .id("project-tab-strip-end-drop")
+                .h_full()
+                // Fixed-width catch area right after the last tab — NOT
+                // `flex_1`, which would stretch to fill the strip and shove
+                // the trailing `+`/overflow buttons to the far edge.
+                .w(px(40.))
+                .drag_over::<DraggedProjectTab>(|style, _dragged, _window, cx| {
+                    style.bg(cx.theme().colors().drop_target_background)
+                })
+                .on_drop(move |dragged: &DraggedProjectTab, _window, cx| {
+                    let new_order = move_to_end(&order, &dragged.catalog_id);
+                    SolutionStore::global(cx)
+                        .update(cx, |store, cx| {
+                            store.reorder_members(&solution_id, new_order, cx)
+                        })
+                        .log_err();
+                })
+        });
+
         h_flex()
             .id("project-tab-strip")
             .h_full()
             .overflow_x_scroll()
             .children(tabs)
+            .when_some(end_drop, |this, zone| this.child(zone))
             .when_some(overflow_popover, |this, popover| {
                 this.child(div().px_1().child(popover))
             })

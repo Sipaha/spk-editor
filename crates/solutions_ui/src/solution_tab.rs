@@ -59,7 +59,7 @@ pub struct SolutionTab {
 /// colour-dot + name so the drag preview looks like the tab being dragged.
 #[derive(Clone)]
 pub struct DraggedSolutionTab {
-    index: usize,
+    pub(crate) index: usize,
     name: SharedString,
     dot: Hsla,
 }

@@ -29,15 +29,16 @@
 //!     on every notify.
 
 use gpui::{
-    Entity, IntoElement, ParentElement, Render, Styled, Subscription, WeakEntity, Window, div,
+    Entity, IntoElement, ParentElement, Render, Styled, Subscription, WeakEntity, Window, div, px,
 };
 use solution_agent::store::{SolutionAgentStore, SolutionAgentStoreEvent};
 use solutions::{Solution, SolutionId, SolutionStore, SolutionStoreEvent};
 use ui::{IconButton, IconName, PopoverMenu, Tooltip, prelude::*};
+use util::ResultExt as _;
 use workspace::{MultiWorkspace, Workspace};
 
 use crate::solution_picker_dropdown::SolutionPickerDropdown;
-use crate::solution_tab::SolutionTab;
+use crate::solution_tab::{DraggedSolutionTab, SolutionTab};
 use crate::window_helpers::is_solution_open_anywhere;
 
 pub struct SolutionTabStrip {
@@ -190,6 +191,34 @@ impl Render for SolutionTabStrip {
                     }))
                 });
 
+        // Trailing drop zone that moves a dragged tab to the very end of the
+        // strip. Dropping onto the last tab only lands *after* it when the
+        // drag started left of it, and the empty space past the last tab is
+        // otherwise inert — so this explicit zone makes "move to end" a
+        // reliable, discoverable target. The end slot is the last tab's
+        // index (`tab_count - 1`), matching what the last tab's own drop uses.
+        let tab_count = tabs.len();
+        let end_drop = (tab_count > 1).then(|| {
+            let multi_workspace = weak_multi_workspace.clone();
+            let target = tab_count - 1;
+            div()
+                .id("solution-tab-strip-end-drop")
+                .h_full()
+                // Fixed-width catch area right after the last tab — NOT
+                // `flex_1`, which would stretch to fill the strip and shove
+                // the trailing `+` button to the far edge.
+                .w(px(40.))
+                .drag_over::<DraggedSolutionTab>(|style, _dragged, _window, cx| {
+                    style.bg(cx.theme().colors().drop_target_background)
+                })
+                .on_drop(move |dragged: &DraggedSolutionTab, _window, cx| {
+                    let from = dragged.index;
+                    multi_workspace
+                        .update(cx, |mw, cx| mw.reorder_workspaces(from, target, cx))
+                        .log_err();
+                })
+        });
+
         h_flex()
             .id("solution-tab-strip")
             .h_full()
@@ -208,6 +237,7 @@ impl Render for SolutionTabStrip {
                     )
                 },
             ))
+            .when_some(end_drop, |this, zone| this.child(zone))
             .child(div().px_1().child(plus_popover))
             .into_any_element()
     }

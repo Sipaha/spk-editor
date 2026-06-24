@@ -283,6 +283,18 @@ pub fn init(cx: &mut App) {
     });
 }
 
+/// True once no main editor window (a `MultiWorkspace`-rooted window) is
+/// left open. Auxiliary windows — the image preview, the detached compose
+/// editor, the About box — are `Normal` windows too, so the old
+/// `cx.windows().is_empty()` check let them keep the app alive after the
+/// last editor window closed. Closing the editor should quit regardless of
+/// those; `cx.quit()` tears them down.
+fn no_main_windows_left(cx: &App) -> bool {
+    !cx.windows()
+        .iter()
+        .any(|window| window.downcast::<MultiWorkspace>().is_some())
+}
+
 fn bind_on_window_closed(cx: &mut App) -> Option<gpui::Subscription> {
     #[cfg(target_os = "macos")]
     {
@@ -291,7 +303,7 @@ fn bind_on_window_closed(cx: &mut App) -> Option<gpui::Subscription> {
             .is_quit_app()
             .then(|| {
                 cx.on_window_closed(|cx, _window_id| {
-                    if cx.windows().is_empty() {
+                    if no_main_windows_left(cx) {
                         cx.quit();
                     }
                 })
@@ -300,7 +312,7 @@ fn bind_on_window_closed(cx: &mut App) -> Option<gpui::Subscription> {
     #[cfg(not(target_os = "macos"))]
     {
         Some(cx.on_window_closed(|cx, _window_id| {
-            if cx.windows().is_empty() {
+            if no_main_windows_left(cx) {
                 cx.quit();
             }
         }))
@@ -465,8 +477,17 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
                         }
                     }
 
-                    ensure_agent_panel_for_workspace(workspace, source_workspace, window, cx)
-                        .detach_and_log_err(cx);
+                    // SPK Editor: do NOT mount the upstream AgentPanel here.
+                    // `initialize_panels` deliberately omits it (this fork's AI
+                    // surface is `solution_agent`, not upstream's agent panel).
+                    // Re-adding it on every active-workspace switch was a
+                    // leftover that reintroduced the stray ZedAssistant
+                    // (sparkle) toggle button in the left dock strip. The
+                    // guarded source-init above is inert while the panel is
+                    // unmounted and stays only so re-enabling is a one-line
+                    // change (restore the `ensure_agent_panel_for_workspace`
+                    // call here and the `initialize_agent_panel` line in
+                    // `initialize_panels`).
                 });
             },
         )

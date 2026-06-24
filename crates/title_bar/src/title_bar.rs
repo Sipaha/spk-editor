@@ -251,7 +251,10 @@ impl Render for TitleBar {
                         // `show_project_items` settings no longer have a
                         // surface to gate here.
                         .when_some(solution_tab_strip, |title_bar, strip| {
-                            title_bar.child(strip)
+                            // Nudge the strip right so its first tab lines up
+                            // with the project tabs / left-panel edge below it
+                            // (the hamburger sits in the gutter to its left).
+                            title_bar.child(div().w(px(5.))).child(strip)
                         })
                 })
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())

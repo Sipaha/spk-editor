@@ -182,6 +182,19 @@ fn open_solution_as_new_workspace(
         options.open_mode = OpenMode::NewWindow;
         options.requesting_window = None;
     }
+    // Retain the current active workspace BEFORE the new solution's workspace
+    // is added. `open_paths`' Add mode pushes the newcomer onto the retained
+    // list immediately; the leaving workspace was previously only retained
+    // afterwards (in the spawn below, via `retain_active_workspace`), so it
+    // landed AFTER the newcomer — putting the freshly-opened tab at the FRONT
+    // of the strip. Retaining it here keeps the new tab at the end.
+    if let Some(source) = source_window {
+        source
+            .update(cx, |multi_workspace, _window, cx| {
+                multi_workspace.retain_active_workspace(cx);
+            })
+            .log_err();
+    }
     let task = workspace::open_paths(&info.paths, app_state, options, cx);
 
     // Capture the launcher window (if any) so we can retire it after

@@ -41,7 +41,7 @@ pub struct ProjectTab {
 /// like the tab being dragged.
 #[derive(Clone)]
 pub struct DraggedProjectTab {
-    catalog_id: CatalogId,
+    pub(crate) catalog_id: CatalogId,
     name: SharedString,
     dot: Hsla,
 }
@@ -165,6 +165,20 @@ impl RenderOnce for ProjectTab {
     }
 }
 
+/// Move `from` to the very end of the order, preserving the relative
+/// order of the remaining members. Used by the trailing drop zone in the
+/// strip so a tab can be dropped past the last tab to become last — a
+/// position no per-tab drop target can express (each tab inserts *before*
+/// itself). Returns the original order unchanged when `from` is missing.
+pub(crate) fn move_to_end(order: &[CatalogId], from: &CatalogId) -> Vec<CatalogId> {
+    if !order.contains(from) {
+        return order.to_vec();
+    }
+    let mut remaining: Vec<CatalogId> = order.iter().filter(|c| *c != from).cloned().collect();
+    remaining.push(from.clone());
+    remaining
+}
+
 /// Move `from` so it lands at the slot currently occupied by `target`,
 /// preserving the order of the remaining members. Returns the original
 /// order unchanged when either id is missing.
@@ -213,5 +227,24 @@ mod tests {
         let order = vec![id("a"), id("b")];
         assert_eq!(reorder_to(&order, &id("a"), &id("a")), order);
         assert_eq!(reorder_to(&order, &id("z"), &id("a")), order);
+    }
+
+    #[test]
+    fn move_to_end_appends_dragged_member() {
+        let order = vec![id("a"), id("b"), id("c")];
+        // Front tab to the end.
+        assert_eq!(
+            move_to_end(&order, &id("a")),
+            vec![id("b"), id("c"), id("a")]
+        );
+        // Middle tab to the end.
+        assert_eq!(
+            move_to_end(&order, &id("b")),
+            vec![id("a"), id("c"), id("b")]
+        );
+        // Last tab to the end is a no-op (order unchanged).
+        assert_eq!(move_to_end(&order, &id("c")), order);
+        // Unknown id is a no-op.
+        assert_eq!(move_to_end(&order, &id("z")), order);
     }
 }

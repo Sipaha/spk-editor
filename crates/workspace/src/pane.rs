@@ -4166,7 +4166,41 @@ fn default_render_tab_bar_buttons(
     window: &mut Window,
     cx: &mut Context<Pane>,
 ) -> (Option<AnyElement>, Option<AnyElement>) {
-    if !pane.has_focus(window, cx) && !pane.context_menu_focused(window, cx) {
+    let has_focus = pane.has_focus(window, cx);
+    let ctx_menu = pane.context_menu_focused(window, cx);
+    let show = has_focus || ctx_menu;
+    // TEMP flicker instrumentation: set SPK_TABBAR_DEBUG=1 to log every
+    // show<->hide transition (with the focus components that drive the gate)
+    // to /tmp/spk-tabbar-flicker.log. Remove once the flicker root cause is found.
+    if std::env::var_os("SPK_TABBAR_DEBUG").is_some() {
+        let pane_focused = pane.focus_handle.contains_focused(window, cx);
+        let item_focused = pane
+            .active_item()
+            .is_some_and(|item| item.item_focus_handle(cx).contains_focused(window, cx));
+        let window_focused = window.focused(cx);
+        let id = cx.entity_id();
+        thread_local! {
+            static TABBAR_FLICKER_LAST: std::cell::RefCell<std::collections::HashMap<gpui::EntityId, bool>> =
+                std::cell::RefCell::new(std::collections::HashMap::new());
+        }
+        let changed =
+            TABBAR_FLICKER_LAST.with(|m| m.borrow_mut().insert(id, show) != Some(show));
+        if changed {
+            use std::io::Write as _;
+            let line = format!(
+                "[tabbar-flicker] pane={id:?} show={show} has_focus={has_focus} ctx_menu={ctx_menu} pane_focused={pane_focused} item_focused={item_focused} window_focused={window_focused:?}\n"
+            );
+            eprint!("{line}");
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/spk-tabbar-flicker.log")
+            {
+                let _ = f.write_all(line.as_bytes());
+            }
+        }
+    }
+    if !show {
         return (None, None);
     }
     let (can_clone, can_split_move) = match pane.active_item() {

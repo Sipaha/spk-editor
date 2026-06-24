@@ -131,7 +131,15 @@ impl Render for AddProjectPicker {
             .on_click(cx.listener(|this, _, window, cx| this.add_from_git(window, cx)));
 
         let query = self.query.clone();
-        let mut list = v_flex().gap_0p5();
+        // Cap the catalog list height and scroll the overflow — the registry
+        // can hold dozens of projects, which otherwise blows the popover open
+        // to full screen height. Content-sized up to the cap (not `flex_1`),
+        // so short lists stay compact.
+        let mut list = v_flex()
+            .id("add-project-catalog-list")
+            .gap_0p5()
+            .max_h(rems(18.))
+            .overflow_y_scroll();
         for catalog_project in self.catalog_entries.iter() {
             if !query.is_empty()
                 && !catalog_project.name.to_lowercase().contains(&query)
