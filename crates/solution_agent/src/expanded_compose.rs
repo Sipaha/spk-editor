@@ -41,6 +41,9 @@ impl ExpandedComposeWindowView {
             e.set_show_gutter(false, cx);
             e.set_show_line_numbers(false, cx);
             e.set_show_scrollbars(true, cx);
+            // Wrap at the window width (like the inline compose editor) so a
+            // long prompt never needs horizontal scrolling.
+            e.set_soft_wrap_mode(language::language_settings::SoftWrap::EditorWidth, cx);
             e
         });
         Self {

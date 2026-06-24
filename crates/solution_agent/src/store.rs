@@ -2602,6 +2602,17 @@ impl SolutionAgentStore {
     }
 
     pub fn close_session(&mut self, id: SolutionSessionId, cx: &mut Context<Self>) -> Result<()> {
+        // Flush the latest transcript and stop any in-flight turn while the
+        // session is still live in `self.sessions`. The flush guarantees a
+        // later "Reopen Closed Chat" restores the full conversation; the
+        // cancel keeps the pooled subprocess from churning on a session the
+        // user just dismissed. Both must run before the `remove` below.
+        self.persist_session_blob(id, cx);
+        if let Some(entity) = self.sessions.get(&id)
+            && matches!(entity.read(cx).state, SessionState::Running { .. })
+        {
+            self.cancel_turn(id, cx).log_err();
+        }
         let removed = self
             .sessions
             .remove(&id)
@@ -3205,6 +3216,64 @@ impl SolutionAgentStore {
         let mut ordered: Vec<SolutionSessionId> = pinned.into_iter().map(|(id, _)| id).collect();
         ordered.push(session_id);
         self.persist_tab_order(solution_id, ordered, cx);
+    }
+
+    /// Metadata for the solution's explicitly-closed sessions (`closed_at`
+    /// set), most-recently-active first, top-level only (subagent rows
+    /// excluded). Backs the "Reopen Closed Chat" picker — each row carries
+    /// title / token total / last activity so the user can tell heavy and
+    /// recent sessions apart. Reads straight from the DB because closed
+    /// sessions are not held in memory (`close_session` evicts them).
+    pub fn list_closed_sessions(
+        &self,
+        solution_id: SolutionId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Vec<SolutionSessionMetadata>>> {
+        let Some(db) = self.persistence.clone() else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        cx.background_spawn(async move {
+            let closed: HashSet<SolutionSessionId> = db
+                .list_closed_session_ids(solution_id.clone())
+                .await?
+                .into_iter()
+                .collect();
+            if closed.is_empty() {
+                return Ok(Vec::new());
+            }
+            // `list_for_solution` is already ordered by `last_activity_at`
+            // DESC, so the filtered result keeps that ordering.
+            let metas = db.list_for_solution(solution_id).await?;
+            Ok(metas
+                .into_iter()
+                .filter(|m| closed.contains(&m.id) && m.parent_session_id.is_none())
+                .collect())
+        })
+    }
+
+    /// Bring a previously-closed session back into the strip. Clears the
+    /// `closed_at` marker so `hydrate_all_for_solution` stops skipping it,
+    /// hydrates it into memory as a cold tab, then pins it. Reuses the
+    /// existing restore + pin machinery rather than reconstructing the
+    /// session inline.
+    pub fn reopen_closed_session(
+        &mut self,
+        id: SolutionSessionId,
+        solution_id: SolutionId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let Some(db) = self.persistence.clone() else {
+            return Task::ready(Err(anyhow!("no persistence backend")));
+        };
+        cx.spawn(async move |this, cx| {
+            db.mark_closed(id, None).await?;
+            let hydrate = this.update(cx, |this, cx| {
+                this.hydrate_all_for_solution(solution_id.clone(), cx)
+            })?;
+            hydrate.await?;
+            this.update(cx, |this, cx| this.open_session_in_strip(id, cx))?;
+            Ok(())
+        })
     }
 
     /// Update the in-memory `tab_order` field on every session that belongs to
@@ -5092,6 +5161,26 @@ impl SolutionAgentStore {
         {
             session.update(cx, |s, _| s.stopping_safety_net = None);
         }
+        // Garbage-collect inline Task subagents on any transition INTO Idle.
+        // An inline subagent (keyed by its Task tool-call id) lives strictly
+        // inside the parent turn — once the turn ends the parent is Idle and no
+        // subagent can still be running. Normally `apply_subagent_lifecycle`
+        // removes each one as its tool call goes terminal, but a turn that ends
+        // without terminalising the Task tool call (observed: an inner tool
+        // Cancelled, the outer Task tool-call left non-terminal / orphaned)
+        // would otherwise strand the pill forever — a ~14h-stuck "Run the §G …"
+        // tab was seen live via the MCP socket. Stranded pills also keep the
+        // subagent strip non-empty, which keeps the `__main__` per-tab filter
+        // engaged and hides most of the conversation. Clearing here is the
+        // catch-all the per-tool-call path misses.
+        if !matches!(previous, SessionState::Idle) && matches!(next, SessionState::Idle) {
+            session.update(cx, |s, _| {
+                if !s.active_subagents.is_empty() || !s.active_subagent_order.is_empty() {
+                    s.active_subagents.clear();
+                    s.active_subagent_order.clear();
+                }
+            });
+        }
         let now = std::time::Instant::now();
         let is_focused = self
             .focus_resolver
@@ -5144,8 +5233,47 @@ impl SolutionAgentStore {
         event: &SolutionStoreEvent,
         cx: &mut Context<Self>,
     ) {
-        if matches!(event, SolutionStoreEvent::Changed) {
-            self.gc_orphan_solutions(cx);
+        match event {
+            SolutionStoreEvent::Changed => self.gc_orphan_solutions(cx),
+            SolutionStoreEvent::Closed { id } => self.cold_close_solution(id, cx),
+            _ => {}
+        }
+    }
+
+    /// Solution-window close: stop the solution's pooled subprocess(es) and
+    /// evict its sessions from memory, WITHOUT marking them `closed_at`. The
+    /// transcript + `tab_order` stay in the DB, so reopening the solution
+    /// restores every tab via `restore_open_tabs`. Distinct from
+    /// [`close_session`](Self::close_session) (a permanent per-tab close that
+    /// sets `closed_at`) and from [`gc_orphan_solutions`](Self::gc_orphan_solutions)
+    /// (which fires only when a solution is *deleted* from the store).
+    pub fn cold_close_solution(&mut self, solution_id: &SolutionId, cx: &mut Context<Self>) {
+        let session_ids = self
+            .by_solution
+            .get(solution_id)
+            .cloned()
+            .unwrap_or_default();
+        // Flush each transcript before dropping the live thread. Incremental
+        // saves usually have the latest state already; this captures any
+        // un-debounced tail so a reopen restores the full conversation.
+        for id in &session_ids {
+            self.persist_session_blob(*id, cx);
+        }
+        self.by_solution.remove(solution_id);
+        for id in &session_ids {
+            self.sessions.remove(id);
+            self.entry_update_throttles.retain(|(sid, _), _| sid != id);
+        }
+        // Drop the pool's connection handle(s) for this solution. Together
+        // with the session eviction above (whose entities release their own
+        // connection refs once the closing window's views tear down) this
+        // releases the last Rc, so the subprocess exits now instead of
+        // lingering for the 60s idle debounce.
+        let mut pool = self.pool.lock();
+        let keys: Vec<(SolutionId, AgentServerId)> =
+            pool.keys_for_solution(solution_id).collect();
+        for key in &keys {
+            pool.remove(key);
         }
     }
 

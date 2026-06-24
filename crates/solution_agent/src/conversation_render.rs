@@ -78,24 +78,48 @@ pub(crate) fn entry_text_spans(entry: &AgentThreadEntry, cx: &App) -> Vec<String
                 .chunks
                 .iter()
                 .any(|c| matches!(c, AssistantMessageChunk::Message { .. }));
-            let mut spans = Vec::new();
-            for chunk in &message.chunks {
-                let (prefix, block) = match chunk {
-                    AssistantMessageChunk::Message { block } => (None, block),
-                    AssistantMessageChunk::Thought { block } if !has_message => {
-                        (Some("thinking: "), block)
+            if has_message {
+                // Coalesce every visible `Message` chunk into ONE span so a
+                // single assistant turn matches/renders as one continuous
+                // message rather than N stacked blocks. Distinct chunks are
+                // separate text ContentBlocks the model emitted in the same
+                // turn (text, then more text, before any tool call) — joining
+                // with a blank line preserves paragraph breaks without the
+                // inter-widget gap. Thoughts are dropped once a real answer
+                // exists (mirrors `render_assistant_message`).
+                let mut combined = String::new();
+                for chunk in &message.chunks {
+                    if let AssistantMessageChunk::Message { block } = chunk {
+                        let text = content_block_text(block, cx);
+                        if text.is_empty() {
+                            continue;
+                        }
+                        if !combined.is_empty() {
+                            combined.push_str("\n\n");
+                        }
+                        combined.push_str(&text);
                     }
-                    AssistantMessageChunk::Thought { .. } => continue,
-                };
-                let mut text = content_block_text(block, cx);
-                if let Some(prefix) = prefix {
-                    text = format!("{prefix}{text}");
                 }
-                if !text.is_empty() {
-                    spans.push(text);
+                if combined.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![combined]
                 }
+            } else {
+                // Thought-only (mid-turn reasoning before the answer streams):
+                // keep one span per thought, each rendered under its own
+                // "thinking…" label.
+                let mut spans = Vec::new();
+                for chunk in &message.chunks {
+                    if let AssistantMessageChunk::Thought { block } = chunk {
+                        let text = content_block_text(block, cx);
+                        if !text.is_empty() {
+                            spans.push(format!("thinking: {text}"));
+                        }
+                    }
+                }
+                spans
             }
-            spans
         }
         AgentThreadEntry::ToolCall(call) => {
             let label_text = call.label.read(cx).source().to_string();
@@ -982,21 +1006,46 @@ pub(crate) fn render_assistant_message(
         .chunks
         .iter()
         .any(|c| matches!(c, AssistantMessageChunk::Message { .. }));
-    let mut span_idx = 0;
-    // Accumulate the user-visible markdown source across non-thought
-    // chunks for the footer copy button — matches what's painted, no
-    // hidden reasoning leaks into the clipboard.
-    let mut visible_text = String::new();
-    for chunk in &message.chunks {
-        let (is_thought, block) = match chunk {
-            AssistantMessageChunk::Message { block } => (false, block),
-            AssistantMessageChunk::Thought { block } if !has_message => (true, block),
-            AssistantMessageChunk::Thought { .. } => continue,
-        };
-        let text = content_block_text(block, cx);
-        if !text.is_empty() {
-            let element = render_span((entry_idx, span_idx), &text, markdown_for, style);
-            if is_thought {
+    // Must mirror `entry_text_spans` exactly — the markdown cache is keyed by
+    // `(entry_idx, span_idx)` and built from that function's spans, so the
+    // span shape here has to line up or find-highlighting and the rendered
+    // markdown drift apart.
+    if has_message {
+        // One coalesced block: a single assistant turn reads as one
+        // continuous message instead of N stacked widgets with gaps.
+        // `combined` also feeds the footer copy button, so the clipboard
+        // matches exactly what's painted (no hidden reasoning leaks in).
+        let mut combined = String::new();
+        for chunk in &message.chunks {
+            if let AssistantMessageChunk::Message { block } = chunk {
+                let text = content_block_text(block, cx);
+                if text.is_empty() {
+                    continue;
+                }
+                if !combined.is_empty() {
+                    combined.push_str("\n\n");
+                }
+                combined.push_str(&text);
+            }
+        }
+        if !combined.is_empty() {
+            container = container.child(render_span((entry_idx, 0), &combined, markdown_for, style));
+            container = container.child(render_floating_copy_button(
+                SharedString::from(format!("copy-assistant-{entry_idx}")),
+                combined,
+                group_name.clone(),
+            ));
+        }
+    } else {
+        // Thought-only: one "thinking…" block per reasoning chunk.
+        let mut span_idx = 0;
+        for chunk in &message.chunks {
+            if let AssistantMessageChunk::Thought { block } = chunk {
+                let text = content_block_text(block, cx);
+                if text.is_empty() {
+                    continue;
+                }
+                let element = render_span((entry_idx, span_idx), &text, markdown_for, style);
                 container = container.child(
                     div()
                         .child(
@@ -1007,22 +1056,9 @@ pub(crate) fn render_assistant_message(
                         )
                         .child(element),
                 );
-            } else {
-                if !visible_text.is_empty() {
-                    visible_text.push_str("\n\n");
-                }
-                visible_text.push_str(&text);
-                container = container.child(element);
+                span_idx += 1;
             }
-            span_idx += 1;
         }
-    }
-    if !visible_text.is_empty() {
-        container = container.child(render_floating_copy_button(
-            SharedString::from(format!("copy-assistant-{entry_idx}")),
-            visible_text,
-            group_name.clone(),
-        ));
     }
     if let Some(time) = render_message_time(created_ms, is_last, group_name) {
         container = container.child(time);
@@ -1051,14 +1087,17 @@ pub(crate) fn render_floating_copy_button(
     )
 }
 
-/// Top-right `HH:MM` affordance for a message bubble. Anchored absolutely
-/// so it overlays the bubble's upper-right corner, sitting clear of the
-/// bottom-right copy button. Always hover-only (same group the copy button
-/// uses) — the always-visible "last activity" time now lives in the status
-/// row instead, so no bubble needs a permanently-painted timestamp. The
-/// `_is_last` param is kept for the caller's plumbing but no longer affects
-/// visibility. Returns `None` for entries without a real timestamp
-/// (`ms <= 0` is filtered upstream).
+/// `HH:MM` affordance for a message bubble. Anchored absolutely just
+/// ABOVE the bubble's top-right corner (`bottom_full`), so it floats in
+/// the inter-message gap rather than painting over the bubble's own text
+/// — a short single-line message would otherwise have the timestamp land
+/// directly on top of the text. Stays clear of the bottom-right copy
+/// button (different corner). Always hover-only (same group the copy
+/// button uses) — the always-visible "last activity" time now lives in
+/// the status row instead, so no bubble needs a permanently-painted
+/// timestamp. The `_is_last` param is kept for the caller's plumbing but
+/// no longer affects visibility. Returns `None` for entries without a
+/// real timestamp (`ms <= 0` is filtered upstream).
 fn render_message_time(
     created_ms: Option<i64>,
     _is_last: bool,
@@ -1069,7 +1108,7 @@ fn render_message_time(
     Some(
         div()
             .absolute()
-            .top_0p5()
+            .bottom_full()
             .right_1p5()
             .child(
                 Label::new(crate::status_row::format_hm(dt))

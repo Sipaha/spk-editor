@@ -415,6 +415,22 @@ impl SolutionAgentDb {
             select_open_session_ids(&connection, &solution_id)
         })
     }
+
+    /// Ids of the solution's *closed* sessions — `closed_at IS NOT NULL`,
+    /// i.e. the ones the user explicitly closed via the desktop's close-tab
+    /// affordance. Drives the "Reopen Closed Chat" picker, which reads each
+    /// row's metadata (title / tokens / last activity) to let the user pick
+    /// one to bring back.
+    pub fn list_closed_session_ids(
+        &self,
+        solution_id: SolutionId,
+    ) -> Task<Result<Vec<SolutionSessionId>>> {
+        let connection = self.connection.clone();
+        self.executor.spawn(async move {
+            let connection = connection.lock();
+            select_closed_session_ids(&connection, &solution_id)
+        })
+    }
 }
 
 /// Apply `ALTER TABLE solution_sessions ADD COLUMN <column_def>` and
@@ -875,6 +891,26 @@ fn select_open_session_ids(
     for id in rows {
         let parsed = SolutionSessionId::parse(&id)
             .map_err(|e| anyhow!("invalid SolutionSessionId in open-session row: {e}"))?;
+        out.push(parsed);
+    }
+    Ok(out)
+}
+
+/// Sibling of [`select_open_session_ids`] for the reopen picker: the
+/// explicitly-closed sessions (`closed_at IS NOT NULL`).
+fn select_closed_session_ids(
+    connection: &Connection,
+    solution_id: &SolutionId,
+) -> Result<Vec<SolutionSessionId>> {
+    let mut select = connection.select_bound::<String, String>(indoc! {"
+        SELECT id FROM solution_sessions
+        WHERE solution_id = ? AND closed_at IS NOT NULL
+    "})?;
+    let rows = select(solution_id.0.clone())?;
+    let mut out = Vec::with_capacity(rows.len());
+    for id in rows {
+        let parsed = SolutionSessionId::parse(&id)
+            .map_err(|e| anyhow!("invalid SolutionSessionId in closed-session row: {e}"))?;
         out.push(parsed);
     }
     Ok(out)

@@ -1694,9 +1694,10 @@ impl SolutionSessionView {
     /// while the session is `Running`. Pulsing Sparkle icon + elapsed
     /// seconds counter, matching the Claude Code CLI's "Sketching… 6s"
     /// Cancel the in-flight agent turn for this session. Wired to the
-    /// Stop button that swaps in for "Send" while `state == Running`,
-    /// and to Esc via the action handler in this view.
-    fn cancel_turn(&self, cx: &mut Context<Self>) {
+    /// Cancel the session's in-flight turn. Wired to the status-bar Stop
+    /// button (see `status_row`) and to Esc via the action handler in this
+    /// view.
+    pub(crate) fn cancel_turn(&self, cx: &mut Context<Self>) {
         let session_id = self.session_id;
         let store = SolutionAgentStore::global(cx);
         store.update(cx, |store, cx| {
@@ -2769,7 +2770,6 @@ impl Render for SolutionSessionView {
         // `'static`) can reach it via `&mut Self`.
         self.assistant_label_for_render = assistant_label;
         let session = self.session.read(cx);
-        let pending_image_count = self.pending_images.len();
         div()
             .id("solution-session-view")
             .key_context("SolutionSessionView")
@@ -3271,7 +3271,7 @@ impl Render for SolutionSessionView {
                                 cx.new(|_| handle.clone())
                             }),
                     );
-                let mut compose_inner = div()
+                let compose_inner = div()
                     .flex()
                     .flex_none()
                     .h(self.compose_height)
@@ -3350,116 +3350,14 @@ impl Render for SolutionSessionView {
                                         ),
                                     );
                                 }
-                                let is_working = matches!(
-                                    self.session.read(cx).state,
-                                    SessionState::Running { .. } | SessionState::Stopping { .. }
-                                );
-                                let stopping = matches!(
-                                    self.session.read(cx).state,
-                                    SessionState::Stopping { .. }
-                                );
-                                let pending_count = self.session.read(cx).pending_messages.len();
-                                let resuming = self.resuming;
-                                let send_label: SharedString = if resuming {
-                                    "Starting…".into()
-                                } else {
-                                    "Send".into()
-                                };
-                                let send_tooltip: SharedString = if resuming {
-                                    "Spawning the agent — your message will go out as soon as the \
-                                     subprocess finishes its handshake (3-4s)."
-                                        .into()
-                                } else if is_working {
-                                    // Mid-turn send goes through the native backend's hook-based
-                                    // live injection: the agent sees the follow-up between tool
-                                    // calls in the SAME turn and reacts in-thread, no interrupt,
-                                    // no broken tool. (Non-native backends fall back to a
-                                    // server-side queue that flushes on turn end.)
-                                    if pending_count > 0 {
-                                        format!(
-                                            "Send follow-up — agent picks it up between tool \
-                                             calls ({pending_count} already queued)"
-                                        )
-                                        .into()
-                                    } else {
-                                        "Send follow-up — agent picks it up between tool calls"
-                                            .into()
-                                    }
-                                } else {
-                                    "Send message".into()
-                                };
-                                let compose_has_text = !self.compose_editor.read(cx).is_empty(cx);
-                                let can_interrupt_and_flush = is_working
-                                    && (pending_count > 0
-                                        || compose_has_text
-                                        || pending_image_count > 0);
-                                this.child(
-                                    ui::Button::new("solution-session-send", send_label)
-                                        .tooltip(Tooltip::text(send_tooltip))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.submit_compose_now(window, cx);
-                                        })),
-                                )
-                                .when(can_interrupt_and_flush, |this| {
-                                    // Cancel the in-flight turn AND immediately
-                                    // start the next one with the queued
-                                    // follow-ups (plus whatever is in the
-                                    // compose box right now). Distinct from
-                                    // Stop, which abandons the queue.
-                                    this.child(
-                                        IconButton::new(
-                                            "solution-session-send-now",
-                                            IconName::BoltFilled,
-                                        )
-                                        .icon_color(Color::Accent)
-                                        .tooltip(Tooltip::text(
-                                            "Send now — interrupts the current \
-                                             turn and runs your queued follow-ups",
-                                        ))
-                                        .on_click(
-                                            cx.listener(|this, _, window, cx| {
-                                                this.submit_compose_and_interrupt(window, cx);
-                                            }),
-                                        ),
-                                    )
-                                })
-                                .when(is_working, |this| {
-                                    if stopping {
-                                        // Stop is already in flight. Render a
-                                        // non-interactive indicator instead of a
-                                        // second clickable Stop — the backend's
-                                        // 30s escalation handles a wedged stop, so
-                                        // a second press would be a no-op at best.
-                                        this.child(LoadingLabel::new("Stopping"))
-                                    } else {
-                                        this.child(
-                                            IconButton::new(
-                                                "solution-session-stop",
-                                                IconName::Stop,
-                                            )
-                                            .icon_color(Color::Error)
-                                            .tooltip(Tooltip::text(
-                                                "Stop response (Esc) — clears queued follow-ups",
-                                            ))
-                                            .on_click(
-                                                cx.listener(|this, _, _, cx| {
-                                                    this.cancel_turn(cx);
-                                                }),
-                                            ),
-                                        )
-                                    }
-                                })
+                                // No action buttons live in the compose row.
+                                // Send is implicit (Enter / `submit_compose_action`).
+                                // Stop now lives in the status bar (right of the
+                                // state badge). The interrupt-and-flush Bolt lives
+                                // on the queued-message bubble (`render_queue`).
+                                this
                             }),
                     );
-                if pending_image_count > 0 {
-                    compose_inner = compose_inner.child(
-                        Label::new(format!(
-                            "{pending_image_count} image{} attached",
-                            if pending_image_count == 1 { "" } else { "s" }
-                        ))
-                        .size(LabelSize::XSmall),
-                    );
-                }
                 compose_row.child(compose_inner).into_any_element()
             })
     }

@@ -719,6 +719,24 @@ pub(crate) fn render_status_row(
             .border_t_1()
             .border_color(cx.theme().colors().border_variant)
             .child(div().flex_none().child(state_badge))
+            // Stop sits right of the state badge while a turn is running —
+            // relocated here from the compose row (which now carries no
+            // action buttons). Cancels the in-flight turn and clears any
+            // queued follow-ups. While stopping, the badge itself reads
+            // "Stopping", so no separate button is shown.
+            .when(is_running, |this| {
+                this.child(
+                    div().flex_none().child(
+                        ui::IconButton::new("solution-status-stop", IconName::Stop)
+                            .icon_size(IconSize::Small)
+                            .icon_color(Color::Error)
+                            .tooltip(ui::Tooltip::text(
+                                "Stop response (Esc) — clears queued follow-ups",
+                            ))
+                            .on_click(cx.listener(|this, _, _, cx| this.cancel_turn(cx))),
+                    ),
+                )
+            })
             .when_some(activity_badge, |this, badge| {
                 this.child(Label::new("·").color(Color::Muted).size(LabelSize::Small))
                     .child(badge)
@@ -969,7 +987,7 @@ fn format_tokens(tokens: u64) -> String {
 /// Short token count, "12.3k" / "456", with no unit suffix. Used in the
 /// status row where the magnitudes of the two operands ("used / max")
 /// already make their meaning unambiguous.
-fn format_tokens_compact(tokens: u64) -> String {
+pub(crate) fn format_tokens_compact(tokens: u64) -> String {
     if tokens >= 1_000_000 {
         format!("{:.1}M", tokens as f64 / 1_000_000.0)
     } else if tokens >= 1_000 {
@@ -981,7 +999,7 @@ fn format_tokens_compact(tokens: u64) -> String {
 
 /// Compact "X ago" formatter mirroring `solutions_ui::welcome::relative_time_label`
 /// but kept local to avoid a fork-internal cross-crate dep cycle.
-fn relative_time_short(
+pub(crate) fn relative_time_short(
     ts: chrono::DateTime<chrono::Utc>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> String {

@@ -92,50 +92,45 @@ impl SolutionSessionView {
                             .border_dashed()
                             .border_color(border_color)
                             .rounded_md()
-                            .child(body),
+                            .child(body)
+                            // Send-now bolt floats in the bubble's bottom-right
+                            // corner (anchored absolutely on the `relative`
+                            // bubble) rather than in a separate strip beneath
+                            // it: the action belongs to *this* queued message,
+                            // so it reads as part of the bubble. Bottom-right
+                            // (like the floating copy button) keeps it clear of
+                            // the usually-long first text line. Only shown while
+                            // the agent is running — cancels the current turn
+                            // and immediately flushes the queue (same affordance
+                            // as the Bolt next to Stop in the compose row).
+                            .when(is_running, |this| {
+                                this.child(
+                                    div().absolute().bottom_0p5().right_0p5().child(
+                                        ui::IconButton::new(
+                                            "solution-queue-send-now",
+                                            IconName::BoltFilled,
+                                        )
+                                        .icon_size(IconSize::Small)
+                                        .icon_color(Color::Accent)
+                                        .tooltip(Tooltip::text(
+                                            "Send now — interrupts the current turn and runs your queued follow-up",
+                                        ))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.submit_compose_and_interrupt(window, cx);
+                                        })),
+                                    ),
+                                )
+                            }),
                     ),
                 )
         })();
 
-        // Footer — no icon/label: the dashed bubble border already signals
-        // "queued/unsent". While the agent is running, surface the send-now
-        // Bolt so the user can flush the queue straight from the bubble;
-        // otherwise there's nothing to show, so the footer is omitted.
-        let strip = is_running.then(|| {
-            h_flex()
-                .id("solution-session-queue-header")
-                .gap_2()
-                .px_2()
-                .py_1()
-                .items_center()
-                .child(div().flex_1())
-                // Send-now bolt: cancels the current turn and immediately
-                // flushes the queue. Same affordance as the Bolt button next
-                // to Stop in the compose row, duplicated here so the user can
-                // interrupt straight from the queue UI without leaving the
-                // bubble.
-                .child(
-                    ui::IconButton::new("solution-queue-send-now", IconName::BoltFilled)
-                        .icon_size(IconSize::Small)
-                        .icon_color(Color::Accent)
-                        .tooltip(Tooltip::text(
-                            "Send now — interrupts the current turn and runs your queued follow-up",
-                        ))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.submit_compose_and_interrupt(window, cx);
-                        })),
-                )
-        });
-
-        // Compose: ghost bubble FIRST, then (only while running) the send-now
-        // bolt strip beneath it, right above the status row.
+        // Compose: just the ghost bubble (the send-now bolt now lives on the
+        // bubble itself; see above).
         let _ = window;
         let mut section = v_flex().w_full().px_1();
         if let Some(bubble) = bubble {
             section = section.child(bubble);
-        }
-        if let Some(strip) = strip {
-            section = section.child(strip);
         }
         Some(section)
     }

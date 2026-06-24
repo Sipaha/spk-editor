@@ -27,7 +27,7 @@ use workspace::{
     dock::{DockPosition, Panel, PanelEvent},
 };
 
-use crate::actions::{NewChat, NewTerminal, ToggleFocus};
+use crate::actions::{NewChat, ToggleFocus};
 use crate::{ChatProvider, ChatProviderEvent, ConsolePanelSettings, TerminalProvider};
 
 const CONSOLE_PANEL_KEY: &str = "ConsolePanel";
@@ -53,31 +53,20 @@ pub fn active_solution_id_for_workspace(workspace: &Workspace, cx: &App) -> Opti
     None
 }
 
-/// Working-directory choice offered when creating a new AI chat. Mirrors
-/// the option model used by the mobile `NewSessionDialog` so the two
-/// surfaces stay consistent.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct CwdOption {
-    label: SharedString,
-    path: PathBuf,
-}
-
-/// Build the list of `cwd` choices for a new AI chat under `solution`.
-/// The solution root always comes first, followed by each member project
-/// labelled by its catalog id.
-fn chat_cwd_options(solution: &solutions::Solution) -> Vec<CwdOption> {
-    let mut out = Vec::with_capacity(1 + solution.members.len());
-    out.push(CwdOption {
-        label: SharedString::new_static("Solution root"),
-        path: solution.root.clone(),
-    });
-    for member in &solution.members {
-        out.push(CwdOption {
-            label: SharedString::from(member.catalog_id.0.clone()),
-            path: member.local_path.clone(),
-        });
+/// Folder of the solution's *active* project — the one selected in the
+/// project tab strip — falling back to the solution root when there is no
+/// active member. Used as the `cwd` for new terminals / AI chats started
+/// from the "+" menu (one project per solution drives both surfaces).
+fn active_member_path(solution_id: &SolutionId, cx: &App) -> Option<PathBuf> {
+    let store = SolutionStore::try_global(cx)?;
+    let store = store.read(cx);
+    let solution = store.solutions().iter().find(|s| &s.id == solution_id)?;
+    if let Some(catalog) = store.active_member(solution_id)
+        && let Some(member) = solution.members.iter().find(|m| &m.catalog_id == catalog)
+    {
+        return Some(member.local_path.clone());
     }
-    out
+    Some(solution.root.clone())
 }
 
 pub enum ConsoleTab {
@@ -143,16 +132,6 @@ pub struct ConsolePanel {
     /// orderings wins (the tab landing vs. the create future resolving)
     /// performs the activation and clears this.
     chat_tab_to_activate: Option<SolutionSessionId>,
-    /// Model the next new AI chat will start on (the "+" popover sets this).
-    /// `None` → fall back to the latest session's model (see effective_new_chat_model).
-    pending_new_chat_model: Option<String>,
-    /// Effort the next new AI chat will start on (the "+" popover sets this).
-    /// `None` → the session takes its own default. Effort has a fixed option
-    /// list, so there's no "refreshed" cache to mirror.
-    pending_new_chat_effort: Option<String>,
-    /// Probe result for the "+" popover's "Refresh models" — overrides the
-    /// derived list when present.
-    refreshed_new_chat_models: Option<Vec<solution_agent::ModelInfo>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -210,9 +189,6 @@ impl ConsolePanel {
             deferred_tasks: HashMap::default(),
             assistant_enabled: false,
             chat_tab_to_activate: None,
-            pending_new_chat_model: None,
-            pending_new_chat_effort: None,
-            refreshed_new_chat_models: None,
             _subscriptions: vec![chat_event_sub],
         }
     }
@@ -655,7 +631,7 @@ impl ConsolePanel {
                 .child(
                     IconButton::new(("console-close", ix), IconName::Close)
                         .icon_size(IconSize::Small)
-                        .on_click(cx.listener(move |this, _, _, cx| this.close_tab(ix, cx))),
+                        .on_click(cx.listener(move |this, _, _, cx| this.close_tab_at(ix, cx))),
                 )
                 .on_mouse_down(
                     MouseButton::Left,
@@ -696,38 +672,13 @@ impl ConsolePanel {
     fn render_plus_popover(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let active_solution_id = self.active_solution_id(cx);
         let has_active_solution = active_solution_id.is_some();
-        let cwd_options: Vec<CwdOption> = active_solution_id
+        // New terminals and new chats both open in the active project's
+        // folder (the project selected in the project tab strip). Model and
+        // effort are no longer chosen here — they're picked in the status bar
+        // after the chat is created, before the first message is sent.
+        let active_path = active_solution_id
             .as_ref()
-            .and_then(|id| {
-                let store = SolutionStore::try_global(cx)?;
-                store
-                    .read(cx)
-                    .solutions()
-                    .iter()
-                    .find(|s| &s.id == id)
-                    .map(chat_cwd_options)
-            })
-            .unwrap_or_default();
-        let (model_options, model_default): (Vec<solution_agent::ModelInfo>, Option<String>) =
-            active_solution_id
-                .as_ref()
-                .map(|id| {
-                    let store = SolutionAgentStore::global(cx);
-                    store.read(cx).new_chat_model_options(
-                        id,
-                        &SharedString::from(CLAUDE_ACP_AGENT_ID),
-                        cx,
-                    )
-                })
-                .unwrap_or_default();
-        // "Refresh" override wins over the derived list.
-        let model_options = self
-            .refreshed_new_chat_models
-            .clone()
-            .filter(|m| !m.is_empty())
-            .unwrap_or(model_options);
-        let effective_model = self.pending_new_chat_model.clone().or(model_default);
-        let effective_effort = self.pending_new_chat_effort.clone();
+            .and_then(|id| active_member_path(id, cx));
         let weak_self = cx.weak_entity();
 
         let plus_container = div()
@@ -747,57 +698,49 @@ impl ConsolePanel {
                 )
                 .anchor(Anchor::TopLeft)
                 .menu(move |window, cx| {
-                    let cwd_options = cwd_options.clone();
                     let active_solution_id = active_solution_id.clone();
+                    let active_path = active_path.clone();
                     let weak_self = weak_self.clone();
-                    let model_options = model_options.clone();
-                    let effective_model = effective_model.clone();
-                    let effective_effort = effective_effort.clone();
                     Some(ContextMenu::build(window, cx, move |menu, _, _| {
-                        let menu = menu.action("New Terminal", NewTerminal.boxed_clone());
-                        let menu = if cwd_options.len() <= 1 {
+                        // New Terminal in the active project's folder (falls
+                        // back to terminal settings when there's no active
+                        // solution, i.e. `active_path` is `None`).
+                        let menu = {
+                            let weak_self = weak_self.clone();
+                            let cwd = active_path.clone();
+                            menu.entry("New Terminal", None, move |window, cx| {
+                                if let Some(panel) = weak_self.upgrade() {
+                                    panel.update(cx, |panel, cx| {
+                                        panel.add_terminal_tab(cwd.clone(), window, cx);
+                                    });
+                                }
+                            })
+                        };
+                        // New AI Chat in the active project's folder.
+                        let menu = if let Some(solution_id) = active_solution_id.clone() {
+                            let weak_self = weak_self.clone();
+                            let cwd = active_path.clone();
+                            menu.entry("New AI Chat", None, move |window, cx| {
+                                if let Some(panel) = weak_self.upgrade() {
+                                    panel.update(cx, |panel, cx| {
+                                        panel.add_chat_tab_with_cwd(
+                                            solution_id.clone(),
+                                            cwd.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                }
+                            })
+                        } else {
                             menu.action_disabled_when(
-                                !has_active_solution,
-                                if has_active_solution {
-                                    "New AI Chat"
-                                } else {
-                                    "New AI Chat (no active solution)"
-                                },
+                                true,
+                                "New AI Chat (no active solution)",
                                 NewChat.boxed_clone(),
                             )
-                        } else if let Some(solution_id) = active_solution_id.clone() {
-                            // Flatten cwd options into the parent menu under a
-                            // "New AI Chat in:" header. GPUI's ContextMenu
-                            // submenu trigger requires hover to expand (its
-                            // on_click handler isn't reachable through the
-                            // ListItem layering we see in practice), so a
-                            // single click on "New AI Chat ▸" looked like a
-                            // no-op. A flat list keeps every entry one click.
-                            let mut menu = menu.separator().header("New AI Chat in:");
-                            for opt in cwd_options.iter().cloned() {
-                                let weak_self = weak_self.clone();
-                                let solution_id = solution_id.clone();
-                                menu = menu.entry(opt.label.clone(), None, move |window, cx| {
-                                    if let Some(panel) = weak_self.upgrade() {
-                                        panel.update(cx, |panel, cx| {
-                                            panel.add_chat_tab_with_cwd(
-                                                solution_id.clone(),
-                                                Some(opt.path.clone()),
-                                                window,
-                                                cx,
-                                            );
-                                        });
-                                    }
-                                });
-                            }
-                            menu.separator()
-                        } else {
-                            menu.action_disabled_when(true, "New AI Chat", NewChat.boxed_clone())
                         };
-                        // Reopen a chat that was closed (unpinned) but still
-                        // lives on disk — restores the session-history
-                        // affordance lost in the panel merge. Disabled when
-                        // there's no active solution to reopen within.
+                        // Reopen a chat that was closed but still lives on
+                        // disk. Disabled when there's no active solution.
                         let menu = {
                             let weak_self = weak_self.clone();
                             menu.item(
@@ -812,77 +755,8 @@ impl ConsolePanel {
                                     }),
                             )
                         };
-                        // Model section for the next new chat. Flattened (no
-                        // submenu) for the same hover-trigger reason as the cwd
-                        // list above (panel.rs note near "New AI Chat in:").
-                        let menu = if !model_options.is_empty() {
-                            let mut menu = menu.separator().header("Model");
-                            for m in model_options.iter().cloned() {
-                                let weak_self = weak_self.clone();
-                                let is_current =
-                                    effective_model.as_deref() == Some(m.value.as_str());
-                                let entry = ui::ContextMenuEntry::new(m.display_name.clone())
-                                    .when(is_current, |e| {
-                                        e.icon(IconName::Check).icon_color(Color::Accent)
-                                    })
-                                    .handler(move |_window, cx| {
-                                        if let Some(panel) = weak_self.upgrade() {
-                                            panel.update(cx, |panel, cx| {
-                                                panel.pending_new_chat_model = Some(m.value.clone());
-                                                cx.notify();
-                                            });
-                                        }
-                                    });
-                                menu = menu.item(entry);
-                            }
-                            if let Some(solution_id) = active_solution_id.clone() {
-                                let weak_self = weak_self.clone();
-                                menu = menu.item(
-                                    ui::ContextMenuEntry::new("Refresh models")
-                                        .icon(IconName::RotateCw)
-                                        .icon_color(Color::Muted)
-                                        .handler(move |_window, cx| {
-                                            if let Some(panel) = weak_self.upgrade() {
-                                                panel.update(cx, |panel, cx| {
-                                                    panel.refresh_new_chat_models(
-                                                        solution_id.clone(),
-                                                        cx,
-                                                    );
-                                                });
-                                            }
-                                        }),
-                                );
-                            }
-                            menu
-                        } else {
-                            menu
-                        };
-                        // Effort section for the next new chat. Fixed option
-                        // list (no probe / refresh), mirroring the Model section.
-                        let menu = {
-                            let mut menu = menu.separator().header("Effort");
-                            for level in solution_agent::EFFORT_LEVELS {
-                                let weak_self = weak_self.clone();
-                                let is_current = effective_effort.as_deref() == Some(*level);
-                                let value = level.to_string();
-                                let entry = ui::ContextMenuEntry::new(SharedString::from(*level))
-                                    .when(is_current, |e| {
-                                        e.icon(IconName::Check).icon_color(Color::Accent)
-                                    })
-                                    .handler(move |_window, cx| {
-                                        if let Some(panel) = weak_self.upgrade() {
-                                            let value = value.clone();
-                                            panel.update(cx, |panel, cx| {
-                                                panel.pending_new_chat_effort = Some(value);
-                                                cx.notify();
-                                            });
-                                        }
-                                    });
-                                menu = menu.item(entry);
-                            }
-                            menu
-                        };
-                        menu.action("Spawn Task…", zed_actions::Spawn::modal().boxed_clone())
+                        menu.separator()
+                            .action("Spawn Task…", zed_actions::Spawn::modal().boxed_clone())
                     }))
                 }),
         )
@@ -1236,40 +1110,6 @@ impl ConsolePanel {
         self.add_chat_tab_with_cwd(solution_id, None, window, cx);
     }
 
-    /// The model a new chat should start on: the explicit "+"-popover choice if
-    /// set, else the latest session's model for this solution+agent.
-    fn effective_new_chat_model(&self, solution_id: &SolutionId, cx: &App) -> Option<String> {
-        if self.pending_new_chat_model.is_some() {
-            return self.pending_new_chat_model.clone();
-        }
-        let agent_id = SharedString::from(CLAUDE_ACP_AGENT_ID);
-        SolutionAgentStore::global(cx)
-            .read(cx)
-            .new_chat_model_options(solution_id, &agent_id, cx)
-            .1
-    }
-
-    fn effective_new_chat_effort(&self) -> Option<String> {
-        self.pending_new_chat_effort.clone()
-    }
-
-    fn refresh_new_chat_models(&mut self, solution_id: SolutionId, cx: &mut Context<Self>) {
-        let agent_id = SharedString::from(CLAUDE_ACP_AGENT_ID);
-        let store = SolutionAgentStore::global(cx);
-        let task = store.update(cx, |store, cx| {
-            store.probe_models_for_agent(&solution_id, &agent_id, cx)
-        });
-        cx.spawn(async move |this, cx| {
-            let models = task.await.log_err().unwrap_or_default();
-            this.update(cx, |this, cx| {
-                this.refreshed_new_chat_models = Some(models);
-                cx.notify();
-            })
-            .log_err();
-        })
-        .detach();
-    }
-
     pub fn add_chat_tab_with_cwd(
         &mut self,
         solution_id: SolutionId,
@@ -1288,8 +1128,9 @@ impl ConsolePanel {
         // only need to remember which session to activate once its tab
         // lands. This is the same path a mobile-driven create takes, so the
         // two surfaces can't diverge.
-        let model = self.effective_new_chat_model(&solution_id, cx);
-        let effort = self.effective_new_chat_effort();
+        // Model and effort are chosen in the status bar after the chat is
+        // created (and applied before the first message starts the session),
+        // so the create call no longer carries them.
         let store = SolutionAgentStore::global(cx);
         let task = store.update(cx, |store, cx| {
             store.create_session_with_cwd(
@@ -1297,8 +1138,8 @@ impl ConsolePanel {
                 SharedString::from(CLAUDE_ACP_AGENT_ID),
                 project,
                 cwd,
-                model,
-                effort,
+                None,
+                None,
                 cx,
             )
         });
@@ -1486,40 +1327,21 @@ impl ConsolePanel {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
+        // Closed sessions live only on disk (close_session evicts them from
+        // memory), so the picker reads them straight from the DB. The query
+        // already returns top-level closed rows ordered most-recently-active
+        // first, each carrying the token total + last-activity time the rows
+        // display.
         let store = SolutionAgentStore::global(cx);
-        let hydrate = store.update(cx, |store, cx| {
-            store.hydrate_all_for_solution(solution_id.clone(), cx)
+        let closed = store.update(cx, |store, cx| {
+            store.list_closed_sessions(solution_id.clone(), cx)
         });
         cx.spawn_in(window, async move |_this, cx| {
-            hydrate.await.log_err();
+            let metas = closed.await.log_err().unwrap_or_default();
+            let sessions: Vec<ReopenableSession> =
+                metas.iter().map(ReopenableSession::from_metadata).collect();
             workspace
                 .update_in(cx, |workspace, window, cx| {
-                    let store = SolutionAgentStore::global(cx);
-                    let mut reopenable: Vec<(ReopenableSession, _)> = store
-                        .read(cx)
-                        .all_sessions()
-                        .filter_map(|entity| {
-                            let s = entity.read(cx);
-                            if s.solution_id == solution_id
-                                && s.tab_order.is_none()
-                                && s.parent_session_id.is_none()
-                            {
-                                Some((
-                                    ReopenableSession {
-                                        id: s.id,
-                                        title: s.title.clone(),
-                                    },
-                                    s.last_activity_at,
-                                ))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    // Most-recently-active first.
-                    reopenable.sort_by(|a, b| b.1.cmp(&a.1));
-                    let sessions: Vec<ReopenableSession> =
-                        reopenable.into_iter().map(|(s, _)| s).collect();
                     workspace.toggle_modal(window, cx, move |window, cx| {
                         ReopenSessionModal::new(sessions, window, cx)
                     });
@@ -1579,6 +1401,25 @@ impl ConsolePanel {
         });
         cx.notify();
         self.persist(cx);
+    }
+
+    /// Close button dispatch. A terminal tab is just dropped from the strip
+    /// ([`close_tab`]). A chat tab is fully closed via the store
+    /// ([`SolutionAgentStore::close_session`]): the transcript is flushed,
+    /// the session is evicted + marked `closed_at` in the DB (so it surfaces
+    /// in "Reopen Closed Chat"), and the resulting `SessionClosed` →
+    /// `ChatProviderEvent::SessionRemoved` round-trip removes the tab here.
+    fn close_tab_at(&mut self, index: usize, cx: &mut Context<Self>) {
+        match self.tabs.get(index) {
+            Some(ConsoleTab::Chat { session_id, .. }) => {
+                let id = *session_id;
+                SolutionAgentStore::global(cx)
+                    .update(cx, |store, cx| store.close_session(id, cx))
+                    .log_err();
+            }
+            Some(ConsoleTab::Terminal { .. }) => self.close_tab(index, cx),
+            None => {}
+        }
     }
 
     fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -2006,49 +1847,4 @@ mod tests {
             .unwrap();
     }
 
-    mod cwd_options_tests {
-        use super::*;
-        use solutions::{CatalogId, Solution, SolutionId, SolutionMember};
-        use std::path::PathBuf;
-
-        fn solution(root: &str, members: &[(&str, &str)]) -> Solution {
-            Solution {
-                id: SolutionId("test-sol".into()),
-                name: "test".into(),
-                root: PathBuf::from(root),
-                members: members
-                    .iter()
-                    .map(|(cat, path)| SolutionMember {
-                        catalog_id: CatalogId((*cat).into()),
-                        local_path: PathBuf::from(path),
-                    })
-                    .collect(),
-                last_opened_at: None,
-            }
-        }
-
-        #[test]
-        fn chat_cwd_options_lists_root_then_each_member() {
-            let sol = solution("/sol", &[("m1", "/sol/m1"), ("m2", "/sol/m2")]);
-            let opts = chat_cwd_options(&sol);
-
-            assert_eq!(opts.len(), 3);
-            assert_eq!(opts[0].label.as_ref(), "Solution root");
-            assert_eq!(opts[0].path, PathBuf::from("/sol"));
-            assert_eq!(opts[1].label.as_ref(), "m1");
-            assert_eq!(opts[1].path, PathBuf::from("/sol/m1"));
-            assert_eq!(opts[2].label.as_ref(), "m2");
-            assert_eq!(opts[2].path, PathBuf::from("/sol/m2"));
-        }
-
-        #[test]
-        fn chat_cwd_options_returns_root_only_when_no_members() {
-            let sol = solution("/sol", &[]);
-            let opts = chat_cwd_options(&sol);
-
-            assert_eq!(opts.len(), 1);
-            assert_eq!(opts[0].label.as_ref(), "Solution root");
-            assert_eq!(opts[0].path, PathBuf::from("/sol"));
-        }
-    }
 }

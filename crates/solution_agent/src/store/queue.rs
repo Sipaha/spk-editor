@@ -650,11 +650,65 @@ impl SolutionAgentStore {
                     // success-of-the-old-turn premise would just be a
                     // misleading log entry.
                     this.update(cx, |store, cx| {
-                        if let Some(s) = store.session(session_id)
-                            && s.read(cx).acp_session_id == expected_acp_session_id
-                        {
-                            store.persist_session_blob(session_id, cx);
+                        let Some(s) = store.session(session_id) else {
+                            return;
+                        };
+                        if s.read(cx).acp_session_id != expected_acp_session_id {
+                            return;
                         }
+                        // Recovery for a LOST `AcpThreadEvent::Stopped`: the turn
+                        // task resolved `Ok`, so the turn is definitively over.
+                        // Normally the Stopped handler already flipped us to Idle
+                        // and drained the queue. If the backend dropped that
+                        // event, the session is wedged on `Running` forever — UI
+                        // stuck on "Thinking…", queued follow-ups never sent,
+                        // inline subagent pills never GC'd. Force the transition
+                        // off the *fact* the turn ended (not a timeout, so a
+                        // legitimately long turn is never cut short), then flush
+                        // the queue exactly as the Stopped(EndTurn) path does.
+                        let still_running =
+                            matches!(s.read(cx).state, SessionState::Running { .. });
+                        if still_running {
+                            log::warn!(
+                                target: "solution_agent::queue",
+                                "session={session_id} turn task resolved Ok but state still \
+                                 Running — no AcpThreadEvent::Stopped arrived; force-flipping to \
+                                 Idle and flushing queue (lost-Stopped recovery)",
+                            );
+                            // mutate_state(Idle) also GCs stranded inline subagents.
+                            store.mutate_state(session_id, |st| *st = SessionState::Idle, cx);
+                            // Drain Main-targeted pending and re-send as the next
+                            // turn (mirrors the Stopped EndTurn idle-flush).
+                            // Subagent-targeted leftovers are dropped: their
+                            // teammate ended with this turn.
+                            let main_blocks = store
+                                .session(session_id)
+                                .map(|s| {
+                                    s.update(cx, |s, _| {
+                                        let mut main: Vec<acp::ContentBlock> = Vec::new();
+                                        for bundle in s.pending_messages.drain(..) {
+                                            if let QueueTarget::Main = bundle.target {
+                                                main.extend(bundle.blocks);
+                                            }
+                                        }
+                                        main
+                                    })
+                                })
+                                .unwrap_or_default();
+                            if !main_blocks.is_empty() {
+                                cx.emit(SolutionAgentStoreEvent::SessionQueueChanged(session_id));
+                                let mut with_hint =
+                                    Vec::with_capacity(main_blocks.len() + 1);
+                                with_hint.push(acp::ContentBlock::Text(
+                                    acp::TextContent::new(format!("{QUEUE_HINT_LINE}\n\n")),
+                                ));
+                                with_hint.extend(main_blocks);
+                                store
+                                    .send_message_blocks(session_id, with_hint, cx)
+                                    .detach();
+                            }
+                        }
+                        store.persist_session_blob(session_id, cx);
                     })?;
                 }
             }
