@@ -18601,6 +18601,7 @@ dependencies = [
  "cloud_api_types",
  "db",
  "fs",
+ "git",
  "git_ui",
  "gpui",
  "icons",

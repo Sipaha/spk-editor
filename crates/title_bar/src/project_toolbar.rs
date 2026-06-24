@@ -4,7 +4,7 @@ use gpui::{
 };
 use project::Project;
 use solutions_ui::project_tab_strip::ProjectTabStrip;
-use ui::{PopoverMenu, PopoverMenuHandle, prelude::*};
+use ui::{PopoverMenu, PopoverMenuHandle, Tooltip, prelude::*};
 use workspace::{MultiWorkspace, Workspace};
 
 /// SPK Editor fork: a full-width toolbar row mounted by `Workspace` directly
@@ -140,18 +140,20 @@ impl ProjectToolbar {
     fn render_branch_widget(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let repository = Self::resolve_repository(&self.project, cx)?;
         let snapshot = repository.read(cx);
-        let (name, ahead, behind) = match &snapshot.branch {
+        // Only the `behind` count is shown on the branch widget now; the
+        // `ahead` (unpushed) count moved to the dedicated Push button.
+        let (name, behind) = match &snapshot.branch {
             Some(branch) => {
-                let (ahead, behind) = branch
+                let behind = branch
                     .tracking_status()
-                    .map(|s| (s.ahead, s.behind))
-                    .unwrap_or((0, 0));
-                (SharedString::from(branch.name().to_string()), ahead, behind)
+                    .map(|s| s.behind)
+                    .unwrap_or(0);
+                (SharedString::from(branch.name().to_string()), behind)
             }
             None => {
                 // Detached HEAD: show short commit SHA, no upstream tracking indicators.
                 let sha = snapshot.head_commit.as_ref().map(|c| c.short_sha())?;
-                (sha, 0, 0)
+                (sha, 0)
             }
         };
         let workspace_weak = self.workspace.clone();
@@ -166,13 +168,9 @@ impl ProjectToolbar {
                                 .gap_1()
                                 .child(Icon::new(IconName::GitBranch).size(IconSize::Small))
                                 .child(Label::new(name).size(LabelSize::Small))
-                                .when(ahead > 0, |this| {
-                                    this.child(
-                                        Label::new(format!("↑{ahead}"))
-                                            .size(LabelSize::Small)
-                                            .color(Color::Muted),
-                                    )
-                                })
+                                // The unpushed-commit count (`↑ahead`) now lives
+                                // on the dedicated Push button (`render_push_button`),
+                                // so it's intentionally not shown here anymore.
                                 .when(behind > 0, |this| {
                                     this.child(
                                         Label::new(format!("↓{behind}"))
@@ -194,6 +192,59 @@ impl ProjectToolbar {
                 }),
         )
     }
+
+    /// "Update Project" button — sits to the LEFT of the branch-widget
+    /// dropdown. Fetches + pulls ONLY the active project's repo (dispatches
+    /// `git::Fetch` then `git::Pull` — they route through the git panel's
+    /// `active_repository`, which is scoped to the active member). Solution-
+    /// wide "Update All Projects" was deliberately dropped: a fetch+pull that
+    /// spans every member can leave half the repos in a conflicted state with
+    /// no good way to resolve it from this surface. Only shown when the active
+    /// project has a git repository (mirrors the branch widget's gating).
+    fn render_update_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        Self::resolve_repository(&self.project, cx)?;
+        Some(
+            IconButton::new("update-project-trigger", IconName::ArrowCircle)
+                .icon_size(IconSize::Small)
+                .tooltip(Tooltip::text("Update Project — fetch + pull"))
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(git::Fetch), cx);
+                    window.dispatch_action(Box::new(git::Pull), cx);
+                }),
+        )
+    }
+
+    /// "Push" button — sits beside the Update button. Shown ONLY when the
+    /// active project's branch has unpushed commits (`ahead > 0`); the count
+    /// renders next to the arrow icon (this is the indicator that used to sit
+    /// on the branch-widget dropdown). Click dispatches `git::Push`, scoped to
+    /// the git panel's active repository.
+    fn render_push_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let repository = Self::resolve_repository(&self.project, cx)?;
+        let ahead = repository
+            .read(cx)
+            .branch
+            .as_ref()
+            .and_then(|branch| branch.tracking_status())
+            .map(|status| status.ahead)
+            .unwrap_or(0);
+        if ahead == 0 {
+            return None;
+        }
+        Some(
+            ui::ButtonLike::new("push-trigger")
+                .child(
+                    h_flex()
+                        .gap_0p5()
+                        .child(Icon::new(IconName::ArrowUp).size(IconSize::Small))
+                        .child(Label::new(format!("{ahead}")).size(LabelSize::Small)),
+                )
+                .tooltip(Tooltip::text("Push unpushed commits"))
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(git::Push), cx);
+                }),
+        )
+    }
 }
 
 impl Render for ProjectToolbar {
@@ -209,7 +260,10 @@ impl Render for ProjectToolbar {
                 self.multi_workspace = Some(mw);
             }
         }
-        let toolbar_background = cx.theme().colors().toolbar_background;
+        // Use the title-bar background (not the more saturated
+        // `toolbar_background`) so this row reads as a continuation of the
+        // title bar above it rather than a separate, prominent band.
+        let toolbar_background = cx.theme().colors().title_bar_background;
         let border_color = cx.theme().colors().border;
         let project_tab_strip = self.ensure_project_tab_strip(cx);
 
@@ -223,18 +277,31 @@ impl Render for ProjectToolbar {
             .h(px(30.))
             .items_center()
             .bg(toolbar_background)
+            // Top border separates this row from the solution-tab row in the
+            // title bar above — needed now that the two share a background
+            // (without it the project tabs visually merge into the title bar).
+            // The bottom border separates it from the body below.
+            .border_t_1()
             .border_b_1()
             .border_color(border_color)
-            // Align the row's start with the title bar's content row, which
-            // begins with `pl_2()` then the hamburger menu button.
             .pl_2()
-            // Inset matching the hamburger `IconButton` (22px) + the `gap_0p5`
-            // (2px) that precedes the solution-tab strip on the title-bar row,
-            // so the project tabs line up with the solution tabs above.
-            .child(div().w(px(24.)))
+            // Inset so the first project tab lines up with the left edge of
+            // the project panel below it (the activity strip + panel border).
+            // `pl_2` (8px) + 32px = 40px from the body's left, matching where
+            // the project tree content begins.
+            .child(div().w(px(32.)))
             .when_some(project_tab_strip, |this, strip| this.child(strip))
             .child(div().flex_1())
-            .children(self.render_branch_widget(cx).map(IntoElement::into_any_element))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .children(self.render_update_button(cx).map(IntoElement::into_any_element))
+                    .children(self.render_push_button(cx).map(IntoElement::into_any_element))
+                    .children(
+                        self.render_branch_widget(cx)
+                            .map(IntoElement::into_any_element),
+                    ),
+            )
             .children(run_config)
             .pr_1p5()
     }
